@@ -211,6 +211,16 @@ Feature flags introduced:
 - **Mesh bounding-box helper:** `CpuMesh::bbox() -> ([f32; 3], [f32; 3])` and startup log line `"bbox x[..] y[..] z[..]"` for axis-convention verification on freshly-exported glTFs.
 - **Fog tuning:** default `SceneParams.fog_density` dropped from `0.0015/m` to `0.0005/m` so distant peaks on the ±275 m terrain read through atmospheric haze without disappearing.
 
+### Milestone 2.4 state (2.4.1 skeleton shipped; real airfoil work pending)
+
+- **2.4.1 (shipped):** `sim::flight::compute_forces(state, spec, dt) -> FlightOutputs` extracted from the old `tick_dynamics`. Pure function; no behavior change from Phase 1 placeholder. `SimState.aircraft: Option<AircraftSpec>` wired from app startup; `SimState.last_flight` caches the last forces for the debug HUD.
+- **Dynamics HUD (top-right):** shows airspeeds (total + horizontal-fwd, m/s + kt), airspeed-based stall alert (NORMAL / APPROACH / STALL vs `AircraftSpec.speeds.vs_clean_mps`), per-force breakdown (thrust / lift / drag / gravity), total acceleration, commanded vs actual angular velocity, active aircraft spec.
+- **Flight-model TODOs** live at the code site in `crates/sim/src/flight.rs` as `TODO(phase-N):` markers per CODING_RULES. They enumerate every gap: airfoil Cl(α), AoA, sideslip β, engine power curve, fuel burn, prop model, stall (real, wing-drop, accelerated), flaps, ground effect, P-factor, adverse yaw, torque roll, density altitude, spin, gyroscopic precession, slipstream, slip/skid, icing. Each closes as its milestone lands.
+- **Known HUD heuristic false-positives (pre-2.4.4):**
+  - The stall alert false-positives in a dive because lift currently depends on horizontal forward airspeed only; vertical descent reduces it even when true α is fine. `TODO(2.4.4)` in `debug_hud.rs::build_ui` documents this.
+  - The stall alert misses accelerated stall (same airspeed but higher G-load in a tight turn would real-stall a wing; heuristic says NORMAL).
+  - The stall alert doesn't know about flaps; at Vso ~ 21 m/s with flaps down a real aircraft isn't stalling, but the HUD would show APPROACH against Vs-clean = 23.25 m/s.
+
 ### Milestone 2.3 deliverables (CORE SHIPPED; 2.3.4 culling deferred)
 
 - `flowplan_assets::load_mesh(bytes) -> Result<CpuMesh, GltfLoadError>` handles `.glb` and embedded-buffer `.gltf`. First-mesh / first-primitive / triangle topology. POSITION required; NORMAL / TEXCOORD_0 / COLOR_0 / indices default when absent.
@@ -247,6 +257,7 @@ Feature flags introduced:
 - **No lateral / horizontal collision.** Plane can fly horizontally into a hillside. The altitude clamp only affects Y. Proper AABB or per-pontoon contact lands with 2.5.
 - **Back-face culling off.** See Phase 2 bug #6.
 - **Terrain is placeholder-at-scale.** Sum-of-sines produces mountain-scale geometry but cannot independently tune amplitude and gradient -- genuinely gentle beach flats beneath steep mountain backdrops (per ref1/2/3 aesthetic targets) are not achievable without a different representation. Related gaps: no elevation lakes, no rivers, no drainage basins, no shore classification (sand / gravel / rock / cliff / delta), no erosion-shaped coastlines. Tracked under [FEATURES.md § Terrain & Static Landscape](FEATURES.md#terrain--static-landscape) for a proper hydrology-aware terrain rebuild in Phase 3+ alongside the world-scope decision.
+- **Flight model is placeholder (toy) until 2.4.2+ airfoil work.** Lift is a horizontal-airspeed multiplier rather than `0.5 ρ V² S Cl(α)`. Thrust is a throttle-proportional constant rather than an engine power curve at current airspeed. No angle of attack, no sideslip, no flaps, no stall physics (just the HUD heuristic), no ground effect, no P-factor / adverse yaw / torque, no density altitude. Each gap is marked with a `TODO(phase-N):` at its code site in `crates/sim/src/flight.rs` and closes as its milestone lands.
 
 ### New invariants / conventions locked in Phase 2
 

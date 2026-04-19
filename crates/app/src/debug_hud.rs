@@ -212,8 +212,14 @@ fn build_ui(ctx: &Context, snap: &SimSnapshot, live: &SimState, frame_ms: f32, p
 
             // Stall alert (pre-2.4.4 heuristic). Compares horizontal forward airspeed
             // to the aircraft's published Vs (clean stall speed). Three tiers:
-            // NORMAL >= 1.2 Vs, APPROACH 1.0..1.2 Vs, STALL below Vs. Real
-            // angle-of-attack-based stall modeling arrives with Milestone 2.4.4.
+            // NORMAL >= 1.2 Vs, APPROACH 1.0..1.2 Vs, STALL below Vs.
+            //
+            // TODO(2.4.4): replace with angle-of-attack-based stall detection. The
+            // airspeed heuristic false-positives in a dive (vertical velocity doesn't
+            // count as "airspeed" under the placeholder model) and misses
+            // accelerated/G-loaded stalls in tight turns (real stall at higher IAS).
+            // Also ignores flaps: with flaps down Vs drops to Vso ~ 21 m/s; the HUD
+            // doesn't know because flaps aren't modeled yet (2.4.5).
             if let Some(spec) = &live.aircraft {
                 ui.separator();
                 ui.heading("Stall alert");

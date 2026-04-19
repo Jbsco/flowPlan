@@ -426,11 +426,25 @@ v1 ships with fully-working keyboard and gamepad profiles plus the mapping UI. H
 
 ## Flight Model
 
+### Phase 2 state (implemented)
+
+- **[shipped: Phase 2.4.1]** Flight-model skeleton at `sim/src/flight.rs`: pure `compute_forces(state, spec, dt) -> FlightOutputs` function. Placeholder dynamics -- constant-thrust + horizontal-airspeed-lift + linear+quadratic drag + gravity. `AircraftSpec` parameter plumbed but not yet consumed. Per-force breakdown exposed to the debug HUD.
+- **[shipped: Phase 2.4.1]** Dynamics debug HUD (top-right egui panel): airspeeds, per-force vectors, total accel, commanded vs actual angular velocity, active aircraft spec. Includes an airspeed-based heuristic stall alert (NORMAL / APPROACH / STALL vs `spec.vs_clean_mps`) with known false-positives in dives and accelerated stalls, pending the real 2.4.4 AoA-based model.
+
+### Phase 2 open items (each carries a `TODO(phase-N):` at `sim/src/flight.rs`)
+
 - **[sketch]** Sim-like, sim-realistic in selected ways. Feel-first; accept liberties where they preserve fun.
 - **[sketch]** Airfoil-based lift per aircraft: tabulated `Cl(alpha)` curve, drag polar, stall region characteristics. No CFD.
-- **[sketch]** Stall: power-on vs power-off stall speed differential, wing-drop tendency per aircraft, recoverable in configured time, stall buffet as audio cue.
+- **[sketch]** Angle of attack as a first-class state -- the angle between body-chord (approx -Z) and relative wind (negated body-frame velocity). All lift, drag, and stall computations key off α.
+- **[sketch]** Sideslip angle β and its effects: rudder authority, asymmetric wing loading, adverse coupling to roll.
+- **[sketch]** Stall: power-on vs power-off stall speed differential, wing-drop tendency per aircraft, recoverable in configured time, stall buffet as audio cue. Stalled wing produces a nose-down pitching moment (center-of-lift shift) that real aircraft use to auto-recover; placeholder has none.
+- **[sketch]** Accelerated / G-loaded stall: `Vs_accelerated = Vs × sqrt(load_factor)`. Tight turns stall at higher airspeed; the airspeed-only HUD heuristic misses this.
+- **[sketch]** Spin dynamics: autorotation after asymmetric stall. PARE recovery (Power idle, Ailerons neutral, Rudder opposite, Elevator through stall). Post-2.4 if not earlier.
+- **[sketch]** Control authority scales with airspeed: slow-flight has weak authority; near-Vne authority is heavy and approaches limits. Post-stall, ailerons lose authority while elevator and rudder retain it (hence PARE works).
 - **[sketch]** Ground effect near surface (reduced induced drag within ~1 wingspan of ground/water).
 - **[sketch]** P-factor, torque, adverse yaw, gyroscopic effect -- tunable per aircraft, dampen for accessibility modes.
+- **[sketch]** Slipstream / prop wash over rudder and elevator at high power + low airspeed: their authority exceeds what freestream airspeed suggests.
+- **[sketch]** Cross-controls / slip / skid: intentional slip for short-field approaches; unintentional skid in uncoordinated turns as a classic stall-spin setup.
 - **[sketch]** CG shift: fuel burn and cargo movement shift CG over time, affecting pitch trim and stall characteristics.
 - **[sketch]** Wind response: gusts perturb attitude; crosswind demands rudder/aileron coordination on landing; wind shear near terrain and thunderstorm gust fronts.
 - **[sketch]** Flap model: per-notch lift boost + drag penalty + stall-speed reduction, aircraft-specific.
