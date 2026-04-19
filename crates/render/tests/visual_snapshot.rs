@@ -116,10 +116,11 @@ fn build_camera_snapshot(
 }
 
 #[cfg(feature = "hardware-tests")]
+#[allow(dead_code)] // only used under `hardware-tests`
 fn capture_png(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    renderer: &Renderer,
+    renderer: &mut Renderer,
     snap: &SimSnapshot,
     size: (u32, u32),
 ) -> Vec<u8> {
@@ -158,6 +159,7 @@ fn capture_png(
         label: Some("snapshot-encoder"),
     });
     renderer.render(
+        device,
         queue,
         &mut encoder,
         &target_view,
@@ -166,6 +168,7 @@ fn capture_png(
         snap,
         1.0,
         CLEAR,
+        None, // no debug gizmo in snapshot renders
     );
     encoder.copy_texture_to_buffer(
         wgpu::ImageCopyTexture {
@@ -261,7 +264,7 @@ fn beaver_preview() {
     #[allow(clippy::items_after_statements)]
     const BEAVER_SIZE: (u32, u32) = (512, 384);
     let water = CpuMesh::water_grid(24, 200.0, WATER_COLOR);
-    let renderer = Renderer::new(
+    let mut renderer = Renderer::new(
         &device,
         &queue,
         FORMAT,
@@ -274,7 +277,7 @@ fn beaver_preview() {
         VEHICLE_SHADING,
     );
     let snap = build_beaver_snapshot(beaver_float_offset);
-    let png = capture_png(&device, &queue, &renderer, &snap, BEAVER_SIZE);
+    let png = capture_png(&device, &queue, &mut renderer, &snap, BEAVER_SIZE);
     insta::assert_binary_snapshot!("beaver_preview.png", png);
 }
 
@@ -302,7 +305,7 @@ fn scene_extended() {
     #[allow(clippy::items_after_statements)]
     const EXTENDED_SIZE: (u32, u32) = (1024, 640);
 
-    let renderer = Renderer::new(
+    let mut renderer = Renderer::new(
         &device,
         &queue,
         FORMAT,
@@ -324,7 +327,7 @@ fn scene_extended() {
         62.0,
         Vec3::new(-20.0, beaver_float_offset, 140.0),
     );
-    let png = capture_png(&device, &queue, &renderer, &snap, EXTENDED_SIZE);
+    let png = capture_png(&device, &queue, &mut renderer, &snap, EXTENDED_SIZE);
     insta::assert_binary_snapshot!("scene_extended.png", png);
 }
 
@@ -344,7 +347,7 @@ fn scene_minimal_snapshot() {
     let cube = CpuMesh::cube(2.0, [1.0, 0.82, 0.28, 1.0]);
     let water = CpuMesh::water_grid(16, 80.0, WATER_COLOR);
 
-    let renderer = Renderer::new(
+    let mut renderer = Renderer::new(
         &device,
         &queue,
         FORMAT,
@@ -357,6 +360,6 @@ fn scene_minimal_snapshot() {
         VEHICLE_SHADING,
     );
     let snap = build_snapshot();
-    let png = capture_png(&device, &queue, &renderer, &snap, SIZE);
+    let png = capture_png(&device, &queue, &mut renderer, &snap, SIZE);
     insta::assert_binary_snapshot!("scene_minimal.png", png);
 }

@@ -15,8 +15,8 @@ use std::time::Instant;
 use egui::Context;
 use egui_wgpu::{Renderer, ScreenDescriptor};
 use egui_winit::State;
-use flowplan_sim::{SimSnapshot, SimState};
-use glam::EulerRot;
+use flowplan_render::Telemetry;
+use flowplan_sim::AircraftSpec;
 use winit::event::WindowEvent;
 use winit::window::Window;
 
@@ -61,9 +61,9 @@ impl DebugHud {
         encoder: &mut wgpu::CommandEncoder,
         target_view: &wgpu::TextureView,
         window: &Window,
-        snapshot: &SimSnapshot,
-        live_sim: &SimState,
+        telemetry: &Telemetry,
         pending_ticks_last_frame: u32,
+        aircraft: Option<&AircraftSpec>,
     ) {
         let now = Instant::now();
         let dt_ms = now.duration_since(self.last_frame_time).as_secs_f32() * 1000.0;
@@ -75,8 +75,8 @@ impl DebugHud {
         let full_output = self.ctx.run(raw_input, |ctx| {
             build_ui(
                 ctx,
-                snapshot,
-                live_sim,
+                telemetry,
+                aircraft,
                 self.frame_time_ms_ema,
                 pending_ticks_last_frame,
             );
@@ -129,69 +129,64 @@ impl DebugHud {
 }
 
 #[allow(clippy::too_many_lines)]
-fn build_ui(ctx: &Context, snap: &SimSnapshot, live: &SimState, frame_ms: f32, pending_ticks: u32) {
-    // glam's `to_euler(YXZ)` returns the angles in the axis order of the enum: (y, x, z).
-    let (yaw, pitch, roll) = live.vehicle.orientation.to_euler(EulerRot::YXZ);
-    let speed = snap.vehicle.velocity.length();
-    let altitude = snap.vehicle.position.y;
-    let view_label = match snap.camera.view_kind {
-        0 => "First-person",
-        1 => "Chase (3P)",
-        2 => "Exterior orbit",
-        _ => "?",
-    };
-
+fn build_ui(
+    ctx: &Context,
+    t: &Telemetry,
+    aircraft: Option<&AircraftSpec>,
+    frame_ms: f32,
+    pending_ticks: u32,
+) {
     egui::Window::new("flowPlan debug")
         .default_pos([10.0, 10.0])
         .default_width(260.0)
         .resizable(false)
         .collapsible(true)
         .show(ctx, |ui| {
-            ui.label(format!("tick: {}", snap.tick));
+            ui.label(format!("tick: {}", t.tick));
             ui.label(format!(
                 "frame: {:5.2} ms  ({:4.0} fps)  pending ticks: {pending_ticks}",
                 frame_ms,
                 1000.0 / frame_ms.max(0.01),
             ));
             ui.separator();
-            ui.label(format!("view: {view_label}"));
-            ui.separator();
             ui.heading("Vehicle");
             ui.label(format!(
                 "pos x {:8.1}  y {:8.1}  z {:8.1}",
-                snap.vehicle.position.x, snap.vehicle.position.y, snap.vehicle.position.z,
+                t.position.x, t.position.y, t.position.z,
             ));
             ui.label(format!(
                 "vel x {:7.2}  y {:7.2}  z {:7.2}",
-                snap.vehicle.velocity.x, snap.vehicle.velocity.y, snap.vehicle.velocity.z,
+                t.velocity.x, t.velocity.y, t.velocity.z,
             ));
-            ui.label(format!("speed  {speed:6.2} m/s  ({:5.1} kt)", speed * 1.944));
-            ui.label(format!("altitude {altitude:7.1} m  ({:5.0} ft)", altitude * 3.281));
+            ui.label(format!(
+                "speed  {:6.2} m/s  ({:5.1} kt)",
+                t.airspeed_total,
+                t.airspeed_total * 1.944,
+            ));
+            ui.label(format!(
+                "altitude {:7.1} m  ({:5.0} ft)",
+                t.altitude_msl,
+                t.altitude_msl * 3.281,
+            ));
             ui.label(format!(
                 "attitude pitch {:6.1}  yaw {:6.1}  roll {:6.1}  (deg)",
-                pitch.to_degrees(),
-                yaw.to_degrees(),
-                roll.to_degrees(),
+                t.pitch_rad.to_degrees(),
+                t.heading_rad.to_degrees(),
+                t.bank_rad.to_degrees(),
             ));
             ui.separator();
             ui.heading("Controls");
-            ui.label(format!(
-                "throttle {:5.1}%",
-                live.vehicle.controls.throttle * 100.0
-            ));
+            ui.label(format!("throttle {:5.1}%", t.throttle * 100.0));
             ui.label(format!(
                 "pitch {:+.2}  yaw {:+.2}  roll {:+.2}",
-                live.vehicle.controls.pitch,
-                live.vehicle.controls.yaw,
-                live.vehicle.controls.roll,
+                t.pitch_input, t.yaw_input, t.roll_input,
             ));
             ui.separator();
             ui.small("W/S throttle  |  stick: ↑ dive / ↓ climb  |  ←/→ roll  |  Q/E yaw  |  1/2/3 view  |  V cycle  |  R reset  |  Esc quit");
         });
 
-    // Top-right: flight-model dynamics breakdown. Shows the current force
-    // composition, airspeeds, and commanded vs actual angular velocity.
-    let f = &live.last_flight;
+    // Top-right: flight-model dynamics breakdown. Same Telemetry source as the left
+    // panel -- single-source invariant per DESIGN.md § Telemetry derivation.
     egui::Window::new("flowPlan dynamics")
         .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-10.0, 10.0))
         .default_width(280.0)
@@ -201,20 +196,20 @@ fn build_ui(ctx: &Context, snap: &SimSnapshot, live: &SimState, frame_ms: f32, p
             ui.heading("Airspeeds & AoA");
             ui.label(format!(
                 "total     {:6.2} m/s  ({:5.1} kt)",
-                f.airspeed,
-                f.airspeed * 1.944,
+                t.airspeed_total,
+                t.airspeed_total * 1.944,
             ));
             ui.label(format!(
                 "horiz fwd {:6.2} m/s  ({:5.1} kt)",
-                f.horizontal_airspeed,
-                f.horizontal_airspeed * 1.944,
+                t.airspeed_horizontal_fwd,
+                t.airspeed_horizontal_fwd * 1.944,
             ));
             ui.label(format!(
                 "α  {:+6.2}°    β  {:+6.2}°",
-                f.alpha.to_degrees(),
-                f.beta.to_degrees(),
+                t.alpha_rad.to_degrees(),
+                t.beta_rad.to_degrees(),
             ));
-            ui.label(format!("Cl {:6.3}    Cd {:6.3}", f.cl, f.cd));
+            ui.label(format!("Cl {:6.3}    Cd {:6.3}", t.cl, t.cd));
 
             // Stall alert (pre-2.4.4 heuristic). Compares horizontal forward airspeed
             // to the aircraft's published Vs (clean stall speed). Three tiers:
@@ -226,11 +221,11 @@ fn build_ui(ctx: &Context, snap: &SimSnapshot, live: &SimState, frame_ms: f32, p
             // accelerated/G-loaded stalls in tight turns (real stall at higher IAS).
             // Also ignores flaps: with flaps down Vs drops to Vso ~ 21 m/s; the HUD
             // doesn't know because flaps aren't modeled yet (2.4.5).
-            if let Some(spec) = &live.aircraft {
+            if let Some(spec) = aircraft {
                 ui.separator();
                 ui.heading("Stall alert");
                 let vs = spec.speeds.vs_clean_mps.max(1e-3);
-                let ratio = f.horizontal_airspeed / vs;
+                let ratio = t.airspeed_horizontal_fwd / vs;
                 let (label, color) = if ratio >= 1.2 {
                     ("NORMAL", egui::Color32::from_rgb(120, 200, 120))
                 } else if ratio >= 1.0 {
@@ -253,52 +248,50 @@ fn build_ui(ctx: &Context, snap: &SimSnapshot, live: &SimState, frame_ms: f32, p
             ui.heading("Forces (m/s^2)");
             ui.label(format!(
                 "thrust   x {:+6.2}  y {:+6.2}  z {:+6.2}  (|{:5.2}|)",
-                f.thrust.x,
-                f.thrust.y,
-                f.thrust.z,
-                f.thrust.length(),
+                t.thrust.x,
+                t.thrust.y,
+                t.thrust.z,
+                t.thrust.length(),
             ));
             ui.label(format!(
                 "lift     x {:+6.2}  y {:+6.2}  z {:+6.2}  (|{:5.2}|)",
-                f.lift.x,
-                f.lift.y,
-                f.lift.z,
-                f.lift.length(),
+                t.lift.x,
+                t.lift.y,
+                t.lift.z,
+                t.lift.length(),
             ));
             ui.label(format!(
                 "drag     x {:+6.2}  y {:+6.2}  z {:+6.2}  (|{:5.2}|)",
-                f.drag.x,
-                f.drag.y,
-                f.drag.z,
-                f.drag.length(),
+                t.drag.x,
+                t.drag.y,
+                t.drag.z,
+                t.drag.length(),
             ));
             ui.label(format!(
                 "gravity  x {:+6.2}  y {:+6.2}  z {:+6.2}",
-                f.gravity.x, f.gravity.y, f.gravity.z,
+                t.gravity.x, t.gravity.y, t.gravity.z,
             ));
             ui.separator();
             ui.label(format!(
                 "total    x {:+6.2}  y {:+6.2}  z {:+6.2}  (|{:5.2}|)",
-                f.linear_accel.x,
-                f.linear_accel.y,
-                f.linear_accel.z,
-                f.linear_accel.length(),
+                t.linear_accel.x,
+                t.linear_accel.y,
+                t.linear_accel.z,
+                t.linear_accel.length(),
             ));
             ui.separator();
             ui.heading("Angular (rad/s, body frame)");
             ui.label(format!(
                 "commanded  p {:+.3}  r {:+.3}  y {:+.3}",
-                f.commanded_angular_vel.x, f.commanded_angular_vel.z, f.commanded_angular_vel.y,
+                t.commanded_angular_vel.x, t.commanded_angular_vel.z, t.commanded_angular_vel.y,
             ));
             ui.label(format!(
                 "actual     p {:+.3}  r {:+.3}  y {:+.3}",
-                live.vehicle.angular_velocity.x,
-                live.vehicle.angular_velocity.z,
-                live.vehicle.angular_velocity.y,
+                t.actual_angular_vel.x, t.actual_angular_vel.z, t.actual_angular_vel.y,
             ));
-            ui.label(format!("response rate  {:.2} / s", f.ang_response_rate));
+            ui.label(format!("response rate  {:.2} / s", t.ang_response_rate));
             ui.separator();
-            if let Some(spec) = &live.aircraft {
+            if let Some(spec) = aircraft {
                 ui.heading("Aircraft");
                 ui.label(format!("{} ({:.0} hp)", spec.name, spec.engine.power_hp));
                 ui.label(format!(

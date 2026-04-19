@@ -13,7 +13,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use crossbeam_queue::ArrayQueue;
 use flowplan_assets::CpuMesh;
-use flowplan_render::{Renderer, SceneParams, ShadingParams};
+use flowplan_render::{DebugLineBatch, Renderer, SceneParams, ShadingParams, Telemetry};
 use flowplan_sim::{
     state::FIXED_DT, AircraftSpec, DifficultyDials, InputEvent, InputEvents, SimSnapshot, SimState,
     VehicleState,
@@ -25,6 +25,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+use crate::debug_gizmo;
 use crate::debug_hud::DebugHud;
 use crate::input_map::KeyState;
 use crate::snapshot_buf::SnapshotBuffer;
@@ -153,6 +154,11 @@ struct Runtime {
     debug_hud: DebugHud,
     /// Number of fixed-step ticks executed in the last frame, exposed to the HUD.
     ticks_last_frame: u32,
+
+    /// Reused CPU batch for the orientation widget's line segments. App-side state;
+    /// not part of `SimState` so determinism is preserved (the widget is presentation-
+    /// only per [`DESIGN.md § Telemetry derivation`](../../../../DESIGN.md#telemetry-derivation-render-side)).
+    gizmo_batch: DebugLineBatch,
 }
 
 impl ApplicationHandler for GameApp {
@@ -226,6 +232,30 @@ impl ApplicationHandler for GameApp {
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(rt) = &self.runtime {
             rt.window.request_redraw();
+        }
+    }
+
+    /// Called after `event_loop.exit()` is requested but BEFORE winit tears down its
+    /// internal event sources. Explicitly dropping the `Runtime` here releases the
+    /// `Arc<Window>` / `wgpu::Surface` / `egui_winit::State` (and on Wayland, the
+    /// underlying calloop sources they reference) in a deterministic order. Without
+    /// this, calloop can log "Received an event for non-existence source" when
+    /// events queued before teardown are dispatched to sources our still-alive
+    /// references helped remove.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if self.runtime.take().is_some() {
+            tracing::info!("exiting: runtime dropped");
+        }
+    }
+
+    /// Background / sleep transition. Not exercised on desktop X11/Wayland in
+    /// practice, but the winit 0.30 API expects both `resumed` and `suspended` for
+    /// correctness on platforms that do pause (mobile, some compositors). We drop
+    /// the surface here so we don't hold a backbuffer across a suspend; the next
+    /// `resumed` rebuilds the runtime from scratch.
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        if self.runtime.take().is_some() {
+            tracing::info!("suspended: runtime dropped");
         }
     }
 }
@@ -397,6 +427,7 @@ impl Runtime {
             debug_hud,
             ticks_last_frame: 0,
             key_state: KeyState::default(),
+            gizmo_batch: DebugLineBatch::new(),
         })
     }
 
@@ -492,12 +523,22 @@ impl Runtime {
         };
         self.renderer.set_scene(&self.queue, &scene_params);
 
+        // Derive telemetry once per frame from the current snapshot. Both the 3D gizmo
+        // and the debug HUD read from this; later phases add the hand-rolled HUD and
+        // 3D cockpit instruments as additional consumers of the same struct.
+        let telemetry = Telemetry::derive(&curr);
+
+        // Rebuild the orientation-widget batch every frame (always on; the widget is
+        // a debug-first instrument and will later inform the real HUD instruments).
+        debug_gizmo::build(&mut self.gizmo_batch, &telemetry);
+
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("phase1-encoder"),
             });
         self.renderer.render(
+            &self.device,
             &self.queue,
             &mut encoder,
             &main_view,
@@ -506,6 +547,7 @@ impl Runtime {
             &curr,
             alpha,
             CLEAR_COLOR,
+            Some(&self.gizmo_batch),
         );
         // Debug HUD pass on top of the main scene, rendered via the linear view.
         self.debug_hud.render(
@@ -514,9 +556,9 @@ impl Runtime {
             &mut encoder,
             &hud_view,
             &self.window,
-            &curr,
-            &self.sim,
+            &telemetry,
             self.ticks_last_frame,
+            self.sim.aircraft.as_ref(),
         );
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();

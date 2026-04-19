@@ -16,12 +16,16 @@
 // of the descriptor chain is part of the readability.
 #![allow(clippy::too_many_lines, clippy::too_many_arguments)]
 
+pub mod debug_lines;
 pub mod renderer;
+pub mod telemetry;
 
 #[cfg(feature = "shader-hot-reload")]
 pub mod hot_reload;
 
+pub use debug_lines::{DebugLineBatch, DebugLineVertex, DebugLinesRenderer};
 pub use renderer::{Renderer, SceneParams, ShadingParams};
+pub use telemetry::Telemetry;
 
 // Dev-deps are consumed by `tests/visual_snapshot.rs` (Tier-3, hardware-gated). Mark
 // them as intentional here so the lib-test target does not trip

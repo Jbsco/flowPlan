@@ -13,6 +13,8 @@ use flowplan_sim::SimSnapshot;
 use glam::{Mat4, Quat, Vec3, Vec4};
 use wgpu::util::DeviceExt;
 
+use crate::debug_lines::{DebugLineBatch, DebugLinesRenderer};
+
 /// Depth format for the Phase 1 forward pass.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
@@ -223,6 +225,15 @@ pub struct Renderer {
     terrain: DrawModel,
     water: DrawModel,
     vehicle: DrawModel,
+    /// 2.4.2c: line-list pipeline used by the orientation widget and (later) HUD
+    /// ladders and wireframe debug views.
+    debug_lines: DebugLinesRenderer,
+    /// Dedicated uniform buffer holding the widget's screen-space ortho view-proj.
+    /// Written every frame in `render()` so the widget tracks window resizes without
+    /// a dedicated callback.
+    widget_camera_buf: wgpu::Buffer,
+    /// Bind group pointing at `widget_camera_buf`. Swapped in for the widget draw.
+    widget_camera_bg: wgpu::BindGroup,
     // Kept for shader hot-reload pipeline rebuilds; feature-gated to avoid dead-code
     // warnings in release/default builds. Re-exposed without the gate when another
     // caller needs them.
@@ -496,6 +507,27 @@ impl Renderer {
             },
         };
 
+        let debug_lines = DebugLinesRenderer::new(device, &camera_bgl, surface_format);
+
+        // Widget uniform: a second camera-shaped buffer + bind group used for the
+        // orientation widget. Holds a screen-space ortho view-proj recomputed per
+        // frame from viewport size. `view_pos` and `inverse_view_proj` are unused by
+        // the line shader; left zero.
+        let widget_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("widget-camera-ubo"),
+            size: core::mem::size_of::<CameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let widget_camera_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("widget-camera-bg"),
+            layout: &camera_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: widget_camera_buf.as_entire_binding(),
+            }],
+        });
+
         Self {
             pipeline,
             water_pipeline,
@@ -513,6 +545,9 @@ impl Renderer {
             terrain,
             water,
             vehicle,
+            debug_lines,
+            widget_camera_buf,
+            widget_camera_bg,
             #[cfg(feature = "shader-hot-reload")]
             scene_pipeline_layout,
             #[cfg(feature = "shader-hot-reload")]
@@ -601,7 +636,8 @@ impl Renderer {
     /// Writes uniforms, begins a render pass with the depth buffer, draws terrain and
     /// vehicle, and ends the pass. Caller submits the encoder.
     pub fn render(
-        &self,
+        &mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         target_view: &wgpu::TextureView,
@@ -610,6 +646,7 @@ impl Renderer {
         snapshot_curr: &SimSnapshot,
         alpha: f32,
         clear_color: wgpu::Color,
+        debug_lines: Option<&DebugLineBatch>,
     ) {
         let alpha = alpha.clamp(0.0, 1.0);
 
@@ -775,7 +812,72 @@ impl Renderer {
             pass.set_bind_group(0, &self.outline_bg, &[]);
             pass.draw(0..3, 0..1);
         }
+
+        // Orientation-widget pass (Phase 2.4.2c). The app builds a batch of unit-length
+        // line segments in widget-local `[-1, 1]` space; we project them into a small
+        // screen-space rectangle at the bottom-right. Drawn last so the widget always
+        // overlays; no depth attachment.
+        if let Some(batch) = debug_lines {
+            if !batch.is_empty() {
+                let widget_vp = widget_view_proj(size);
+                queue.write_buffer(
+                    &self.widget_camera_buf,
+                    0,
+                    bytemuck::bytes_of(&CameraUniform {
+                        view_proj: widget_vp.to_cols_array_2d(),
+                        view_pos: [0.0; 4],
+                        inverse_view_proj: [[0.0; 4]; 4],
+                    }),
+                );
+                self.debug_lines.upload(device, queue, batch);
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("orientation-widget-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_bind_group(0, &self.widget_camera_bg, &[]);
+                self.debug_lines.render(&mut pass, batch);
+            }
+        }
     }
+}
+
+/// Widget size in pixels (square).
+const WIDGET_PX: f32 = 180.0;
+/// Margin from the viewport edges (pixels).
+const WIDGET_MARGIN_PX: f32 = 20.0;
+
+/// Screen-space orthographic view-proj for the orientation widget.
+///
+/// Maps widget-local `[-1, 1]³` to a `WIDGET_PX × WIDGET_PX` square anchored
+/// `WIDGET_MARGIN_PX` from the bottom-right. Z range `[-1, 1]` is mapped to NDC `[0, 1]`
+/// so widget-local Z roughly respects depth ordering if the pipeline ever re-enables
+/// depth; currently depth is disabled so Z is effectively ignored by the pipeline and
+/// overlap order comes from draw order.
+fn widget_view_proj(viewport: (u32, u32)) -> Mat4 {
+    let vw = viewport.0.max(1) as f32;
+    let vh = viewport.1.max(1) as f32;
+    // Half-width / half-height of the widget, in NDC units.
+    let sx = WIDGET_PX / vw; // (WIDGET_PX / 2) / (vw / 2)
+    let sy = WIDGET_PX / vh;
+    // Widget center in NDC. +X is right; +Y is up in NDC (wgpu).
+    let cx = 1.0 - (WIDGET_PX + 2.0 * WIDGET_MARGIN_PX) / vw;
+    let cy = -1.0 + (WIDGET_PX + 2.0 * WIDGET_MARGIN_PX) / vh;
+    Mat4::from_cols(
+        Vec4::new(sx, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, sy, 0.0, 0.0),
+        Vec4::new(0.0, 0.0, 0.5, 0.0),
+        Vec4::new(cx, cy, 0.5, 1.0),
+    )
 }
 
 impl DrawModel {

@@ -10,8 +10,22 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Quat, Vec3};
 
 use crate::camera::{Camera, ViewKind};
+use crate::flight::FlightOutputs;
 use crate::state::SimState;
 use crate::vehicle::VehicleState;
+
+/// Control-stick + throttle position snapshot.
+///
+/// Part of `VehicleSnapshot` so every display surface (debug HUD, cockpit, HUD tapes)
+/// reads control input from one place rather than reaching into live `SimState`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
+pub struct ControlsSnapshot {
+    pub throttle: f32,
+    pub pitch: f32,
+    pub yaw: f32,
+    pub roll: f32,
+}
 
 /// Vehicle snapshot: the fields render + audio care about.
 ///
@@ -25,6 +39,11 @@ pub struct VehicleSnapshot {
     pub orientation: Quat,
     pub velocity: Vec3,
     pad1: f32,
+    /// Body-frame angular velocity (rad/s). Carried so display surfaces can read actual
+    /// vs. commanded rates without pulling live `SimState`.
+    pub angular_velocity: Vec3,
+    pad2: f32,
+    pub controls: ControlsSnapshot,
 }
 
 impl VehicleSnapshot {
@@ -36,6 +55,14 @@ impl VehicleSnapshot {
             orientation: v.orientation,
             velocity: v.velocity,
             pad1: 0.0,
+            angular_velocity: v.angular_velocity,
+            pad2: 0.0,
+            controls: ControlsSnapshot {
+                throttle: v.controls.throttle,
+                pitch: v.controls.pitch,
+                yaw: v.controls.yaw,
+                roll: v.controls.roll,
+            },
         }
     }
 }
@@ -72,7 +99,7 @@ impl CameraSnapshot {
 }
 
 /// Top-level simulation snapshot produced each tick for render + audio consumption.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub struct SimSnapshot {
     pub tick: u64,
     pub vehicle: VehicleSnapshot,
@@ -80,6 +107,10 @@ pub struct SimSnapshot {
     /// Normalized time-of-day in `[0, 1)`. Render uses this to drive sun direction via
     /// `flowplan_world::sun_direction`. 0.5 = noon (matches `SimState::new` initial).
     pub time_of_day: f32,
+    /// Most-recent flight-model outputs. Snapshotted here so telemetry / debug displays
+    /// read the exact tick-boundary forces that produced the vehicle state, without
+    /// reaching into live `SimState`.
+    pub flight: FlightOutputs,
 }
 
 impl SimSnapshot {
@@ -90,6 +121,7 @@ impl SimSnapshot {
             vehicle: VehicleSnapshot::from_state(&s.vehicle),
             camera: CameraSnapshot::from_state(&s.camera),
             time_of_day: s.time_of_day,
+            flight: s.last_flight,
         }
     }
 }
@@ -104,6 +136,9 @@ impl Default for SimSnapshot {
                 orientation: Quat::IDENTITY,
                 velocity: Vec3::ZERO,
                 pad1: 0.0,
+                angular_velocity: Vec3::ZERO,
+                pad2: 0.0,
+                controls: ControlsSnapshot::default(),
             },
             camera: CameraSnapshot {
                 position: Vec3::new(0.0, 5.0, 15.0),
@@ -116,6 +151,7 @@ impl Default for SimSnapshot {
             // Matches `SimState::new` default so app-free renders (hardware snapshot
             // test) don't fall into the "midnight" branch.
             time_of_day: 0.5,
+            flight: FlightOutputs::default(),
         }
     }
 }

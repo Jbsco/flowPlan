@@ -434,6 +434,8 @@ v1 ships with fully-working keyboard and gamepad profiles plus the mapping UI. H
 - **[shipped: Phase 2.4.2b, in test]** Lift direction perpendicular to velocity (not body-+Y). Fixes the stall-cascade on pitch-up that resulted from spurious `L·sin(α)` backward force. Coordinated banked turns feel realistic -- lift correctly tilts into the turn as the plane rolls. Full throttle climbs; full pitch-up does not bleed into stall at reasonable airspeed.
 - **[shipped: Phase 2.4.2b]** Tuning: `THRUST_ACCEL_MAX` 2.0 → 3.5 m/s² for climb margin (proper power curve is 2.4.3); spawn velocity 50 → 55 m/s for ~2.4× Vs stall margin.
 - **[shipped: Phase 2.4.1]** Dynamics debug HUD (top-right egui panel): airspeeds, α / β / Cl / Cd, per-force vectors, total accel, commanded vs actual angular velocity, active aircraft spec. Includes an airspeed-based heuristic stall alert (NORMAL / APPROACH / STALL vs `spec.vs_clean_mps`) with known false-positives in dives and accelerated stalls, pending the real 2.4.4 α-based model.
+- **[shipped: Phase 2.4.2c]** Telemetry plumbing (`flowplan_render::Telemetry`) as a single-source derivation from `SimSnapshot + FlightOutputs`. Both debug HUD panels and the orientation widget read from it; no consumer reaches into `SimState` directly.
+- **[shipped: Phase 2.4.2c]** Bottom-right cel-shaded orientation widget. Unit-length direction vectors for body axes (+X/+Y/-Z = RGB), velocity (white), thrust (yellow), lift (cyan), drag (orange), gravity (grey), total accel (magenta) in a 180×180 px panel. Always on; direction-only display (magnitudes live in the top-right dynamics HUD). Arrows are cel-shaded (dark outline quad behind, colored fill quad on top) with the outline intentionally a hair thinner than the main scene's sobel outline. A fixed isometric display rotation ensures all three body axes are visible at any attitude. Rendered via a new `TriangleList` pipeline with a dedicated screen-space ortho projection, reused in Phase 4 for hand-rolled HUD ladders.
 
 ### Phase 2 open items (each carries a `TODO(phase-N):` at `sim/src/flight.rs`)
 
@@ -528,19 +530,21 @@ Each phase adds one consumer of the same telemetry layer; the layer itself grows
 - One struct, many consumers -- no parallel re-derivation from sim state anywhere.
 - Determinism-safe: presentation-side smoothing (needle lag, averaging) is allowed here; never in sim.
 
-### 3D Debug Gizmo (Phase 2.4.2c, first visual consumer)
+### Orientation Widget (Phase 2.4.2c, first visual consumer)
 
-- **[ready]** New render module `debug_lines.rs` + `debug_lines.wgsl`: position + color vertex, `wgpu::PrimitiveTopology::LineList` pipeline. Reuses existing camera + scene BGLs. Depth-test on, depth-write off so lines read the scene without occluding it.
-- **[ready]** `DebugLineBatch { vertices: Vec<DebugLineVertex> }` allocated once, cleared+repopulated per frame. Passed as `Option<&DebugLineBatch>` through the render path so release builds / preview builds can omit it.
-- **[ready]** `crates/app/src/debug_gizmo.rs` builds the batch from `Telemetry` each frame at the vehicle CG:
-    - Body axes: +X red (right wing), +Y green (up), -Z blue (nose), each ~3 m long.
-    - Velocity vector: white, ~0.3 m per m/s so cruise reads ~16 m long.
-    - Force vectors (thrust yellow, lift cyan, drag orange, total accel magenta) at ~0.5 m per m/s² so gravity would be ~5 m if shown.
-    - Gravity omitted by default (always `(0, -9.81, 0)`; clutters the gizmo).
-- **[ready]** Toggle keybind (suggested `G`) adds a `ToggleGizmo` input event. The gizmo bool persists across ticks on the app side; *not* part of sim state (presentation-only).
-- **[ready]** Render order: after the scene pass, before the egui HUD pass, so the egui panels overlay the gizmo.
-- **[ready]** Determinism: gizmo is read-only presentation; it does not mutate sim, does not introduce new floats into the hash, and toggling it mid-flight leaves state identical.
-- **[ready]** Infrastructure dividend: the same `LineList` pipeline later draws HUD tape tick marks, artificial-horizon ladders, pitch ladder on cockpit glass, flight-path vector on HUD, wireframe debug renderings of collision volumes (Phase 2.5+), and wake/spray spline previews. Building the pipeline well in 2.4.2c is a one-time cost that keeps paying into Phase 5+.
+- **[shipped]** Render module `debug_lines.rs` + `debug_lines.wgsl`: position + color vertex, `wgpu::PrimitiveTopology::TriangleList` pipeline, no depth attachment. Each segment emits two triangulated quads -- a wider dark-grey outline behind a narrower colored fill -- drawn in two separate draw calls within the same pass so all outlines land behind all fills regardless of per-segment push order. The widening happens in widget-local XY because the widget uses an ortho projection down +Z; a future depth-aware world-space variant (for wireframe collision debug or flight-path vector) will need a clip-space vertex shader for widening.
+- **[shipped]** `DebugLineBatch { outline_vertices, fill_vertices }` allocated once, cleared+repopulated per frame. Separate vecs so draw ordering is guaranteed regardless of push order.
+- **[shipped]** `crates/app/src/debug_gizmo.rs` builds the batch from `Telemetry` each frame in **widget-local `[-1, 1]` space**:
+    - No perimeter frame (design feedback: the frame competed with the arrow visuals).
+    - Body axes: +X red (right wing), +Y green (up), -Z blue (nose), each rotated by the aircraft's world orientation then by a fixed widget display rotation (≈25° pitch + 32° yaw) so all three axes always have a visible screen-plane projection -- a level-flight nose pointing straight into the screen would otherwise vanish.
+    - Force + velocity vectors: unit-length each, direction only (magnitudes already in the top-right dynamics HUD). Thrust yellow, lift cyan, drag orange, gravity grey, velocity white, total accel magenta.
+    - Zero-magnitude vectors skipped so the widget stays readable when an engine is off or the aircraft is at rest.
+    - Cel outline / fill thicknesses (widget-local units, ≈4 px / ≈2.5 px at the default 180 px widget size) tuned to read a hair thinner than the main scene's sobel outline.
+- **[shipped]** Renderer maps the widget-local cube to a fixed screen-space rectangle via a dedicated ortho projection (`widget_view_proj` in `renderer.rs`) written to a separate camera-shaped uniform buffer each frame. Anchored 20 px from the bottom-right, 180×180 px square. Scales naturally with window resize.
+- **[shipped]** No keybinding -- the widget is always on. The widget is small and cheap (13 line segments per frame), and it's what drives future HUD design; hiding it behind a toggle would add complexity with no payoff.
+- **[shipped]** Render order: after the outline pass, before the egui debug HUD. The widget overlays the scene without being picked up by the outline sobel.
+- **[shipped]** Determinism: app-side `gizmo_batch: DebugLineBatch` only; no sim-side state.
+- **Infrastructure dividend (in progress):** the same `LineList` pipeline + widget-ortho pattern will carry Phase 4 HUD ladders (pitch, bank), artificial-horizon tick marks, airspeed/altitude tape ticks, and cockpit instrument face lines. A second depth-aware pipeline variant lands alongside the first consumer that needs 3D world-space wireframes (collision volume debug, flight-path vector).
 
 ---
 
