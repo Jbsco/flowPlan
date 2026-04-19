@@ -29,6 +29,7 @@ Granular feature bullets for later expansion. Every idea captured here is intent
 - [Camera & Views](#camera--views)
 - [Control Bindings & Mapping](#control-bindings--mapping)
 - [Flight Model](#flight-model)
+- [Telemetry & Instrumentation Data Flow](#telemetry--instrumentation-data-flow)
 - [Ground & Water Surface Interaction](#ground--water-surface-interaction)
 - [Weather](#weather)
 - [Time of Day & Seasons](#time-of-day--seasons)
@@ -481,6 +482,65 @@ v1 ships with fully-working keyboard and gamepad profiles plus the mapping UI. H
 - **[sketch]** Autopilot authority (how much wind it can handle before disengaging).
 
 **Invariant note:** Dials tune *parameters*, they do not swap physics *models*. Determinism is preserved: `(seed, input trace, dial state) -> bit-identical result`.
+
+---
+
+## Telemetry & Instrumentation Data Flow
+
+Every display surface on the plane -- debug overlays, HUD, 3D cockpit gauges, autopilot readouts, flight-log entries -- reads the *same* derived telemetry, computed once per render frame from `SimSnapshot + FlightOutputs`. Design-for-reuse: debug plumbing written in Phase 2 is the same plumbing that drives Phase 4 hand-rolled HUD and Phase 4+ 3D cockpit instruments.
+
+See [DESIGN.md § Telemetry derivation (render side)](DESIGN.md#telemetry-derivation-render-side) for the architectural boundary and invariants.
+
+### The plumbing
+
+A single `Telemetry` struct (lives in `render` or `app`, not `sim`) is derived once per frame from the latest snapshot. Fields are SI internally; display-unit conversions happen at the consumer's format call. Every instrument / gauge / debug widget reads from this struct -- no reaching into `SimState`, no duplicated compute.
+
+### Consumer progression
+
+Each phase adds one consumer of the same telemetry layer; the layer itself grows by adding fields as more instruments need them.
+
+- **[shipped: Phase 2.4.1]** Debug HUD (egui top-left and top-right). Formats numbers to text. Current reader of `SimSnapshot.vehicle` + `last_flight`; this is the de-facto first consumer of the "render-side derivation" pattern.
+- **[ready: Phase 2.4.2c]** **3D debug gizmo** -- body-frame axes, velocity vector, force vectors (thrust / lift / drag / total accel) rendered as colored 3D lines at the aircraft position. First visual consumer of the new telemetry plumbing; proves the `LineList` pipeline infrastructure that later phases reuse for HUD ladders and instrument face lines. Toggled with a debug keybind. Details in the dedicated sub-section below.
+- **[sketch: Phase 2.4.4]** G-load / load-factor readout in HUD. Telemetry adds `load_factor`, `vertical_g`, `lateral_g`, `longitudinal_g`.
+- **[sketch: Phase 3-ish]** Crosswind / wind-direction indicator in debug HUD as weather lands. Telemetry adds `wind_world`, `wind_relative_to_heading`, `crosswind_component`.
+- **[sketch: Phase 4 HUD]** Hand-rolled in-game HUD (the player-facing HUD, not the debug overlay). Airspeed tape, altitude tape, artificial horizon, heading tape, vertical speed indicator, turn-coordinator ball, AoA/stall margin indicator, engine cluster, fuel cluster, flap/gear/trim state. All read the same `Telemetry` struct.
+    - Colorblind palette, sizing, anchoring, and animation smoothing live in the HUD renderer; the *data* is unambiguous and shared.
+- **[sketch: Phase 4+ cockpit]** 3D physically-modeled cockpit instruments -- needles and drums driven by telemetry values. The same `airspeed` that drives the HUD tape drives the ASI needle rotation. Panel lighting, reflections, glass depth all live in the renderer; instrument *readings* are one float per dial.
+- **[sketch: Phase 4+ autopilot]** Autopilot target / error readout (HDG bug, ALT capture, VS target, NAV deviation). Autopilot commands live in sim (they're inputs); autopilot *readouts* are telemetry.
+- **[sketch: Phase 4+ damage / engine]** CHT, oil temp, oil pressure, manifold pressure, RPM, fuel flow, fuel remaining per tank, total fuel, range-to-empty at current burn. Telemetry picks these up as the engine model (2.4.3+) exposes them in `FlightOutputs`.
+- **[sketch: Phase 5+ logbook / replay]** Flight-log entries capture telemetry at key moments (takeoff, landing, max altitude, touchdown G, stall events). Replay visualization consumes the same fields.
+
+### Fields the `Telemetry` struct will carry (progressive)
+
+**Phase 2 (initial):** `airspeed_total`, `airspeed_horizontal_fwd`, `airspeed_vertical`, `altitude_agl`, `altitude_msl`, `heading_rad`, `bank_rad`, `pitch_rad`, `alpha_rad`, `beta_rad`, `vertical_speed_mps`, `forces: ForceBreakdown { thrust, lift, drag, gravity, total }`, `commanded_angular_vel`, `actual_angular_vel`.
+
+**Phase 2.4.4+:** `load_factor`, `stall_margin` (α-based, not airspeed heuristic), `slip_skid_ball`, `control_surface_deflections` (after keyboard-ramp lands).
+
+**Phase 3:** `wind_world`, `wind_relative`, `crosswind_component`, `headwind_component`, `density_altitude`.
+
+**Phase 4 (engine & secondary):** `rpm`, `manifold_pressure_inhg`, `fuel_flow_gph`, `fuel_remaining_gal`, `cht`, `oil_temp_c`, `oil_pressure_psi`, `flap_position`, `gear_position`, `trim_positions`.
+
+### Invariants (restated at code site for anyone adding a field)
+
+- Pure function of `(SimSnapshot, FlightOutputs, dt)`; no hidden state in telemetry itself.
+- SI units internally; conversions at consumer format edges.
+- Lives in `render` or `app`, not `sim`.
+- One struct, many consumers -- no parallel re-derivation from sim state anywhere.
+- Determinism-safe: presentation-side smoothing (needle lag, averaging) is allowed here; never in sim.
+
+### 3D Debug Gizmo (Phase 2.4.2c, first visual consumer)
+
+- **[ready]** New render module `debug_lines.rs` + `debug_lines.wgsl`: position + color vertex, `wgpu::PrimitiveTopology::LineList` pipeline. Reuses existing camera + scene BGLs. Depth-test on, depth-write off so lines read the scene without occluding it.
+- **[ready]** `DebugLineBatch { vertices: Vec<DebugLineVertex> }` allocated once, cleared+repopulated per frame. Passed as `Option<&DebugLineBatch>` through the render path so release builds / preview builds can omit it.
+- **[ready]** `crates/app/src/debug_gizmo.rs` builds the batch from `Telemetry` each frame at the vehicle CG:
+    - Body axes: +X red (right wing), +Y green (up), -Z blue (nose), each ~3 m long.
+    - Velocity vector: white, ~0.3 m per m/s so cruise reads ~16 m long.
+    - Force vectors (thrust yellow, lift cyan, drag orange, total accel magenta) at ~0.5 m per m/s² so gravity would be ~5 m if shown.
+    - Gravity omitted by default (always `(0, -9.81, 0)`; clutters the gizmo).
+- **[ready]** Toggle keybind (suggested `G`) adds a `ToggleGizmo` input event. The gizmo bool persists across ticks on the app side; *not* part of sim state (presentation-only).
+- **[ready]** Render order: after the scene pass, before the egui HUD pass, so the egui panels overlay the gizmo.
+- **[ready]** Determinism: gizmo is read-only presentation; it does not mutate sim, does not introduce new floats into the hash, and toggling it mid-flight leaves state identical.
+- **[ready]** Infrastructure dividend: the same `LineList` pipeline later draws HUD tape tick marks, artificial-horizon ladders, pitch ladder on cockpit glass, flight-path vector on HUD, wireframe debug renderings of collision volumes (Phase 2.5+), and wake/spray spline previews. Building the pipeline well in 2.4.2c is a one-time cost that keeps paying into Phase 5+.
 
 ---
 

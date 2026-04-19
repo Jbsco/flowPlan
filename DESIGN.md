@@ -242,6 +242,32 @@ cpal audio callback:
   write output buffer
 ```
 
+### Telemetry derivation (render side)
+
+Instrument displays, HUD elements, and debug visualizers all need the *same* derived quantities -- airspeed (total / horizontal / vertical components), altitude, attitude in degrees, heading, bank angle, vertical speed, angle of attack, sideslip, G-load, slip/skid, stall margin, force breakdown vectors, etc. These are *derivable from* `SimSnapshot + FlightOutputs`, not additional state. They are computed **once per render frame**, on the render side of the boundary, and consumed in parallel by every display surface:
+
+```
+SimSnapshot (front) ----\
+                        +--> Telemetry (derived, per-frame) --> consumers:
+FlightOutputs  --------/                                        - debug HUD (egui)    [Phase 2]
+                                                                 - debug gizmo (3D)    [Phase 2.4.2c]
+                                                                 - hand-rolled HUD     [Phase 4]
+                                                                 - 3D cockpit gauges   [Phase 4+]
+                                                                 - damage / engine     [Phase 4+]
+                                                                 - autopilot readout   [Phase 4+]
+                                                                 - flight log entries  [Phase 5+]
+```
+
+**Invariants for the telemetry layer:**
+
+- **Derivation, not state.** `Telemetry` is a pure function of `(SimSnapshot, FlightOutputs, dt)`. No hidden memory, no per-tick accumulators beyond what `SimSnapshot` already carries. If a reading needs history (e.g., G-load peak-hold), the history lives in the *consumer*, not in the telemetry struct.
+- **Render-rate, not sim-rate.** Telemetry is computed at display rate, like interpolated render state. This is why it lives in `render` or `app`, not `sim` -- producing it in the sim would bloat the snapshot with values that are just derived quantities.
+- **One struct, many consumers.** A single `Telemetry` struct drives every display surface so that the debug HUD's airspeed and the Phase 4 cockpit ASI read from the exact same source. No drift, no duplicated compute, no "why does the gauge disagree with the HUD?" bugs.
+- **SI internally, presentation conversions at the consumer edge.** `Telemetry` fields are SI (m/s, rad, m). Knots / feet / degrees / mph conversions happen when the consumer formats a number or positions a needle. This is a one-line detail but locks the invariant that the sim is SI throughout.
+- **Determinism unaffected.** `Telemetry` is presentation-only, so wall-clock effects (rolling averages for noisy readings, needle-lag smoothing) are allowed here but never in sim.
+
+This boundary means debug visualizations built in Phase 2 and Phase 3 are the *same plumbing* that Phase 4 hand-rolled HUD elements and Phase 4+ 3D cockpit instruments will plug into. Adding a new instrument later is "consume a field from `Telemetry`; draw it", not "reach into `SimState` and recompute". See [FEATURES.md § Telemetry & Instrumentation Data Flow](FEATURES.md#telemetry--instrumentation-data-flow) for the consumer-side progression.
+
 ---
 
 ## State Discipline
