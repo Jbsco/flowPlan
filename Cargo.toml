@@ -88,12 +88,17 @@ cast_possible_truncation = "warn"
 cast_possible_wrap = "warn"
 alloc_instead_of_core = "warn"
 
-# Allowed exceptions per CODING_RULES.md § Lints and Formatting
+# Allowed exceptions per CODING_RULES.md § Lints and Formatting.
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 similar_names = "allow"
-multiple_crate_versions = "allow"          # Upstream transitive noise; audit manually
+multiple_crate_versions = "allow"          # Upstream transitive noise; audit manually.
+missing_const_for_fn = "allow"             # Noisy in exploratory game code; revisit per-crate.
+suboptimal_flops = "allow"                 # mul_add isn't always the readable choice.
+cast_lossless = "allow"                    # `as` casts are idiomatic in math code.
+inline_always = "allow"
+must_use_candidate = "allow"               # Overly aggressive; we add #[must_use] by judgment.
 
 [profile.dev]
 opt-level = 1                              # Usable FPS while debugging

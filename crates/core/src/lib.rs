@@ -11,5 +11,5 @@ pub mod rng;
 pub mod time;
 
 pub use handle::Handle;
-pub use rng::Rng;
+pub use rng::{splitmix64, Rng};
 pub use time::{Seconds, TickCount};

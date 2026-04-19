@@ -11,5 +11,10 @@ description = "flowPlan simulation: fixed-timestep aircraft state and tick"
 [lints]
 workspace = true
 
-# Phase 0: empty stub. Dependencies (flowplan-core, flowplan-assets, glam, tracing,
-# proptest) land alongside the tick implementation in Phase 1.
+[dependencies]
+flowplan-core = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

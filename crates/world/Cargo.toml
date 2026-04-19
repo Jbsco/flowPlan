@@ -11,5 +11,7 @@ description = "flowPlan world rules: terrain, water, sky, weather, wind, time-of
 [lints]
 workspace = true
 
-# Phase 0: empty stub. Dependencies (flowplan-core, flowplan-sim, glam, tracing) land in
-# Phase 1 (terrain) and Phase 3 (weather expansion).
+[dependencies]
+flowplan-core = { workspace = true }
+# flowplan-sim, glam, tracing added alongside the state they need (weather uses glam for
+# wind vectors; sim needs terrain for buoyancy in Phase 2).

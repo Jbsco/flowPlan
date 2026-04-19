@@ -16,11 +16,19 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-# Phase 0 set: only what the clear-app entry point actually uses.
-# flowplan-* sibling crates are added as each phase wires them in.
+flowplan-assets = { workspace = true }
+flowplan-sim = { workspace = true }
+flowplan-world = { workspace = true }
+flowplan-render = { workspace = true }
+# flowplan-core added when app uses core types directly.
+
 wgpu = { workspace = true }
 winit = { workspace = true }
 pollster = { workspace = true }
+crossbeam-queue = { workspace = true }
+parking_lot = { workspace = true }
+glam = { workspace = true }
+
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

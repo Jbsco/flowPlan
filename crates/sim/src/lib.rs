@@ -1,5 +1,28 @@
 //! flowPlan simulation: fixed-timestep aircraft state and tick.
 //!
-//! Phase 0 placeholder. See [`DESIGN.md § Simulation Architecture`](../../../DESIGN.md#simulation-architecture).
+//! Phase 1 scope: a placeholder vehicle ("the cube") with simple rigid-body dynamics,
+//! an input queue drained at tick start, a camera with first-person / third-person /
+//! orbit views, and a deterministic `tick()` that advances state by a fixed `dt`.
+//! The Beaver-specific flight model replaces this in Phase 2.
+//!
+//! See [`DESIGN.md § Simulation Architecture`](../../../DESIGN.md#simulation-architecture).
 
 #![forbid(unsafe_code)]
+
+pub mod camera;
+pub mod controls;
+pub mod difficulty;
+pub mod hash;
+pub mod input;
+pub mod snapshot;
+pub mod state;
+pub mod vehicle;
+
+pub use camera::{Camera, ChaseConfig, ViewKind};
+pub use controls::Controls;
+pub use difficulty::DifficultyDials;
+pub use hash::state_hash;
+pub use input::{InputEvent, InputEvents};
+pub use snapshot::SimSnapshot;
+pub use state::SimState;
+pub use vehicle::VehicleState;

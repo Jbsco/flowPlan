@@ -11,9 +11,11 @@ description = "flowPlan renderer: wgpu pipelines, passes, HUD, camera"
 [lints]
 workspace = true
 
-# Phase 0: empty stub. Dependencies (flowplan-core, flowplan-assets, flowplan-sim,
-# flowplan-progression, flowplan-world, wgpu, winit, glam, bytemuck, tracing) land
-# alongside first pipelines in Phase 2.
-#
-# Render is permitted limited unsafe at documented wgpu lifetime-management sites.
-# Every unsafe block must carry a // SAFETY: comment per CODING_RULES.md.
+[dependencies]
+flowplan-assets = { workspace = true }
+flowplan-sim = { workspace = true }
+wgpu = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+# flowplan-core + flowplan-world added in Phase 2 when render uses their types directly.
+# tracing added alongside render instrumentation spans.
