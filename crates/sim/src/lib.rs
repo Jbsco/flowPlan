@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod aircraft_spec;
 pub mod camera;
 pub mod controls;
 pub mod difficulty;
@@ -18,6 +19,7 @@ pub mod snapshot;
 pub mod state;
 pub mod vehicle;
 
+pub use aircraft_spec::{AircraftSpec, EngineSpec, SpeedsSpec};
 pub use camera::{Camera, ChaseConfig, ViewKind};
 pub use controls::Controls;
 pub use difficulty::DifficultyDials;

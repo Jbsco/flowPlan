@@ -1,0 +1,45 @@
+// flowPlan MVP aircraft spec sheet.
+//
+// Sanitized homage of the de Havilland Canada DHC-2 Beaver (piston variant, Pratt &
+// Whitney R-985 Wasp Junior). Figures authored from AIRCRAFT.md § MVP Reference and the
+// published Beaver POH; converted to SI where flowPlan's sim tick expects SI. Imperial
+// units (hp, gal) retained where operator recognizability matters more than consistency.
+//
+// `(verify)` entries in AIRCRAFT.md remain pending primary-source confirmation; tighten
+// before Milestone 2.4 (flight-model lock).
+(
+    name: "Northlander",
+    inspiration: "de Havilland Canada DHC-2 Beaver (1947-1967)",
+    // 2,900 lb empty -> 1315.5 kg
+    empty_mass_kg: 1315.5,
+    // 5,100 lb wheels MTOW -> 2313.3 kg
+    max_mass_wheels_kg: 2313.3,
+    // 5,370 lb floats MTOW -> 2435.8 kg
+    max_mass_floats_kg: 2435.8,
+    // 250 sq ft -> 23.23 m^2
+    wing_area_m2: 23.23,
+    aspect_ratio: 9.2,
+    airfoil_root: "NACA 64A416",
+    airfoil_tip: "NACA 64A412",
+    engine: (
+        name: "Pratt & Whitney R-985 Wasp Junior",
+        power_hp: 450.0,
+        cruise_fuel_gph: 27.0,
+    ),
+    fuel_capacity_gal: 95.0,
+    // Speeds converted from POH figures:
+    //   Vne   160 mph -> 71.53 m/s
+    //   cruise 125 kt -> 64.31 m/s
+    //   Vs     52 mph -> 23.25 m/s
+    //   Vso    47 mph -> 21.01 m/s (flaps + floats)
+    //   Vx     65 mph -> 29.06 m/s
+    //   Vy     85 mph -> 37.99 m/s
+    speeds: (
+        vne_mps: 71.53,
+        cruise_mps: 64.31,
+        vs_clean_mps: 23.25,
+        vso_mps: 21.01,
+        vx_mps: 29.06,
+        vy_mps: 37.99,
+    ),
+)

@@ -15,7 +15,8 @@ use crossbeam_queue::ArrayQueue;
 use flowplan_assets::CpuMesh;
 use flowplan_render::{Renderer, SceneParams, ShadingParams};
 use flowplan_sim::{
-    state::FIXED_DT, DifficultyDials, InputEvent, InputEvents, SimSnapshot, SimState, VehicleState,
+    state::FIXED_DT, AircraftSpec, DifficultyDials, InputEvent, InputEvents, SimSnapshot, SimState,
+    VehicleState,
 };
 use flowplan_world::{sun_direction, HeightSampler, Terrain};
 use winit::application::ApplicationHandler;
@@ -55,8 +56,17 @@ const MAX_TICKS_PER_FRAME: u32 = 8;
 const TERRAIN_CELLS: u32 = 200;
 const TERRAIN_HALF_EXTENT: f32 = 2000.0;
 
-/// Cube size for the placeholder vehicle (meters).
+/// Cube size for the placeholder vehicle (meters). Used only when the glTF aircraft at
+/// `VEHICLE_GLB_PATH` is missing or malformed.
 const CUBE_SIZE: f32 = 2.0;
+
+/// Workspace-relative path to the MVP aircraft glTF. See AIRCRAFT.md § MVP Reference.
+/// Populated by the author via Blender export; absent by default. Load failure is
+/// non-fatal -- we fall back to the placeholder cube so the app always runs.
+const VEHICLE_GLB_PATH: &str = "data/aircraft/northlander.glb";
+
+/// Workspace-relative path to the MVP aircraft spec sheet.
+const VEHICLE_SPEC_PATH: &str = "data/aircraft/northlander.ron";
 
 /// Cel-shading presets for the Phase 1 placeholder scene. The terrain is a large, mostly
 /// diffuse surface: many bands (4), high ambient floor (0.5), low rim (0.08). The vehicle
@@ -280,12 +290,14 @@ impl Runtime {
         };
         surface.configure(&device, &config);
 
-        // Build terrain + cube meshes.
+        // Build terrain + vehicle meshes. The vehicle comes from `VEHICLE_GLB_PATH` when
+        // available; otherwise we fall back to the placeholder cube.
         let terrain = Terrain::from_seed(WORLD_SEED);
         let terrain_mesh = CpuMesh::terrain_patch(TERRAIN_CELLS, TERRAIN_HALF_EXTENT, |x, z| {
             terrain.height(x, z)
         });
-        let vehicle_mesh = CpuMesh::cube(1.0, [1.0, 0.82, 0.28, 1.0]);
+        let vehicle_mesh = load_vehicle_mesh();
+        let _aircraft_spec = load_aircraft_spec();
 
         let renderer = Renderer::new(
             &device,
@@ -296,7 +308,6 @@ impl Runtime {
             TERRAIN_SHADING,
             &vehicle_mesh,
             VEHICLE_SHADING,
-            CUBE_SIZE,
         );
 
         // Sim.
@@ -460,6 +471,76 @@ enum FrameError {
     Lost,
     OutOfMemory,
     Other(wgpu::SurfaceError),
+}
+
+/// Attempt to load the MVP aircraft mesh from `VEHICLE_GLB_PATH`; fall back to the
+/// placeholder cube on missing file or parse failure. Log the chosen path so startup is
+/// self-documenting.
+fn load_vehicle_mesh() -> CpuMesh {
+    match std::fs::read(VEHICLE_GLB_PATH) {
+        Ok(bytes) => match flowplan_assets::load_mesh(&bytes) {
+            Ok(mesh) => {
+                tracing::info!(
+                    "loaded aircraft mesh: {} ({} verts, {} tris)",
+                    VEHICLE_GLB_PATH,
+                    mesh.vertex_count(),
+                    mesh.index_count() / 3,
+                );
+                mesh
+            },
+            Err(e) => {
+                tracing::warn!("failed to parse {VEHICLE_GLB_PATH}: {e}; using placeholder cube");
+                placeholder_cube()
+            },
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::info!("no {VEHICLE_GLB_PATH} on disk; using placeholder cube");
+            placeholder_cube()
+        },
+        Err(e) => {
+            tracing::warn!("read {VEHICLE_GLB_PATH} failed: {e}; using placeholder cube");
+            placeholder_cube()
+        },
+    }
+}
+
+fn placeholder_cube() -> CpuMesh {
+    CpuMesh::cube(CUBE_SIZE, [1.0, 0.82, 0.28, 1.0])
+}
+
+/// Load the MVP aircraft spec sheet. Returns `None` if the file is absent or malformed;
+/// the sim keeps running in that case (spec feeds the Phase 2.4 flight model, not the
+/// Phase 1 placeholder dynamics).
+fn load_aircraft_spec() -> Option<AircraftSpec> {
+    match std::fs::read_to_string(VEHICLE_SPEC_PATH) {
+        Ok(s) => match AircraftSpec::from_ron(&s) {
+            Ok(spec) => {
+                tracing::info!(
+                    "loaded aircraft spec: {} ({}) MTOW {:.0} kg wheels / {:.0} kg floats, \
+                     {} @ {:.0} hp",
+                    spec.name,
+                    spec.inspiration,
+                    spec.max_mass_wheels_kg,
+                    spec.max_mass_floats_kg,
+                    spec.engine.name,
+                    spec.engine.power_hp,
+                );
+                Some(spec)
+            },
+            Err(e) => {
+                tracing::warn!("parse {VEHICLE_SPEC_PATH}: {e}");
+                None
+            },
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::info!("no {VEHICLE_SPEC_PATH}; aircraft spec unavailable");
+            None
+        },
+        Err(e) => {
+            tracing::warn!("read {VEHICLE_SPEC_PATH}: {e}");
+            None
+        },
+    }
 }
 
 /// Map an sRGB surface format to its linear counterpart for the egui HUD view. wgpu 22

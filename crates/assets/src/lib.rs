@@ -10,6 +10,8 @@
 // sizes we produce (64k verts at most in Phase 1).
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+pub mod gltf_load;
 pub mod mesh;
 
+pub use gltf_load::{load_mesh, GltfLoadError};
 pub use mesh::{CpuMesh, Vertex};

@@ -201,7 +201,8 @@ fn scene_minimal_snapshot() {
 
     let terrain =
         CpuMesh::terrain_patch(24, 40.0, |x, z| ((x * 0.08).sin() + (z * 0.08).cos()) * 1.6);
-    let cube = CpuMesh::cube(1.0, [1.0, 0.82, 0.28, 1.0]);
+    // Cube built at 2 m directly now that the Renderer renders meshes at authored scale.
+    let cube = CpuMesh::cube(2.0, [1.0, 0.82, 0.28, 1.0]);
 
     let renderer = Renderer::new(
         &device,
@@ -212,7 +213,6 @@ fn scene_minimal_snapshot() {
         TERRAIN_SHADING,
         &cube,
         VEHICLE_SHADING,
-        2.0,
     );
     let png = capture_png(&device, &queue, &renderer);
     insta::assert_binary_snapshot!("scene_minimal.png", png);

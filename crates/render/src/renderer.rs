@@ -212,7 +212,6 @@ pub struct Renderer {
     outline_params_buf: wgpu::Buffer,
     terrain: DrawModel,
     vehicle: DrawModel,
-    cube_size: f32,
     // Kept for shader hot-reload pipeline rebuilds; feature-gated to avoid dead-code
     // warnings in release/default builds. Re-exposed without the gate when another
     // caller needs them.
@@ -240,7 +239,6 @@ impl Renderer {
         terrain_shading: ShadingParams,
         vehicle_mesh: &CpuMesh,
         vehicle_shading: ShadingParams,
-        vehicle_cube_size: f32,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("flowplan-scene-shader"),
@@ -477,7 +475,6 @@ impl Renderer {
             outline_params_buf,
             terrain,
             vehicle,
-            cube_size: vehicle_cube_size,
             #[cfg(feature = "shader-hot-reload")]
             scene_pipeline_layout,
             #[cfg(feature = "shader-hot-reload")]
@@ -609,8 +606,9 @@ impl Renderer {
             .vehicle
             .orientation
             .slerp(snapshot_curr.vehicle.orientation, alpha);
-        let model_mat =
-            Mat4::from_scale_rotation_translation(Vec3::splat(self.cube_size), veh_orient, veh_pos);
+        // Vehicle renders at authored scale: the placeholder cube ships sized correctly
+        // from the app; glTF-imported meshes are in real-world meters.
+        let model_mat = Mat4::from_scale_rotation_translation(Vec3::ONE, veh_orient, veh_pos);
         let normal_mat = Mat4::from_quat(veh_orient);
         let vehicle_uniform = ModelUniform {
             model: model_mat.to_cols_array_2d(),

@@ -14,4 +14,6 @@ workspace = true
 [dependencies]
 glam = { workspace = true }
 bytemuck = { workspace = true }
+gltf = "1.4"
+thiserror = { workspace = true }
 # flowplan-core + tracing added when asset handles and loader logging arrive in Phase 2.

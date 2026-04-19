@@ -37,14 +37,22 @@ mod tests {
             #[allow(clippy::cast_precision_loss)]
             let t = i as f32 / 32.0;
             let v = sun_direction(t);
-            assert!((v.length() - 1.0).abs() < 1e-5, "t={t} length={}", v.length());
+            assert!(
+                (v.length() - 1.0).abs() < 1e-5,
+                "t={t} length={}",
+                v.length()
+            );
         }
     }
 
     #[test]
     fn midnight_sun_is_below_horizon() {
         let v = sun_direction(0.0);
-        assert!(v.y < 0.0, "midnight sun should be below horizon; got y={}", v.y);
+        assert!(
+            v.y < 0.0,
+            "midnight sun should be below horizon; got y={}",
+            v.y
+        );
     }
 
     #[test]
