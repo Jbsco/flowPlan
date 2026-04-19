@@ -27,6 +27,8 @@ pub use renderer::{Renderer, SceneParams, ShadingParams};
 // them as intentional here so the lib-test target does not trip
 // `-D unused_crate_dependencies` when the feature is disabled.
 #[cfg(test)]
+use flowplan_world as _;
+#[cfg(test)]
 use image as _;
 #[cfg(test)]
 use insta as _;

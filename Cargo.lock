@@ -1105,6 +1105,7 @@ dependencies = [
  "bytemuck",
  "flowplan-assets",
  "flowplan-sim",
+ "flowplan-world",
  "glam",
  "image",
  "insta",

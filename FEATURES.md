@@ -175,7 +175,23 @@ Each biome contributes to the shared feature taxonomy below (surface types, weat
 
 ## Terrain & Static Landscape
 
-- **[sketch]** Heightmap base with vector overlays for rivers, lakes, coastlines, ridges, tree-line, field/forest polygons.
+### Phase 2 state (implemented)
+
+- **[shipped: Phase 2.2]** Sum-of-sines procedural heightmap (`flowplan-world::Terrain`) with 5 octaves (regional, coarse, mid, fine, detail) at mountain scale (±275 m max). Beach flattening post-process (`raw * smoothstep²(|raw|/120)`) compresses shore heights. 5-tier color ramp: sand / field / forest / rock / snow.
+
+### Phase 2 known limitations (to resolve via Phase 3+ terrain rebuild)
+
+- **Sum-of-sines cannot independently tune amplitude and gradient.** Shores rise steeply because the regional octave has large vertical amplitude over short horizontal distances. Height-based flattening can squash vertical extent but cannot stretch horizontal extent, so gentle beach flats with tall mountain backdrops (per ref1/2/3 photos) aren't achievable without a different representation.
+- **No real hydrology.** Water sits at a single fixed y=0 mean level; no lakes at different altitudes, no rivers, no drainage patterns. Valleys never collect water realistically; a lake basin is just "area where terrain happens to dip below zero".
+- **No shore classification.** Beach, cliff, rocky headland, estuary, delta all look the same (whatever height+color the sum-of-sines produces). Hub placement can't distinguish safe float landing zones from surf-prone exposed coasts.
+- **Repetitive look at distance.** 4 km patch tiled procedurally reveals the sinusoidal basis when flown over for long.
+
+### Future terrain design (Phase 3+ target)
+
+- **[sketch]** Proper terrain representation that decouples amplitude and gradient -- e.g., ridged noise plus domain warping, or a hand-authored heightmap with procedural detail overlaid. Enables genuine beach flats adjacent to mountain backdrops.
+- **[sketch]** Hydrological realism: elevation lakes (ice-dammed, alpine tarns, oxbow lakes), rivers carved along gradient lines, drainage basins, deltas and alluvial fans at river mouths, waterfalls at elevation jumps. Each water body has its own surface level, chop behavior, and palette.
+- **[sketch]** Shore classification: `sand_beach | gravel_beach | rock | cliff | mudflat | delta | ice_edge`, driving hub placement, landing feasibility, spray / foam / splash behavior, and wildlife spawn tables.
+- **[sketch]** Heightmap base with vector overlays for rivers, lakes, coastlines, ridges, tree-line, field/forest polygons (original sketch, still the likely baseline representation).
 - **[sketch]** Build-time baking of all static meshes; runtime streaming only for distant LOD swap.
 - **[sketch]** Placed landmarks for dead-reckoning: mountains, towers, lighthouses, wrecks, bridges, unusual rock formations, logged cut-blocks, river bends, waterfalls.
 - **[sketch]** Biome-specific flora density and palette that feed cel shading.

@@ -18,7 +18,7 @@ Last updated: **2026-04-19** (Phase 2 in progress; Milestones 2.1, 2.6, 2.3 core
     - Milestone 2.5 (pontoon buoyancy + contact physics): QUEUED (needs 2.2 water height sampler and proper surface contact to replace the pre-2.5 ground clamp)
 - Milestone order taken (deviates from ROADMAP's numeric order): **2.1 -> 2.6 -> 2.3 -> 2.2 -> 2.4 -> 2.5**. Sky landed before plane because it made visual tuning of the Beaver easier; water came before flight model because buoyancy (2.5) needs it.
 - Gate: green. `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `cargo bench --bench frame_budget -- --test`, and the hardware snapshot tests all pass.
-- Test count: **102 total** (up from 94 mid-Phase-2, 81 at Phase 1 lock). Breakdown since last PROGRESS update: +5 world::water (Gerstner math parity, amplitude bound, determinism, time variation, sum invariant), +2 assets (water_grid, bbox full), +1 assets (mesh bbox_of_cube_is_symmetric).
+- Test count: **102 total** (up from 94 mid-Phase-2, 81 at Phase 1 lock). Three hardware snapshots committed: `scene_minimal`, `beaver_preview`, `scene_extended` (1024x640; uses the real `Terrain::from_seed` so it reflects in-game terrain faithfully). Reference photos `ref1.png`, `ref2.png`, `ref3.png` in `crates/render/tests/snapshots/` as aesthetic targets (coastal Alaska / fjord floatplane photography).
 
 ## Quick commands
 
@@ -199,14 +199,17 @@ Feature flags introduced:
 - `world::sun_direction(t)` in new `crates/world/src/sky.rs`. Great-circle with fixed `Z = -0.3` tilt: 0 = midnight (below horizon), 0.25 = dawn east, 0.5 = noon overhead, 0.75 = dusk west.
 - App derives `SceneParams.sun_dir` from the snapshot's `time_of_day` each frame.
 
-### Milestone 2.2 deliverables (CORE SHIPPED; 2.2.4 foam + 2.2.5b distant LOD pending)
+### Milestone 2.2 deliverables (CORE SHIPPED; depth-compare foam + distant LOD pending; terrain rebuild planned for Phase 3+)
 
 - **Flat water plane (2.2.1):** `CpuMesh::water_grid(cells, half_extent, color)` in `flowplan-assets` builds a tessellated grid at y=0 with uniform blue color. App instantiates 64x64 at 4000 m half-extent. Renderer treats it as a separate DrawModel drawn between terrain and vehicle in the scene pass.
-- **Terrain amplitude tune (2.2.5):** `world::Terrain` octaves halved (`(0.015, 2.25)`, `(0.04, 1.0)`, `(0.12, 0.45)`, `(0.3, 0.18)`). Max |height| dropped from 7.75 m to 3.88 m; wavelengths slightly longer for broader rolling hills. Keeps peaks plausible against the Beaver's 4 m height.
 - **Gerstner GPU waves (2.2.2):** new `water.wgsl` with 3 wave components (wavelengths 7-18 m, amplitudes 0.08-0.25 m). Dedicated `water_pipeline` built against the same camera+model+scene layout. Per-vertex normal reconstruction via the GPU Gems 2 Ch. 1 simplified form. Sun-glint specular spike bundled in the fragment shader.
 - **CPU water-height sampler (2.2.3):** `flowplan_world::water_height(x, z, t)` in `crates/world/src/water.rs`. Mirrors the GPU wave set (same directions / wavelengths / amplitudes / speeds). Y-only height; trochoidal X/Z displacement omitted because Phase 2.5 buoyancy only needs immersion depth. `max_amplitude()` = 0.45 m exposed for conservative clearance checks. `water_max_amplitude` re-exported from the crate root.
+- **Whitecap foam (2.2.4 EX):** value-noise-based foam mask in `water.wgsl` (2D value noise at 20 m + 5 m wavelengths, multiplied into a `smoothstep(0.20, 0.26, y)` crest threshold). Produces discrete foam clusters on wave tops rather than sweeping tints. Pattern rides the waves because it samples the displaced world position. **Depth-compare shoreline foam deferred** -- would require a render pass that samples a prior pass's depth buffer; revisit with Phase 2.5 contact physics or Phase 3 scene_standard bench work.
+- **Terrain at mountain scale (2.2.5 + polish iterations):** 5-octave sum-of-sines in `world::Terrain`. Current amplitudes: regional ±100 m (`1 km` wavelength), coarse ±120 m, mid ±40 m, fine ±12 m, detail ±3 m. Max |height| ±275 m. Regional halved from an initial 200 m to let the beach flatten produce visible shore flats rather than clifflike transitions. Color ramp in `terrain_color_for_height` blends sand (below 6 m) / field / forest / rock / snow (above 320 m).
+- **Beach flattening:** post-process `raw * smoothstep²(|raw|/120)` in `Terrain::height` compresses terrain within ±120 m of sea level toward zero. Scene_extended test uses the real `Terrain::from_seed` (flowplan-world added as a render dev-dep) so the snapshot reflects in-game terrain.
 - **Pre-2.5 terrain/water ground clamp:** `SimState::tick` signature gained a `min_altitude: f32` parameter. App computes `min_altitude = max(terrain.height(x, z), WATER_LEVEL=0.0) + vehicle_float_offset + SURFACE_MARGIN=0.05` every tick. Prevents through-terrain flight and mean-water submersion. Determinism invariant extended: `(seed, input trace, dials, tick count, min_altitude)` -> identical state.
 - **Mesh bounding-box helper:** `CpuMesh::bbox() -> ([f32; 3], [f32; 3])` and startup log line `"bbox x[..] y[..] z[..]"` for axis-convention verification on freshly-exported glTFs.
+- **Fog tuning:** default `SceneParams.fog_density` dropped from `0.0015/m` to `0.0005/m` so distant peaks on the ±275 m terrain read through atmospheric haze without disappearing.
 
 ### Milestone 2.3 deliverables (CORE SHIPPED; 2.3.4 culling deferred)
 
@@ -243,6 +246,7 @@ Feature flags introduced:
 - **Wave crests clip the floats.** Water surface oscillates ±0.45 m around y=0; the `min_altitude` clamp uses mean water level only (wall-clock-dependent wave height would undermine the determinism invariant). Buoyancy in 2.5 converts submersion into a displacement force instead of a hard clamp.
 - **No lateral / horizontal collision.** Plane can fly horizontally into a hillside. The altitude clamp only affects Y. Proper AABB or per-pontoon contact lands with 2.5.
 - **Back-face culling off.** See Phase 2 bug #6.
+- **Terrain is placeholder-at-scale.** Sum-of-sines produces mountain-scale geometry but cannot independently tune amplitude and gradient -- genuinely gentle beach flats beneath steep mountain backdrops (per ref1/2/3 aesthetic targets) are not achievable without a different representation. Related gaps: no elevation lakes, no rivers, no drainage basins, no shore classification (sand / gravel / rock / cliff / delta), no erosion-shaped coastlines. Tracked under [FEATURES.md § Terrain & Static Landscape](FEATURES.md#terrain--static-landscape) for a proper hydrology-aware terrain rebuild in Phase 3+ alongside the world-scope decision.
 
 ### New invariants / conventions locked in Phase 2
 

@@ -169,14 +169,15 @@ A cube can be flown (WASD/gamepad) over a terrain. Frame budget check passes at 
 - [x] Shader hot-reload (dev only) via `notify`, feature-gated as `shader-hot-reload` on `flowplan-render` / `flowplan-app`
 - [x] Visual snapshot tests via `cargo-insta` on a reference scene (`scene_minimal`); hardware-gated behind `hardware-tests` feature.
 
-### Milestone 2.2: Water -- IN PROGRESS (foam + distant LOD pending)
+### Milestone 2.2: Water -- IN PROGRESS (depth-compare foam + distant LOD pending)
 
 - [x] Gerstner wave displacement in vertex shader (3 components) per GPU Gems 2, Ch. 1. `water.wgsl`, separate pipeline. Sun-glint specular highlight bundled. Wave amplitudes 0.1-0.25 m so crests never engulf the plane.
-- [ ] Shoreline foam from depth-compare (Milestone 2.2.4, deferred).
+- [x] Whitecap foam via value-noise mask on wave crests. Proper depth-compare shoreline foam (per the original brief) deferred until the render pass can sample a prior pass's depth; revisit with 2.5 contact physics or the Phase 3 scene_standard bench work.
 - [ ] Normal-mapped distant water; decide transition distance during this phase (Milestone 2.2.5b, deferred to Phase 3 scene_standard work).
 - [x] Water height sampling on CPU for buoyancy (`flowplan_world::water_height(x, z, t)`); same 3 wave components as the shader. Consumed by the Phase 2.5 pontoon buoyancy model.
 - [ ] Bench: water on full screen meets frame budget (scene_standard bench is Phase 3 deliverable).
-- [x] **Ancillary in this milestone:** terrain amplitude dampening (`world::terrain` octaves halved so peaks read plausibly against the 4 m Beaver); pre-2.5 terrain+water ground clamp (`SimState::tick` takes `min_altitude` each step; app supplies `max(terrain, water_level) + float_offset + margin`).
+- [x] **Ancillary in this milestone (terrain polish):** 5-octave sum-of-sines at mountain scale (±275 m max); beach flattening `raw * smoothstep²(|raw|/120)`; 5-tier color ramp (sand / field / forest / rock / snow); pre-2.5 terrain+water ground clamp (`SimState::tick` takes `min_altitude` each step; app supplies `max(terrain, water_level) + float_offset + margin`).
+- **Note: sum-of-sines terrain has limits.** It cannot independently tune amplitude and gradient, so genuinely gentle beach flats beneath steep mountain backdrops (per ref1/2/3 photos) require a different representation. Tracked under [FEATURES.md § Terrain & Static Landscape](FEATURES.md#terrain--static-landscape) for a Phase 3+ terrain rebuild with proper hydrology (elevation lakes, rivers, drainage basins, shore-type classification). Phase 2 terrain is placeholder-at-scale -- enough to verify the look and feel boundaries without committing to the final world system.
 
 ### Milestone 2.3: Plane model (DHC-2 Beaver reference) -- IN PROGRESS (core shipped; back-face culling deferred)
 

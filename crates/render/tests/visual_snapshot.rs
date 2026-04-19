@@ -39,6 +39,7 @@ use glam::{Quat, Vec3};
 // `bytemuck` / `notify` are inherited from the render crate's regular deps; mark them
 // so the test target doesn't trip the lint either.
 use bytemuck as _;
+use flowplan_world as _;
 use image as _;
 use insta as _;
 #[cfg(feature = "shader-hot-reload")]
@@ -281,15 +282,12 @@ fn beaver_preview() {
 fn scene_extended() {
     let (device, queue) = init_wgpu();
 
-    // Large tessellated terrain with all five color tiers in one frame -- beach at
-    // the shoreline, field / forest on the lower slopes, rock ridges, snow peaks.
-    // Matches the scale of ref1/2/3 reference photos (fjords / coastal Alaska).
-    let terrain = CpuMesh::terrain_patch(128, 800.0, |x, z| {
-        ((x * 0.003).sin() + (z * 0.003).cos()) * 220.0
-            + ((x * 0.012).sin() * (z * 0.012).cos()) * 80.0
-            + ((x * 0.04).cos() + (z * 0.04).sin()) * 22.0
-            + ((x * 0.12).sin() * (z * 0.12).sin()) * 6.0
-    });
+    // Use the actual game terrain so the snapshot reflects the in-game view: full
+    // Phase 2.2.4 octave mix, beach flattening, mountain-scale amplitudes. Seed picked
+    // for a frame with a mix of water, lowland, and high peaks.
+    use flowplan_world::{HeightSampler, Terrain};
+    let game_terrain = Terrain::from_seed(0xBEAC_1234_5678_9ABC_u64);
+    let terrain = CpuMesh::terrain_patch(128, 800.0, |x, z| game_terrain.height(x, z));
     let water = CpuMesh::water_grid(48, 900.0, WATER_COLOR);
     let glb_path = concat!(
         env!("CARGO_MANIFEST_DIR"),

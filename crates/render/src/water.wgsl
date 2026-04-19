@@ -47,6 +47,24 @@ fn wave_dir_and_params(i: u32) -> vec4<f32> {
     return             vec4<f32>(-0.70,  0.50,  7.0, 0.08);
 }
 
+// 2D value noise: hash at integer grid corners, smooth bilinear interpolation. Gives
+// spatially coherent blobs at a chosen scale, unlike `fract(sin(dot))` which produces
+// per-pixel static. Used for foam patch masking.
+fn hash21(p: vec2<f32>) -> f32 {
+    return fract(sin(dot(p, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+}
+
+fn value_noise2(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = hash21(i);
+    let b = hash21(i + vec2<f32>(1.0, 0.0));
+    let c = hash21(i + vec2<f32>(0.0, 1.0));
+    let d = hash21(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
 fn wave_speed_and_steep(i: u32) -> vec2<f32> {
     if (i == 0u) { return vec2<f32>(3.2, 0.7); }
     if (i == 1u) { return vec2<f32>(2.0, 0.5); }
@@ -134,16 +152,23 @@ fn fs_water(in: VsOut) -> @location(0) vec4<f32> {
     let spec_align = max(dot(view_reflect, sun_dir), 0.0);
     let spec = pow(spec_align, 64.0) * 0.35;
 
-    // Whitecap foam: wave crests above a threshold get a cream-white tint. Cheap and
-    // reads as "water has surface texture" without needing a depth-compare pass for
-    // shoreline foam (that's deferred to 2.5 with proper contact physics).
-    let crest = smoothstep(0.12, 0.28, in.world_pos.y);
+    // Whitecap foam: only the tops of the largest wave crests, masked by value noise
+    // with spatial coherence so foam clusters read as patches (not per-pixel static).
+    // Two noise scales combined -- the larger places patch clusters, the smaller adds
+    // within-patch detail. Pattern sampled on displaced world_pos so it moves with the
+    // waves.
+    let crest = smoothstep(0.20, 0.26, in.world_pos.y);
+    // 20 m wavelength patch scale, 5 m wavelength detail. `* 1/wavelength` scaling.
+    let noise_large = value_noise2(in.world_pos.xz * 0.05);
+    let noise_detail = value_noise2(in.world_pos.xz * 0.2);
+    let foam_field = noise_large * 0.75 + noise_detail * 0.25;
+    let foam_mask = smoothstep(0.45, 0.70, foam_field);
     let foam_color = vec3<f32>(0.94, 0.96, 0.98);
 
     let base_lit = in.vert_color.rgb * diffuse * scene.sun_color.rgb
         + rim
         + scene.sun_color.rgb * spec;
-    let lit = mix(base_lit, foam_color, crest * 0.55);
+    let lit = mix(base_lit, foam_color, crest * foam_mask * 0.85);
 
     // Matching scene fog so water fades at the same horizon as terrain.
     let dist = length(camera.view_pos.xyz - in.world_pos);

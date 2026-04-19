@@ -41,17 +41,25 @@ impl Terrain {
     pub fn from_seed(seed: u64) -> Self {
         let mut rng = Rng::from_seed(splitmix64(seed));
         // Phase 2.2.4 mountain-scale tuning (per ref1/2/3 reference photos: coastal
-        // Alaska fjord and alpine-lake imagery with 300-500 m peaks).
-        // - Regional: ~1 km wavelength, ±200 m -- broad mountain ranges vs. valley floors.
+        // Alaska fjord and alpine-lake imagery). Regional amplitude halved from the
+        // original 200 m to 100 m to soften large-scale gradients so shores can
+        // actually spread horizontally; the tradeoff is less dramatic mountain peaks.
+        //
+        // The fundamental limitation: sum-of-sines terrain cannot independently tune
+        // amplitude and gradient, so genuinely gentle beach flats next to steep
+        // mountain buttresses require a different representation. Proper solution
+        // involves real hydrology (rivers carving valleys, lake basins, erosion-aware
+        // coastlines) -- tracked under [FEATURES.md § Terrain & Static Landscape]
+        // for a Phase 3+ terrain rebuild.
+        //
+        // - Regional: ~1 km wavelength, ±100 m -- broad mountain ranges vs. valley floors.
         // - Coarse: ~419 m, ±120 m -- major ridges and buttresses.
         // - Mid: ~157 m, ±40 m -- foothill rolls, side ridges.
         // - Fine: ~52 m, ±12 m -- local hillocks.
         // - Detail: ~21 m, ±3 m -- surface texture.
-        // Total ±375 m max; sea level cuts the lowlands, forests climb the middle,
-        // rock and snow crown the ridges. Plane's 4 m height is now small relative to
-        // the terrain, matching real-world floatplane photography scale.
+        // Total ±275 m max.
         let octaves = [
-            make_octave(&mut rng, 0.006, 200.0), // regional
+            make_octave(&mut rng, 0.006, 100.0), // regional (halved from 200)
             make_octave(&mut rng, 0.015, 120.0),
             make_octave(&mut rng, 0.04, 40.0),
             make_octave(&mut rng, 0.12, 12.0),
@@ -84,13 +92,34 @@ impl Terrain {
     }
 }
 
+/// Width of the beach-flattening zone, in meters. Terrain heights within +/- this
+/// distance from mean sea level get compressed toward zero so shores rise gently out of
+/// the water before the steeper octaves take over. Tuned against the Phase 2.2.4
+/// mountain-scale amplitudes (±375 m): 120 m means the beach ramp extends ~120 m
+/// vertical before full-amplitude terrain takes over, producing shores that rise at
+/// shallow angles over hundreds of horizontal meters even when the underlying octave
+/// gradients are steep.
+const BEACH_WIDTH_M: f32 = 120.0;
+
+/// `raw * smoothstep(0, width, |raw|) ^ k`. Below `width` heights are compressed with
+/// a cubic-ish curve; at or above `width` the identity function applies. Sign preserved.
+fn beach_flatten(raw: f32, width: f32) -> f32 {
+    let a = raw.abs();
+    let t = (a / width).clamp(0.0, 1.0);
+    // Stronger flattening near zero than smoothstep alone: square the smoothstep so
+    // very-near-zero heights stay essentially at sea level.
+    let smooth = t * t * (3.0 - 2.0 * t);
+    raw * smooth * smooth
+}
+
 impl HeightSampler for Terrain {
     fn height(&self, x: f32, z: f32) -> f32 {
-        self.octaves.iter().fold(0.0, |acc, o| {
+        let raw = self.octaves.iter().fold(0.0, |acc, o| {
             acc + o.amplitude
                 * ((x * o.frequency + o.phase_x).sin())
                 * ((z * o.frequency + o.phase_z).cos())
-        }) * self.base_amplitude
+        }) * self.base_amplitude;
+        beach_flatten(raw, BEACH_WIDTH_M)
     }
 }
 

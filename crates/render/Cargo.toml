@@ -37,3 +37,4 @@ notify = { version = "6", optional = true }
 insta = "1.34"
 image = "0.25"
 pollster = { workspace = true }
+flowplan-world = { workspace = true }
