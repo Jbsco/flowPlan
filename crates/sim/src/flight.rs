@@ -80,10 +80,17 @@ use crate::vehicle::VehicleState;
 /// Gravitational acceleration, world-space m/s².
 pub const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
 
-// Phase 1 placeholder constants. Replaced by `AircraftSpec`-driven values in 2.4.2+.
+// Shared placeholder constants. Some stay (angular rates) until 2.4.4 replaces them
+// with airspeed-scaled / stall-aware authority; others are replaced in 2.4.2 below
+// by airfoil-driven force computation when an `AircraftSpec` is provided.
 
 /// Thrust acceleration at full throttle along body forward, m/s².
-const THRUST_ACCEL_MAX: f32 = 32.0;
+///
+/// TODO(2.4.3): replace with engine power curve `T = P(rpm, map, alt) * η_prop / V`.
+/// The 2.0 value is a placeholder sized so a 2.3-tonne Beaver doesn't overshoot
+/// Vne in level flight at full throttle (old 32.0 was sized for the 2 m placeholder
+/// cube's terminal velocity and produces supersonic cruise under real aerodynamics).
+const THRUST_ACCEL_MAX: f32 = 2.0;
 
 /// Peak commanded angular rate per body axis (rad/s).
 const ROLL_RATE_MAX: f32 = 1.6;
@@ -93,17 +100,106 @@ const YAW_RATE_MAX: f32 = 0.6;
 /// First-order tracking rate toward commanded angular velocity (1/s).
 const ANG_RESPONSE: f32 = 10.0;
 
-/// Linear drag coefficient (1/s), low-speed stability.
+// --- Placeholder (no-spec) drag constants ---
+
+/// Linear drag coefficient (1/s), low-speed stability -- only used when no
+/// `AircraftSpec` is present (airfoil drag polar takes over when one is).
 const LIN_DAMPING: f32 = 0.05;
 
-/// Quadratic drag coefficient (1/m), bounds terminal velocity.
+/// Quadratic drag coefficient (1/m), bounds terminal velocity -- only used without
+/// an `AircraftSpec`.
 const QUAD_DRAG: f32 = 0.014;
 
 /// Placeholder wing-lift coefficient: m/s² of upward acceleration per m/s of
-/// *horizontal* forward airspeed. Projection onto the world XZ plane keeps dives
-/// accelerating because lift falls with horizontal airspeed rather than total airspeed.
-/// Airfoil-based lift replaces this in 2.4.2.
+/// *horizontal* forward airspeed. Only used when no `AircraftSpec` is present.
 const LIFT_COEFF: f32 = 0.344;
+
+// --- Airfoil / atmosphere constants (Phase 2.4.2) ---
+
+/// International Standard Atmosphere sea-level density, kg/m³.
+/// TODO(2.4.7): density altitude -- `ρ(h, T) = ρ₀ × (1 - Lh/T₀)^(g M / R L - 1)`.
+const AIR_DENSITY_SEA_LEVEL: f32 = 1.225;
+
+/// Zero-lift drag coefficient (clean airframe, no flaps).
+/// TODO(2.4.5): flap-deployment bumps this by ~0.02 per notch.
+const CD0: f32 = 0.028;
+
+/// Oswald efficiency factor. Typical for small single-engine aircraft: 0.7-0.85.
+const OSWALD_E: f32 = 0.8;
+
+/// NACA 64A416-shaped `Cl(α)` table. `α` in radians; `Cl` dimensionless. Piecewise
+/// linearly interpolated. Zero-lift at ~-2°, linear slope ~0.105/deg through the
+/// clean range, peak `Cl_max` ≈ 1.4 at 15°, stall drop to 1.0 by 20°, deep-stall
+/// plateau near 0.5 out to 60°. Mirror-extended to negative α for inverted flight.
+///
+/// TODO(2.4.2): per-aircraft tables should live in `AircraftSpec` rather than being
+/// hard-coded here. For the MVP (Beaver) this matches published NACA TN-1945-ish
+/// figures closely enough.
+#[allow(clippy::approx_constant)]
+const CL_TABLE: &[(f32, f32)] = &[
+    (-1.5708, 0.0),   // -90° (flying backward / full sideways)
+    (-0.5236, -0.75), // -30°
+    (-0.3491, -1.10), // -20°
+    (-0.2793, -1.30), // -16° (inverted Cl_max)
+    (-0.1745, -1.00), // -10°
+    (-0.0873, -0.60), // -5°
+    (-0.0349, 0.00),  // -2° zero-lift
+    (0.0000, 0.20),   // 0°
+    (0.0873, 0.75),   // 5°
+    (0.1745, 1.10),   // 10°
+    (0.2443, 1.35),   // 14°
+    (0.2793, 1.40),   // 16° Cl_max
+    (0.3142, 1.20),   // 18° post-stall
+    (0.3491, 0.95),   // 20°
+    (0.5236, 0.75),   // 30°
+    (1.0472, 0.50),   // 60° deep stall
+    (1.5708, 0.00),   // 90°
+];
+
+/// Linearly interpolate `Cl` from the table at the given α (radians).
+fn lift_coefficient(alpha_rad: f32) -> f32 {
+    let a = alpha_rad.clamp(CL_TABLE[0].0, CL_TABLE[CL_TABLE.len() - 1].0);
+    let mut i = 0;
+    while i + 1 < CL_TABLE.len() && CL_TABLE[i + 1].0 < a {
+        i += 1;
+    }
+    let (x0, y0) = CL_TABLE[i];
+    let (x1, y1) = CL_TABLE[(i + 1).min(CL_TABLE.len() - 1)];
+    if (x1 - x0).abs() < 1e-6 {
+        return y0;
+    }
+    let t = (a - x0) / (x1 - x0);
+    y0 + (y1 - y0) * t
+}
+
+/// `Cd(α) = Cd0 + Cl² / (π · AR · e)` plus a post-stall parasite-drag spike.
+fn drag_coefficient(alpha_rad: f32, cl: f32, aspect_ratio: f32) -> f32 {
+    let induced = cl * cl / (core::f32::consts::PI * aspect_ratio.max(1.0) * OSWALD_E);
+    // Post-stall drag rises roughly quadratically in |α - α_stall|.
+    let stall_excess = (alpha_rad.abs() - 0.2793).max(0.0); // 16° stall boundary
+    let stall_drag = stall_excess * stall_excess * 2.0;
+    CD0 + induced + stall_drag
+}
+
+/// Compute α (angle of attack, rad) and β (sideslip, rad) from body-frame velocity.
+///
+/// α > 0 when the relative wind comes from below the chord (nose above airflow).
+/// β > 0 when the relative wind comes from the right (nose pointing left of velocity).
+/// Returns `(0, 0)` when velocity is near zero or the forward component collapses
+/// (flying sideways or backward); callers treat that as no aerodynamic force.
+fn angle_of_attack_and_sideslip(state: &VehicleState) -> (f32, f32) {
+    if state.velocity.length_squared() < 1e-3 {
+        return (0.0, 0.0);
+    }
+    let body_vel = state.orientation.inverse() * state.velocity;
+    let forward_speed = -body_vel.z;
+    if forward_speed < 1e-3 {
+        return (0.0, 0.0);
+    }
+    let alpha = f32::atan2(-body_vel.y, forward_speed);
+    let beta = f32::atan2(body_vel.x, forward_speed);
+    (alpha, beta)
+}
 
 /// Result of one flight-model evaluation. The first three fields drive integration;
 /// the remaining fields are diagnostics for the debug HUD.
@@ -126,6 +222,15 @@ pub struct FlightOutputs {
     /// Horizontal component of forward airspeed (m/s); feeds lift in the placeholder
     /// model.
     pub horizontal_airspeed: f32,
+    /// Angle of attack (rad). Positive when nose points above relative wind.
+    pub alpha: f32,
+    /// Sideslip angle (rad). Positive when relative wind comes from the right.
+    pub beta: f32,
+    /// Current lift coefficient (dimensionless). Driven by `alpha` on the airfoil path,
+    /// zero on the no-spec placeholder path.
+    pub cl: f32,
+    /// Current drag coefficient (dimensionless).
+    pub cd: f32,
 }
 
 /// Compute flight forces for the current vehicle state.
@@ -135,7 +240,7 @@ pub struct FlightOutputs {
 #[must_use]
 pub fn compute_forces(
     state: &VehicleState,
-    _spec: Option<&AircraftSpec>,
+    spec: Option<&AircraftSpec>,
     _dt: f32,
 ) -> FlightOutputs {
     // Commanded angular rates per body axis.
@@ -159,35 +264,63 @@ pub fn compute_forces(
     );
 
     // Thrust along body forward.
-    // TODO(2.4.3): replace constant `THRUST_ACCEL_MAX` with
-    //   `AircraftSpec.engine.power_hp` curve: thrust = P(rpm, map, alt) / airspeed,
-    //   clamped at static thrust when airspeed is low.
+    // TODO(2.4.3): replace constant `THRUST_ACCEL_MAX` with engine power curve.
     let forward = state.orientation * Vec3::NEG_Z;
     let thrust = forward * (state.controls.throttle * THRUST_ACCEL_MAX);
 
-    // Placeholder wing lift: proportional to horizontal forward airspeed, along world +Y.
-    // TODO(2.4.2): replace with airfoil Cl(α) lookup -- `L = 0.5 ρ V² S Cl(α)`.
-    //   Using horizontal-airspeed here is why the HUD's stall alert false-positives in
-    //   a dive: vertical velocity doesn't count as "airspeed," so lift reads zero and
-    //   airspeed < Vs looks like a stall. Real α-based lift would note that the wing
-    //   still has clean freestream over it.
-    // TODO(2.4.2): compute angle of attack α = asin((forward x velocity) · right) or
-    //   equivalent chord-to-relative-wind angle in body frame.
+    let speed = state.velocity.length();
+
+    // Always-useful diagnostics:
     let horiz_vel = Vec3::new(state.velocity.x, 0.0, state.velocity.z);
     let horiz_fwd = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
     let horiz_airspeed = horiz_vel.dot(horiz_fwd).max(0.0);
-    let lift = Vec3::Y * (horiz_airspeed * LIFT_COEFF);
+    let (alpha, beta) = angle_of_attack_and_sideslip(state);
 
-    // Drag: linear + quadratic on speed, opposing velocity. Zero below 1e-3 m/s to
-    // avoid a normalize of a vanishing vector.
-    // TODO(2.4.2): drag polar: `Cd(α) = Cd0 + Cl² / (π AR e)`. Induced drag dominates
-    //   at high α, parasite drag at high speed. Quadratic-on-speed approximates the
-    //   parasite term only.
-    let speed = state.velocity.length();
-    let drag = if speed > 1e-3 {
-        -state.velocity.normalize_or_zero() * (speed * (LIN_DAMPING + QUAD_DRAG * speed))
+    // Lift / drag branch: airfoil path when an AircraftSpec is available, placeholder
+    // otherwise. The airfoil path is physically derived (`0.5 ρ V² S C_*`) and uses
+    // mass to convert force to acceleration. `if let / else` stays -- map_or_else
+    // would obscure the two distinct physical paths.
+    #[allow(clippy::option_if_let_else)]
+    let (lift, drag, cl, cd) = if let Some(s) = spec {
+        // Mass: MTOW on wheels as the Phase 2.4 placeholder (cargo / fuel update in
+        // Phase 4). TODO(4.2): use dynamic mass from current fuel + cargo loadout.
+        let mass_kg = s.max_mass_wheels_kg.max(1.0);
+        let wing_area = s.wing_area_m2.max(1.0);
+        // Aspect ratio comes from the spec; defaults to 1.0 if missing (won't happen
+        // for sane RON input).
+        let aspect_ratio = s.aspect_ratio.max(1.0);
+
+        let cl = lift_coefficient(alpha);
+        let cd = drag_coefficient(alpha, cl, aspect_ratio);
+        let q = 0.5 * AIR_DENSITY_SEA_LEVEL * speed * speed; // dynamic pressure, Pa
+        let lift_force_n = q * wing_area * cl;
+        let drag_force_n = q * wing_area * cd;
+
+        // Lift direction: body +Y (wing-up). TODO(2.4.2b): rotate into the plane
+        // perpendicular to velocity and containing body-up, so lift is truly
+        // orthogonal to airspeed (matters for steep climbs / dives). Body +Y is a
+        // reasonable approximation for near-level flight.
+        let body_up = state.orientation * Vec3::Y;
+        let lift = body_up * (lift_force_n / mass_kg);
+
+        // Drag acts opposite velocity.
+        let drag = if speed > 1e-3 {
+            -state.velocity.normalize_or_zero() * (drag_force_n / mass_kg)
+        } else {
+            Vec3::ZERO
+        };
+
+        (lift, drag, cl, cd)
     } else {
-        Vec3::ZERO
+        // No-spec fallback: the Phase 1 horizontal-airspeed placeholder. Kept so
+        // pure-sim tests without an AircraftSpec still behave deterministically.
+        let lift = Vec3::Y * (horiz_airspeed * LIFT_COEFF);
+        let drag = if speed > 1e-3 {
+            -state.velocity.normalize_or_zero() * (speed * (LIN_DAMPING + QUAD_DRAG * speed))
+        } else {
+            Vec3::ZERO
+        };
+        (lift, drag, 0.0, 0.0)
     };
 
     FlightOutputs {
@@ -200,6 +333,10 @@ pub fn compute_forces(
         gravity: GRAVITY,
         airspeed: speed,
         horizontal_airspeed: horiz_airspeed,
+        alpha,
+        beta,
+        cl,
+        cd,
     }
 }
 
@@ -236,16 +373,65 @@ mod tests {
 
     #[test]
     fn lift_rises_with_horizontal_airspeed() {
+        // No-spec placeholder path: lift = horiz_airspeed * LIFT_COEFF.
         let mut s = zero_state();
-        s.velocity = Vec3::new(0.0, 0.0, -20.0); // forward at identity orientation
+        s.velocity = Vec3::new(0.0, 0.0, -20.0);
         let out = compute_forces(&s, None, 1.0 / 120.0);
-        // Lift contribution in +Y exceeds gravity at this airspeed (20 * 0.344 = 6.88 > 9.81? no),
-        // but should be meaningfully positive.
         assert!(
             out.linear_accel.y > GRAVITY.y + 3.0,
             "y accel {}",
             out.linear_accel.y
         );
+    }
+
+    #[test]
+    fn alpha_zero_when_flying_level_forward() {
+        let mut s = zero_state();
+        s.velocity = Vec3::new(0.0, 0.0, -30.0);
+        let (alpha, beta) = angle_of_attack_and_sideslip(&s);
+        assert!(alpha.abs() < 1e-5);
+        assert!(beta.abs() < 1e-5);
+    }
+
+    #[test]
+    fn alpha_positive_when_velocity_has_body_neg_y() {
+        // Plane pitched up 10°, moving in the pre-pitch world velocity direction: the
+        // pitched plane sees airflow coming from below -> positive α.
+        let mut s = zero_state();
+        s.orientation = Quat::from_rotation_x(10_f32.to_radians());
+        s.velocity = Vec3::new(0.0, 0.0, -30.0);
+        let (alpha, _beta) = angle_of_attack_and_sideslip(&s);
+        assert!(alpha > 0.08, "alpha {alpha}");
+        assert!(alpha < 0.20);
+    }
+
+    #[test]
+    fn cl_zero_at_minus_two_degrees() {
+        let cl = lift_coefficient((-2.0_f32).to_radians());
+        assert!(cl.abs() < 1e-3, "Cl at -2° should be ~0, got {cl}");
+    }
+
+    #[test]
+    fn cl_peaks_near_sixteen_degrees() {
+        let cl_peak = lift_coefficient(16.0_f32.to_radians());
+        let cl_clean = lift_coefficient(5.0_f32.to_radians());
+        assert!(cl_peak > cl_clean);
+        assert!(cl_peak > 1.3);
+        assert!(cl_peak < 1.5);
+    }
+
+    #[test]
+    fn cl_drops_post_stall() {
+        let cl_peak = lift_coefficient(16.0_f32.to_radians());
+        let cl_stalled = lift_coefficient(22.0_f32.to_radians());
+        assert!(cl_stalled < cl_peak);
+    }
+
+    #[test]
+    fn drag_grows_with_cl_squared() {
+        let cd_low = drag_coefficient(5.0_f32.to_radians(), 0.75, 9.2);
+        let cd_high = drag_coefficient(12.0_f32.to_radians(), 1.2, 9.2);
+        assert!(cd_high > cd_low);
     }
 
     #[test]

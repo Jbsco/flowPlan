@@ -239,12 +239,15 @@ mod tests {
         inputs.push(InputEvent::SetThrottle(1.0));
         let d = DifficultyDials::default();
         s.tick(&inputs, &d, FIXED_DT, 0.5);
-        // After one tick, velocity should have a negative z component (forward).
+        // Post-Phase-2.4.2 `THRUST_ACCEL_MAX` is 2.0 m/s² (placeholder at Beaver scale;
+        // the old 32.0 was sized for the cube). Over 60 ticks (0.5 s) with 1.0 throttle
+        // the plane picks up roughly 1 m/s forward velocity after subtracting drag.
+        // We just want to confirm "thrust produces forward motion", so -0.5 m/s suffices.
         for _ in 0..60 {
             s.tick(&InputEvents::empty(), &d, FIXED_DT, 0.5);
         }
         assert!(
-            s.vehicle.velocity.z < -2.0,
+            s.vehicle.velocity.z < -0.5,
             "velocity.z = {}",
             s.vehicle.velocity.z
         );

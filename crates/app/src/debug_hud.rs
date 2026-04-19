@@ -198,7 +198,7 @@ fn build_ui(ctx: &Context, snap: &SimSnapshot, live: &SimState, frame_ms: f32, p
         .resizable(false)
         .collapsible(true)
         .show(ctx, |ui| {
-            ui.heading("Airspeeds");
+            ui.heading("Airspeeds & AoA");
             ui.label(format!(
                 "total     {:6.2} m/s  ({:5.1} kt)",
                 f.airspeed,
@@ -209,6 +209,12 @@ fn build_ui(ctx: &Context, snap: &SimSnapshot, live: &SimState, frame_ms: f32, p
                 f.horizontal_airspeed,
                 f.horizontal_airspeed * 1.944,
             ));
+            ui.label(format!(
+                "α  {:+6.2}°    β  {:+6.2}°",
+                f.alpha.to_degrees(),
+                f.beta.to_degrees(),
+            ));
+            ui.label(format!("Cl {:6.3}    Cd {:6.3}", f.cl, f.cd));
 
             // Stall alert (pre-2.4.4 heuristic). Compares horizontal forward airspeed
             // to the aircraft's published Vs (clean stall speed). Three tiers:

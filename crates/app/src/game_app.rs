@@ -358,11 +358,15 @@ impl Runtime {
         // bottom-anchored mesh had.
         let start_y = terrain.max_height() + vehicle_float_offset + 25.0;
         sim.vehicle.position = glam::Vec3::new(0.0, start_y, 0.0);
-        sim.vehicle.velocity = glam::Vec3::new(0.0, 0.0, -28.0); // ~28 m/s forward (-Z)
-        sim.vehicle.controls.throttle = 0.4; // idle cruise
-                                             // Seed the camera at a chase-valid pose behind+above the vehicle so the first
-                                             // frame shows a sensible view rather than converging from the Camera::default
-                                             // position (which is far from the vehicle on startup).
+        // ~50 m/s (~97 kt) forward (-Z). Below POH cruise of 64 m/s but above Vs_clean,
+        // so the new 2.4.2 airfoil model produces reasonable lift at spawn. Thrust is
+        // still placeholder (TODO(2.4.3)), so equilibrium cruise speed will drift
+        // once the power curve replaces the constant.
+        sim.vehicle.velocity = glam::Vec3::new(0.0, 0.0, -50.0);
+        sim.vehicle.controls.throttle = 0.55;
+        // Seed the camera at a chase-valid pose behind+above the vehicle so the first
+        // frame shows a sensible view rather than converging from the Camera::default
+        // position (which is far from the vehicle on startup).
         sim.camera.position = sim.vehicle.position
             + glam::Vec3::new(0.0, sim.camera.chase.height, sim.camera.chase.distance);
         sim.camera
