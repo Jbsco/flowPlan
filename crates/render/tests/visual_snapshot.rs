@@ -56,6 +56,8 @@ const CLEAR: wgpu::Color = wgpu::Color {
 };
 const TERRAIN_SHADING: ShadingParams = ShadingParams::new(4.0, 0.5, 0.08, 4.0);
 const VEHICLE_SHADING: ShadingParams = ShadingParams::new(3.0, 0.35, 0.35, 3.0);
+const WATER_SHADING: ShadingParams = ShadingParams::new(3.0, 0.55, 0.12, 3.5);
+const WATER_COLOR: [f32; 4] = [0.18, 0.38, 0.58, 1.0];
 
 #[cfg(feature = "hardware-tests")]
 fn init_wgpu() -> (wgpu::Device, wgpu::Queue) {
@@ -199,7 +201,7 @@ fn capture_png(
 }
 
 #[cfg(feature = "hardware-tests")]
-fn build_beaver_snapshot() -> SimSnapshot {
+fn build_beaver_snapshot(float_offset: f32) -> SimSnapshot {
     let mut snap = SimSnapshot::default();
     // Pull the camera back and up from a representative 10 m aircraft pose.
     let cam_pos = Vec3::new(18.0, 9.0, 22.0);
@@ -210,7 +212,9 @@ fn build_beaver_snapshot() -> SimSnapshot {
     let basis = glam::Mat3::from_cols(right, up, -forward);
     snap.camera.orientation = Quat::from_mat3(&basis);
     snap.camera.fov_y_radians = 55.0_f32.to_radians();
-    snap.vehicle.position = Vec3::new(0.0, 0.0, 0.0);
+    // CG-centered mesh: raise position by the float offset so the floats sit at y=0
+    // (water level) rather than dipping through it.
+    snap.vehicle.position = Vec3::new(0.0, float_offset, 0.0);
     snap.vehicle.orientation = Quat::IDENTITY;
     snap
 }
@@ -230,14 +234,13 @@ fn beaver_preview() {
         "/../../data/aircraft/northlander.glb"
     );
     let glb_bytes = std::fs::read(glb_path).expect("read northlander.glb");
-    let mut beaver = flowplan_assets::load_mesh(&glb_bytes).expect("parse northlander.glb");
-    // Match the app's load-time shift so the preview matches what players see.
-    let min_y = beaver.bbox_min_y();
-    if min_y.abs() > 1e-4 {
-        beaver.translate([0.0, -min_y, 0.0]);
-    }
+    let beaver = flowplan_assets::load_mesh(&glb_bytes).expect("parse northlander.glb");
+    // No load-time shift: the Blender origin is authored at the CG. The preview
+    // lifts vehicle.position by the float offset so floats touch the water surface.
+    let beaver_float_offset = (-beaver.bbox_min_y()).max(0.0);
 
     const BEAVER_SIZE: (u32, u32) = (512, 384);
+    let water = CpuMesh::water_grid(24, 200.0, WATER_COLOR);
     let renderer = Renderer::new(
         &device,
         &queue,
@@ -245,10 +248,12 @@ fn beaver_preview() {
         BEAVER_SIZE,
         &terrain,
         TERRAIN_SHADING,
+        &water,
+        WATER_SHADING,
         &beaver,
         VEHICLE_SHADING,
     );
-    let snap = build_beaver_snapshot();
+    let snap = build_beaver_snapshot(beaver_float_offset);
     let png = capture_png(&device, &queue, &renderer, &snap, BEAVER_SIZE);
     insta::assert_binary_snapshot!("beaver_preview.png", png);
 }
@@ -262,6 +267,7 @@ fn scene_minimal_snapshot() {
         CpuMesh::terrain_patch(24, 40.0, |x, z| ((x * 0.08).sin() + (z * 0.08).cos()) * 1.6);
     // Cube built at 2 m directly now that the Renderer renders meshes at authored scale.
     let cube = CpuMesh::cube(2.0, [1.0, 0.82, 0.28, 1.0]);
+    let water = CpuMesh::water_grid(16, 80.0, WATER_COLOR);
 
     let renderer = Renderer::new(
         &device,
@@ -270,6 +276,8 @@ fn scene_minimal_snapshot() {
         SIZE,
         &terrain,
         TERRAIN_SHADING,
+        &water,
+        WATER_SHADING,
         &cube,
         VEHICLE_SHADING,
     );

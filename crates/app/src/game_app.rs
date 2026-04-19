@@ -76,6 +76,19 @@ const VEHICLE_SPEC_PATH: &str = "data/aircraft/northlander.ron";
 const TERRAIN_SHADING: ShadingParams = ShadingParams::new(4.0, 0.5, 0.08, 4.0);
 const VEHICLE_SHADING: ShadingParams = ShadingParams::new(3.0, 0.35, 0.35, 3.0);
 
+/// Water shading: 3 bands for a readable surface, moderate ambient floor (calm water
+/// reads as lit even in shadow), and a low rim (sun sparkle arrives with Gerstner waves).
+const WATER_SHADING: ShadingParams = ShadingParams::new(3.0, 0.55, 0.12, 3.5);
+
+/// Water tessellation. 64 cells across 4000 m half-extent matches the terrain patch so
+/// the two meet cleanly. Milestone 2.2.2 uses the existing vertices as Gerstner anchors.
+const WATER_CELLS: u32 = 64;
+const WATER_HALF_EXTENT: f32 = 4000.0;
+
+/// Deep cel-water tint. Cooler than the sky so the horizon reads. Alpha is unused by the
+/// cel shader.
+const WATER_COLOR: [f32; 4] = [0.18, 0.38, 0.58, 1.0];
+
 pub fn run() -> Result<()> {
     let event_loop = EventLoop::new().context("construct winit event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -113,6 +126,8 @@ struct Runtime {
     difficulty: DifficultyDials,
     tick_budget: f32,
     last_frame_time: Instant,
+    /// Wall-clock Instant captured at startup; fed to `SceneParams.time_seconds`.
+    start_time: Instant,
 
     // Sim -> render handoff.
     snapshots: SnapshotBuffer,
@@ -297,6 +312,11 @@ impl Runtime {
             terrain.height(x, z)
         });
         let vehicle_mesh = load_vehicle_mesh();
+        // Depth of the lowest mesh point below the origin (CG). Used below to lift the
+        // spawn altitude so the floats clear terrain. Zero when the mesh sits at or
+        // above y=0.
+        let vehicle_float_offset = (-vehicle_mesh.bbox_min_y()).max(0.0);
+        let water_mesh = CpuMesh::water_grid(WATER_CELLS, WATER_HALF_EXTENT, WATER_COLOR);
         let _aircraft_spec = load_aircraft_spec();
 
         let renderer = Renderer::new(
@@ -306,6 +326,8 @@ impl Runtime {
             (config.width, config.height),
             &terrain_mesh,
             TERRAIN_SHADING,
+            &water_mesh,
+            WATER_SHADING,
             &vehicle_mesh,
             VEHICLE_SHADING,
         );
@@ -317,7 +339,10 @@ impl Runtime {
         // from frame zero. This avoids the "I pressed throttle but fell" confusion
         // that a dead-stop start produces with only thrust and gravity.
         sim.vehicle = VehicleState::at_origin();
-        let start_y = terrain.max_height() + 25.0;
+        // CG-centered mesh means `position.y` is the CG height. Lift by the float-to-CG
+        // distance so the floats clear terrain peaks by the same 25 m margin the old
+        // bottom-anchored mesh had.
+        let start_y = terrain.max_height() + vehicle_float_offset + 25.0;
         sim.vehicle.position = glam::Vec3::new(0.0, start_y, 0.0);
         sim.vehicle.velocity = glam::Vec3::new(0.0, 0.0, -28.0); // ~28 m/s forward (-Z)
         sim.vehicle.controls.throttle = 0.4; // idle cruise
@@ -346,6 +371,7 @@ impl Runtime {
             difficulty: DifficultyDials::default(),
             tick_budget: 0.0,
             last_frame_time: Instant::now(),
+            start_time: Instant::now(),
             snapshots,
             input_queue,
             debug_hud,
@@ -428,9 +454,11 @@ impl Runtime {
 
         // Drive the scene uniform from the sim's time-of-day: sun direction updates as
         // the day advances. Fog / ambient / sun color stay at render defaults for now;
-        // per-biome tuning arrives alongside the weather system.
+        // per-biome tuning arrives alongside the weather system. Wall-clock seconds
+        // since startup feed water Gerstner phase.
         let scene_params = SceneParams {
             sun_dir: sun_direction(curr.time_of_day),
+            time_seconds: self.start_time.elapsed().as_secs_f32(),
             ..SceneParams::default()
         };
         self.renderer.set_scene(&self.queue, &scene_params);
@@ -479,20 +507,14 @@ enum FrameError {
 fn load_vehicle_mesh() -> CpuMesh {
     match std::fs::read(VEHICLE_GLB_PATH) {
         Ok(bytes) => match flowplan_assets::load_mesh(&bytes) {
-            Ok(mut mesh) => {
-                // Shift the mesh so its lowest point sits at local y=0. The authoring
-                // Blender pivot is often at model center; the sim wants the contact
-                // surface (wheels / floats underside) on the ground. A log line makes
-                // the adjustment transparent; once the Blender origin is set correctly
-                // this becomes a no-op.
-                let min_y = mesh.bbox_min_y();
-                if min_y.abs() > 1e-4 {
-                    mesh.translate([0.0, -min_y, 0.0]);
-                    tracing::info!(
-                        "vehicle mesh: shifted y by {:+.3} m so bottom sits at y=0",
-                        -min_y
-                    );
-                }
+            Ok(mesh) => {
+                // The mesh is rendered at `vehicle.position` and rotated around it.
+                // That pivot is the physical CG; the mesh's local origin must therefore
+                // be at the CG too. We trust the Blender-authored origin rather than
+                // auto-shifting -- an automatic shift-to-bottom would push the pivot
+                // down to the floats, which makes roll / pitch feel wrong. If the
+                // floats visually sit below the terrain, that's a sign the Blender
+                // origin needs to move up (or the spawn altitude needs tuning).
                 tracing::info!(
                     "loaded aircraft mesh: {} ({} verts, {} tris)",
                     VEHICLE_GLB_PATH,

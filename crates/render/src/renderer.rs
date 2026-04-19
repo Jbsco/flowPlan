@@ -116,6 +116,10 @@ pub struct SceneParams {
     pub fog_color: Vec3,
     /// Exponential fog density, per meter (reserved for sub-step 3).
     pub fog_density: f32,
+    /// Wall-clock seconds since app start. Drives water Gerstner wave phase (and later
+    /// any other time-animated shader). Non-deterministic w.r.t. the sim tick, which is
+    /// intentional -- render is presentation-only.
+    pub time_seconds: f32,
 }
 
 impl SceneParams {
@@ -131,6 +135,7 @@ impl SceneParams {
                 self.fog_color.z,
                 self.fog_density,
             ],
+            time: [self.time_seconds, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -147,6 +152,7 @@ impl Default for SceneParams {
             // 0.0015 /m: ~14% fog at 100 m, ~78% at 1 km, ~95% at 2 km. Moderate haze
             // on the current 4 km terrain patch; tuning moves to per-biome data later.
             fog_density: 0.0015,
+            time_seconds: 0.0,
         }
     }
 }
@@ -158,6 +164,8 @@ struct SceneUniform {
     sun_color: [f32; 4],
     ambient: [f32; 4],
     fog: [f32; 4],
+    // x = seconds since app start; remaining lanes reserved.
+    time: [f32; 4],
 }
 
 /// A wgpu-resident mesh: vertex buffer, index buffer, index count.
@@ -199,6 +207,7 @@ struct DrawModel {
 /// Top-level renderer.
 pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
+    water_pipeline: wgpu::RenderPipeline,
     outline_pipeline: wgpu::RenderPipeline,
     sky_pipeline: wgpu::RenderPipeline,
     depth_view: wgpu::TextureView,
@@ -211,6 +220,7 @@ pub struct Renderer {
     outline_bg: wgpu::BindGroup,
     outline_params_buf: wgpu::Buffer,
     terrain: DrawModel,
+    water: DrawModel,
     vehicle: DrawModel,
     // Kept for shader hot-reload pipeline rebuilds; feature-gated to avoid dead-code
     // warnings in release/default builds. Re-exposed without the gate when another
@@ -237,6 +247,8 @@ impl Renderer {
         initial_size: (u32, u32),
         terrain_mesh: &CpuMesh,
         terrain_shading: ShadingParams,
+        water_mesh: &CpuMesh,
+        water_shading: ShadingParams,
         vehicle_mesh: &CpuMesh,
         vehicle_shading: ShadingParams,
     ) -> Self {
@@ -251,6 +263,10 @@ impl Renderer {
         let sky_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("flowplan-sky-shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("sky.wgsl").into()),
+        });
+        let water_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("flowplan-water-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("water.wgsl").into()),
         });
 
         // Bind group layouts.
@@ -286,12 +302,13 @@ impl Renderer {
             }],
         });
 
-        // Scene-level uniform (sun / ambient / fog). Read by the scene fragment shader.
+        // Scene-level uniform (sun / ambient / fog / time). Read by the scene fragment
+        // shader AND the water vertex shader (time drives Gerstner wave phase).
         let scene_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("scene-bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -312,6 +329,14 @@ impl Renderer {
 
         let pipeline =
             build_scene_pipeline(device, &scene_pipeline_layout, &shader, surface_format);
+        // Water reuses the camera + model + scene bind group layouts but has its own
+        // pipeline with the Gerstner vertex shader and the water fragment shader.
+        let water_pipeline = build_water_pipeline(
+            device,
+            &scene_pipeline_layout,
+            &water_shader,
+            surface_format,
+        );
 
         let depth_view = create_depth_view(device, initial_size);
 
@@ -423,6 +448,16 @@ impl Renderer {
             terrain_shading,
         );
 
+        // Water draw model (identity transform; vertex colors carry the water hue).
+        let water = DrawModel::new(
+            device,
+            &model_bgl,
+            water_mesh,
+            Mat4::IDENTITY,
+            Vec4::new(1.0, 1.0, 1.0, 1.0),
+            water_shading,
+        );
+
         // Vehicle draw model. Initial transform is identity; `render` overwrites each frame.
         let vehicle = DrawModel::new(
             device,
@@ -462,6 +497,7 @@ impl Renderer {
 
         Self {
             pipeline,
+            water_pipeline,
             outline_pipeline,
             sky_pipeline,
             depth_view,
@@ -474,6 +510,7 @@ impl Renderer {
             outline_bg,
             outline_params_buf,
             terrain,
+            water,
             vehicle,
             #[cfg(feature = "shader-hot-reload")]
             scene_pipeline_layout,
@@ -695,7 +732,21 @@ impl Renderer {
             pass.set_index_buffer(self.terrain.mesh.ibo.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..self.terrain.mesh.index_count, 0, 0..1);
 
-            // Draw vehicle cube.
+            // Draw water with its own pipeline (Gerstner vertex displacement + water
+            // fragment). Camera + model + scene bind groups are layout-compatible, so
+            // we just swap the pipeline.
+            pass.set_pipeline(&self.water_pipeline);
+            pass.set_bind_group(0, &self.camera_bg, &[]);
+            pass.set_bind_group(2, &self.scene_bg, &[]);
+            pass.set_bind_group(1, &self.water.bind_group, &[]);
+            pass.set_vertex_buffer(0, self.water.mesh.vbo.slice(..));
+            pass.set_index_buffer(self.water.mesh.ibo.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..self.water.mesh.index_count, 0, 0..1);
+
+            // Back to the scene pipeline for the vehicle.
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.camera_bg, &[]);
+            pass.set_bind_group(2, &self.scene_bg, &[]);
             pass.set_bind_group(1, &self.vehicle.bind_group, &[]);
             pass.set_vertex_buffer(0, self.vehicle.mesh.vbo.slice(..));
             pass.set_index_buffer(self.vehicle.mesh.ibo.slice(..), wgpu::IndexFormat::Uint32);
@@ -867,6 +918,64 @@ fn build_outline_pipeline(
         },
         // Outline is a full-screen post pass; no depth interaction.
         depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
+fn build_water_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    surface_format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let vertex_attrs = wgpu::vertex_attr_array![
+        0 => Float32x3, // position
+        1 => Float32x3, // normal
+        2 => Float32x2, // uv
+        3 => Float32x4, // color
+    ];
+    let vertex_buffers = [wgpu::VertexBufferLayout {
+        array_stride: core::mem::size_of::<Vertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &vertex_attrs,
+    }];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("phase2-water-pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: "vs_water",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &vertex_buffers,
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: "fs_water",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: surface_format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Less,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
         cache: None,

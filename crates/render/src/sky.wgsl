@@ -21,6 +21,7 @@ struct SceneUniform {
     sun_color: vec4<f32>,
     ambient:   vec4<f32>,
     fog:       vec4<f32>,
+    time:      vec4<f32>,
 };
 @group(1) @binding(0) var<uniform> scene: SceneUniform;
 

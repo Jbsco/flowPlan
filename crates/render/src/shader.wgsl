@@ -33,10 +33,13 @@ struct SceneUniform {
     sun_dir:   vec4<f32>,
     // rgb = sun-light color multiplied into the diffuse term. a reserved.
     sun_color: vec4<f32>,
-    // rgb = ambient fill (reserved for Milestone 2.6 sub-step 3). a reserved.
+    // rgb = ambient fill (reserved for Milestone 2.6 sub-step 3). a reserved for Phase 5
+    // celestial intensity.
     ambient:   vec4<f32>,
-    // rgb = fog color, a = fog density per meter (both reserved for sub-step 3).
+    // rgb = fog color, a = fog density per meter.
     fog:       vec4<f32>,
+    // x = wall-clock seconds since app start (drives water wave phase, animated sky).
+    time:      vec4<f32>,
 };
 @group(2) @binding(0) var<uniform> scene: SceneUniform;
 

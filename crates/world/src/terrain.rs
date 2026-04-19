@@ -31,17 +31,19 @@ struct Octave {
 impl Terrain {
     /// Build a seeded procedural terrain.
     ///
-    /// Four octaves with roughly doubling frequency and halving amplitude. Tuned for a
-    /// ~800 m play area where the largest feature has a wavelength of ~200 m (a few
-    /// rolling hills visible at once), the smallest ~15 m (tussocks and dips).
+    /// Four octaves with roughly tripling frequency and halving amplitude. Phase 2
+    /// tuning (Milestone 2.2.5): amplitudes halved from the Phase 1 values so terrain
+    /// peaks stay plausible at aircraft scale (Beaver height ~4 m). Frequencies
+    /// slightly reduced for broader rolling hills that read more like coastal Alaskan
+    /// bush terrain than choppy noise.
     #[must_use]
     pub fn from_seed(seed: u64) -> Self {
         let mut rng = Rng::from_seed(splitmix64(seed));
         let octaves = [
-            make_octave(&mut rng, 0.03, 4.5),  // ~209 m wavelength, ±4.5 m
-            make_octave(&mut rng, 0.07, 2.0),  // ~90 m, ±2.0 m
-            make_octave(&mut rng, 0.18, 0.9),  // ~35 m, ±0.9 m
-            make_octave(&mut rng, 0.42, 0.35), // ~15 m, ±0.35 m
+            make_octave(&mut rng, 0.015, 2.25), // ~419 m wavelength, ±2.25 m
+            make_octave(&mut rng, 0.04, 1.0),   // ~157 m, ±1.0 m
+            make_octave(&mut rng, 0.12, 0.45),  // ~52 m, ±0.45 m
+            make_octave(&mut rng, 0.3, 0.18),   // ~21 m, ±0.18 m
         ];
         Self {
             seed,

@@ -153,6 +153,43 @@ impl CpuMesh {
         mesh
     }
 
+    /// Build a flat water grid at `y = 0` with uniform color and upward normals.
+    ///
+    /// Tessellated (not a single quad) so Milestone 2.2.2 can apply Gerstner wave
+    /// displacement in the vertex shader without re-authoring the mesh.
+    #[must_use]
+    pub fn water_grid(cells_per_side: u32, half_extent: f32, color: [f32; 4]) -> Self {
+        let mut mesh = Self::new("water");
+        let cells = cells_per_side.max(1);
+        let verts_per_side = cells + 1;
+        let step = (half_extent * 2.0) / cells as f32;
+
+        for iz in 0..verts_per_side {
+            for ix in 0..verts_per_side {
+                let x = -half_extent + ix as f32 * step;
+                let z = -half_extent + iz as f32 * step;
+                mesh.vertices.push(Vertex {
+                    position: [x, 0.0, z],
+                    normal: [0.0, 1.0, 0.0],
+                    uv: [ix as f32 / cells as f32, iz as f32 / cells as f32],
+                    color,
+                });
+            }
+        }
+
+        for iz in 0..cells {
+            for ix in 0..cells {
+                let row = verts_per_side;
+                let tl = iz * row + ix;
+                let tr = iz * row + ix + 1;
+                let bl = (iz + 1) * row + ix;
+                let br = (iz + 1) * row + ix + 1;
+                mesh.indices.extend_from_slice(&[tl, bl, tr, tr, bl, br]);
+            }
+        }
+        mesh
+    }
+
     /// Returns the vertex count.
     #[must_use]
     pub fn vertex_count(&self) -> usize {
@@ -254,6 +291,20 @@ mod tests {
     fn bbox_min_y_empty_mesh() {
         let m = CpuMesh::new("empty");
         assert!((m.bbox_min_y() - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn water_grid_has_expected_counts() {
+        let m = CpuMesh::water_grid(4, 10.0, [0.1, 0.3, 0.55, 1.0]);
+        // 5x5 verts = 25
+        assert_eq!(m.vertex_count(), 25);
+        // 4x4 cells * 6 indices = 96
+        assert_eq!(m.index_count(), 96);
+        // All verts at y=0, normal up.
+        for v in &m.vertices {
+            assert!((v.position[1] - 0.0).abs() < f32::EPSILON);
+            assert!((v.normal[1] - 1.0).abs() < 1e-6);
+        }
     }
 
     #[test]

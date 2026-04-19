@@ -10,6 +10,8 @@
 
 pub mod sky;
 pub mod terrain;
+pub mod water;
 
 pub use sky::sun_direction;
 pub use terrain::{HeightSampler, Terrain};
+pub use water::{max_amplitude as water_max_amplitude, water_height};
