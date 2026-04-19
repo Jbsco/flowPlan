@@ -8,6 +8,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod sky;
 pub mod terrain;
 
+pub use sky::sun_direction;
 pub use terrain::{HeightSampler, Terrain};

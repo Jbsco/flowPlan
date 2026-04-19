@@ -28,6 +28,18 @@ struct ModelUniform {
 };
 @group(1) @binding(0) var<uniform> model: ModelUniform;
 
+struct SceneUniform {
+    // xyz = unit vector TOWARD the sun (i.e., "up" when the sun is overhead). w reserved.
+    sun_dir:   vec4<f32>,
+    // rgb = sun-light color multiplied into the diffuse term. a reserved.
+    sun_color: vec4<f32>,
+    // rgb = ambient fill (reserved for Milestone 2.6 sub-step 3). a reserved.
+    ambient:   vec4<f32>,
+    // rgb = fog color, a = fog density per meter (both reserved for sub-step 3).
+    fog:       vec4<f32>,
+};
+@group(2) @binding(0) var<uniform> scene: SceneUniform;
+
 struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal:   vec3<f32>,
@@ -56,11 +68,10 @@ fn vs_main(in: VsIn) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // Hard-coded scene light until Milestone 2.6 introduces a sun / sky uniform.
-    let light_dir = normalize(vec3<f32>(0.45, -0.9, 0.3));
+    let sun_dir = normalize(scene.sun_dir.xyz);
     let n = normalize(in.world_normal);
 
-    let lambert = max(dot(n, -light_dir), 0.0);
+    let lambert = max(dot(n, sun_dir), 0.0);
     let bands = max(model.shading.x, 1.0);
     let ambient = clamp(model.shading.y, 0.0, 1.0);
     // Banded diffuse: quantize lambert into `bands` steps, then remap [0, 1] into
@@ -73,7 +84,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let rim_edge = 1.0 - max(dot(view_dir, n), 0.0);
     let rim = pow(rim_edge, max(model.shading.w, 0.01)) * model.shading.z;
 
-    let shaded = in.vert_color.rgb * diffuse + rim;
-    return vec4<f32>(shaded, in.vert_color.a);
+    let lit = in.vert_color.rgb * diffuse * scene.sun_color.rgb + rim;
+
+    // Exponential distance fog with sun-bias. Fog density is per-meter; the sun-aligned
+    // view scatters forward light, so fragments in the sun quadrant of the view tint
+    // warmer (mixed toward sun_color). Milestone 2.6 sub-step 3; full height-scaled fog
+    // lands when altitude gameplay requires it.
+    let dist = length(camera.view_pos.xyz - in.world_pos);
+    let fog_density = max(scene.fog.a, 0.0);
+    let fog_factor = clamp(1.0 - exp(-fog_density * dist), 0.0, 1.0);
+    let view_to_pixel = normalize(in.world_pos - camera.view_pos.xyz);
+    let sun_align = clamp(dot(view_to_pixel, -sun_dir), 0.0, 1.0);
+    let fog_col = mix(scene.fog.rgb, scene.sun_color.rgb, pow(sun_align, 6.0) * 0.5);
+    let final_color = mix(lit, fog_col, fog_factor);
+    return vec4<f32>(final_color, in.vert_color.a);
 }
 

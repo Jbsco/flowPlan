@@ -26,6 +26,9 @@ const FAR: f32 = 10_000.0;
 struct CameraUniform {
     view_proj: [[f32; 4]; 4],
     view_pos: [f32; 4],
+    // Inverse of `view_proj`. Sky pass uses it to reconstruct world-space view rays
+    // from screen-space NDC without a dedicated skybox cubemap.
+    inverse_view_proj: [[f32; 4]; 4],
 }
 
 /// Outline pass uniform. `vec4` holds `[viewport_w, viewport_h, threshold, strength]`.
@@ -95,6 +98,68 @@ impl Default for ShadingParams {
     }
 }
 
+/// Scene-level shading parameters: sun direction / color, ambient, fog.
+///
+/// Bound as a uniform at `@group(2)` on the scene pipeline. Milestone 2.6 sub-step 1
+/// introduces the plumbing with the sun direction replacing the Phase 1 hard-coded
+/// constant; fog and ambient become load-bearing in subsequent sub-steps (procedural
+/// sky + height fog).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SceneParams {
+    /// Unit vector pointing FROM the scene TOWARD the sun. `(0, 1, 0)` = sun overhead.
+    pub sun_dir: Vec3,
+    /// RGB sun-light color. `(1, 1, 1)` = neutral white.
+    pub sun_color: Vec3,
+    /// RGB ambient fill (reserved for sub-step 3).
+    pub ambient: Vec3,
+    /// RGB fog color (reserved for sub-step 3).
+    pub fog_color: Vec3,
+    /// Exponential fog density, per meter (reserved for sub-step 3).
+    pub fog_density: f32,
+}
+
+impl SceneParams {
+    fn to_uniform(self) -> SceneUniform {
+        let d = self.sun_dir.try_normalize().unwrap_or(Vec3::Y);
+        SceneUniform {
+            sun_dir: [d.x, d.y, d.z, 0.0],
+            sun_color: [self.sun_color.x, self.sun_color.y, self.sun_color.z, 0.0],
+            ambient: [self.ambient.x, self.ambient.y, self.ambient.z, 0.0],
+            fog: [
+                self.fog_color.x,
+                self.fog_color.y,
+                self.fog_color.z,
+                self.fog_density,
+            ],
+        }
+    }
+}
+
+impl Default for SceneParams {
+    /// Defaults reproduce the Phase 1 hard-coded light direction in the new
+    /// toward-sun convention (the prior `light_dir = (0.45, -0.9, 0.3)` inverted).
+    fn default() -> Self {
+        Self {
+            sun_dir: Vec3::new(-0.45, 0.9, -0.3),
+            sun_color: Vec3::splat(1.0),
+            ambient: Vec3::splat(0.35),
+            fog_color: Vec3::new(0.55, 0.73, 0.90),
+            // 0.0015 /m: ~14% fog at 100 m, ~78% at 1 km, ~95% at 2 km. Moderate haze
+            // on the current 4 km terrain patch; tuning moves to per-biome data later.
+            fog_density: 0.0015,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct SceneUniform {
+    sun_dir: [f32; 4],
+    sun_color: [f32; 4],
+    ambient: [f32; 4],
+    fog: [f32; 4],
+}
+
 /// A wgpu-resident mesh: vertex buffer, index buffer, index count.
 struct GpuMesh {
     vbo: wgpu::Buffer,
@@ -135,10 +200,13 @@ struct DrawModel {
 pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
     outline_pipeline: wgpu::RenderPipeline,
+    sky_pipeline: wgpu::RenderPipeline,
     depth_view: wgpu::TextureView,
     camera_buf: wgpu::Buffer,
     camera_bg: wgpu::BindGroup,
     model_bgl: wgpu::BindGroupLayout,
+    scene_bg: wgpu::BindGroup,
+    scene_buf: wgpu::Buffer,
     outline_bgl: wgpu::BindGroupLayout,
     outline_bg: wgpu::BindGroup,
     outline_params_buf: wgpu::Buffer,
@@ -182,6 +250,10 @@ impl Renderer {
             label: Some("flowplan-outline-shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("outline.wgsl").into()),
         });
+        let sky_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("flowplan-sky-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("sky.wgsl").into()),
+        });
 
         // Bind group layouts.
         // Camera uniform is read by vertex (MVP) AND fragment (rim-light view dir).
@@ -216,10 +288,27 @@ impl Renderer {
             }],
         });
 
+        // Scene-level uniform (sun / ambient / fog). Read by the scene fragment shader.
+        let scene_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("scene-bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(
+                        core::mem::size_of::<SceneUniform>() as u64
+                    ),
+                },
+                count: None,
+            }],
+        });
+
         let scene_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("phase2-scene-pipeline-layout"),
-                bind_group_layouts: &[&camera_bgl, &model_bgl],
+                bind_group_layouts: &[&camera_bgl, &model_bgl, &scene_bgl],
                 push_constant_ranges: &[],
             });
 
@@ -269,6 +358,16 @@ impl Renderer {
             surface_format,
         );
 
+        // Sky pipeline layout uses the existing camera + scene bind group layouts. The
+        // sky shader maps them as: @group(0) = camera, @group(1) = scene.
+        let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("phase2-sky-pipeline-layout"),
+            bind_group_layouts: &[&camera_bgl, &scene_bgl],
+            push_constant_ranges: &[],
+        });
+        let sky_pipeline =
+            build_sky_pipeline(device, &sky_pipeline_layout, &sky_shader, surface_format);
+
         let outline_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("outline-params-ubo"),
             size: core::mem::size_of::<OutlineUniform>() as u64,
@@ -293,6 +392,28 @@ impl Renderer {
                 resource: camera_buf.as_entire_binding(),
             }],
         });
+
+        // Scene uniform buffer + bind group; primed with defaults so frame 0 is valid
+        // even if the app never calls `set_scene`.
+        let scene_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scene-ubo"),
+            size: core::mem::size_of::<SceneUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let scene_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scene-bg"),
+            layout: &scene_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: scene_buf.as_entire_binding(),
+            }],
+        });
+        queue.write_buffer(
+            &scene_buf,
+            0,
+            bytemuck::bytes_of(&SceneParams::default().to_uniform()),
+        );
 
         // Terrain draw model (identity transform, light tint).
         let terrain = DrawModel::new(
@@ -327,6 +448,7 @@ impl Renderer {
             bytemuck::bytes_of(&CameraUniform {
                 view_proj: default_view_proj.to_cols_array_2d(),
                 view_pos: [0.0, 5.0, 15.0, 0.0],
+                inverse_view_proj: default_view_proj.inverse().to_cols_array_2d(),
             }),
         );
 
@@ -343,10 +465,13 @@ impl Renderer {
         Self {
             pipeline,
             outline_pipeline,
+            sky_pipeline,
             depth_view,
             camera_buf,
             camera_bg,
             model_bgl,
+            scene_bg,
+            scene_buf,
             outline_bgl,
             outline_bg,
             outline_params_buf,
@@ -411,6 +536,12 @@ impl Renderer {
         eprintln!("flowplan-render: shaders reloaded");
     }
 
+    /// Write scene-level parameters (sun direction / color, ambient, fog) into the
+    /// scene uniform buffer. Called each frame before `render`.
+    pub fn set_scene(&self, queue: &wgpu::Queue, params: &SceneParams) {
+        queue.write_buffer(&self.scene_buf, 0, bytemuck::bytes_of(&params.to_uniform()));
+    }
+
     /// Handle a window resize.
     pub fn resize(&mut self, device: &wgpu::Device, size: (u32, u32)) {
         self.depth_view = create_depth_view(device, size);
@@ -465,6 +596,7 @@ impl Renderer {
             bytemuck::bytes_of(&CameraUniform {
                 view_proj: view_proj.to_cols_array_2d(),
                 view_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 0.0],
+                inverse_view_proj: view_proj.inverse().to_cols_array_2d(),
             }),
         );
 
@@ -508,6 +640,29 @@ impl Renderer {
             bytemuck::bytes_of(&outline_params),
         );
 
+        // Sky pass. Renders first, filling the target with an analytic sky gradient +
+        // sun disc. The scene pass then draws on top with `LoadOp::Load`.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("phase2-sky-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(clear_color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.sky_pipeline);
+            pass.set_bind_group(0, &self.camera_bg, &[]);
+            pass.set_bind_group(1, &self.scene_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
         // Scene pass.
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -516,7 +671,7 @@ impl Renderer {
                     view: target_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear_color),
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -534,6 +689,7 @@ impl Renderer {
 
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_bg, &[]);
+            pass.set_bind_group(2, &self.scene_bg, &[]);
 
             // Draw terrain.
             pass.set_bind_group(1, &self.terrain.bind_group, &[]);
@@ -709,6 +865,49 @@ fn build_outline_pipeline(
             conservative: false,
         },
         // Outline is a full-screen post pass; no depth interaction.
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
+fn build_sky_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    surface_format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("phase2-sky-pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: "vs_sky",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: "fs_sky",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: surface_format,
+                // Sky fully overwrites the cleared target; no blend needed.
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        // Sky runs without a depth attachment (full-screen, before scene).
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview: None,

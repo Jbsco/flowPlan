@@ -13,5 +13,6 @@ workspace = true
 
 [dependencies]
 flowplan-core = { workspace = true }
-# flowplan-sim, glam, tracing added alongside the state they need (weather uses glam for
-# wind vectors; sim needs terrain for buoyancy in Phase 2).
+glam = { workspace = true }
+# flowplan-sim, tracing added alongside the state they need (sim needs terrain for
+# buoyancy in Phase 2).

@@ -13,11 +13,11 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use crossbeam_queue::ArrayQueue;
 use flowplan_assets::CpuMesh;
-use flowplan_render::{Renderer, ShadingParams};
+use flowplan_render::{Renderer, SceneParams, ShadingParams};
 use flowplan_sim::{
     state::FIXED_DT, DifficultyDials, InputEvent, InputEvents, SimSnapshot, SimState, VehicleState,
 };
-use flowplan_world::{HeightSampler, Terrain};
+use flowplan_world::{sun_direction, HeightSampler, Terrain};
 use winit::application::ApplicationHandler;
 use winit::event::{KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -414,6 +414,16 @@ impl Runtime {
         });
 
         let (prev, curr) = self.snapshots.read();
+
+        // Drive the scene uniform from the sim's time-of-day: sun direction updates as
+        // the day advances. Fog / ambient / sun color stay at render defaults for now;
+        // per-biome tuning arrives alongside the weather system.
+        let scene_params = SceneParams {
+            sun_dir: sun_direction(curr.time_of_day),
+            ..SceneParams::default()
+        };
+        self.renderer.set_scene(&self.queue, &scene_params);
+
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {

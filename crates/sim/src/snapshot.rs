@@ -77,6 +77,9 @@ pub struct SimSnapshot {
     pub tick: u64,
     pub vehicle: VehicleSnapshot,
     pub camera: CameraSnapshot,
+    /// Normalized time-of-day in `[0, 1)`. Render uses this to drive sun direction via
+    /// `flowplan_world::sun_direction`. 0.5 = noon (matches `SimState::new` initial).
+    pub time_of_day: f32,
 }
 
 impl SimSnapshot {
@@ -86,6 +89,7 @@ impl SimSnapshot {
             tick: s.tick.0,
             vehicle: VehicleSnapshot::from_state(&s.vehicle),
             camera: CameraSnapshot::from_state(&s.camera),
+            time_of_day: s.time_of_day,
         }
     }
 }
@@ -109,6 +113,9 @@ impl Default for SimSnapshot {
                 view_kind: 1,
                 pad1: [0.0; 2],
             },
+            // Matches `SimState::new` default so app-free renders (hardware snapshot
+            // test) don't fall into the "midnight" branch.
+            time_of_day: 0.5,
         }
     }
 }

@@ -21,7 +21,7 @@ pub mod renderer;
 #[cfg(feature = "shader-hot-reload")]
 pub mod hot_reload;
 
-pub use renderer::{Renderer, ShadingParams};
+pub use renderer::{Renderer, SceneParams, ShadingParams};
 
 // Dev-deps are consumed by `tests/visual_snapshot.rs` (Tier-3, hardware-gated). Mark
 // them as intentional here so the lib-test target does not trip

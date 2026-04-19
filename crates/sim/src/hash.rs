@@ -24,6 +24,7 @@ pub fn state_hash(s: &SimState) -> u64 {
     fold_quat(&mut h, s.camera.orientation);
     fold_f32(&mut h, s.camera.fov_y_radians);
     fold_u32(&mut h, view_kind_as_u32(s.camera.view_kind));
+    fold_f32(&mut h, s.time_of_day);
     h
 }
 

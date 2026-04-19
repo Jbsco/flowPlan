@@ -17,6 +17,13 @@ use crate::vehicle::VehicleState;
 /// The fixed simulation timestep. 120 Hz per [`DESIGN.md § Invariants`](../../../DESIGN.md#invariants).
 pub const FIXED_DT: f32 = 1.0 / 120.0;
 
+/// Wall-clock seconds for a full diurnal cycle.
+///
+/// 1200 s = 20 minutes, symmetric day/night for Phase 2 Milestone 2.6 sub-step 4.
+/// Asymmetric day/night per ROADMAP § Time of Day (15-20 min day / 5 min night)
+/// becomes a later tuning pass.
+pub const DAY_LENGTH_SECONDS: f32 = 1200.0;
+
 /// Gravitational acceleration at the placeholder flat Earth.
 const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
 
@@ -71,6 +78,8 @@ pub struct SimState {
     pub vehicle: VehicleState,
     /// Camera frame.
     pub camera: Camera,
+    /// Normalized time-of-day in `[0, 1)`: 0.0 = midnight, 0.5 = noon.
+    pub time_of_day: f32,
     /// Per-sim RNG (for future spawn / weather; retained so `SimState` is seeded).
     pub rng: Rng,
     /// World seed for replay / state-hash purposes.
@@ -85,6 +94,9 @@ impl SimState {
             tick: TickCount::ZERO,
             vehicle: VehicleState::at_origin(),
             camera: Camera::default(),
+            // 0.5 = noon. Matches the Phase 1 "sun high overhead" look roughly; the
+            // actual sun angle lives in `world::sun_direction`.
+            time_of_day: 0.5,
             rng: Rng::from_seed(seed),
             seed,
         }
@@ -99,6 +111,7 @@ impl SimState {
         tick_dynamics(&mut self.vehicle, dt);
         self.camera
             .follow(self.vehicle.position, self.vehicle.orientation, dt);
+        self.time_of_day = (self.time_of_day + dt / DAY_LENGTH_SECONDS).rem_euclid(1.0);
         self.tick = self.tick.next();
     }
 }
@@ -192,6 +205,38 @@ mod tests {
     fn new_state_tick_zero() {
         let s = SimState::new(1);
         assert_eq!(s.tick, TickCount::ZERO);
+    }
+
+    #[test]
+    fn time_of_day_defaults_to_noon() {
+        let s = SimState::new(1);
+        assert!((s.time_of_day - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn time_of_day_advances_per_tick() {
+        let mut s = SimState::new(1);
+        let t0 = s.time_of_day;
+        let d = DifficultyDials::default();
+        s.tick(&InputEvents::empty(), &d, FIXED_DT);
+        let expected = t0 + FIXED_DT / DAY_LENGTH_SECONDS;
+        assert!(
+            (s.time_of_day - expected).abs() < 1e-6,
+            "time_of_day did not advance by dt/day_length; got {} expected {}",
+            s.time_of_day,
+            expected,
+        );
+    }
+
+    #[test]
+    fn time_of_day_wraps_at_one() {
+        let mut s = SimState::new(1);
+        // Force the clock near the wrap boundary and step past it.
+        s.time_of_day = 1.0 - (FIXED_DT / DAY_LENGTH_SECONDS) * 0.5;
+        let d = DifficultyDials::default();
+        s.tick(&InputEvents::empty(), &d, FIXED_DT);
+        assert!(s.time_of_day < 0.5, "expected wrap; got {}", s.time_of_day);
+        assert!(s.time_of_day >= 0.0);
     }
 
     #[test]
