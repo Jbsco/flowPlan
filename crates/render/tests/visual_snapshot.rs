@@ -258,6 +258,7 @@ fn beaver_preview() {
     // lifts vehicle.position by the float offset so floats touch the water surface.
     let beaver_float_offset = (-beaver.bbox_min_y()).max(0.0);
 
+    #[allow(clippy::items_after_statements)]
     const BEAVER_SIZE: (u32, u32) = (512, 384);
     let water = CpuMesh::water_grid(24, 200.0, WATER_COLOR);
     let renderer = Renderer::new(
@@ -280,12 +281,13 @@ fn beaver_preview() {
 #[cfg(feature = "hardware-tests")]
 #[test]
 fn scene_extended() {
+    use flowplan_world::{HeightSampler, Terrain};
+
     let (device, queue) = init_wgpu();
 
     // Use the actual game terrain so the snapshot reflects the in-game view: full
     // Phase 2.2.4 octave mix, beach flattening, mountain-scale amplitudes. Seed picked
     // for a frame with a mix of water, lowland, and high peaks.
-    use flowplan_world::{HeightSampler, Terrain};
     let game_terrain = Terrain::from_seed(0xBEAC_1234_5678_9ABC_u64);
     let terrain = CpuMesh::terrain_patch(128, 800.0, |x, z| game_terrain.height(x, z));
     let water = CpuMesh::water_grid(48, 900.0, WATER_COLOR);
@@ -297,6 +299,7 @@ fn scene_extended() {
     let beaver = flowplan_assets::load_mesh(&glb_bytes).expect("parse northlander.glb");
     let beaver_float_offset = (-beaver.bbox_min_y()).max(0.0);
 
+    #[allow(clippy::items_after_statements)]
     const EXTENDED_SIZE: (u32, u32) = (1024, 640);
 
     let renderer = Renderer::new(

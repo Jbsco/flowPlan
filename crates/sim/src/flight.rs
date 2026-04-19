@@ -87,10 +87,12 @@ pub const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
 /// Thrust acceleration at full throttle along body forward, m/s².
 ///
 /// TODO(2.4.3): replace with engine power curve `T = P(rpm, map, alt) * η_prop / V`.
-/// The 2.0 value is a placeholder sized so a 2.3-tonne Beaver doesn't overshoot
-/// Vne in level flight at full throttle (old 32.0 was sized for the 2 m placeholder
-/// cube's terminal velocity and produces supersonic cruise under real aerodynamics).
-const THRUST_ACCEL_MAX: f32 = 2.0;
+/// A real 450 hp R-985 at 80% prop efficiency produces roughly 5.8 m/s² at takeoff
+/// airspeed (V=20 m/s, T=13.4 kN / 2313 kg) and ~1.95 m/s² at cruise (V=60 m/s);
+/// the constant 3.5 is a compromise that gives the plane enough climb / maneuver
+/// margin without overshooting Vne in level flight. A full power curve lands here
+/// in 2.4.3.
+const THRUST_ACCEL_MAX: f32 = 3.5;
 
 /// Peak commanded angular rate per body axis (rad/s).
 const ROLL_RATE_MAX: f32 = 1.6;
@@ -127,10 +129,13 @@ const CD0: f32 = 0.028;
 /// Oswald efficiency factor. Typical for small single-engine aircraft: 0.7-0.85.
 const OSWALD_E: f32 = 0.8;
 
-/// NACA 64A416-shaped `Cl(α)` table. `α` in radians; `Cl` dimensionless. Piecewise
-/// linearly interpolated. Zero-lift at ~-2°, linear slope ~0.105/deg through the
-/// clean range, peak `Cl_max` ≈ 1.4 at 15°, stall drop to 1.0 by 20°, deep-stall
-/// plateau near 0.5 out to 60°. Mirror-extended to negative α for inverted flight.
+/// NACA 64A416-shaped `Cl(α)` table adjusted for finite-span whole-wing effects.
+/// `α` in radians; `Cl` dimensionless. Piecewise linearly interpolated. Zero-lift at
+/// ~-2°, linear slope ~0.10/deg through the clean range, peak `Cl_max` ≈ 1.65 at 16°
+/// (2D section `Cl_max` ~1.4 lifted to ~1.65 to approximate whole-wing max with fuselage
+/// lift contribution and without flaps), post-stall drop to 1.25 by 18° and 1.0 by
+/// 20°, deep-stall plateau near 0.55 out to 60°. Mirror-extended to negative α for
+/// inverted flight.
 ///
 /// TODO(2.4.2): per-aircraft tables should live in `AircraftSpec` rather than being
 /// hard-coded here. For the MVP (Beaver) this matches published NACA TN-1945-ish
@@ -138,21 +143,21 @@ const OSWALD_E: f32 = 0.8;
 #[allow(clippy::approx_constant)]
 const CL_TABLE: &[(f32, f32)] = &[
     (-1.5708, 0.0),   // -90° (flying backward / full sideways)
-    (-0.5236, -0.75), // -30°
-    (-0.3491, -1.10), // -20°
-    (-0.2793, -1.30), // -16° (inverted Cl_max)
-    (-0.1745, -1.00), // -10°
-    (-0.0873, -0.60), // -5°
+    (-0.5236, -0.85), // -30°
+    (-0.3491, -1.25), // -20°
+    (-0.2793, -1.50), // -16° (inverted Cl_max -- mirrored but still real)
+    (-0.1745, -1.10), // -10°
+    (-0.0873, -0.65), // -5°
     (-0.0349, 0.00),  // -2° zero-lift
-    (0.0000, 0.20),   // 0°
-    (0.0873, 0.75),   // 5°
-    (0.1745, 1.10),   // 10°
-    (0.2443, 1.35),   // 14°
-    (0.2793, 1.40),   // 16° Cl_max
-    (0.3142, 1.20),   // 18° post-stall
-    (0.3491, 0.95),   // 20°
-    (0.5236, 0.75),   // 30°
-    (1.0472, 0.50),   // 60° deep stall
+    (0.0000, 0.21),   // 0°
+    (0.0873, 0.80),   // 5°
+    (0.1745, 1.25),   // 10°
+    (0.2443, 1.55),   // 14°
+    (0.2793, 1.65),   // 16° Cl_max
+    (0.3142, 1.40),   // 18° post-stall
+    (0.3491, 1.10),   // 20°
+    (0.5236, 0.85),   // 30°
+    (1.0472, 0.55),   // 60° deep stall
     (1.5708, 0.00),   // 90°
 ];
 
@@ -296,12 +301,30 @@ pub fn compute_forces(
         let lift_force_n = q * wing_area * cl;
         let drag_force_n = q * wing_area * cd;
 
-        // Lift direction: body +Y (wing-up). TODO(2.4.2b): rotate into the plane
-        // perpendicular to velocity and containing body-up, so lift is truly
-        // orthogonal to airspeed (matters for steep climbs / dives). Body +Y is a
-        // reasonable approximation for near-level flight.
+        // Lift direction: perpendicular to velocity, in the plane containing velocity
+        // and body-up. This is the textbook aerodynamic convention -- lift is by
+        // definition orthogonal to the relative wind, not to the wing. Using body +Y
+        // instead (the previous placeholder) produced a large spurious backward force
+        // at high α (lift × sin α), which decelerated the plane every time the pilot
+        // pulled up and triggered stall-cascade behavior with no real control
+        // authority. Backward force on the plane now comes only from proper Cd.
+        //
+        // Construction: start with body-up, project out the velocity component, and
+        // normalize. If body-up happens to be parallel to velocity (plane aligned with
+        // its flight path in an unusual way), fall back to body-up.
         let body_up = state.orientation * Vec3::Y;
-        let lift = body_up * (lift_force_n / mass_kg);
+        let lift_dir = if speed > 1e-3 {
+            let v_hat = state.velocity / speed;
+            let perp = body_up - v_hat * body_up.dot(v_hat);
+            if perp.length_squared() > 1e-6 {
+                perp.normalize()
+            } else {
+                body_up
+            }
+        } else {
+            body_up
+        };
+        let lift = lift_dir * (lift_force_n / mass_kg);
 
         // Drag acts opposite velocity.
         let drag = if speed > 1e-3 {
@@ -416,8 +439,51 @@ mod tests {
         let cl_peak = lift_coefficient(16.0_f32.to_radians());
         let cl_clean = lift_coefficient(5.0_f32.to_radians());
         assert!(cl_peak > cl_clean);
-        assert!(cl_peak > 1.3);
-        assert!(cl_peak < 1.5);
+        // Whole-wing Cl_max target ~1.65 (see CL_TABLE doc comment).
+        assert!(cl_peak > 1.5);
+        assert!(cl_peak < 1.8);
+    }
+
+    #[test]
+    fn lift_is_perpendicular_to_velocity_on_airfoil_path() {
+        use crate::aircraft_spec::{AircraftSpec, EngineSpec, SpeedsSpec};
+        // Plane pitched up 10°, moving level horizontally -- α > 0 so Cl > 0 so lift
+        // exists. Assert lift vector dot velocity ≈ 0 (orthogonal).
+        let mut s = zero_state();
+        s.orientation = Quat::from_rotation_x(10_f32.to_radians());
+        s.velocity = Vec3::new(0.0, 0.0, -40.0);
+        let spec = AircraftSpec {
+            name: "test".into(),
+            inspiration: String::new(),
+            empty_mass_kg: 1000.0,
+            max_mass_wheels_kg: 2000.0,
+            max_mass_floats_kg: 2000.0,
+            wing_area_m2: 20.0,
+            aspect_ratio: 9.0,
+            airfoil_root: String::new(),
+            airfoil_tip: String::new(),
+            engine: EngineSpec {
+                name: String::new(),
+                power_hp: 450.0,
+                cruise_fuel_gph: 27.0,
+            },
+            fuel_capacity_gal: 95.0,
+            speeds: SpeedsSpec {
+                vne_mps: 70.0,
+                cruise_mps: 60.0,
+                vs_clean_mps: 23.0,
+                vso_mps: 21.0,
+                vx_mps: 29.0,
+                vy_mps: 38.0,
+            },
+        };
+        let out = compute_forces(&s, Some(&spec), 1.0 / 120.0);
+        assert!(out.lift.length() > 1.0, "lift should be non-trivial");
+        let dot = out.lift.dot(s.velocity) / (out.lift.length() * s.velocity.length());
+        assert!(
+            dot.abs() < 1e-3,
+            "lift should be perpendicular to velocity; cos θ = {dot}",
+        );
     }
 
     #[test]
