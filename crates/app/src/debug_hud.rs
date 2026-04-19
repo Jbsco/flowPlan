@@ -280,16 +280,41 @@ fn build_ui(
                 t.linear_accel.length(),
             ));
             ui.separator();
-            ui.heading("Angular (rad/s, body frame)");
+            ui.heading("Angular (body frame)");
+            // Rates in flowplan storage; physics convention in parens for the signs.
             ui.label(format!(
-                "commanded  p {:+.3}  r {:+.3}  y {:+.3}",
-                t.commanded_angular_vel.x, t.commanded_angular_vel.z, t.commanded_angular_vel.y,
-            ));
-            ui.label(format!(
-                "actual     p {:+.3}  r {:+.3}  y {:+.3}",
+                "rate   p {:+.3}  r {:+.3}  y {:+.3}  (rad/s, flowplan storage)",
                 t.actual_angular_vel.x, t.actual_angular_vel.z, t.actual_angular_vel.y,
             ));
-            ui.label(format!("response rate  {:.2} / s", t.ang_response_rate));
+            ui.label(format!(
+                "accel  p {:+.3}  r {:+.3}  y {:+.3}  (rad/s²)",
+                t.angular_accel.x, t.angular_accel.z, t.angular_accel.y,
+            ));
+            ui.separator();
+            ui.heading("Moments (N·m, physics convention)");
+            // Physics convention: +M nose up, +L right-wing-down, +N nose right.
+            // For each axis, show total + (control, stability, damping).
+            ui.label(format!(
+                "pitch M  {:+8.0}   ctl {:+7.0}  stab {:+7.0}  damp {:+7.0}",
+                t.pitch_moment.total(),
+                t.pitch_moment.control,
+                t.pitch_moment.stability,
+                t.pitch_moment.damping,
+            ));
+            ui.label(format!(
+                "roll  L  {:+8.0}   ctl {:+7.0}  stab {:+7.0}  damp {:+7.0}",
+                t.roll_moment.total(),
+                t.roll_moment.control,
+                t.roll_moment.stability,
+                t.roll_moment.damping,
+            ));
+            ui.label(format!(
+                "yaw   N  {:+8.0}   ctl {:+7.0}  stab {:+7.0}  damp {:+7.0}",
+                t.yaw_moment.total(),
+                t.yaw_moment.control,
+                t.yaw_moment.stability,
+                t.yaw_moment.damping,
+            ));
             ui.separator();
             if let Some(spec) = aircraft {
                 ui.heading("Aircraft");

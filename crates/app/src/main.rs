@@ -26,7 +26,14 @@ fn main() -> Result<()> {
 }
 
 fn install_tracing() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,wgpu_core=warn,wgpu_hal=warn,naga=warn"));
+    // `calloop=error` silences a known benign warning from winit 0.30's Wayland
+    // backend ("Received an event for non-existence source") that fires when calloop
+    // dispatches a queued event whose source was removed between queueing and
+    // dispatch -- typically during resize, scale change, or focus transitions.
+    // Upstream race in winit/calloop; no downstream fix. Drop the `calloop=error`
+    // segment to re-surface genuine calloop errors if we ever hit one.
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("info,wgpu_core=warn,wgpu_hal=warn,naga=warn,calloop=error")
+    });
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }

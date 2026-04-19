@@ -19,7 +19,7 @@
 
 #![deny(unsafe_code)]
 
-use flowplan_sim::SimSnapshot;
+use flowplan_sim::{MomentBreakdown, SimSnapshot};
 use glam::{EulerRot, Quat, Vec3};
 
 /// Derived per-frame telemetry. Every display surface reads from this.
@@ -75,11 +75,16 @@ pub struct Telemetry {
     /// gizmo arrow and for G-load derivation in 2.4.4.
     pub linear_accel: Vec3,
 
-    // --- Angular (body-frame, rad/s) ---
-    pub commanded_angular_vel: Vec3,
+    // --- Angular (body-frame) ---
+    /// Actual angular velocity (rad/s).
     pub actual_angular_vel: Vec3,
-    /// 1/s smoothing rate from commanded to actual. Shown in the dynamics HUD.
-    pub ang_response_rate: f32,
+    /// Angular acceleration this tick (rad/s²), derived from aerodynamic moments.
+    pub angular_accel: Vec3,
+    /// Per-axis aerodynamic moment breakdowns (N·m). Physics convention:
+    /// pitch > 0 nose up, roll > 0 right-wing-down, yaw > 0 nose right.
+    pub pitch_moment: MomentBreakdown,
+    pub roll_moment: MomentBreakdown,
+    pub yaw_moment: MomentBreakdown,
 
     // --- Altitude / VSI ---
     /// Mean-sea-level altitude in meters. AGL arrives when terrain-sample is plumbed
@@ -135,9 +140,11 @@ impl Telemetry {
             gravity: f.gravity,
             linear_accel: f.linear_accel,
 
-            commanded_angular_vel: f.commanded_angular_vel,
             actual_angular_vel: veh.angular_velocity,
-            ang_response_rate: f.ang_response_rate,
+            angular_accel: f.angular_accel,
+            pitch_moment: f.pitch_moment,
+            roll_moment: f.roll_moment,
+            yaw_moment: f.yaw_moment,
 
             altitude_msl: veh.position.y,
             vertical_speed_mps: veh.velocity.y,

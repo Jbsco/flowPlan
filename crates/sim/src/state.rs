@@ -139,12 +139,13 @@ fn tick_dynamics(
 ) -> flight::FlightOutputs {
     let forces = flight::compute_forces(v, spec, dt);
 
-    // Angular: first-order tracking of commanded rate, then body-frame rotation
-    // composition via axis-angle exponential.
-    let response = 1.0 - (-forces.ang_response_rate * dt).exp();
-    v.angular_velocity = v
-        .angular_velocity
-        .lerp(forces.commanded_angular_vel, response);
+    // Angular: Euler-integrate angular velocity from the aero-moment-derived
+    // angular acceleration, then compose the resulting rotation onto orientation.
+    //
+    // Per 2.4.4, `angular_accel` already has flowplan's sign convention baked in
+    // (physics-convention moments are flipped on Y and Z inside `compute_forces`),
+    // so we can simply integrate component-wise.
+    v.angular_velocity += forces.angular_accel * dt;
     let dq = Quat::from_scaled_axis(v.orientation * v.angular_velocity * dt);
     v.orientation = (dq * v.orientation).normalize();
 

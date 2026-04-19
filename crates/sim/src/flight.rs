@@ -94,13 +94,79 @@ pub const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
 /// in 2.4.3.
 const THRUST_ACCEL_MAX: f32 = 3.5;
 
-/// Peak commanded angular rate per body axis (rad/s).
-const ROLL_RATE_MAX: f32 = 1.6;
-const PITCH_RATE_MAX: f32 = 1.0;
-const YAW_RATE_MAX: f32 = 0.6;
+// --- Rotational dynamics (Phase 2.4.4): moment-based, not fiat rate.
+//
+// Each control surface produces an aerodynamic moment keyed to dynamic pressure `q`,
+// the reference length for that axis, and a coefficient. Static stability terms pull
+// α / β back toward trim (this is what recovers the "plane weathervanes toward the
+// relative wind" behavior the fiat rate model was missing). Damping terms oppose
+// angular velocity proportional to `ω * L / (2V)`, so the aircraft self-stabilizes at
+// altitude and feels mushy at low speed. Each moment is divided by the aircraft's
+// moment of inertia about that axis to give angular acceleration, then Euler-integrated
+// in `state::tick_dynamics`.
+//
+// Physics-convention signs used internally:
+//   M (pitch)  > 0  -> nose up
+//   L (roll)   > 0  -> right wing down
+//   N (yaw)    > 0  -> nose right
+//
+// Flowplan's body-frame storage negates Y (yaw) and Z (roll), so the moment-to-accel
+// conversion negates on those axes. See the conversion site in `compute_forces`.
 
-/// First-order tracking rate toward commanded angular velocity (1/s).
-const ANG_RESPONSE: f32 = 10.0;
+/// Moments of inertia about the three body axes (Beaver placeholder, kg·m²).
+/// TODO(2.4.x): move to `AircraftSpec` so other aircraft tune independently.
+const I_XX: f32 = 8000.0; // pitch (rotation about right-wing axis)
+const I_YY: f32 = 12000.0; // yaw (rotation about up axis)
+const I_ZZ: f32 = 5000.0; // roll (rotation about nose axis)
+
+/// Reference lengths used in moment coefficients (Beaver placeholder, meters).
+/// TODO(2.4.x): pull from `AircraftSpec` alongside wing area.
+const MEAN_CHORD_M: f32 = 1.52;
+const WING_SPAN_M: f32 = 14.63;
+
+/// Aerodynamic moment coefficients. Signs are stated for our physics convention above.
+/// Values are textbook small-aircraft ballpark; they are the primary tuning knobs for
+/// handling feel and will be adjusted during 2.4.4 flight testing. TODO(2.4.x): migrate
+/// to per-aircraft data in `AircraftSpec`.
+///
+/// Pitch: static stability (`Cm_α < 0`) pulls α back toward trim; elevator command
+/// (`Cm_δe > 0`) pitches nose up for positive stick; damping (`Cm_q < 0`) opposes
+/// pitch rate.
+///
+/// `Cm_δe` tuning history:
+///   0.05 → "almost nonexistent" feel
+///   0.12 → "half the size it should be"
+///   0.24 → current; full stick at cruise hits ~40°/s steady pitch rate, initial
+///          accel ~2 rad/s². Subjectively crisp without being unrecoverable.
+const CM_ALPHA: f32 = -0.25;
+const CM_DELTA_E: f32 = 0.24;
+const CM_Q: f32 = -25.0;
+
+/// Roll: aileron command (`Cl_δa > 0`) rolls right wing down for positive stick;
+/// damping (`Cl_p < 0`) opposes roll rate. No static roll stability term in the
+/// baseline (small aircraft are roughly roll-neutral; dihedral-induced coupling
+/// through β lives in 2.4.6).
+///
+/// `Cl_δa` tuning: 0.08 (too lively) → 0.07 (slightly weak) → 0.075 (smidge up).
+const CL_DELTA_A: f32 = 0.075;
+const CL_P: f32 = -0.5;
+
+/// Yaw: weathervane stability (`Cn_β > 0`) yaws nose toward velocity when sideslip
+/// develops; rudder command (`Cn_δr > 0`) yaws nose right for positive pedal; damping
+/// (`Cn_r < 0`) opposes yaw rate.
+///
+/// `Cn_δr` tuning: 0.05 (wobble due to spring/damper imbalance, plus too lively) →
+/// 0.03 (lively fixed via `Cn_r` increase below, but felt a little small) →
+/// 0.04 (small bump back toward responsive while keeping the damping margin).
+/// `Cn_r` lifted 0.15 → 0.6 (4×) to kill the visible Dutch-roll-like oscillation.
+const CN_BETA: f32 = 0.08;
+const CN_DELTA_R: f32 = 0.04;
+const CN_R: f32 = -0.6;
+
+/// Minimum airspeed used as the denominator in the nondimensional damping factor
+/// `ω·L/(2V)`. Below this, the plane is essentially parked and damping should saturate
+/// rather than blow up; clamping to 1 m/s gives sensible behavior without a divide.
+const MIN_DAMPING_AIRSPEED: f32 = 1.0;
 
 // --- Placeholder (no-spec) drag constants ---
 
@@ -206,16 +272,38 @@ fn angle_of_attack_and_sideslip(state: &VehicleState) -> (f32, f32) {
     (alpha, beta)
 }
 
-/// Result of one flight-model evaluation. The first three fields drive integration;
+/// Contributions that sum to a single-axis aerodynamic moment (N·m).
+///
+/// Kept separate so the debug HUD can show which term dominates at the current flight
+/// condition (e.g., "control is strong but damping cancels it", "stability is pulling
+/// you back").
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MomentBreakdown {
+    /// Control-surface contribution (elevator / aileron / rudder × stick position).
+    pub control: f32,
+    /// Static-stability contribution (α for pitch, β for yaw; zero for roll).
+    pub stability: f32,
+    /// Damping contribution (opposes the current angular rate about this axis).
+    pub damping: f32,
+}
+
+impl MomentBreakdown {
+    /// Sum of the three contributions.
+    #[must_use]
+    pub fn total(&self) -> f32 {
+        self.control + self.stability + self.damping
+    }
+}
+
+/// Result of one flight-model evaluation. The first two fields drive integration;
 /// the remaining fields are diagnostics for the debug HUD.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FlightOutputs {
     /// World-space linear acceleration applied to the velocity this tick.
     pub linear_accel: Vec3,
-    /// Body-frame commanded angular velocity (rad/s) that integration tracks toward.
-    pub commanded_angular_vel: Vec3,
-    /// Smoothing rate used to blend toward `commanded_angular_vel` (1/s).
-    pub ang_response_rate: f32,
+    /// Body-frame angular acceleration (rad/s²). Integrated into `angular_velocity` in
+    /// `state::tick_dynamics`. Replaces the old commanded-rate model.
+    pub angular_accel: Vec3,
 
     // Diagnostic breakdown of the force terms that compose `linear_accel`. All in m/s².
     pub thrust: Vec3,
@@ -224,74 +312,51 @@ pub struct FlightOutputs {
     pub gravity: Vec3,
     /// Total airspeed magnitude (m/s).
     pub airspeed: f32,
-    /// Horizontal component of forward airspeed (m/s); feeds lift in the placeholder
-    /// model.
+    /// Horizontal component of forward airspeed (m/s); feeds the placeholder lift model
+    /// and the pre-2.4.4 airspeed-based stall alert heuristic.
     pub horizontal_airspeed: f32,
     /// Angle of attack (rad). Positive when nose points above relative wind.
     pub alpha: f32,
-    /// Sideslip angle (rad). Positive when relative wind comes from the right.
+    /// Sideslip angle (rad). Positive when the aircraft has rightward lateral body
+    /// velocity (wind from the right, nose left of velocity). Matches aerospace
+    /// convention in sign -- the yaw-stability moment uses this value directly.
     pub beta: f32,
     /// Current lift coefficient (dimensionless). Driven by `alpha` on the airfoil path,
     /// zero on the no-spec placeholder path.
     pub cl: f32,
     /// Current drag coefficient (dimensionless).
     pub cd: f32,
+
+    // --- Moment breakdown (N·m) per body axis. Physics-convention signs:
+    //   pitch > 0 = nose up, roll > 0 = right wing down, yaw > 0 = nose right.
+    /// Pitch moment M about the lateral axis (breakdown: elevator / α-stability / damping).
+    pub pitch_moment: MomentBreakdown,
+    /// Roll moment L about the longitudinal axis (breakdown: aileron / - / damping).
+    pub roll_moment: MomentBreakdown,
+    /// Yaw moment N about the vertical axis (breakdown: rudder / β-weathervane / damping).
+    pub yaw_moment: MomentBreakdown,
 }
 
 /// Compute flight forces for the current vehicle state.
 ///
-/// `spec` carries aircraft-specific data (mass, airfoil, engine). Phase 2.4.1 ignores
-/// it; later sub-steps read lift / drag / thrust tables from it.
+/// `spec` carries aircraft-specific data (mass, airfoil, engine). Used for translational
+/// force computation; rotational dynamics use hardcoded Beaver-ballpark inertia /
+/// moment coefficients until `AircraftSpec` grows those fields in a 2.4.x follow-up.
+///
+/// Sign conventions (right-handed, Y-up, -Z forward):
+///   pitch positive = nose up      -> body X rotation positive
+///   yaw positive   = nose right   -> body Y rotation negative (storage negates)
+///   roll positive  = roll right   -> body Z rotation negative (storage negates)
+///
+/// See the moment-coefficient block at the top of this module for the open TODOs that
+/// close once this milestone's follow-ups (2.4.4d stall physics, 2.4.6 adverse
+/// coupling, 2.4.x per-aircraft data) land.
 #[must_use]
 pub fn compute_forces(
     state: &VehicleState,
     spec: Option<&AircraftSpec>,
     _dt: f32,
 ) -> FlightOutputs {
-    // Commanded angular rates per body axis.
-    // Sign conventions (right-handed, Y-up, -Z forward):
-    //   pitch positive = nose up      -> rotate +X (right)
-    //   yaw positive   = nose right   -> rotate -Y (positive rot around +Y yaws LEFT)
-    //   roll positive  = roll right   -> rotate -Z (positive rot around +Z rolls LEFT)
-    //
-    // TODO(2.4.4): this entire block is fiat: stick position -> body-frame angular
-    //   velocity directly, with no aero in the loop. Real control surfaces produce
-    //   *moments* via pressure differentials; the body then experiences angular
-    //   *acceleration* proportional to (moment / inertia). The cleanest refactor is:
-    //     - rudder deflection δ_r (rad) + β + q (dynamic pressure) -> side force on
-    //       vertical stabilizer -> yaw moment N -> body yaw accel (not rate).
-    //     - elevator δ_e + α + q -> pitch moment M -> body pitch accel.
-    //     - aileron δ_a + q -> differential lift on wings -> roll moment L -> body
-    //       roll accel.
-    //   Each surface also contributes damping proportional to (rate × q), so the
-    //   plane self-stabilizes at altitude but mushes at low speed. This is the
-    //   right physical frame for 2.4.4 to sit in; the current fixed-rate model
-    //   produces nonphysical behaviors like "full rudder at any airspeed yaws
-    //   identically" and "rudder yaw doesn't generate β, the plane just rotates".
-    // TODO(2.4.4): airspeed-scaled control authority follows from the moment model
-    //   above (q = 0.5 ρ V² is the scaling factor). Until 2.4.4 lands, even an
-    //   interim ramp like `authority = (V / V_ref).clamp(0.0, 1.2)` on the rate
-    //   constants would be an improvement over the flat rate.
-    // TODO(2.4.4): post-stall, elevator authority is normal but ailerons lose authority
-    //   (differentially: the retreating-inside-roll blade can be deep in stall). Rudder
-    //   retains authority (hence PARE recovery). Falls out of the moment model
-    //   naturally once `Cl(α)` on each wing half drives the aileron-moment coupling.
-    // TODO(2.4.6): aileron input should couple into a yaw contribution (adverse yaw).
-    //   Also falls out of the moment model (extra induced drag on the up-going wing).
-    // TODO(2.4.6): throttle + nose-high attitude should couple into a yaw contribution
-    //   (P-factor, right-rudder-required on takeoff). Requires prop model (2.4.3).
-    // TODO(2.4.4 / UX): keyboard input is 0/1 step. Even under a proper moment model,
-    //   "full rudder mashed in one frame" is a more violent command than any human
-    //   could produce on a real pedal. An input-layer control ramp (surface deflection
-    //   slews toward target at a bounded rate, e.g., ~1.5/s so full deflection needs
-    //   ~0.7 s) would smooth this without faking physics. Gamepad / HOTAS analog
-    //   support lands in a later UX pass; the ramp is useful regardless.
-    let commanded = Vec3::new(
-        state.controls.pitch * PITCH_RATE_MAX,
-        -state.controls.yaw * YAW_RATE_MAX,
-        -state.controls.roll * ROLL_RATE_MAX,
-    );
-
     // Thrust along body forward.
     // TODO(2.4.3): replace constant `THRUST_ACCEL_MAX` with engine power curve.
     let forward = state.orientation * Vec3::NEG_Z;
@@ -370,10 +435,68 @@ pub fn compute_forces(
         (lift, drag, 0.0, 0.0)
     };
 
+    // ----- Rotational dynamics (Phase 2.4.4): moments -> angular acceleration. -----
+    //
+    // Dynamic pressure and wing area are the scaling factors on all three axes. Wing
+    // area falls back to the spec value; the no-spec placeholder path uses the
+    // hardcoded Beaver area so the moment equations still produce sensible numbers
+    // without an AircraftSpec loaded (e.g., in pure-sim tests).
+    let wing_area_moments = spec.map_or(23.23_f32, |s| s.wing_area_m2.max(1.0));
+    let q_dyn = 0.5 * AIR_DENSITY_SEA_LEVEL * speed * speed;
+    let v_damp = speed.max(MIN_DAMPING_AIRSPEED);
+
+    // Angular rates in physics convention: pitch > 0 nose-up, roll > 0 right-wing-down,
+    // yaw > 0 nose-right. flowplan stores yaw and roll negated in angular_velocity, so
+    // flip back here.
+    let pitch_rate = state.angular_velocity.x;
+    let roll_rate = -state.angular_velocity.z;
+    let yaw_rate = -state.angular_velocity.y;
+
+    // Nondimensional damping factors ω·L/(2V). At cruise they're ~0.01--0.02 per rad/s
+    // of rate, so moderate rates combined with large |Cm_q| / |Cl_p| / |Cn_r| produce
+    // meaningful restoring moments.
+    let pitch_damp_nd = pitch_rate * MEAN_CHORD_M / (2.0 * v_damp);
+    let roll_damp_nd = roll_rate * WING_SPAN_M / (2.0 * v_damp);
+    let yaw_damp_nd = yaw_rate * WING_SPAN_M / (2.0 * v_damp);
+
+    // Pitch: control (elevator) + α-stability + pitch-rate damping.
+    let pitch_moment = MomentBreakdown {
+        control: q_dyn * wing_area_moments * MEAN_CHORD_M * CM_DELTA_E * state.controls.pitch,
+        stability: q_dyn * wing_area_moments * MEAN_CHORD_M * CM_ALPHA * alpha,
+        damping: q_dyn * wing_area_moments * MEAN_CHORD_M * CM_Q * pitch_damp_nd,
+    };
+
+    // Roll: control (aileron) + roll-rate damping. No static stability term in baseline.
+    let roll_moment = MomentBreakdown {
+        control: q_dyn * wing_area_moments * WING_SPAN_M * CL_DELTA_A * state.controls.roll,
+        stability: 0.0,
+        damping: q_dyn * wing_area_moments * WING_SPAN_M * CL_P * roll_damp_nd,
+    };
+
+    // Yaw: control (rudder) + β-weathervane + yaw-rate damping.
+    //
+    // flowplan's `beta = atan2(body_vel.x, forward_speed)` matches aerospace β in sign:
+    // both are positive when the aircraft has rightward lateral body velocity (wind
+    // from the right). With `Cn_β > 0`, the stability term produces a positive N
+    // (nose-right in physics convention) to restore.
+    let yaw_moment = MomentBreakdown {
+        control: q_dyn * wing_area_moments * WING_SPAN_M * CN_DELTA_R * state.controls.yaw,
+        stability: q_dyn * wing_area_moments * WING_SPAN_M * CN_BETA * beta,
+        damping: q_dyn * wing_area_moments * WING_SPAN_M * CN_R * yaw_damp_nd,
+    };
+
+    // Convert moments (physics convention) to body-frame angular acceleration. flowplan
+    // storage negates Y (yaw) and Z (roll); negate those on the way in so the final
+    // angular_velocity has the same sign convention the rest of the sim already uses.
+    let angular_accel = Vec3::new(
+        pitch_moment.total() / I_XX,
+        -yaw_moment.total() / I_YY,
+        -roll_moment.total() / I_ZZ,
+    );
+
     FlightOutputs {
         linear_accel: thrust + lift + drag + GRAVITY,
-        commanded_angular_vel: commanded,
-        ang_response_rate: ANG_RESPONSE,
+        angular_accel,
         thrust,
         lift,
         drag,
@@ -384,6 +507,9 @@ pub fn compute_forces(
         beta,
         cl,
         cd,
+        pitch_moment,
+        roll_moment,
+        yaw_moment,
     }
 }
 
@@ -406,7 +532,8 @@ mod tests {
     fn at_rest_idle_only_gravity() {
         let out = compute_forces(&zero_state(), None, 1.0 / 120.0);
         assert!((out.linear_accel - GRAVITY).length() < 1e-5);
-        assert!(out.commanded_angular_vel.length() < 1e-6);
+        // At rest (q = 0), every moment term should vanish.
+        assert!(out.angular_accel.length() < 1e-6);
     }
 
     #[test]
@@ -525,10 +652,135 @@ mod tests {
     }
 
     #[test]
-    fn commanded_rate_follows_stick() {
+    fn elevator_at_cruise_produces_nose_up_moment() {
+        // At cruise airspeed with full nose-up stick, the control contribution of the
+        // pitch moment should be positive (nose up in physics convention) and the
+        // body-frame angular_accel.x component should be positive.
         let mut s = zero_state();
+        s.velocity = Vec3::new(0.0, 0.0, -50.0);
         s.controls.pitch = 1.0;
         let out = compute_forces(&s, None, 1.0 / 120.0);
-        assert!((out.commanded_angular_vel.x - PITCH_RATE_MAX).abs() < 1e-5);
+        assert!(
+            out.pitch_moment.control > 0.0,
+            "pitch control moment should be positive with nose-up stick; got {}",
+            out.pitch_moment.control,
+        );
+        assert!(
+            out.angular_accel.x > 0.0,
+            "pitch angular accel should be positive (nose up); got {}",
+            out.angular_accel.x,
+        );
+    }
+
+    #[test]
+    fn rudder_at_cruise_produces_nose_right_yaw() {
+        // Positive yaw stick -> positive yaw moment N (nose right in physics) ->
+        // stored as negative Y angular accel (flowplan storage convention).
+        let mut s = zero_state();
+        s.velocity = Vec3::new(0.0, 0.0, -50.0);
+        s.controls.yaw = 1.0;
+        let out = compute_forces(&s, None, 1.0 / 120.0);
+        assert!(
+            out.yaw_moment.control > 0.0,
+            "yaw control moment positive for nose-right pedal; got {}",
+            out.yaw_moment.control,
+        );
+        assert!(
+            out.angular_accel.y < 0.0,
+            "nose-right yaw maps to negative Y angular accel; got {}",
+            out.angular_accel.y,
+        );
+    }
+
+    #[test]
+    fn aileron_at_cruise_produces_right_wing_down_roll() {
+        // Positive roll stick -> positive roll moment L (right wing down) ->
+        // stored as negative Z angular accel.
+        let mut s = zero_state();
+        s.velocity = Vec3::new(0.0, 0.0, -50.0);
+        s.controls.roll = 1.0;
+        let out = compute_forces(&s, None, 1.0 / 120.0);
+        assert!(
+            out.roll_moment.control > 0.0,
+            "roll control moment positive for right-wing-down stick; got {}",
+            out.roll_moment.control,
+        );
+        assert!(
+            out.angular_accel.z < 0.0,
+            "right-wing-down roll maps to negative Z angular accel; got {}",
+            out.angular_accel.z,
+        );
+    }
+
+    #[test]
+    fn pitch_damping_opposes_pitch_rate() {
+        // With the aircraft already pitching nose-up (positive angular_velocity.x) and
+        // neutral stick, the damping term should produce a nose-down moment to
+        // oppose the motion.
+        let mut s = zero_state();
+        s.velocity = Vec3::new(0.0, 0.0, -50.0);
+        s.angular_velocity = Vec3::new(0.5, 0.0, 0.0); // 0.5 rad/s pitch-up
+        let out = compute_forces(&s, None, 1.0 / 120.0);
+        assert!(
+            out.pitch_moment.damping < 0.0,
+            "pitch damping should be negative when pitching up; got {}",
+            out.pitch_moment.damping,
+        );
+    }
+
+    #[test]
+    fn weathervane_restores_to_velocity() {
+        // Plane yawed 10° left of its velocity vector. flowplan's β is negative in this
+        // case; aerospace β is positive (wind from the right). Restoring moment is
+        // nose-right (positive N), which maps to negative Y angular accel.
+        let mut s = zero_state();
+        s.orientation = Quat::from_rotation_y(10_f32.to_radians());
+        s.velocity = Vec3::new(0.0, 0.0, -50.0);
+        let out = compute_forces(&s, None, 1.0 / 120.0);
+        assert!(
+            out.yaw_moment.stability > 0.0,
+            "weathervane moment should be nose-right for nose-left-of-velocity; got {}",
+            out.yaw_moment.stability,
+        );
+        assert!(
+            out.angular_accel.y < 0.0,
+            "weathervane-induced yaw accel should be negative Y (nose right); got {}",
+            out.angular_accel.y,
+        );
+    }
+
+    #[test]
+    fn alpha_stability_restores_toward_trim() {
+        // Nose-up attitude relative to velocity (α > 0) should produce a nose-down
+        // stability moment (pitch.stability < 0, angular_accel.x < 0).
+        let mut s = zero_state();
+        s.orientation = Quat::from_rotation_x(10_f32.to_radians());
+        s.velocity = Vec3::new(0.0, 0.0, -50.0);
+        let out = compute_forces(&s, None, 1.0 / 120.0);
+        assert!(
+            out.pitch_moment.stability < 0.0,
+            "α-stability should be nose-down for α>0; got {}",
+            out.pitch_moment.stability,
+        );
+    }
+
+    #[test]
+    fn control_authority_scales_with_airspeed() {
+        // Moments scale with q = 0.5 ρ V². Doubling speed should give ~4× moment.
+        let mut slow = zero_state();
+        slow.velocity = Vec3::new(0.0, 0.0, -25.0);
+        slow.controls.pitch = 1.0;
+        let out_slow = compute_forces(&slow, None, 1.0 / 120.0);
+
+        let mut fast = zero_state();
+        fast.velocity = Vec3::new(0.0, 0.0, -50.0);
+        fast.controls.pitch = 1.0;
+        let out_fast = compute_forces(&fast, None, 1.0 / 120.0);
+
+        let ratio = out_fast.pitch_moment.control / out_slow.pitch_moment.control;
+        assert!(
+            (ratio - 4.0).abs() < 0.1,
+            "pitch control moment should ~4× from 25 -> 50 m/s; got ratio {ratio}",
+        );
     }
 }

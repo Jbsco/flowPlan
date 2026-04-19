@@ -23,7 +23,11 @@ struct State {
 }
 
 impl SnapshotBuffer {
-    /// New buffer seeded with `initial` for both slots.
+    /// New buffer seeded with `initial` for both slots. `SimSnapshot` is a `Copy` POD
+    /// carried across the sim→render boundary specifically to avoid allocation on
+    /// publish; passing by value rather than reference is the intended ergonomic API
+    /// even though the struct is modestly large.
+    #[allow(clippy::large_types_passed_by_value)]
     pub fn new(initial: SimSnapshot) -> Self {
         Self {
             state: Mutex::new(State {
@@ -34,6 +38,7 @@ impl SnapshotBuffer {
     }
 
     /// Publish a new snapshot; the old `current` becomes `previous`.
+    #[allow(clippy::large_types_passed_by_value)]
     pub fn publish(&self, next: SimSnapshot) {
         let mut s = self.state.lock();
         s.previous = s.current;

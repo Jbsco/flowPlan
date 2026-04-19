@@ -439,13 +439,9 @@ v1 ships with fully-working keyboard and gamepad profiles plus the mapping UI. H
 
 ### Phase 2 open items (each carries a `TODO(phase-N):` at `sim/src/flight.rs`)
 
-- **[ready, major: Phase 2.4.4]** **Rotational dynamics are fiat, not aerodynamic.** Stick input → body-frame angular velocity directly, with no moments, no q-scaling, no sideslip generation from rudder, no damping. Symptom reported in flight testing: rudder yaws the aircraft identically at any airspeed and generates no β. The 2.4.4 refactor replaces the fixed-rate model with moment-based rotation:
-    - Rudder δ_r + β + q → side force on vertical stabilizer → yaw moment N → angular acceleration
-    - Elevator δ_e + α + q → pitch moment M
-    - Aileron δ_a + q → roll moment L via differential wing lift
-    - Each surface adds damping proportional to (rate × q) so the plane self-stabilizes at altitude but mushes at low speed
-    - Real stall / wing-drop / accelerated-stall behavior falls out of the same frame naturally
-- **[ready: Phase 2.4.4, UX sub-step]** **Keyboard input slew-rate clamp.** Keyboard is 0%/100% step; real control pedals/sticks are analog and rate-limited by human motor capability. Apply a linear slew-rate clamp at the `Controls` input-layer boundary: target value - current value, max Δ per tick bounded by `slew_rate × dt`, full-deflection reach in ~0.7 s (slew rate ~1.5 / s). Linear chosen over progressive to match the physical behavior of a human pushing a pedal at bounded speed; progressive ease would feel mushy near neutral. Apply to pitch / yaw / roll. Throttle gets its own rate (~0.4 / s on hold). Analog sources (gamepad, HOTAS) bypass the ramp.
+- **[shipped: Phase 2.4.4a]** Keyboard input slew-rate ramp. Pitch / roll / yaw axes slew toward held-key targets at 1.5 full-deflection/s (full travel ~0.67 s, symmetric on release). Throttle keeps its per-tick delta. Analog sources (gamepad, HOTAS) bypass when added.
+- **[shipped: Phase 2.4.4b]** Moment-based rotational dynamics. Each control surface produces an aerodynamic moment `M = q·S·L·(Cm_δ·δ + Cm_stab·α_or_β + Cm_damp·ω·L/(2V))`; angular acceleration = moment / inertia; Euler-integrated into angular velocity. Control authority scales with dynamic pressure, weathervane stability restores toward velocity under sideslip, α-stability pitches back toward trim, damping opposes rates. Coefficients hardcoded Beaver placeholders; migration to `AircraftSpec` is a 2.4.x follow-up.
+- **[ready: Phase 2.4.4d]** Real stall physics + α-based stall alert. Post-stall nose-down pitching moment (center-of-lift shift), wing-drop via asymmetric `Cl(α)` across the wing (ailerons lose authority in stall while rudder retains it -- PARE recovery works), accelerated-stall correction. HUD stall alert moves from `airspeed / Vs` heuristic to α-based.
 
 - **[sketch]** Sim-like, sim-realistic in selected ways. Feel-first; accept liberties where they preserve fun.
 - **[sketch]** Airfoil-based lift per aircraft: tabulated `Cl(alpha)` curve, drag polar, stall region characteristics. No CFD.
