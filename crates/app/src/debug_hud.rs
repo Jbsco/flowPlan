@@ -209,6 +209,34 @@ fn build_ui(ctx: &Context, snap: &SimSnapshot, live: &SimState, frame_ms: f32, p
                 f.horizontal_airspeed,
                 f.horizontal_airspeed * 1.944,
             ));
+
+            // Stall alert (pre-2.4.4 heuristic). Compares horizontal forward airspeed
+            // to the aircraft's published Vs (clean stall speed). Three tiers:
+            // NORMAL >= 1.2 Vs, APPROACH 1.0..1.2 Vs, STALL below Vs. Real
+            // angle-of-attack-based stall modeling arrives with Milestone 2.4.4.
+            if let Some(spec) = &live.aircraft {
+                ui.separator();
+                ui.heading("Stall alert");
+                let vs = spec.speeds.vs_clean_mps.max(1e-3);
+                let ratio = f.horizontal_airspeed / vs;
+                let (label, color) = if ratio >= 1.2 {
+                    ("NORMAL", egui::Color32::from_rgb(120, 200, 120))
+                } else if ratio >= 1.0 {
+                    ("APPROACH", egui::Color32::from_rgb(240, 200, 80))
+                } else {
+                    ("STALL", egui::Color32::from_rgb(240, 80, 80))
+                };
+                ui.colored_label(
+                    color,
+                    format!(
+                        "{label}    (airspeed / Vs = {:.2};  Vs = {:.1} m/s / {:.0} kt)",
+                        ratio,
+                        vs,
+                        vs * 1.944,
+                    ),
+                );
+            }
+
             ui.separator();
             ui.heading("Forces (m/s^2)");
             ui.label(format!(
