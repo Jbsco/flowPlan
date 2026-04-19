@@ -171,6 +171,26 @@ Each entry follows this structure:
 - Engine: Continental A-65/A-75, 65-75 hp
 - Notes: very simple early light taildragger; charm aircraft for the vintage tier.
 
+### Rookling (Yakovlev Yak-12 / PZL-101 Gawron)
+
+**[post-v1]** Yakovlev OKB Yak-12 (USSR) / PZL-101 Gawron (Poland) | 1946-1974, ~4,500+ built across variants | Soviet-era light utility STOL taildragger
+
+- MTOW: ~2,650 lb (Yak-12M) | Empty: ~1,900 lb
+- Engine: Ivchenko AI-14R 9-cyl radial, 260 hp (Yak-12M/R); earlier M-11FR 145 hp 5-cyl radial (Yak-12A); AI-14RF 300 hp on Gawron
+- Prop: 2-blade fixed-pitch wood or metal; constant-speed on later variants
+- Airfoil: Clark YH family (verify)
+- Wing area: ~247 sq ft | Aspect ratio: ~7
+- Speeds: cruise ~78 kt (~90 mph) | Vne ~120 mph | Vs ~37 kt
+- Fuel: ~40 gal
+- Payload: 4 seats (pilot + 3) + small cargo
+- Configurations: wheels (taildragger, tundra optional), skis, floats (rare); Gawron variants adapted for agricultural spray
+- Typical upgrades: AI-14RF re-engine, improved avionics, long-range tanks; Gawron ag-spray kit
+- Characteristic handling: slow, docile, strong low-speed authority; classic Soviet-era bush / ag feel
+- Modeling difficulty: simple (single radial piston, standard taildragger behavior)
+- Audio signature: AI-14 9-cyl radial -- Russian radial character, similar tonal family to the R-985 but smaller displacement
+- Real-world reference: Yakovlev Design Bureau data, PZL Okecie Gawron documentation, Eastern-Bloc operator histories
+- Notes: Soviet analog to the Super Cub / Skywagon niche; widespread in USSR, Warsaw Pact, and ag-aviation. Lineage continues in the SM-92 Finist.
+
 ---
 
 ## Mid / Heavy Bushplanes -- Taildragger
@@ -202,6 +222,46 @@ Each entry follows this structure:
 - Characteristic handling: leading-edge slats give extraordinary slow-flight capability
 - Modeling difficulty: complex (slat behavior, full-span flaps interact with airfoil tables non-trivially)
 - Notes: legendary STOL, unique silhouette with the slats and long-span flaps.
+
+### Taiga (Technoavia SM-92 Finist)
+
+**[post-v1]** Technoavia SM-92 Finist | 1994-present, small-series production | Russian single-radial STOL bush utility (Yak-12 successor lineage)
+
+- MTOW: ~3,700 lb (~1,680 kg) | Empty: ~2,700 lb
+- Engine: Vedeneev M-14P 9-cyl radial, 360 hp; some M-14PF 400 hp variants
+- Prop: 2-blade constant-speed composite or metal
+- Airfoil: NACA 23018 (verify)
+- Wing area: ~237 sq ft | Aspect ratio: ~8
+- Speeds: cruise ~110 kt | Vne ~140 kt | Vs ~40 kt
+- Fuel: ~85 gal | Range ~550 nm
+- Payload: 6 seats (pilot + 5) or freighter
+- Configurations: wheels (taildragger, large low-pressure tundra standard), skis, floats
+- Typical upgrades: reinforced gear for rough-field ops, long-range tanks, glass panel; SM-92T turbine conversion on prototype
+- Characteristic handling: STOL-capable; radial burbles on power reductions; descendant of Yak-12 / Yak-18T lineage with updated geometry and higher payload
+- Modeling difficulty: moderate (M-14 radial has distinctive audio + power-response character)
+- Audio signature: Vedeneev M-14 9-cyl radial -- hallmark rasp heard on Russian aerobatic aircraft; slightly higher-RPM character than R-985
+- Real-world reference: Technoavia manufacturer data, OKB-92 / Sokol Nizhny Novgorod production notes, Russian Aviation Monitor reporting
+- Notes: modern spiritual successor to the Yak-12 / An-2 ethos but lighter; fits the Siberian / subarctic biome visually and narratively.
+
+### Summit (Pilatus PC-6 Porter / Turbo Porter)
+
+**[v1]** Pilatus PC-6 Porter / Turbo Porter | 1959-2019, ~600+ built | Swiss single-engine turbine STOL utility taildragger
+
+- MTOW: ~6,100 lb (PC-6/B2-H4) | Empty: ~2,800 lb
+- Engine: Pratt & Whitney Canada PT6A-27 or -34, 550-680 shp turboprop; earlier piston variants used Lycoming GSO-480 (340 hp)
+- Prop: Hartzell 3-blade constant-speed reversing feathering; some 4-blade conversions
+- Airfoil: Pilatus high-lift section (close to a modified NACA 64-series, verify)
+- Wing area: ~324 sq ft | Aspect ratio: ~9.3
+- Speeds: cruise ~120 kt | Vne ~151 kt | Vs ~52 kt | Vso ~48 kt
+- Fuel: 160 gal standard; up to ~260 gal with tip tanks | Range ~770 nm
+- Payload: ~2,800 lb useful | 10-11 seats or cargo / parachute-jump configuration
+- Configurations: wheels (fixed taildragger), skis, straight floats, amphib floats (rare conversions)
+- Typical upgrades: Raisbeck tip tanks, cargo pod, glass panel, upgraded PT6 variants
+- Characteristic handling: legendary STOL -- landing rolls under 200 ft at low weights; bushmaster for mountain, jump, and island operations; strong prop-reverse authority on rollout
+- Modeling difficulty: complex (turbine power curve + reverse thrust + mountain-airstrip density-altitude + tailwheel + broad weight range)
+- Audio signature: PT6 turbine whine with classic beta-range whoop on reverse; higher pitched than a Beaver's radial, calmer than a twin's scream
+- Real-world reference: Pilatus PC-6 POH, PT6A-27/34 installation data, Swiss / Antarctic / SEA operator histories, Air America historical records
+- Notes: the definitive single-engine turbine bushplane. Used from Himalayan supply to Papuan missions and Nepal highland strips. Canonical glue between piston bush aircraft and multi-engine turboprops.
 
 ---
 
@@ -414,6 +474,27 @@ Each entry follows this structure:
 - Hybrid / specialty: retracting wingtip floats that fold up to become wingtips in flight -- unique and worth modeling visually
 - Notes: iconic aircraft; fits fire-hopping / rescue roles; retractable wingtip floats are a showcase feature.
 
+### Tarn (Republic RC-3 Seabee)
+
+**[v1]** Republic Aircraft RC-3 Seabee | 1946-1947, ~1,060 built | Small single-engine amphibious flying boat (pusher)
+
+- MTOW: ~3,000 lb | Empty: ~2,100 lb | Useful: ~900 lb
+- Engine: Franklin 6A8-215-B8F, 215 hp, 6-cyl air-cooled flat-six, pusher configuration
+- Prop: fixed-pitch 2-blade pusher (post-war CS 2/3-blade conversions on modified airframes)
+- Airfoil: NACA 4415 (verify)
+- Wing area: ~192 sq ft | Aspect ratio: ~5.9
+- Speeds: cruise ~93 kt (107 mph) | Vne ~120 mph | Vs ~52 mph | Vso ~50 mph
+- Fuel: 75 gal | Range ~400 sm
+- Payload: 4 seats + baggage
+- Configurations: **hull + retractable tricycle gear** (amphib by design) | fixed wingtip floats
+- Hybrid / specialty: high-mounted wing over pusher prop; nose-forward cabin with excellent visibility; gear retracts into the hull sides
+- Typical upgrades: Lycoming GO-480 "Super Seabee" (~260 hp, the common re-engine), Lycoming IO-540 conversions, rare turbine conversions, gull-wing door mods, Twin Bee (twin-engine conversion, pusher removed), Simuflight and Whitehouse aerodynamic kits
+- Characteristic handling: docile and slow; short-field capable on both surfaces; pusher-prop creates distinctive thrust/pitch coupling (power-on pitches nose up); visibility excellent from nose-forward cabin
+- Modeling difficulty: moderate (hull hydrodynamics + tricycle retract + pusher prop + wingtip-float coupling)
+- Audio signature: flat-six pusher -- engine and prop sit above and behind the cabin, producing a muted-in-cabin but distinctive external note
+- Real-world reference: Seabee POH, Seabee Operator's Manual, Percival Spencer design notes, Simuflight service documents, active RC-3 owners' community
+- Notes: the "Jeep of the air" personal amphibian. Distinctive silhouette (high-wing + pusher + nose-forward cabin). Strong Alaska-summer / lake-community vibe. Small but dedicated enthusiast community provides ample technical reference.
+
 ### Islet (Icon A5)
 
 **[v1]** Icon A5 | 2014-present | Modern light amphibious sport
@@ -559,6 +640,27 @@ Small, single- or two-seat aircraft intended for short trips, pond-hopping, beac
 - Real-world reference: Kitfox Aircraft build manuals, community forums, FAA experimental records
 - Notes: one of the most popular STOL homebuilts ever; the "you can fly it off your driveway" aircraft. Floats-optional makes it versatile. Great mid-tier backcountry aircraft.
 
+### Hopper (Zenith STOL CH 701)
+
+**[v1]** Zenith Aircraft Company STOL CH 701 | 1986-present (design), still available as kit | Ultralight-class kit STOL two-seater
+
+- MTOW: ~1,100 lb (Part 103 ultralight trainer) / ~1,320 lb (LSA-compliant kit) | Empty: ~580 lb
+- Engine: Rotax 912 UL / ULS (80-100 hp); earlier builds with Continental O-200 (100 hp), Jabiru 2200 (85 hp), or VW conversions
+- Prop: fixed 2-blade composite or wood; ground-adjustable on some builds
+- Airfoil: full-span fixed leading-edge slats + Junkers-style slotted flaperons (defining feature -- not a standard NACA section)
+- Wing area: ~122 sq ft | Aspect ratio: ~6
+- Speeds: cruise ~65-70 kt | Vne ~100 kt | Vs ~25 kt (with flaperons) | Vso ~23 kt
+- Fuel: 15 gal (24 gal extended) | Range ~260 nm
+- Payload: 2 side-by-side + minimal baggage
+- Configurations: tricycle gear standard (taildragger kits exist); straight floats and skis available as kit conversions
+- Hybrid / specialty: full-span slats + slotted flaperons give extraordinary low-speed capability; take-off roll as short as ~90 ft
+- Typical upgrades: 100 hp Rotax upgrade from 80 hp, larger tundra tires, ballistic chute, composite 3-blade prop
+- Characteristic handling: extreme STOL in a featherweight; high drag and low cruise the trade-off; crosswind sensitivity in the landing flare
+- Modeling difficulty: moderate (slats + flaperons require custom aero curves -- cannot be captured by a plain NACA table)
+- Audio signature: Rotax 912 buzz; very quiet cruise given low prop speed and light airframe
+- Real-world reference: Zenith Aircraft Company builder manuals, Chris Heintz design documentation, community build logs
+- Notes: "Sky Jeep" of the kitbuild world. Perfect for pond-hopping, beach strips, and "drop in anywhere" backcountry gameplay. Pairs with the larger CH 750 Super Duty below as a progression pair.
+
 ### Skyjeep (Zenith CH 750 STOL / Super Duty)
 
 **[v1]** Zenith Aircraft CH 750 STOL / CH 750 Cruzer / CH 750 Super Duty | 2008-present | Extreme STOL homebuilt
@@ -684,6 +786,48 @@ Famous military seaplanes with historical or ongoing civilian service. Included 
 - Typical upgrades: Viking Series 400 avionics, cargo interior, winglets
 - Notes: extensive bush / Arctic / island service; twin turbine entry point for heavy missions.
 
+### Drover (GAF Nomad)
+
+**[post-v1]** Government Aircraft Factories N22 / N24 Nomad | 1971-1984, ~172 built | Australian twin-turboprop STOL utility
+
+- MTOW: N22B ~8,500 lb | N24A ~9,400 lb | Empty: N22B ~4,800 lb (verify)
+- Engine: 2x Allison / Rolls-Royce 250-B17 series, ~420 shp each turboprop
+- Prop: Hartzell 3-blade reversing feathering constant-speed
+- Airfoil: NACA 64-series high-lift section (verify)
+- Wing area: ~324 sq ft | Aspect ratio: ~10 (verify)
+- Speeds: cruise ~168 kt | Vne ~200 kt | Vs ~58 kt (verify)
+- Fuel: ~274 gal (N22B) | Range ~730 nm
+- Payload: 12 pax / freight (N22), 16 pax / freight (N24); military Searchmaster variant for maritime patrol
+- Configurations: wheels (fixed tricycle); rare float conversions; no production ski variant
+- Hybrid / specialty: full-span leading-edge slats + double-slotted flaps give short-field performance at twin-turboprop weight
+- Typical upgrades: refurb avionics packages, re-engine studies (rare, modern -C20 variants), cargo-door mods
+- Characteristic handling: STOL-capable for its class; steady twin-turboprop feel with notable prop-reverse authority on rollout; docile in bush ops; historical asymmetric-thrust quirks documented in the type's safety record
+- Modeling difficulty: complex (twin turboprop + reversing prop + STOL slats/flaps + two-variant fuselage length)
+- Audio signature: pair of Allison 250 turboprops -- higher-pitched whine than the Twin Otter's PT6, distinctive chirp on start
+- Real-world reference: GAF Nomad flight manuals, RAAF / PNGDF operator histories, Australian type-certificate data, operator-community technical write-ups
+- Notes: rare outside Australia / PNG / Indonesia / Philippines; strong "remote utility" silhouette for the bush and island biomes. Good fit for mid-tier twin-turbine missions when the Twin Otter is overkill.
+
+### Glacier (Pilatus PC-12)
+
+**[post-v1]** Pilatus PC-12 / PC-12 NG / PC-12 NGX | 1991-present, ~2,000+ built | Swiss pressurized single-engine turboprop utility / executive
+
+- MTOW: ~10,450 lb (PC-12/45) to ~10,995 lb (PC-12/47E, NG, NGX) | Empty: ~6,200 lb
+- Engine: Pratt & Whitney Canada PT6A-67B (-45), -67P (-47E/NG), -67P variant (NGX), 1,200-1,845 shp rated (derated for type)
+- Prop: Hartzell 4-blade (early) / 5-blade (NGX) constant-speed reversing feathering; composite MT on some
+- Airfoil: Pilatus high-lift section (verify)
+- Wing area: ~277 sq ft | Aspect ratio: ~10.3 | winglets standard since NG
+- Speeds: cruise ~280 kt | Vne ~280+ | Vs ~67 kt | Vso ~61 kt
+- Fuel: 402 gal | Range ~1,800 nm (NG/NGX)
+- Payload: 9-11 pax pressurized cabin (9 executive, 11 combi); cargo-door variants
+- Configurations: retractable tricycle gear only (no factory float variant due to weight and pressurization)
+- Hybrid / specialty: pressurized cabin for high-altitude cruise over mountains; large aft cargo door for combi operations
+- Typical upgrades: NG / NGX retrofits, glass panel upgrades, extended-range tanks, medevac interior, government / special-mission sensor pods
+- Characteristic handling: fast cruise for a single-turbine utility; long-range; good rough-field capability for its class though not STOL; forgiving handling with strong single-engine reliability record
+- Modeling difficulty: complex (pressurization cabin model, high-speed turbine, autopilot expectations, service-ceiling density-altitude effects)
+- Audio signature: PT6A-67 variant -- louder inlet whine than the -27/-34 in the Porter, 5-blade NGX prop quieter on the tip
+- Real-world reference: Pilatus PC-12 POH, PT6A-67P installation data, PlaneSense / Surf Air Mobility / government operator histories
+- Notes: end-game utility for long-range high-altitude missions. Pairs with the Porter (single-turbine low-and-slow) as the fast-and-high counterpart. Corporate / medevac / high-altitude air-ambulance mission templates fit here.
+
 ---
 
 ## Golden Age / Historic
@@ -717,6 +861,26 @@ Famous military seaplanes with historical or ongoing civilian service. Included 
 - Engine: 4x Pratt & Whitney Twin Wasp / Wright Twin Cyclone
 - Configurations: hull, wingtip floats (S-42) or fuselage sponsons (314)
 - Notes: trans-oceanic golden-age flying boats. Aspirational bonus.
+
+### Cairn (Pilatus SB-2 Pelican)
+
+**[bonus]** Pilatus SB-2 Pelican | 1944 prototype, one built (HB-AEP) | Pioneering Swiss single-engine STOL mountain utility
+
+- MTOW: ~2,900 lb (verify) | Empty: ~2,100 lb (verify)
+- Engine: Argus As 10C-3 inverted air-cooled V8, ~240 hp
+- Prop: 2-blade wooden fixed-pitch
+- Airfoil: high-lift section with fixed leading-edge slats + slotted flaps (pre-war experimental, verify geometry)
+- Wing area: ~269 sq ft (verify) | Aspect ratio: ~7
+- Speeds: cruise ~90 kt (verify) | Vne ~130 mph (verify) | Vs ~32 kt (verify)
+- Fuel: ~40 gal (verify)
+- Payload: 4-5 seats
+- Configurations: wheels (fixed taildragger); skis documented in period photographs
+- Hybrid / specialty: one of the first purpose-designed STOL mountain utility aircraft; conceptual ancestor of the Pilatus PC-6 Porter lineage
+- Characteristic handling: slow, docile, alpine-strip capable; pre-war STOL design language made mechanical with slats + slotted flaps
+- Modeling difficulty: moderate (slat + slotted-flap interaction, pre-war V8 torque character)
+- Audio signature: Argus As 10 inverted V8 -- distinctive pre-war German aero-engine tone, rare in any sim catalog
+- Real-world reference: Pilatus company historical archives, Swiss Air Force historical documents, *Pilatus: Seit 1939* (company history), preserved HB-AEP records
+- Notes: only one built; a historical curiosity and the seed from which Pilatus's later mountain-utility line grew. Included for catalog completeness and as a rare pre-war STOL single to contrast with the Helio Courier and PC-6 later in the tree.
 
 ---
 

@@ -1,0 +1,7 @@
+---
+source: crates/render/tests/visual_snapshot.rs
+assertion_line: 216
+expression: png
+extension: png
+snapshot_kind: binary
+---

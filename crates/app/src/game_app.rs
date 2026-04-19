@@ -13,7 +13,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use crossbeam_queue::ArrayQueue;
 use flowplan_assets::CpuMesh;
-use flowplan_render::Renderer;
+use flowplan_render::{Renderer, ShadingParams};
 use flowplan_sim::{
     state::FIXED_DT, DifficultyDials, InputEvent, InputEvents, SimSnapshot, SimState, VehicleState,
 };
@@ -57,6 +57,14 @@ const TERRAIN_HALF_EXTENT: f32 = 2000.0;
 
 /// Cube size for the placeholder vehicle (meters).
 const CUBE_SIZE: f32 = 2.0;
+
+/// Cel-shading presets for the Phase 1 placeholder scene. The terrain is a large, mostly
+/// diffuse surface: many bands (4), high ambient floor (0.5), low rim (0.08). The vehicle
+/// is a small object where silhouette reads matter: fewer bands (3), lower ambient (0.35),
+/// stronger rim (0.35) with a sharp falloff (exponent 3.0). Tuning will be revisited once
+/// the DHC-2 glTF model lands in Milestone 2.3.
+const TERRAIN_SHADING: ShadingParams = ShadingParams::new(4.0, 0.5, 0.08, 4.0);
+const VEHICLE_SHADING: ShadingParams = ShadingParams::new(3.0, 0.35, 0.35, 3.0);
 
 pub fn run() -> Result<()> {
     let event_loop = EventLoop::new().context("construct winit event loop")?;
@@ -285,7 +293,9 @@ impl Runtime {
             surface_format,
             (config.width, config.height),
             &terrain_mesh,
+            TERRAIN_SHADING,
             &vehicle_mesh,
+            VEHICLE_SHADING,
             CUBE_SIZE,
         );
 
@@ -348,6 +358,9 @@ impl Runtime {
     }
 
     fn tick_and_render(&mut self) -> Result<(), FrameError> {
+        #[cfg(feature = "shader-hot-reload")]
+        self.renderer.maybe_reload_shaders(&self.device);
+
         // Measure wall time since last frame; cap to avoid sim-storms after a pause.
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_frame_time).as_secs_f32();

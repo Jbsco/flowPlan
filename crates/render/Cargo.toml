@@ -11,11 +11,29 @@ description = "flowPlan renderer: wgpu pipelines, passes, HUD, camera"
 [lints]
 workspace = true
 
+[features]
+# Enables runtime shader hot-reload in development builds. Off by default. See
+# `crates/render/src/hot_reload.rs` for the implementation. Do not enable in shipping
+# builds: the feature reads WGSL from `CARGO_MANIFEST_DIR`, which is only meaningful on
+# the build machine.
+shader-hot-reload = ["dep:notify"]
+
+# Enables Tier-3 hardware tests (visual snapshot harness). Off by default; requires a
+# wgpu-capable adapter. See `tests/visual_snapshot.rs` and
+# [`TEST_PLAN.md § Test Tiers`](../../TEST_PLAN.md#test-tiers).
+hardware-tests = []
+
 [dependencies]
 flowplan-assets = { workspace = true }
 flowplan-sim = { workspace = true }
 wgpu = { workspace = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
+notify = { version = "6", optional = true }
 # flowplan-core + flowplan-world added in Phase 2 when render uses their types directly.
 # tracing added alongside render instrumentation spans.
+
+[dev-dependencies]
+insta = "1.34"
+image = "0.25"
+pollster = { workspace = true }

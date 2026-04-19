@@ -18,4 +18,17 @@
 
 pub mod renderer;
 
-pub use renderer::Renderer;
+#[cfg(feature = "shader-hot-reload")]
+pub mod hot_reload;
+
+pub use renderer::{Renderer, ShadingParams};
+
+// Dev-deps are consumed by `tests/visual_snapshot.rs` (Tier-3, hardware-gated). Mark
+// them as intentional here so the lib-test target does not trip
+// `-D unused_crate_dependencies` when the feature is disabled.
+#[cfg(test)]
+use image as _;
+#[cfg(test)]
+use insta as _;
+#[cfg(test)]
+use pollster as _;

@@ -1,9 +1,9 @@
-//! Phase 1 renderer: flat-shaded pipeline with depth buffer, camera + model uniforms,
-//! terrain + placeholder cube.
+//! Phase 2 renderer: cel-shaded forward pass + screen-space sobel outline.
 //!
-//! Construction wires the wgpu pipeline, depth texture, vertex/index buffers for the
-//! two meshes, and their uniform bind groups. `resize` recreates the depth buffer.
-//! `render` interpolates between two `SimSnapshot`s and submits a single draw pass.
+//! Construction wires the wgpu pipelines (scene + outline), depth texture, vertex/index
+//! buffers for the two meshes, their uniform bind groups, and the outline bind group.
+//! `resize` recreates the depth view and outline bind group. `render` interpolates
+//! between two `SimSnapshot`s and submits a scene pass followed by the outline pass.
 
 #![deny(unsafe_code)]
 
@@ -28,12 +28,71 @@ struct CameraUniform {
     view_pos: [f32; 4],
 }
 
+/// Outline pass uniform. `vec4` holds `[viewport_w, viewport_h, threshold, strength]`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct OutlineUniform {
+    viewport_and_tunables: [f32; 4],
+}
+
+/// Depth-edge threshold (post-projection). Empirically tuned for the Phase 2 placeholder
+/// scene; raise to suppress noise on steep terrain, lower to catch subtler creases.
+const OUTLINE_THRESHOLD: f32 = 0.0008;
+/// Opacity of detected outline pixels.
+const OUTLINE_STRENGTH: f32 = 1.0;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct ModelUniform {
     model: [[f32; 4]; 4],
     normal_mat: [[f32; 4]; 4],
     tint: [f32; 4],
+    // x = band count, y = ambient floor, z = rim strength, w = rim exponent.
+    shading: [f32; 4],
+}
+
+/// Per-material cel-shading parameters.
+///
+/// Phase 2 Milestone 2.1: banded diffuse + rim light. Values are passed through to the
+/// fragment shader. `bands` is clamped to at least 1.0 in the shader; `rim_exponent` is
+/// clamped to at least 0.01 to avoid `pow(_, 0)` producing a flat sheet.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShadingParams {
+    /// Number of diffuse bands. 3-4 is the design target per ROADMAP § 2.1.
+    pub bands: f32,
+    /// Floor of the banded diffuse term in [0, 1]. Higher values brighten shadows.
+    pub ambient_floor: f32,
+    /// Rim-light scalar added on top of diffuse.
+    pub rim_strength: f32,
+    /// Rim-light falloff exponent; higher = thinner rim.
+    pub rim_exponent: f32,
+}
+
+impl ShadingParams {
+    #[must_use]
+    pub const fn new(bands: f32, ambient_floor: f32, rim_strength: f32, rim_exponent: f32) -> Self {
+        Self {
+            bands,
+            ambient_floor,
+            rim_strength,
+            rim_exponent,
+        }
+    }
+
+    const fn to_vec4(self) -> [f32; 4] {
+        [
+            self.bands,
+            self.ambient_floor,
+            self.rim_strength,
+            self.rim_exponent,
+        ]
+    }
+}
+
+impl Default for ShadingParams {
+    fn default() -> Self {
+        Self::new(3.0, 0.4, 0.25, 2.5)
+    }
 }
 
 /// A wgpu-resident mesh: vertex buffer, index buffer, index count.
@@ -68,18 +127,35 @@ struct DrawModel {
     mesh: GpuMesh,
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    shading: [f32; 4],
+    tint: [f32; 4],
 }
 
 /// Top-level renderer.
 pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
+    outline_pipeline: wgpu::RenderPipeline,
     depth_view: wgpu::TextureView,
     camera_buf: wgpu::Buffer,
     camera_bg: wgpu::BindGroup,
     model_bgl: wgpu::BindGroupLayout,
+    outline_bgl: wgpu::BindGroupLayout,
+    outline_bg: wgpu::BindGroup,
+    outline_params_buf: wgpu::Buffer,
     terrain: DrawModel,
     vehicle: DrawModel,
     cube_size: f32,
+    // Kept for shader hot-reload pipeline rebuilds; feature-gated to avoid dead-code
+    // warnings in release/default builds. Re-exposed without the gate when another
+    // caller needs them.
+    #[cfg(feature = "shader-hot-reload")]
+    scene_pipeline_layout: wgpu::PipelineLayout,
+    #[cfg(feature = "shader-hot-reload")]
+    outline_pipeline_layout: wgpu::PipelineLayout,
+    #[cfg(feature = "shader-hot-reload")]
+    surface_format: wgpu::TextureFormat,
+    #[cfg(feature = "shader-hot-reload")]
+    watcher: Option<crate::hot_reload::Watcher>,
 }
 
 impl Renderer {
@@ -93,20 +169,27 @@ impl Renderer {
         surface_format: wgpu::TextureFormat,
         initial_size: (u32, u32),
         terrain_mesh: &CpuMesh,
+        terrain_shading: ShadingParams,
         vehicle_mesh: &CpuMesh,
+        vehicle_shading: ShadingParams,
         vehicle_cube_size: f32,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("flowplan-phase1-shader"),
+            label: Some("flowplan-scene-shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+        });
+        let outline_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("flowplan-outline-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("outline.wgsl").into()),
         });
 
         // Bind group layouts.
+        // Camera uniform is read by vertex (MVP) AND fragment (rim-light view dir).
         let camera_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("camera-bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -133,69 +216,67 @@ impl Renderer {
             }],
         });
 
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("phase1-pipeline-layout"),
-            bind_group_layouts: &[&camera_bgl, &model_bgl],
-            push_constant_ranges: &[],
-        });
+        let scene_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("phase2-scene-pipeline-layout"),
+                bind_group_layouts: &[&camera_bgl, &model_bgl],
+                push_constant_ranges: &[],
+            });
 
-        let vertex_attrs = wgpu::vertex_attr_array![
-            0 => Float32x3, // position
-            1 => Float32x3, // normal
-            2 => Float32x2, // uv
-            3 => Float32x4, // color
-        ];
-        let vertex_buffers = [wgpu::VertexBufferLayout {
-            array_stride: core::mem::size_of::<Vertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &vertex_attrs,
-        }];
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("phase1-pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_main",
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &vertex_buffers,
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs_main",
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                // Phase 1 pragma: no culling. Hand-authored cube + terrain meshes do not
-                // yet guarantee CCW winding in every case. Phase 2 brings glTF-imported
-                // meshes with trusted winding, at which point we re-enable back-face
-                // culling and save the fragment work.
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+        let pipeline =
+            build_scene_pipeline(device, &scene_pipeline_layout, &shader, surface_format);
 
         let depth_view = create_depth_view(device, initial_size);
+
+        // Outline bind-group layout: depth texture (sampled as depth) + params uniform.
+        let outline_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("outline-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            core::mem::size_of::<OutlineUniform>() as u64,
+                        ),
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let outline_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("outline-pipeline-layout"),
+                bind_group_layouts: &[&outline_bgl],
+                push_constant_ranges: &[],
+            });
+        let outline_pipeline = build_outline_pipeline(
+            device,
+            &outline_pipeline_layout,
+            &outline_shader,
+            surface_format,
+        );
+
+        let outline_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("outline-params-ubo"),
+            size: core::mem::size_of::<OutlineUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let outline_bg =
+            build_outline_bind_group(device, &outline_bgl, &depth_view, &outline_params_buf);
 
         // Camera uniform.
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -220,6 +301,7 @@ impl Renderer {
             terrain_mesh,
             Mat4::IDENTITY,
             Vec4::new(1.0, 1.0, 1.0, 1.0),
+            terrain_shading,
         );
 
         // Vehicle draw model. Initial transform is identity; `render` overwrites each frame.
@@ -229,6 +311,7 @@ impl Renderer {
             vehicle_mesh,
             Mat4::IDENTITY,
             Vec4::new(1.0, 1.0, 1.0, 1.0),
+            vehicle_shading,
         );
 
         // Prime camera uniform to a sensible default so the first frame does not stutter.
@@ -247,21 +330,98 @@ impl Renderer {
             }),
         );
 
+        #[cfg(feature = "shader-hot-reload")]
+        let watcher = match crate::hot_reload::Watcher::new() {
+            Ok(w) => Some(w),
+            Err(e) => {
+                // Dev-only feature; failing to spawn the watcher is not fatal.
+                eprintln!("flowplan-render: shader-hot-reload disabled: {e}");
+                None
+            },
+        };
+
         Self {
             pipeline,
+            outline_pipeline,
             depth_view,
             camera_buf,
             camera_bg,
             model_bgl,
+            outline_bgl,
+            outline_bg,
+            outline_params_buf,
             terrain,
             vehicle,
             cube_size: vehicle_cube_size,
+            #[cfg(feature = "shader-hot-reload")]
+            scene_pipeline_layout,
+            #[cfg(feature = "shader-hot-reload")]
+            outline_pipeline_layout,
+            #[cfg(feature = "shader-hot-reload")]
+            surface_format,
+            #[cfg(feature = "shader-hot-reload")]
+            watcher,
         }
+    }
+
+    /// Check the shader-reload flag and rebuild pipelines if a watched file changed.
+    /// No-op in release builds (feature `shader-hot-reload` disabled by default).
+    #[cfg(feature = "shader-hot-reload")]
+    pub fn maybe_reload_shaders(&mut self, device: &wgpu::Device) {
+        let Some(watcher) = self.watcher.as_ref() else {
+            return;
+        };
+        if !watcher.take_pending() {
+            return;
+        }
+        let scene_src = match crate::hot_reload::load_source("shader.wgsl") {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("flowplan-render: scene shader read failed: {e}");
+                return;
+            },
+        };
+        let outline_src = match crate::hot_reload::load_source("outline.wgsl") {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("flowplan-render: outline shader read failed: {e}");
+                return;
+            },
+        };
+        let scene_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("flowplan-scene-shader-reload"),
+            source: wgpu::ShaderSource::Wgsl(scene_src.into()),
+        });
+        let outline_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("flowplan-outline-shader-reload"),
+            source: wgpu::ShaderSource::Wgsl(outline_src.into()),
+        });
+        self.pipeline = build_scene_pipeline(
+            device,
+            &self.scene_pipeline_layout,
+            &scene_mod,
+            self.surface_format,
+        );
+        self.outline_pipeline = build_outline_pipeline(
+            device,
+            &self.outline_pipeline_layout,
+            &outline_mod,
+            self.surface_format,
+        );
+        eprintln!("flowplan-render: shaders reloaded");
     }
 
     /// Handle a window resize.
     pub fn resize(&mut self, device: &wgpu::Device, size: (u32, u32)) {
         self.depth_view = create_depth_view(device, size);
+        // Outline bind group references the depth view by handle; rebuild it so the
+        // outline pass reads the fresh depth texture rather than the dropped one.
+        self.outline_bg = build_outline_bind_group(
+            device,
+            &self.outline_bgl,
+            &self.depth_view,
+            &self.outline_params_buf,
+        );
     }
 
     /// Intentional read accessor; render crate may grow multiple model-bind-group layouts.
@@ -323,7 +483,8 @@ impl Renderer {
         let vehicle_uniform = ModelUniform {
             model: model_mat.to_cols_array_2d(),
             normal_mat: normal_mat.to_cols_array_2d(),
-            tint: [1.0, 0.82, 0.28, 1.0],
+            tint: self.vehicle.tint,
+            shading: self.vehicle.shading,
         };
         queue.write_buffer(
             &self.vehicle.uniform_buf,
@@ -331,43 +492,83 @@ impl Renderer {
             bytemuck::bytes_of(&vehicle_uniform),
         );
 
-        // Begin render pass.
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("phase1-pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target_view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(clear_color),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.depth_view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
+        // Outline params: viewport size + tunables, written every frame so a resize is
+        // reflected immediately without a dedicated resize hook for the params buffer.
+        let outline_params = OutlineUniform {
+            viewport_and_tunables: [
+                size.0 as f32,
+                size.1 as f32,
+                OUTLINE_THRESHOLD,
+                OUTLINE_STRENGTH,
+            ],
+        };
+        queue.write_buffer(
+            &self.outline_params_buf,
+            0,
+            bytemuck::bytes_of(&outline_params),
+        );
+
+        // Scene pass.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("phase2-scene-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(clear_color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
                 }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-        });
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
 
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.camera_bg, &[]);
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.camera_bg, &[]);
 
-        // Draw terrain.
-        pass.set_bind_group(1, &self.terrain.bind_group, &[]);
-        pass.set_vertex_buffer(0, self.terrain.mesh.vbo.slice(..));
-        pass.set_index_buffer(self.terrain.mesh.ibo.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..self.terrain.mesh.index_count, 0, 0..1);
+            // Draw terrain.
+            pass.set_bind_group(1, &self.terrain.bind_group, &[]);
+            pass.set_vertex_buffer(0, self.terrain.mesh.vbo.slice(..));
+            pass.set_index_buffer(self.terrain.mesh.ibo.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..self.terrain.mesh.index_count, 0, 0..1);
 
-        // Draw vehicle cube.
-        pass.set_bind_group(1, &self.vehicle.bind_group, &[]);
-        pass.set_vertex_buffer(0, self.vehicle.mesh.vbo.slice(..));
-        pass.set_index_buffer(self.vehicle.mesh.ibo.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..self.vehicle.mesh.index_count, 0, 0..1);
+            // Draw vehicle cube.
+            pass.set_bind_group(1, &self.vehicle.bind_group, &[]);
+            pass.set_vertex_buffer(0, self.vehicle.mesh.vbo.slice(..));
+            pass.set_index_buffer(self.vehicle.mesh.ibo.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..self.vehicle.mesh.index_count, 0, 0..1);
+        }
+
+        // Outline pass: full-screen triangle, sobel on the just-written depth buffer,
+        // alpha-blended black on top of the scene.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("phase2-outline-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.outline_pipeline);
+            pass.set_bind_group(0, &self.outline_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
     }
 }
 
@@ -378,12 +579,16 @@ impl DrawModel {
         mesh: &CpuMesh,
         initial_model: Mat4,
         tint: Vec4,
+        shading: ShadingParams,
     ) -> Self {
         let mesh_gpu = GpuMesh::upload(device, mesh);
+        let tint_arr = [tint.x, tint.y, tint.z, tint.w];
+        let shading_arr = shading.to_vec4();
         let uniform = ModelUniform {
             model: initial_model.to_cols_array_2d(),
             normal_mat: initial_model.to_cols_array_2d(),
-            tint: [tint.x, tint.y, tint.z, tint.w],
+            tint: tint_arr,
+            shading: shading_arr,
         };
         let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(&format!("{}-model-ubo", mesh.label)),
@@ -402,8 +607,113 @@ impl DrawModel {
             mesh: mesh_gpu,
             uniform_buf,
             bind_group,
+            shading: shading_arr,
+            tint: tint_arr,
         }
     }
+}
+
+fn build_scene_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    surface_format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let vertex_attrs = wgpu::vertex_attr_array![
+        0 => Float32x3, // position
+        1 => Float32x3, // normal
+        2 => Float32x2, // uv
+        3 => Float32x4, // color
+    ];
+    let vertex_buffers = [wgpu::VertexBufferLayout {
+        array_stride: core::mem::size_of::<Vertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &vertex_attrs,
+    }];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("phase2-scene-pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: "vs_main",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &vertex_buffers,
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: "fs_main",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: surface_format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            // Phase 1 pragma carried into Phase 2: no culling. Hand-authored cube + terrain
+            // meshes do not yet guarantee CCW winding. Milestone 2.3 brings glTF-imported
+            // meshes with trusted winding; culling re-enables there.
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Less,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
+fn build_outline_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    surface_format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("phase2-outline-pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: "vs_outline",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: "fs_outline",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: surface_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        // Outline is a full-screen post pass; no depth interaction.
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
 }
 
 fn create_depth_view(device: &wgpu::Device, size: (u32, u32)) -> wgpu::TextureView {
@@ -418,10 +728,34 @@ fn create_depth_view(device: &wgpu::Device, size: (u32, u32)) -> wgpu::TextureVi
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: DEPTH_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        // `TEXTURE_BINDING` is required so the outline pass can sample depth after the
+        // scene pass writes it. The two passes are non-overlapping within the encoder.
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     tex.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+fn build_outline_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    depth_view: &wgpu::TextureView,
+    params_buf: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("outline-bg"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(depth_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: params_buf.as_entire_binding(),
+            },
+        ],
+    })
 }
 
 fn aspect((w, h): (u32, u32)) -> f32 {

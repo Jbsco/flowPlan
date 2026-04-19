@@ -12,6 +12,11 @@ description = "flowPlan app: main loop, window, lifecycle, orchestration"
 name = "flowplan"
 path = "src/main.rs"
 
+[features]
+# Forwards to `flowplan-render/shader-hot-reload`. Dev-only; enable via
+# `cargo run -p flowplan-app --features shader-hot-reload`.
+shader-hot-reload = ["flowplan-render/shader-hot-reload"]
+
 [lints]
 workspace = true
 
