@@ -169,13 +169,14 @@ A cube can be flown (WASD/gamepad) over a terrain. Frame budget check passes at 
 - [x] Shader hot-reload (dev only) via `notify`, feature-gated as `shader-hot-reload` on `flowplan-render` / `flowplan-app`
 - [x] Visual snapshot tests via `cargo-insta` on a reference scene (`scene_minimal`); hardware-gated behind `hardware-tests` feature.
 
-### Milestone 2.2: Water
+### Milestone 2.2: Water -- IN PROGRESS (foam + distant LOD pending)
 
-- [ ] Gerstner wave displacement in vertex shader (2-4 wave components) per GPU Gems 2, Ch. 1
-- [ ] Shoreline foam from depth-compare
-- [ ] Normal-mapped distant water; decide transition distance during this phase
-- [ ] Water height sampling on CPU for buoyancy (deterministic, same formula as GPU)
-- [ ] Bench: water on full screen meets frame budget
+- [x] Gerstner wave displacement in vertex shader (3 components) per GPU Gems 2, Ch. 1. `water.wgsl`, separate pipeline. Sun-glint specular highlight bundled. Wave amplitudes 0.1-0.25 m so crests never engulf the plane.
+- [ ] Shoreline foam from depth-compare (Milestone 2.2.4, deferred).
+- [ ] Normal-mapped distant water; decide transition distance during this phase (Milestone 2.2.5b, deferred to Phase 3 scene_standard work).
+- [x] Water height sampling on CPU for buoyancy (`flowplan_world::water_height(x, z, t)`); same 3 wave components as the shader. Consumed by the Phase 2.5 pontoon buoyancy model.
+- [ ] Bench: water on full screen meets frame budget (scene_standard bench is Phase 3 deliverable).
+- [x] **Ancillary in this milestone:** terrain amplitude dampening (`world::terrain` octaves halved so peaks read plausibly against the 4 m Beaver); pre-2.5 terrain+water ground clamp (`SimState::tick` takes `min_altitude` each step; app supplies `max(terrain, water_level) + float_offset + margin`).
 
 ### Milestone 2.3: Plane model (DHC-2 Beaver reference) -- IN PROGRESS (core shipped; back-face culling deferred)
 
