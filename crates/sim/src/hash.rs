@@ -99,7 +99,12 @@ mod tests {
     fn ticks_change_hash() {
         let mut s = SimState::new(1);
         let h0 = state_hash(&s);
-        s.tick(&InputEvents::empty(), &DifficultyDials::default(), FIXED_DT);
+        s.tick(
+            &InputEvents::empty(),
+            &DifficultyDials::default(),
+            FIXED_DT,
+            0.5,
+        );
         let h1 = state_hash(&s);
         assert_ne!(h0, h1);
     }
@@ -113,8 +118,8 @@ mod tests {
         events.push(InputEvent::SetThrottle(0.5));
         events.push(InputEvent::SetPitch(0.1));
         for _ in 0..128 {
-            a.tick(&events, &d, FIXED_DT);
-            b.tick(&events, &d, FIXED_DT);
+            a.tick(&events, &d, FIXED_DT, 0.5);
+            b.tick(&events, &d, FIXED_DT, 0.5);
         }
         assert_eq!(state_hash(&a), state_hash(&b));
     }
@@ -154,8 +159,8 @@ mod tests {
             let d = DifficultyDials::default();
             for batch in &batches {
                 let ev = InputEvents::from_slice(batch);
-                a.tick(&ev, &d, FIXED_DT);
-                b.tick(&ev, &d, FIXED_DT);
+                a.tick(&ev, &d, FIXED_DT, 0.5);
+                b.tick(&ev, &d, FIXED_DT, 0.5);
             }
             prop_assert_eq!(state_hash(&a), state_hash(&b));
         }
@@ -172,8 +177,8 @@ mod tests {
             let d = DifficultyDials::default();
             for batch in &batches {
                 let ev = InputEvents::from_slice(batch);
-                a.tick(&ev, &d, FIXED_DT);
-                b.tick(&ev, &d, FIXED_DT);
+                a.tick(&ev, &d, FIXED_DT, 0.5);
+                b.tick(&ev, &d, FIXED_DT, 0.5);
             }
             // Seed is folded into state_hash; divergence is guaranteed.
             prop_assert_ne!(state_hash(&a), state_hash(&b));

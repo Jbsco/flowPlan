@@ -63,8 +63,10 @@ const QUAD_DRAG: f32 = 0.014;
 /// `Cl(alpha)` tables aligned with the body's up axis.
 const LIFT_COEFF: f32 = 0.344;
 
-/// Ground plane height. Placeholder until terrain sampling lands later in Phase 1.
-const GROUND_Y: f32 = 0.5;
+// Ground plane height is no longer a sim-crate constant. Callers pass `min_altitude`
+// into `tick` each step; the sim clamps the CG Y to that floor. Terrain and water
+// sampling live in `world` / app, so the sim stays decoupled from them while the
+// invariant "vehicle CG never dips below the floor" sits at the sim boundary.
 
 /// Authoritative simulation state.
 ///
@@ -104,11 +106,20 @@ impl SimState {
 
     /// Advance the simulation by one fixed step.
     ///
-    /// Deterministic for a given `(seed, input trace, difficulty state, tick count)`.
-    /// See [`DESIGN.md § Invariants`](../../../DESIGN.md#invariants).
-    pub fn tick(&mut self, inputs: &InputEvents, _difficulty: &DifficultyDials, dt: f32) {
+    /// Deterministic for a given `(seed, input trace, difficulty state, tick count,
+    /// min_altitude)`. See [`DESIGN.md § Invariants`](../../../DESIGN.md#invariants).
+    /// `min_altitude` is the floor the CG must not cross: for the game it's
+    /// `max(terrain.height(x, z), mean_water_level) + float_offset` (computed by the
+    /// app). For pure-sim tests use any constant (e.g., `0.5`).
+    pub fn tick(
+        &mut self,
+        inputs: &InputEvents,
+        _difficulty: &DifficultyDials,
+        dt: f32,
+        min_altitude: f32,
+    ) {
         apply_inputs(&mut self.vehicle.controls, &mut self.camera, inputs);
-        tick_dynamics(&mut self.vehicle, dt);
+        tick_dynamics(&mut self.vehicle, dt, min_altitude);
         self.camera
             .follow(self.vehicle.position, self.vehicle.orientation, dt);
         self.time_of_day = (self.time_of_day + dt / DAY_LENGTH_SECONDS).rem_euclid(1.0);
@@ -140,7 +151,7 @@ fn apply_inputs(controls: &mut Controls, camera: &mut Camera, inputs: &InputEven
 }
 
 /// Advance vehicle dynamics by `dt` given its current controls.
-fn tick_dynamics(v: &mut VehicleState, dt: f32) {
+fn tick_dynamics(v: &mut VehicleState, dt: f32, min_altitude: f32) {
     // Commanded angular rates per axis, expressed in the *body frame*.
     // Sign conventions (right-handed, Y-up, -Z forward):
     //   pitch positive = nose up      -> rotate +X (right)
@@ -187,9 +198,10 @@ fn tick_dynamics(v: &mut VehicleState, dt: f32) {
     v.velocity += accel * dt;
     v.position += v.velocity * dt;
 
-    // Simple ground plane.
-    if v.position.y < GROUND_Y {
-        v.position.y = GROUND_Y;
+    // Caller-supplied floor (terrain + float offset, or water + float offset, whichever
+    // is higher in the app; a constant in pure-sim tests).
+    if v.position.y < min_altitude {
+        v.position.y = min_altitude;
         if v.velocity.y < 0.0 {
             v.velocity.y = 0.0;
         }
@@ -218,7 +230,7 @@ mod tests {
         let mut s = SimState::new(1);
         let t0 = s.time_of_day;
         let d = DifficultyDials::default();
-        s.tick(&InputEvents::empty(), &d, FIXED_DT);
+        s.tick(&InputEvents::empty(), &d, FIXED_DT, 0.5);
         let expected = t0 + FIXED_DT / DAY_LENGTH_SECONDS;
         assert!(
             (s.time_of_day - expected).abs() < 1e-6,
@@ -234,7 +246,7 @@ mod tests {
         // Force the clock near the wrap boundary and step past it.
         s.time_of_day = 1.0 - (FIXED_DT / DAY_LENGTH_SECONDS) * 0.5;
         let d = DifficultyDials::default();
-        s.tick(&InputEvents::empty(), &d, FIXED_DT);
+        s.tick(&InputEvents::empty(), &d, FIXED_DT, 0.5);
         assert!(s.time_of_day < 0.5, "expected wrap; got {}", s.time_of_day);
         assert!(s.time_of_day >= 0.0);
     }
@@ -244,8 +256,8 @@ mod tests {
         let mut s = SimState::new(1);
         let empty = InputEvents::empty();
         let d = DifficultyDials::default();
-        s.tick(&empty, &d, FIXED_DT);
-        s.tick(&empty, &d, FIXED_DT);
+        s.tick(&empty, &d, FIXED_DT, 0.5);
+        s.tick(&empty, &d, FIXED_DT, 0.5);
         assert_eq!(s.tick, TickCount(2));
     }
 
@@ -256,7 +268,7 @@ mod tests {
         let empty = InputEvents::empty();
         let d = DifficultyDials::default();
         for _ in 0..10 {
-            s.tick(&empty, &d, FIXED_DT);
+            s.tick(&empty, &d, FIXED_DT, 0.5);
         }
         assert!(s.vehicle.position.y < 20.0);
         assert!(s.vehicle.velocity.y < 0.0);
@@ -268,10 +280,10 @@ mod tests {
         let mut inputs = InputEvents::default();
         inputs.push(InputEvent::SetThrottle(1.0));
         let d = DifficultyDials::default();
-        s.tick(&inputs, &d, FIXED_DT);
+        s.tick(&inputs, &d, FIXED_DT, 0.5);
         // After one tick, velocity should have a negative z component (forward).
         for _ in 0..60 {
-            s.tick(&InputEvents::empty(), &d, FIXED_DT);
+            s.tick(&InputEvents::empty(), &d, FIXED_DT, 0.5);
         }
         assert!(
             s.vehicle.velocity.z < -2.0,
@@ -287,21 +299,22 @@ mod tests {
         let mut inputs = InputEvents::default();
         inputs.push(InputEvent::CycleView);
         let d = DifficultyDials::default();
-        s.tick(&inputs, &d, FIXED_DT);
+        s.tick(&inputs, &d, FIXED_DT, 0.5);
         assert_ne!(s.camera.view_kind, original);
     }
 
     #[test]
     fn ground_clamp_holds() {
+        const FLOOR: f32 = 0.5;
         let mut s = SimState::new(1);
-        // Start just above the ground, falling fast enough that the tick's integration
-        // step drives position below GROUND_Y and triggers the clamp.
-        s.vehicle.position = Vec3::new(0.0, GROUND_Y + 0.01, 0.0);
+        // Start just above the floor, falling fast enough that the tick's integration
+        // step drives position below it and triggers the clamp.
+        s.vehicle.position = Vec3::new(0.0, FLOOR + 0.01, 0.0);
         s.vehicle.velocity = Vec3::new(0.0, -5.0, 0.0);
         let d = DifficultyDials::default();
-        s.tick(&InputEvents::empty(), &d, FIXED_DT);
+        s.tick(&InputEvents::empty(), &d, FIXED_DT, FLOOR);
         assert!(
-            s.vehicle.position.y >= GROUND_Y - f32::EPSILON,
+            s.vehicle.position.y >= FLOOR - f32::EPSILON,
             "position.y = {}",
             s.vehicle.position.y
         );
@@ -318,7 +331,7 @@ mod tests {
         let mut inputs = InputEvents::default();
         inputs.push(InputEvent::SetView(ViewKind::FirstPerson));
         let d = DifficultyDials::default();
-        s.tick(&inputs, &d, FIXED_DT);
+        s.tick(&inputs, &d, FIXED_DT, 0.5);
         assert_eq!(s.camera.view_kind, ViewKind::FirstPerson);
     }
 }

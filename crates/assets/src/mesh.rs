@@ -214,6 +214,28 @@ impl CpuMesh {
             .fold(f32::INFINITY, f32::min)
     }
 
+    /// Axis-aligned bounding box: `(min, max)` in the mesh's local space. Each is
+    /// `[x, y, z]`. Returns `([0, 0, 0], [0, 0, 0])` for an empty mesh.
+    #[must_use]
+    pub fn bbox(&self) -> ([f32; 3], [f32; 3]) {
+        if self.vertices.is_empty() {
+            return ([0.0; 3], [0.0; 3]);
+        }
+        let mut mn = [f32::INFINITY; 3];
+        let mut mx = [f32::NEG_INFINITY; 3];
+        for v in &self.vertices {
+            for axis in 0..3 {
+                if v.position[axis] < mn[axis] {
+                    mn[axis] = v.position[axis];
+                }
+                if v.position[axis] > mx[axis] {
+                    mx[axis] = v.position[axis];
+                }
+            }
+        }
+        (mn, mx)
+    }
+
     /// Translate every vertex by `offset`. Normals are unchanged (rotation/scale-only
     /// transforms would require normal-matrix handling; translation does not).
     pub fn translate(&mut self, offset: [f32; 3]) {
@@ -304,6 +326,26 @@ mod tests {
         for v in &m.vertices {
             assert!((v.position[1] - 0.0).abs() < f32::EPSILON);
             assert!((v.normal[1] - 1.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn bbox_of_cube_is_symmetric() {
+        let m = CpuMesh::cube(2.0, [1.0; 4]);
+        let (mn, mx) = m.bbox();
+        for axis in 0..3 {
+            assert!((mn[axis] - -1.0).abs() < 1e-6);
+            assert!((mx[axis] - 1.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn bbox_empty_mesh() {
+        let m = CpuMesh::new("empty");
+        let (mn, mx) = m.bbox();
+        for axis in 0..3 {
+            assert!(mn[axis].abs() < f32::EPSILON);
+            assert!(mx[axis].abs() < f32::EPSILON);
         }
     }
 

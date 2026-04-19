@@ -89,6 +89,15 @@ const WATER_HALF_EXTENT: f32 = 4000.0;
 /// cel shader.
 const WATER_COLOR: [f32; 4] = [0.18, 0.38, 0.58, 1.0];
 
+/// Mean water level in world-space Y. Gerstner waves oscillate around this; the passive
+/// ground clamp (pre-2.5) uses it as a static floor so the plane can't descend through
+/// mean sea level while buoyancy is still not modeled.
+const WATER_LEVEL: f32 = 0.0;
+
+/// Small clearance added to the floor to avoid surface z-fighting between the vehicle
+/// and the terrain / water mesh.
+const SURFACE_MARGIN: f32 = 0.05;
+
 pub fn run() -> Result<()> {
     let event_loop = EventLoop::new().context("construct winit event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -117,6 +126,10 @@ struct Runtime {
 
     // World (kept on the app side; sim doesn't depend on terrain in Phase 1).
     terrain: Terrain,
+    /// Depth (meters) from the vehicle mesh's CG/origin down to its lowest point
+    /// (floats / wheels). Used to lift the spawn altitude and each-tick `min_altitude`
+    /// so those contact points clear terrain / water.
+    vehicle_float_offset: f32,
 
     // Linear (non-sRGB) view format for the egui HUD pass. See `linear_variant`.
     hud_format: wgpu::TextureFormat,
@@ -366,6 +379,7 @@ impl Runtime {
             config,
             renderer,
             terrain,
+            vehicle_float_offset,
             hud_format,
             sim,
             difficulty: DifficultyDials::default(),
@@ -413,7 +427,16 @@ impl Runtime {
             while let Some(ev) = self.input_queue.pop() {
                 batch.push(ev);
             }
-            self.sim.tick(&batch, &self.difficulty, FIXED_DT);
+            // Min-altitude floor: highest of (terrain at vehicle's XZ, mean water level)
+            // plus float_offset plus a small margin to avoid surface z-fighting. Wave
+            // crests can still clip floats briefly -- resolved by the Phase 2.5
+            // buoyancy model, not this passive clamp.
+            let pos = self.sim.vehicle.position;
+            let terrain_here = self.terrain.height(pos.x, pos.z);
+            let floor = terrain_here.max(WATER_LEVEL);
+            let min_altitude = floor + self.vehicle_float_offset + SURFACE_MARGIN;
+            self.sim
+                .tick(&batch, &self.difficulty, FIXED_DT, min_altitude);
             // Post-tick terrain-aware camera clamp: prevents chase camera from
             // clipping through hills. Kept outside `sim.tick` so sim stays pure.
             let cam_ground = self
@@ -515,11 +538,25 @@ fn load_vehicle_mesh() -> CpuMesh {
                 // down to the floats, which makes roll / pitch feel wrong. If the
                 // floats visually sit below the terrain, that's a sign the Blender
                 // origin needs to move up (or the spawn altitude needs tuning).
+                //
+                // The bbox dump below lets you verify the axis convention. For a
+                // DHC-2-analogue authored at real scale and with Y-up export: expect
+                // X extent ~wingspan (±7 m), Y extent tall (~2-3 m with CG near
+                // wing-root height), Z extent fuselage length (~±4.5 m). If Y and Z
+                // extents look swapped, the Blender `+Y Up` export option is off.
+                let (mn, mx) = mesh.bbox();
                 tracing::info!(
-                    "loaded aircraft mesh: {} ({} verts, {} tris)",
+                    "loaded aircraft mesh: {} ({} verts, {} tris) bbox \
+                     x[{:+6.2}, {:+6.2}] y[{:+6.2}, {:+6.2}] z[{:+6.2}, {:+6.2}]",
                     VEHICLE_GLB_PATH,
                     mesh.vertex_count(),
                     mesh.index_count() / 3,
+                    mn[0],
+                    mx[0],
+                    mn[1],
+                    mx[1],
+                    mn[2],
+                    mx[2],
                 );
                 mesh
             },
