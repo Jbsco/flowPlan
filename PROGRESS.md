@@ -3,15 +3,22 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
-Last updated: **2026-04-19** (Phase 1 locked).
+Last updated: **2026-04-19** (Phase 2 in progress; Milestones 2.1, 2.6, 2.3 core shipped; 2.2 Water is NEXT).
 
 ## Current status
 
 - **Phase 0 (Skeleton)**: COMPLETE 2026-04-19
 - **Phase 1 (Core Loop)**: COMPLETE 2026-04-19 (locked; tuning frozen)
-- **Phase 2 (Feel Core)**: NEXT
-- Gate: green. `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, and `cargo bench --bench frame_budget -- --test` all pass.
-- Test count: **81 total** (up from 30 at Phase 0).
+- **Phase 2 (Feel Core)**: IN PROGRESS
+    - Milestone 2.1 (cel shading + outline + hot-reload + insta harness): COMPLETE
+    - Milestone 2.6 (procedural sky + fog + sim time-of-day): COMPLETE
+    - Milestone 2.3 (plane model + glTF loader + spec sheet): CORE SHIPPED; 2.3.4 back-face culling deferred pending chase-camera / cockpit work
+    - Milestone 2.2 (water): NEXT
+    - Milestone 2.4 (flight model): QUEUED (consumes the spec from 2.3)
+    - Milestone 2.5 (pontoon buoyancy): QUEUED (needs 2.2 water height sampler)
+- Milestone order taken (deviates from ROADMAP's numeric order): **2.1 -> 2.6 -> 2.3 -> 2.2 -> 2.4 -> 2.5**. Sky landed before plane because it made visual tuning of the Beaver easier; water comes before flight model because buoyancy (2.5) needs it.
+- Gate: green. `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `cargo bench --bench frame_budget -- --test`, and the hardware snapshot tests all pass.
+- Test count: **94 total** (up from 81 at Phase 1 lock). Breakdown: +7 sim/world (time-of-day, sky math, aircraft_spec), +4 assets (mesh bbox/translate), +2 hardware (scene_minimal, beaver_preview).
 
 ## Quick commands
 
@@ -154,62 +161,149 @@ Per-crate `#![allow(...)]` uses (documented at site):
 
 - None tracked. All Phase 1 warnings have been addressed.
 
-## Phase 2 readiness
+## Phase 2 (IN PROGRESS)
 
-See [ROADMAP.md § Phase 2: Feel Core](ROADMAP.md#phase-2-feel-core) for the milestone checklist. Key work:
+Milestone order taken: **2.1 -> 2.6 -> 2.3 -> 2.2 -> 2.4 -> 2.5**. See [ROADMAP.md § Phase 2](ROADMAP.md#phase-2-feel-core) for the original ordering.
 
-- Cel shading (banded diffuse + rim + outline pass).
-- Gerstner water with CPU height sampling for buoyancy parity.
-- DHC-2 Beaver-analogue glTF import (see [AIRCRAFT.md § MVP Reference](AIRCRAFT.md#mvp-reference-aircraft-dhc-2-beaver-analogue) for the frozen spec sheet).
-- Real airfoil-based flight model replaces the Phase 1 placeholder (constants above become aircraft data).
-- Pontoon buoyancy on water.
-- Procedural sky + celestial-sphere infrastructure (stars/moon populate in Phase 5, framework lands here so nothing has to be retrofitted).
-- Visual snapshot tests via `cargo-insta` on a reference scene.
-- Re-enable back-face culling with glTF-imported meshes.
-- Fix the egui sRGB warning en route.
+### Tech-stack additions in Phase 2
 
-Gate criteria: per-phase quality gate + visual snapshot tests + frame-budget bench on `scene_standard` under reference-tier budget + playtest that the core feel "clicks."
+Pinned via `Cargo.toml`. Still within the approved list in [DESIGN.md § Tech Stack](DESIGN.md#tech-stack).
+
+| Crate | Version | Role |
+| --- | --- | --- |
+| gltf | 1.4 | glTF 2.0 import in `flowplan-assets`. |
+| thiserror | 1 | Error enums on the asset loader. |
+| notify | 6 (optional) | Dev-only shader hot-reload; feature `shader-hot-reload` on `flowplan-render`. |
+| insta | 1.34 (dev) | Hardware visual snapshot harness. |
+| image | 0.25 (dev) | PNG encoding for snapshots. |
+| pollster | 0.4 (dev) | Headless wgpu adapter init for snapshot tests. |
+
+Feature flags introduced:
+- `flowplan-render/shader-hot-reload` -- pulls in `notify` + reads `shader.wgsl` / `outline.wgsl` / `sky.wgsl` from disk at runtime; dev only. `flowplan-app/shader-hot-reload` forwards.
+- `flowplan-render/hardware-tests` -- gates the hardware snapshot test in `crates/render/tests/visual_snapshot.rs`.
+
+### Milestone 2.1 deliverables (COMPLETE)
+
+- `ShadingParams { bands, ambient_floor, rim_strength, rim_exponent }` uniform attached per-material to the scene pipeline's `ModelUniform.shading: vec4`. App sets distinct terrain/vehicle presets.
+- Screen-space sobel outline pass on depth, `outline.wgsl`, separate pipeline, alpha-blended after scene.
+- Rim light in the scene fragment shader, per-material strength + exponent.
+- Shader hot-reload via `notify` behind `shader-hot-reload` feature. `Renderer::maybe_reload_shaders` re-reads WGSL from `env!("CARGO_MANIFEST_DIR")/src/*.wgsl` and rebuilds the scene + outline pipelines.
+- `cargo-insta` visual snapshot harness in `crates/render/tests/visual_snapshot.rs`, baseline `scene_minimal.snap.png` committed. Hardware-gated.
+
+### Milestone 2.6 deliverables (COMPLETE)
+
+- `SceneParams { sun_dir, sun_color, ambient, fog_color, fog_density }` bound at `@group(2)` for the scene pipeline. Default reproduces the Phase 1 hard-coded light direction.
+- Procedural sky in `sky.wgsl`: full-screen triangle pre-scene pass, reconstructs world-space view rays via `inverse_view_proj` (added to `CameraUniform`). Zenith-to-horizon gradient, warm sun-bearing band, sun disc + halo, below-horizon darkening.
+- Sun-tinted exponential distance fog in the scene fragment shader. Fog mixes toward `sun_color` along the view-to-sun axis. Default density 0.0015/m.
+- `SimState.time_of_day: f32` in `[0, 1)`, default 0.5 (noon), advances `dt / DAY_LENGTH_SECONDS` per tick with `rem_euclid(1)` wrap. Folded into `state_hash` so determinism covers it.
+- `world::sun_direction(t)` in new `crates/world/src/sky.rs`. Great-circle with fixed `Z = -0.3` tilt: 0 = midnight (below horizon), 0.25 = dawn east, 0.5 = noon overhead, 0.75 = dusk west.
+- App derives `SceneParams.sun_dir` from the snapshot's `time_of_day` each frame.
+
+### Milestone 2.3 deliverables (CORE SHIPPED; 2.3.4 culling deferred)
+
+- `flowplan_assets::load_mesh(bytes) -> Result<CpuMesh, GltfLoadError>` handles `.glb` and embedded-buffer `.gltf`. First-mesh / first-primitive / triangle topology. POSITION required; NORMAL / TEXCOORD_0 / COLOR_0 / indices default when absent.
+- `CpuMesh::bbox_min_y` and `CpuMesh::translate` for per-load origin adjustment.
+- App tries `data/aircraft/northlander.glb` at startup; falls back to the placeholder cube on missing-file or parse-error. Auto-shifts the mesh so bottom-Y sits at 0.
+- `AircraftSpec { name, empty_mass_kg, max_mass_wheels_kg, max_mass_floats_kg, wing_area_m2, aspect_ratio, airfoil_root, airfoil_tip, engine, fuel_capacity_gal, speeds }` in `flowplan-sim`, serde+ron parsed. `data/aircraft/northlander.ron` committed, authored from AIRCRAFT.md § MVP Reference with SI-normalized speeds.
+- Renderer's `vehicle_cube_size` removed; meshes now render at authored scale. The cube placeholder is built at 2 m directly in the app.
+- `beaver_preview.snap.png` committed as a visual regression baseline for the loaded Beaver.
+- **Deferred:** 2.3.4 back-face culling. Attempted; snapshot views remained clean but interior chase-camera / first-person views made the Beaver's exterior shell disappear (see-through plane effect). Culling stays off until a cockpit model + chase-camera clearance rework lands.
+
+### Phase 2 tech-stack additions in Cargo.toml
+
+| Crate | Version | Role |
+| --- | --- | --- |
+| gltf | 1.4 | glTF 2.0 import in `flowplan-assets`. |
+| thiserror | 1 | Loader error enum. |
+| notify | 6 (optional) | Dev-only filesystem watch for hot-reload. |
+
+### Bugs fixed during Phase 2 (do not re-introduce)
+
+1. **Scene uniform visibility**: when the fragment stage started reading `camera.view_pos` for the rim-light view direction, the camera-BGL visibility had to move from `VERTEX` to `VERTEX_FRAGMENT` -- wgpu validation error otherwise. Applies to the scene BGL too.
+2. **Duplicate `@group` declarations in one WGSL module**: the outline shader's `@group(0)` conflicted with the scene shader's camera `@group(0)`. Fix: separate `shader.wgsl` / `outline.wgsl` / `sky.wgsl` modules.
+3. **Full-screen triangle vertex math**: the initial oversized-triangle formula was correct in NDC but an intermediate commit had duplicate unused `x` / `y` let-bindings that confused the reader. Current form in `sky.wgsl` and `outline.wgsl`: `x_ndc = f32(idx & 1) * 4.0 - 1.0; y_ndc = f32(idx >> 1) * 4.0 - 1.0;`.
+4. **insta dev-dep lint pollution**: `cargo test` without the `hardware-tests` feature tripped `unused_crate_dependencies` on dev-deps consumed only by the feature-gated test. Fix: `use bytemuck as _;` / `use image as _;` / etc. markers at the top of `visual_snapshot.rs`, plus a feature-conditional `#[cfg(feature = "shader-hot-reload")] use notify as _;` line.
+5. **Blender STL orientation**: STL export preserves Blender's Z-up + -Y-forward; glTF wants Y-up + -Z-forward. Re-export with `+Y Up` under `Transform` in the glTF export dialog, and `Object -> Apply -> All Transforms` before export. STL imports create disconnected per-triangle vertex soup; needs `Mesh -> Merge by Distance` + `Recalculate Normals Outside` + `Shade Auto Smooth` in Blender before the glTF export looks right.
+6. **Back-face culling vs. interior views**: culling correctly removes back-facing geometry from the exterior, but chase / first-person camera poses that dip inside the vehicle's bounding volume see the mesh as hollow. Keep `cull_mode: None` in the scene pipeline until cockpit interior + chase-camera clearance are proper.
+
+### New invariants / conventions locked in Phase 2
+
+- **Scene uniform lives at `@group(2)`** in the scene pipeline. Sky pipeline uses `@group(0) = camera, @group(1) = scene` (its own layout; reuses the same bind groups via layout compatibility).
+- **`CameraUniform.inverse_view_proj`** is now part of the uniform's stable layout. Sky pass depends on it.
+- **`SceneUniform.ambient.a`** is reserved for celestial-sphere intensity (Phase 5 hook).
+- **Mesh origin shift at load** is the convention: the app's `load_vehicle_mesh` lifts the mesh so bottom-Y sits at 0 regardless of Blender pivot. Applies to any glTF-imported vehicle.
+- **Time-of-day is a first-class `SimState` field** and part of `state_hash`. Any future sky / weather / wildlife driver reads it from the snapshot.
+- **Snapshot tests are hardware-tier**, feature-gated `hardware-tests`. Baselines live at `crates/render/tests/snapshots/visual_snapshot__*.snap.png`. Byte-exact comparison; tolerant of reference-hardware parity, not cross-driver.
+
+Gate criteria for Phase 2 close (unchanged from ROADMAP): per-phase quality gate + visual snapshot tests + frame-budget bench on `scene_standard` under reference-tier budget + playtest that the core feel "clicks."
 
 ## File map (quick reference)
 
 ```
 crates/
   core/src/{time,handle,rng}.rs            # Newtypes, generational handle, seeded RNG
-  assets/src/mesh.rs                        # Vertex, CpuMesh, cube / terrain builders
+  assets/src/
+    mesh.rs                                 # Vertex, CpuMesh, cube / terrain builders + bbox_min_y / translate
+    gltf_load.rs                            # glTF 2.0 loader (Phase 2.3)
   sim/src/
-    state.rs                                # SimState, tick(), dynamics constants
+    state.rs                                # SimState, tick(), dynamics constants, time_of_day
     camera.rs                               # Camera + views + look_at_quat (WATCH THE SIGN)
     vehicle.rs                              # VehicleState
     controls.rs                             # Controls (pitch/yaw/roll/throttle)
     input.rs                                # InputEvent enum, InputEvents batch
     difficulty.rs                           # DifficultyDials placeholder
-    snapshot.rs                             # SimSnapshot / VehicleSnapshot / CameraSnapshot
-    hash.rs                                 # state_hash + proptest determinism
-  world/src/terrain.rs                      # HeightSampler, seeded Terrain
+    snapshot.rs                             # SimSnapshot (includes time_of_day) / VehicleSnapshot / CameraSnapshot
+    hash.rs                                 # state_hash + proptest determinism (covers time_of_day)
+    aircraft_spec.rs                        # AircraftSpec / EngineSpec / SpeedsSpec, serde+ron (Phase 2.3)
+  world/src/
+    terrain.rs                              # HeightSampler, seeded Terrain
+    sky.rs                                  # sun_direction(time_of_day) (Phase 2.6)
   render/src/
-    renderer.rs                             # Renderer struct, pipeline, pass
-    shader.wgsl                             # Flat-shaded WGSL
+    renderer.rs                             # Renderer + SceneParams + ShadingParams + scene/outline/sky pipelines
+    shader.wgsl                             # Scene pipeline: cel diffuse + rim + fog (Phase 2.1 + 2.6)
+    outline.wgsl                            # Sobel outline full-screen pass (Phase 2.1)
+    sky.wgsl                                # Procedural sky full-screen pre-pass (Phase 2.6)
+    hot_reload.rs                           # Dev-only filesystem watcher (Phase 2.1, feature-gated)
   app/src/
     main.rs                                 # Entry point + tracing init
-    game_app.rs                             # Runtime, accumulator, tick loop
+    game_app.rs                             # Runtime, accumulator, tick loop, glb + ron loaders
     input_map.rs                            # KeyState, arrow/WASD/etc. bindings
     snapshot_buf.rs                         # Double-buffered SimSnapshot
     debug_hud.rs                            # egui overlay (Phase 1 debug only)
 tests/workspace-rules/
   src/lib.rs + tests/dependency_dag.rs      # 9 DAG enforcement tests
+crates/render/tests/
+  visual_snapshot.rs                        # Hardware-gated insta snapshots (scene_minimal, beaver_preview)
+  snapshots/                                # Committed PNG baselines
+data/aircraft/
+  northlander.glb                           # Beaver mesh (Blender-exported, STL origin)
+  northlander.ron                           # Beaver spec sheet
 benches/
   frame_budget.rs                           # criterion smoke
 ```
 
 ## Verification before any Phase 2 work
 
-Before touching Phase 2, run:
+Before touching Phase 2 sub-steps, run:
 
 ```bash
 cargo fmt --all -- --check && \
 cargo clippy --workspace --all-targets -- -D warnings && \
 cargo test --workspace && \
-cargo bench --bench frame_budget -- --test
+cargo bench -p flowplan-benches --bench frame_budget -- --test
 ```
 
-All four must be green. If any are not, something has drifted since the Phase 1 lock and must be fixed before moving on.
+Plus the hardware-gated snapshot tier:
+
+```bash
+cargo test -p flowplan-render --features hardware-tests --test visual_snapshot
+```
+
+All five must be green. Feature-matrix spot-checks (run periodically; not on every iteration):
+
+```bash
+cargo clippy --workspace --all-targets --features flowplan-app/shader-hot-reload -- -D warnings
+cargo clippy --workspace --all-targets --features flowplan-render/hardware-tests -- -D warnings
+cargo clippy --workspace --all-targets \
+    --features flowplan-app/shader-hot-reload,flowplan-render/hardware-tests -- -D warnings
+```

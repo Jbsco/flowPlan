@@ -161,13 +161,13 @@ A cube can be flown (WASD/gamepad) over a terrain. Frame budget check passes at 
 
 **Goal:** the game looks and feels like flowPlan. Cel shading, water, plane, buoyancy. If Phase 1 proves the engine works, Phase 2 proves the design works.
 
-### Milestone 2.1: Cel shading
+### Milestone 2.1: Cel shading -- COMPLETE
 
-- [ ] Banded diffuse in the opaque forward pass (3-4 bands, configurable per-material)
-- [ ] Outline pass: start with screen-space sobel on depth+normals; evaluate inverted-hull as a per-object alternative
-- [ ] Rim light term
-- [ ] Shader hot-reload (dev only) via `notify`
-- [ ] Visual snapshot tests via `cargo-insta` on a reference scene
+- [x] Banded diffuse in the opaque forward pass (3-4 bands, configurable per-material via `ShadingParams`)
+- [x] Outline pass: screen-space sobel on depth (normal-buffer MRT deferred; depth-only catches silhouettes for Phase 2 scenes). Lives in `outline.wgsl`.
+- [x] Rim light term (per-material in `ShadingParams`)
+- [x] Shader hot-reload (dev only) via `notify`, feature-gated as `shader-hot-reload` on `flowplan-render` / `flowplan-app`
+- [x] Visual snapshot tests via `cargo-insta` on a reference scene (`scene_minimal`); hardware-gated behind `hardware-tests` feature.
 
 ### Milestone 2.2: Water
 
@@ -177,14 +177,16 @@ A cube can be flown (WASD/gamepad) over a terrain. Frame budget check passes at 
 - [ ] Water height sampling on CPU for buoyancy (deterministic, same formula as GPU)
 - [ ] Bench: water on full screen meets frame budget
 
-### Milestone 2.3: Plane model (DHC-2 Beaver reference)
+### Milestone 2.3: Plane model (DHC-2 Beaver reference) -- IN PROGRESS (core shipped; back-face culling deferred)
 
-- [ ] glTF import in `assets` (decompose meshes, materials, scenes)
-- [ ] DHC-2 Beaver reference aircraft, hand-modeled in Blender from public references -- low-poly, cel-shaded, sanitized livery, no branding. Box-prop stand-in acceptable for early iterations; first-class model lands before milestone close.
-- [ ] Wheels + straight floats variants modeled at minimum; amphib floats in the same milestone if feasible, otherwise Milestone 2.5
-- [ ] Plane rendered with cel shading + outline
-- [ ] In-game name placeholder committed (TBD: "Northlander" / "Klondiker" / "Driftwood" / other)
-- [ ] Spec sheet (`.ron` data) authored from published DHC-2 POH: weights, CG, wing area, airfoil (NACA 64A416 → 64A412), Vne, Vs, Vso, cruise, fuel burn, flap positions. See [FEATURES.md § MVP Reference Aircraft](FEATURES.md#mvp-reference-aircraft-dhc-2-beaver-analogue).
+- [x] glTF import in `assets` (`flowplan_assets::load_mesh` handles `.glb` + embedded-buffer `.gltf`, first-mesh first-primitive, optional NORMAL / UV / COLOR fallbacks)
+- [x] DHC-2 Beaver reference aircraft, hand-authored in Blender -- low-poly, cel-shaded, sanitized, no branding. Committed at `data/aircraft/northlander.glb`.
+- [ ] Wheels + straight floats variants modeled at minimum; amphib floats in the same milestone if feasible, otherwise Milestone 2.5 *(current model bundles both as the STL source; per-part swap comes later)*
+- [x] Plane rendered with cel shading + outline
+- [x] In-game name placeholder committed: **Northlander**
+- [x] Spec sheet (`.ron` data) authored: `data/aircraft/northlander.ron` from AIRCRAFT.md § MVP Reference, SI-normalized. Loaded via `AircraftSpec::from_ron` at startup; consumed by the flight model in Milestone 2.4.
+- [x] Mesh origin auto-shift at load so bottom-Y sits at 0 (`CpuMesh::bbox_min_y` / `translate`), eliminating Blender pivot-offset fiddliness.
+- [ ] **2.3.4 Re-enable back-face culling** -- attempted; reverted pending chase-camera and cockpit refinements (interior views cull the exterior shell and read as "see-through plane"). Revisit during Milestone 2.4/2.5 feel work.
 
 ### Milestone 2.4: Flight model (Beaver-tuned reference)
 
@@ -215,12 +217,12 @@ A cube can be flown (WASD/gamepad) over a terrain. Frame budget check passes at 
 - [ ] Spray effects obstructing forward view at high speed or chop
 - [ ] Touchdown moment feels good in playtest (subjective, required)
 
-### Milestone 2.6: Sky (daytime foundation)
+### Milestone 2.6: Sky (daytime foundation) -- COMPLETE
 
-- [ ] Procedural sky (Preetham or Hosek-Wilkie)
-- [ ] Sun direction tied to `sim` time-of-day
-- [ ] Exponential height fog with sun tint
-- [ ] Celestial-sphere hook placed now (empty at daytime): infrastructure for stars, planets, moon, Milky Way. Night rendering is populated in Phase 5 Milestone 5.6. Building it here avoids retrofit later and lets dusk/twilight stars appear as the sun sets.
+- [x] Procedural sky: analytic zenith-to-horizon gradient + warm sun band + sun disc / halo in `sky.wgsl`. Full Preetham / Hosek-Wilkie deferred; current stylized model fits cel-shading aesthetic and ships cheap. Pre-scene pass.
+- [x] Sun direction tied to sim time-of-day: `SimState.time_of_day: f32` in `[0, 1)` advances per tick at `DAY_LENGTH_SECONDS = 1200` (20 min symmetric cycle); `world::sun_direction(t)` derives the unit vector; app writes into `SceneParams.sun_dir` each frame.
+- [x] Exponential height fog with sun tint in the scene fragment shader (distance-based `1 - exp(-density * dist)`, biased toward `sun_color` along the view-to-sun axis).
+- [x] Celestial-sphere hook placed (reserved slot `SceneUniform.ambient.a`); populated in Phase 5 Milestone 5.6.
 
 ### Deliverable
 

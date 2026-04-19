@@ -807,9 +807,12 @@ fn build_scene_pipeline(
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
             front_face: wgpu::FrontFace::Ccw,
-            // Phase 1 pragma carried into Phase 2: no culling. Hand-authored cube + terrain
-            // meshes do not yet guarantee CCW winding. Milestone 2.3 brings glTF-imported
-            // meshes with trusted winding; culling re-enables there.
+            // Culling stays off for now. Geometry winding checks out on the exterior
+            // views used by the snapshot tests, but the runtime chase camera and the
+            // first-person pose dip inside the vehicle mesh's bounding volume, which
+            // makes the interior surfaces disappear and reads as "see through the
+            // plane" to the player. Re-enable once Milestone 2.4+ introduces proper
+            // chase-camera clearance and a cockpit model. Tracked as revisit on 2.3.4.
             cull_mode: None,
             polygon_mode: wgpu::PolygonMode::Fill,
             unclipped_depth: false,
