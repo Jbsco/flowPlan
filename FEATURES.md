@@ -208,8 +208,36 @@ Each biome contributes to the shared feature taxonomy below (surface types, weat
 
 ## Aircraft Catalog
 
+### MVP Reference Aircraft: DHC-2 Beaver analogue
+
+**[ready]** The MVP flight-model teacher aircraft. Beaver-based specs drive Phase 2 flight-model work; other aircraft become parameter-swap exercises once the reference is tuned to feel right.
+
+- **Real-world basis:** de Havilland Canada DHC-2 Beaver (piston variant, Pratt & Whitney R-985 Wasp Junior radial, 450 hp).
+- **In-game name:** TBD sanitized placeholder (candidates: "Northlander," "Klondiker," "Driftwood"). Visual homage, no trademarks, no DHC-2 branding; generic livery pool.
+- **Why this aircraft:** iconic bush/float archetype, universally recognized, canonical configuration diversity (wheels / floats / amphibs / skis / tundra tires), wealth of public technical reference data, forgiving flight envelope for MVP tuning, distinctive radial audio signature.
+- **Core flight-model parameters** (Phase 2 target):
+    - Empty weight ~2,900 lb; MTOW 5,100 lb (wheels), 5,370 lb (floats).
+    - Wing area ~250 sq ft; aspect ratio ~9.2.
+    - Airfoil: NACA 64A416 root tapering to 64A412 tip (verify against published NACA TN data before lock).
+    - Power: 450 hp radial at sea level; fuel burn ~27 gph cruise.
+    - Vne ~160 mph, cruise ~125 kt (143 mph), Vs (clean) ~52 mph, Vso (flaps, floats) ~47 mph.
+    - Slotted flaps, 4 positions (up / climb / takeoff / landing).
+    - No retract; tailwheel configuration for wheeled variant.
+    - Fuel: 95 US gal main (front + rear tanks; fuel selector modeled simply).
+- **Configurations supported at v1 (MVP spans all three):**
+    - **Wheeled taildragger** (bush tires optional).
+    - **Straight floats** (Edo 4930 analogue geometry; hydrodynamic model at step transition).
+    - **Amphibious floats** (retract capability; float-gear-in-hull configuration).
+    - **Skis** (added Phase 5 if winter biome lands).
+- **Engine / audio:** Pratt & Whitney R-985 radial -- 9 cylinders, low RPM rumble, distinctive exhaust pattern. Glicol patch keyed to RPM, manifold pressure, and load; idle to takeoff power covers ~650 to ~2,300 RPM. The radial is the reason audio modeling will be flagship on this aircraft.
+- **Aesthetic / cel-shade fit:** slab sides, rounded cowl, short nose, tall cabin, high wing with struts. Silhouette reads beautifully in banded shading; surface areas invite strong livery expression.
+- **Post-MVP turbine variant:** DHC-2T (PT6A conversion) noted as a future unlock -- simpler power model, modern sound profile, common on today's working Beavers.
+- **Reference sources to chase:** DHC-2 Aircraft Operating Manual (publicly available facsimiles), Viking Air DHC-2T performance data, NACA TN-1945 and related reports for the 64A-series airfoil, operational accounts from Alaska/Canada bush operators, type certificate data.
+
+### Broader Catalog (post-MVP expansion)
+
 - **[sketch]** Every aircraft homaged, not branded. Sanitized names (e.g. "Northlander 185" style), low-poly cel-shaded models avoid licensing exposure.
-- **[sketch]** Bushplane family: light taildragger (Cub-analogue), mid-weight utility taildragger (Beaver-analogue), STOL-modified taildragger (Carbon Cub-analogue), nosewheel utility (Cessna-analogue), large cargo trike (Caravan-analogue).
+- **[sketch]** Bushplane family: light taildragger (Cub-analogue), mid-weight utility taildragger (Beaver-analogue -- the MVP reference above), STOL-modified taildragger (Carbon Cub-analogue), nosewheel utility (Cessna-analogue), large cargo trike (Caravan-analogue).
 - **[sketch]** Floatplane family: light single-float seaplane, mid-weight utility floatplane, big-iron float single (Turbine Otter-analogue), twin-float light sport.
 - **[sketch]** Amphibious family: amphib floats with retractable gear (any of the floatplanes + amphib config), flying boats with hull + beaching gear (Widgeon / Goose-analogue), unusual configurations (Albatross-analogue for large hull flying boat).
 - **[sketch]** Ski-plane configurations applied to bushplanes for winter biomes.

@@ -1,0 +1,15 @@
+[package]
+name = "flowplan-workspace-rules"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "flowPlan architectural enforcement tests: crate dependency DAG per DESIGN.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+toml = { workspace = true }

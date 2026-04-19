@@ -1,0 +1,23 @@
+[package]
+name = "flowplan-benches"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "flowPlan benchmarks: frame-budget smoke + per-phase perf gates"
+
+[lints]
+workspace = true
+
+[dependencies]
+flowplan-core = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "frame_budget"
+path = "frame_budget.rs"
+harness = false

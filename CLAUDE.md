@@ -13,9 +13,10 @@ Read these six documents in full, in this exact order, before any work in this r
 
 When in doubt at any point: stop and ask. Re-open the spec docs rather than guessing.
 
-### Backlog
+### Backlog and content catalogs
 
 - **[FEATURES.md](FEATURES.md)** -- granular feature backlog, authoritative source for design *detail* not yet lifted into the specs. Features promote from `[sketch]` to `[ready]` only after they (a) reconcile with the specs above, (b) gain acceptance criteria, and (c) land in a phase in [ROADMAP.md](ROADMAP.md). **Read it whenever scoping new work so you can see what is already captured, including open questions and deferred ideas.** Do not invent features that could instead be promoted from the backlog.
+- **[AIRCRAFT.md](AIRCRAFT.md)** -- living aircraft catalog with design-model spec sheets. Adding an aircraft here is free; implementing one requires a ROADMAP slot. Consult before inventing flight-model data.
 
 ### Also in the repo
 

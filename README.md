@@ -67,12 +67,24 @@ flowPlan/
   ROADMAP.md                             # Phased execution plan -- the "order"
   TEST_PLAN.md                           # Verification strategy -- the "verify"
   FEATURES.md                            # Feature backlog -- every captured detail
-  skills/
-    flowplan-methodology/
-      SKILL.md                           # Design-first discipline, applied to game dev
+  AIRCRAFT.md                            # Living aircraft catalog with design-model specs
+  skills/flowplan-methodology/SKILL.md   # Design-first discipline, applied to game dev
+  crates/          # One per subsystem (DAG per DESIGN.md); populated in Phase 0
+    README.md      # Layer map
+    {core, assets, sim, progression, world, render, audio, app}/
+  data/            # Content-only .ron files (aircraft, hubs, cargo, missions, wildlife)
+    README.md      # Authoring conventions
+  assets/          # Source assets (shaders, models, textures, audio) baked at build time
+    README.md
+  benches/         # Criterion frame-budget benches; per-phase perf gate
+    README.md
+  tests/           # Cross-crate integration tests
+    README.md
+  tools/           # Build-time tools (shader baker, data validators, etc.)
+    README.md
 ```
 
-Implementation will live under `crates/` (one per subsystem) once Phase 0 begins; see [DESIGN.md § Directory Structure](DESIGN.md#directory-structure).
+Subdirectories under `crates/`, `data/`, and `assets/` currently hold only `.gitkeep` files; they populate as ROADMAP phases advance. See [DESIGN.md § Directory Structure](DESIGN.md#directory-structure) for the layout rationale.
 
 ---
 

@@ -1,0 +1,15 @@
+[package]
+name = "flowplan-world"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "flowPlan world rules: terrain, water, sky, weather, wind, time-of-day"
+
+[lints]
+workspace = true
+
+# Phase 0: empty stub. Dependencies (flowplan-core, flowplan-sim, glam, tracing) land in
+# Phase 1 (terrain) and Phase 3 (weather expansion).

@@ -1,0 +1,17 @@
+[package]
+name = "flowplan-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "flowPlan audio: Glicol graph, cpal stream, lock-free SPSC reader"
+
+[lints]
+workspace = true
+
+# Phase 0: empty stub. Dependencies (flowplan-core, flowplan-sim, flowplan-progression,
+# rtrb, cpal, glicol_synth, tracing) land alongside the audio spine in Phase 3.
+#
+# Audio is permitted limited unsafe at the cpal callback trampoline (framework-required).

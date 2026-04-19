@@ -1,0 +1,41 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo registry / state
+.cargo/
+# Cargo.lock is committed for the binary / app; do not ignore.
+
+# Profiling captures
+*.tracy
+tracy-*.json
+perf.data*
+*.flamegraph
+
+# Asset build cache (populated by tools/)
+/asset-cache/
+/build-cache/
+
+# IDE / editor noise
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*.orig
+*.rej
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Coverage
+/coverage/
+/.cargo/
+tarpaulin-report.*
+
+# Personal scratch (not committed)
+/scratch/
+/.scratch/

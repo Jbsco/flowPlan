@@ -1,0 +1,15 @@
+[package]
+name = "flowplan-assets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "flowPlan asset pipeline: loaders, handle table, caches"
+
+[lints]
+workspace = true
+
+# Phase 0: empty stub. Dependencies (flowplan-core, bytemuck, tracing, gltf, image, wgsl
+# parsing) land alongside loader implementations in Phase 2.

@@ -1,0 +1,20 @@
+[package]
+name = "flowplan-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "flowPlan core types: math, arenas, handles, rings, RNG, time"
+
+[lints]
+workspace = true
+
+[dependencies]
+rand = { workspace = true }
+rand_pcg = { workspace = true }
+# glam, bytemuck, tracing added in Phase 1 when types arrive that need them.
+
+# [dev-dependencies] populated in Phase 1 when proptest-driven property tests arrive.
+# Phase 0 tests are plain unit tests and do not require proptest.

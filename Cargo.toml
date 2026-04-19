@@ -1,0 +1,111 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/assets",
+    "crates/sim",
+    "crates/progression",
+    "crates/world",
+    "crates/render",
+    "crates/audio",
+    "crates/app",
+    "tests/workspace-rules",
+    "benches",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.93"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jbsco/flowPlan"
+publish = false
+
+[workspace.dependencies]
+# Internal crates (for cross-crate workspace deps)
+flowplan-core = { path = "crates/core" }
+flowplan-assets = { path = "crates/assets" }
+flowplan-sim = { path = "crates/sim" }
+flowplan-progression = { path = "crates/progression" }
+flowplan-world = { path = "crates/world" }
+flowplan-render = { path = "crates/render" }
+flowplan-audio = { path = "crates/audio" }
+
+# Math and POD casts
+glam = { version = "0.29", features = ["bytemuck", "serde"] }
+bytemuck = { version = "1.19", features = ["derive"] }
+
+# GPU + windowing (for render, app)
+wgpu = "22"
+winit = "0.30"
+pollster = "0.4"
+
+# Determinism primitives
+rand = { version = "0.8", default-features = false, features = ["std_rng"] }
+rand_pcg = "0.3"
+
+# Concurrency
+parking_lot = "0.12"
+rtrb = "0.3"
+crossbeam-queue = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+ron = "0.8"
+toml = "0.8"
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Errors (app layer only per CODING_RULES.md)
+anyhow = "1"
+thiserror = "1"
+
+# Dev dependencies shared
+proptest = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_crate_dependencies = "warn"
+let_underscore_drop = "warn"
+missing_docs = "allow"                    # Opt in per-crate as the public API stabilizes
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+# Promote common real-time discipline lints to deny in non-test code
+unwrap_used = "deny"
+expect_used = "warn"
+float_cmp = "deny"
+cast_precision_loss = "warn"
+cast_sign_loss = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+alloc_instead_of_core = "warn"
+
+# Allowed exceptions per CODING_RULES.md § Lints and Formatting
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+similar_names = "allow"
+multiple_crate_versions = "allow"          # Upstream transitive noise; audit manually
+
+[profile.dev]
+opt-level = 1                              # Usable FPS while debugging
+debug = "full"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"

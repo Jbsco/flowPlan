@@ -173,24 +173,42 @@ A cube can be flown (WASD/gamepad) over a terrain. Frame budget check passes at 
 - [ ] Water height sampling on CPU for buoyancy (deterministic, same formula as GPU)
 - [ ] Bench: water on full screen meets frame budget
 
-### Milestone 2.3: Plane model
+### Milestone 2.3: Plane model (DHC-2 Beaver reference)
 
 - [ ] glTF import in `assets` (decompose meshes, materials, scenes)
-- [ ] A single placeholder plane model with pontoons (hand-modeled in Blender; commit a basic box-prop stand-in if art is slow)
+- [ ] DHC-2 Beaver reference aircraft, hand-modeled in Blender from public references -- low-poly, cel-shaded, sanitized livery, no branding. Box-prop stand-in acceptable for early iterations; first-class model lands before milestone close.
+- [ ] Wheels + straight floats variants modeled at minimum; amphib floats in the same milestone if feasible, otherwise Milestone 2.5
 - [ ] Plane rendered with cel shading + outline
+- [ ] In-game name placeholder committed (TBD: "Northlander" / "Klondiker" / "Driftwood" / other)
+- [ ] Spec sheet (`.ron` data) authored from published DHC-2 POH: weights, CG, wing area, airfoil (NACA 64A416 → 64A412), Vne, Vs, Vso, cruise, fuel burn, flap positions. See [FEATURES.md § MVP Reference Aircraft](FEATURES.md#mvp-reference-aircraft-dhc-2-beaver-analogue).
 
-### Milestone 2.4: Flight model
+### Milestone 2.4: Flight model (Beaver-tuned reference)
 
-- [ ] Simplified aerodynamics: lift/drag curves vs AoA, pitch/yaw/roll damping, stall region
-- [ ] Throttle control; propeller disc shader (radial motion blur)
-- [ ] Tunable feel: decide "arcade" vs "sim-lite" by playtest and lock
-- [ ] Property tests: energy conservation in level flight (within tolerance), recovery from stall in configured time
+- [ ] Airfoil-based lift using published NACA 64A416 / 64A412 Cl/Cd tables (cross-reference NACA TN-1945 and related reports)
+- [ ] Drag polar and stall region keyed to Beaver performance envelope
+- [ ] Engine model: Pratt & Whitney R-985 radial, 450 hp at sea level, published fuel burn curve
+- [ ] Fixed-pitch / ground-adjustable prop model (constant-speed prop is a post-MVP upgrade option)
+- [ ] Slotted flaps: 4 positions matching POH lift-boost and drag-penalty figures
+- [ ] Pitch/yaw/roll damping and ground effect tuned against documented Beaver handling notes
+- [ ] Tunable feel: decide final arcade-dial-default vs sim-lite-default by playtest; determinism invariant preserved under any dial setting
+- [ ] Property tests:
+    - Level flight at cruise power holds altitude within tolerance under zero wind
+    - Published cruise speed achievable at published power setting within tolerance
+    - Stall speeds (clean / flaps / floats) match POH figures within tolerance
+    - Stall recovery within documented time at configured input sequence
+    - Determinism: same seed + same input trace + same dial state -> bit-identical state
+- [ ] Validate against DHC-2 POH performance charts (takeoff distance, climb rate, cruise fuel burn) before milestone close
+- [ ] **Scratch-branch prototype of the flight-model feel belongs in Phase 1**; this milestone is where feel locks. If feel has not clicked by 4-6 weeks into this milestone, trim scope per MVP re-planning in [skills/flowplan-methodology/SKILL.md](skills/flowplan-methodology/SKILL.md).
 
-### Milestone 2.5: Pontoon buoyancy
+### Milestone 2.5: Pontoon buoyancy (Beaver floats)
 
+- [ ] Hydrodynamic model for Beaver-sized floats (Edo 4930 analogue geometry)
 - [ ] Per-pontoon water height sample + buoyancy force
-- [ ] Horizontal drag when in contact with water
+- [ ] Horizontal drag when in contact with water, tuned to produce realistic plowing and on-step behavior
+- [ ] Step transition ("on step") as a deliberate feel moment; porpoising risk modeled and avoidable with technique
+- [ ] Water rudder for low-speed taxi; weather-vaning when retracted
 - [ ] Wake spawn: particle + decal trail
+- [ ] Spray effects obstructing forward view at high speed or chop
 - [ ] Touchdown moment feels good in playtest (subjective, required)
 
 ### Milestone 2.6: Sky (daytime foundation)
@@ -217,7 +235,7 @@ A plane can be flown, landed on water, taxied, taken off again. Cel-shaded look 
 - [ ] `cpal` stream in `audio` crate
 - [ ] `glicol_synth` graph construction at startup
 - [ ] `rtrb` SPSC ring between sim and audio
-- [ ] Engine sound: Glicol patch modulated by RPM, load, airspeed
+- [ ] Engine sound: Glicol patch modulated by RPM, load, airspeed. **Reference aircraft (MVP) is the DHC-2 Beaver's Pratt & Whitney R-985 radial** -- 9-cylinder pattern, distinctive low-RPM rumble, flagship audio example for the project. Other engine types (flat-six, turbine) become patch variants once the radial signature is locked.
 - [ ] Wind noise: filtered noise patch keyed to airspeed
 - [ ] Water lapping: procedural patch near shoreline
 - [ ] Callback invariants verified by hot-path allocation test and logging-free lint

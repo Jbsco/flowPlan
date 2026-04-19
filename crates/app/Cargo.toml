@@ -1,0 +1,26 @@
+[package]
+name = "flowplan-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "flowPlan app: main loop, window, lifecycle, orchestration"
+
+[[bin]]
+name = "flowplan"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Phase 0 set: only what the clear-app entry point actually uses.
+# flowplan-* sibling crates are added as each phase wires them in.
+wgpu = { workspace = true }
+winit = { workspace = true }
+pollster = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
