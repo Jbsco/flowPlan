@@ -124,10 +124,15 @@ const I_ZZ: f32 = 5000.0; // roll (rotation about nose axis)
 const MEAN_CHORD_M: f32 = 1.52;
 const WING_SPAN_M: f32 = 14.63;
 
+// TODO(2.4.3): velocity-scaled control authority will shift once `THRUST_ACCEL_MAX`
+// is replaced with the R-985 power curve. Current coefficient tuning is against the
+// constant-thrust placeholder; final values should be re-checked against the stable
+// cruise / slow-flight / climb regimes the engine model actually holds.
+// TODO(2.4.x): migrate these per-aircraft data to `AircraftSpec`.
+
 /// Aerodynamic moment coefficients. Signs are stated for our physics convention above.
-/// Values are textbook small-aircraft ballpark; they are the primary tuning knobs for
-/// handling feel and will be adjusted during 2.4.4 flight testing. TODO(2.4.x): migrate
-/// to per-aircraft data in `AircraftSpec`.
+/// Values are textbook small-aircraft ballpark tuned by flight-test feel on the
+/// Beaver-placeholder airframe.
 ///
 /// Pitch: static stability (`Cm_α < 0`) pulls α back toward trim; elevator command
 /// (`Cm_δe > 0`) pitches nose up for positive stick; damping (`Cm_q < 0`) opposes

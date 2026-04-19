@@ -3,22 +3,22 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
-Last updated: **2026-04-19** (Phase 2 in progress; 2.1 / 2.6 / 2.2 core + 2.3 core all shipped; Milestone 2.4 flight model is NEXT).
+Last updated: **2026-04-19** (Phase 2 in progress; 2.1 / 2.6 / 2.2 core + 2.3 core shipped; Milestone 2.4 flight model is mid-work -- 2.4.1/2.4.2/2.4.2b/2.4.2c/2.4.4a/2.4.4b/2.4.4c shipped, 2.4.3 engine / 2.4.4d stall / 2.4.5 flaps / 2.4.6 secondary effects / 2.4.7 density altitude pending).
 
 ## Current status
 
 - **Phase 0 (Skeleton)**: COMPLETE 2026-04-19
-- **Phase 1 (Core Loop)**: COMPLETE 2026-04-19 (locked; tuning frozen)
+- **Phase 1 (Core Loop)**: COMPLETE 2026-04-19 (locked; tuning frozen at Phase 1 close, superseded inside Phase 2 as each milestone lands)
 - **Phase 2 (Feel Core)**: IN PROGRESS
     - Milestone 2.1 (cel shading + outline + hot-reload + insta harness): COMPLETE
     - Milestone 2.6 (procedural sky + fog + sim time-of-day): COMPLETE
     - Milestone 2.3 (plane model + glTF loader + spec sheet): CORE SHIPPED; 2.3.4 back-face culling deferred pending chase-camera / cockpit work
     - Milestone 2.2 (water): CORE SHIPPED (flat quad, Gerstner waves, CPU height sampler, terrain amplitude tune, pre-2.5 ground clamp); 2.2.4 shoreline foam and 2.2.5b distant-water LOD pending
-    - Milestone 2.4 (flight model): NEXT (consumes the spec from 2.3)
+    - Milestone 2.4 (flight model): TRANSLATIONAL + ROTATIONAL AERO SHIPPED (2.4.1 skeleton, 2.4.2 airfoil forces, 2.4.2b lift perpendicular to velocity, 2.4.2c telemetry plumbing + orientation widget, 2.4.4a keyboard slew ramp, 2.4.4b moment-based angular dynamics, 2.4.4c moment HUD). Still pending: 2.4.3 engine power curve, 2.4.4d real stall / wing-drop / α-based stall alert, 2.4.5 flaps, 2.4.6 adverse yaw / P-factor / torque / ground effect, 2.4.7 density altitude.
     - Milestone 2.5 (pontoon buoyancy + contact physics): QUEUED (needs 2.2 water height sampler and proper surface contact to replace the pre-2.5 ground clamp)
-- Milestone order taken (deviates from ROADMAP's numeric order): **2.1 -> 2.6 -> 2.3 -> 2.2 -> 2.4 -> 2.5**. Sky landed before plane because it made visual tuning of the Beaver easier; water came before flight model because buoyancy (2.5) needs it.
+- Milestone order taken (deviates from ROADMAP's numeric order): **2.1 -> 2.6 -> 2.3 -> 2.2 -> 2.4 -> 2.5**. Sky landed before plane because it made visual tuning of the Beaver easier; water came before flight model because buoyancy (2.5) needs it. Within 2.4: 2.4.4 jumped ahead of 2.4.3 because the moment model fundamentally changes handling feel and was a prerequisite for sensible tuning against any thrust model.
 - Gate: green. `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `cargo bench --bench frame_budget -- --test`, and the hardware snapshot tests all pass.
-- Test count: **102 total** (up from 94 mid-Phase-2, 81 at Phase 1 lock). Three hardware snapshots committed: `scene_minimal`, `beaver_preview`, `scene_extended` (1024x640; uses the real `Terrain::from_seed` so it reflects in-game terrain faithfully). Reference photos `ref1.png`, `ref2.png`, `ref3.png` in `crates/render/tests/snapshots/` as aesthetic targets (coastal Alaska / fjord floatplane photography).
+- Test count: **140 total** (up from 117 at 2.4.2c, 102 mid-Phase-2, 81 at Phase 1 lock). Three hardware snapshots committed: `scene_minimal`, `beaver_preview`, `scene_extended` (1024x640; uses the real `Terrain::from_seed` so it reflects in-game terrain faithfully). Reference photos `ref1.png`, `ref2.png`, `ref3.png` in `crates/render/tests/snapshots/` as aesthetic targets (coastal Alaska / fjord floatplane photography).
 
 ## Quick commands
 
@@ -80,20 +80,28 @@ Pinned in workspace `Cargo.toml`. Do not bump without amendment to [DESIGN.md §
 - Proptest-driven determinism sweeps (`prop_same_seed_same_trace_same_hash`, `prop_different_seed_different_hash`), 32 cases each.
 - `TickCount` (u64) and `Seconds` (f64) newtypes to keep sim time and wall time distinct.
 
-### Flight model (Phase 1 placeholder; **not** the final Beaver model)
-Constants in `crates/sim/src/state.rs`. These are the frozen Phase 1 values:
+### Flight model (Phase 1 placeholder; SUPERSEDED by Phase 2.4)
 
-- `THRUST_ACCEL_MAX = 32.0` m/s² at full throttle
-- `LIFT_COEFF = 0.344` (m/s² per m/s of horizontal forward airspeed; level flight at ~28 m/s)
-- `LIN_DAMPING = 0.05` (1/s; low-speed stability)
-- `QUAD_DRAG = 0.014` (1/m; bounds terminal velocity)
-- `ROLL_RATE_MAX = 1.6`, `PITCH_RATE_MAX = 1.0`, `YAW_RATE_MAX = 0.6` rad/s
-- `ANG_RESPONSE = 10.0` (1/s; rate-tracking exponential)
-- `GROUND_Y = 0.5` m (flat-plane clamp; terrain integration is Phase 2)
+> **Historical section.** The constants and dynamics documented here were the frozen Phase 1 values. All of them have been replaced by Phase 2.4 work:
+> - Translational forces: see "Milestone 2.4 state" below (2.4.2 airfoil lift/drag, 2.4.2b perpendicular-to-velocity lift).
+> - Rotational dynamics: see 2.4.4a (keyboard slew ramp) + 2.4.4b (moment-based angular accel) + 2.4.4c (moment HUD). The `PITCH_RATE_MAX` / `YAW_RATE_MAX` / `ROLL_RATE_MAX` / `ANG_RESPONSE` constants are gone.
+> - Ground clamp: `GROUND_Y = 0.5` replaced by per-tick `min_altitude` from `max(terrain, water_level) + float_offset + margin`.
+>
+> The Phase 1 numbers are kept here for historical reference so a future reader can understand how far the model has moved.
 
-Dynamics: thrust along body forward; lift = +Y × *horizontal* forward airspeed × `LIFT_COEFF`; drag = linear + quadratic on `|v|`; gravity 9.81 Y; single-step explicit Euler integration; quaternion body-frame rotation composition.
+Phase 1 constants (former, in `crates/sim/src/state.rs`):
 
-Starting state: `(0, terrain_max + 25)` with `(0, 0, -28)` initial velocity and `throttle = 0.4` so the cube is in level cruise from frame zero.
+- `THRUST_ACCEL_MAX = 32.0` m/s² at full throttle (now in `crates/sim/src/flight.rs` as `3.5`)
+- `LIFT_COEFF = 0.344` (m/s² per m/s of horizontal forward airspeed; superseded by full airfoil `Cl(α)` table)
+- `LIN_DAMPING = 0.05` (superseded by drag-polar `Cd`)
+- `QUAD_DRAG = 0.014` (superseded by drag-polar `Cd`)
+- `ROLL_RATE_MAX = 1.6`, `PITCH_RATE_MAX = 1.0`, `YAW_RATE_MAX = 0.6` rad/s (superseded by moment model)
+- `ANG_RESPONSE = 10.0` (superseded by moment/inertia Euler integration)
+- `GROUND_Y = 0.5` m (superseded by `min_altitude` parameter)
+
+Phase 1 dynamics: thrust along body forward; lift = +Y × *horizontal* forward airspeed × `LIFT_COEFF`; drag = linear + quadratic on `|v|`; gravity 9.81 Y; single-step explicit Euler integration; quaternion body-frame rotation composition; commanded-rate angular tracking.
+
+Starting state (former): `(0, terrain_max + 25)` with `(0, 0, -28)` initial velocity and `throttle = 0.4`. Current: `(0, terrain_max + 25)` with `(0, 0, -55)` and `throttle = 0.55` (see 2.4.2b tuning).
 
 ### Rotation sign conventions (documented in `crates/sim/src/state.rs`)
 Right-handed, Y-up, forward = −Z. Body-frame angular velocity components:
@@ -211,7 +219,7 @@ Feature flags introduced:
 - **Mesh bounding-box helper:** `CpuMesh::bbox() -> ([f32; 3], [f32; 3])` and startup log line `"bbox x[..] y[..] z[..]"` for axis-convention verification on freshly-exported glTFs.
 - **Fog tuning:** default `SceneParams.fog_density` dropped from `0.0015/m` to `0.0005/m` so distant peaks on the ±275 m terrain read through atmospheric haze without disappearing.
 
-### Milestone 2.4 state (2.4.1 + 2.4.2 + 2.4.2b shipped; rotational dynamics still fiat, engine/flaps/stall pending)
+### Milestone 2.4 state (2.4.1 + 2.4.2 + 2.4.2b + 2.4.2c + 2.4.4a + 2.4.4b + 2.4.4c shipped; 2.4.3 engine + 2.4.4d stall + 2.4.5 flaps + 2.4.6 secondary + 2.4.7 density altitude pending)
 
 - **2.4.1 (shipped):** `sim::flight::compute_forces(state, spec, dt) -> FlightOutputs` extracted from the old `tick_dynamics`. Pure function; no behavior change from Phase 1 placeholder. `SimState.aircraft: Option<AircraftSpec>` wired from app startup; `SimState.last_flight` caches the last forces for the debug HUD.
 - **2.4.2 (shipped):** real airfoil physics for *translational* forces. Lift `L = 0.5 ρ V² S Cl(α)` with a NACA 64A416-shaped `CL_TABLE` (`Cl_max = 1.65` at α=16°, whole-wing adjusted above the ~1.4 2D section value to approximate fuselage + vortex contributions). Drag polar `Cd = Cd0 + Cl²/(π·AR·e)` with a post-stall quadratic spike. Angle of attack α and sideslip β computed from body-frame velocity. Mass from `AircraftSpec.max_mass_wheels_kg` converts force to acceleration. No-spec fallback path retained for pure-sim tests.
@@ -222,11 +230,12 @@ Feature flags introduced:
 - **2.4.4c (shipped) Telemetry + debug HUD for moments.** `Telemetry` replaces `commanded_angular_vel` / `ang_response_rate` with `angular_accel` + three `MomentBreakdown` fields. Dynamics HUD's "Angular" section now shows actual rate + angular accel; new "Moments" section shows total M/L/N with control / stability / damping columns per axis, so "why isn't the plane responding?" is diagnosable at a glance (low q, damping dominating, stick not through ramp, etc.).
 - **Pre-2.4.4 "input aggression" TODO (resolved by 2.4.4a).** Kept here as a reference to what was fixed: keyboard step inputs now pass through a 1.5 / s linear slew before reaching the moment model. Analog input sources bypass it.
 - **2.4.2c (shipped) Telemetry plumbing + cel-shaded orientation widget.** Single `Telemetry` struct (`flowplan_render::Telemetry`) derived once per frame from `SimSnapshot` (which now carries the tick-boundary `FlightOutputs` plus `VehicleSnapshot.angular_velocity` / `ControlsSnapshot` for full display coverage). SI units internally. Debug HUD refactored to read from Telemetry only -- no more `&SimState` on the HUD boundary. First visual consumer is a screen-space **orientation widget** anchored to the bottom-right (180×180 px, 20 px margin): unit-length direction vectors rotated with the aircraft -- body axes (+X red, +Y green, -Z blue), velocity (white), thrust (yellow), lift (cyan), drag (orange), gravity (grey), total accel (magenta). All vectors unit-length so directions compare at a glance; magnitudes read from the top-right dynamics HUD. Always on (no toggle). Arrows are **cel-shaded**: each segment emits a ~4 px dark outline quad behind a ~2.5 px colored fill quad, giving a crisp cel-style border slightly thinner than the main scene's sobel outline so the widget doesn't compete with scene edges. A fixed "isometric" display rotation (≈25° pitch + 32° yaw) is composed with the aircraft orientation so all three body axes always have a visible XY projection regardless of attitude (nose-up, inverted, pure bank). Rendered via a new `TriangleList` pipeline (`debug_lines.rs` + `debug_lines.wgsl`) driven by a dedicated `widget_camera_buf` holding a screen-space ortho view-proj recomputed per frame from viewport size; no depth attachment so the widget always overlays. Determinism preserved: widget state is app-side (`gizmo_batch: DebugLineBatch`), never in `SimState`. Architectural boundary documented in [DESIGN.md § Telemetry derivation (render side)](DESIGN.md#telemetry-derivation-render-side); consumer progression and field list in [FEATURES.md § Telemetry & Instrumentation Data Flow](FEATURES.md#telemetry--instrumentation-data-flow). Infrastructure dividend: the same quad-widening pipeline + widget ortho pattern is reused in Phase 4 for HUD ladders (pitch ladder, bank indicator ticks), artificial-horizon tick marks, and other screen-space instrument lines. A depth-aware variant for world-space wireframes (collision debug, flight-path vector) needs a clip-space vertex shader for widening (deferred until the first world-space consumer arrives; 2D widget widening in the XY plane is fine for now because the widget uses an ortho projection down +Z).
-- **Pitch-feel observation (maps into 2.4.4 moment model).** No restoring pitching moment means the plane has no static pitch stability -- disturb it from trim and it stays there rather than weathervaning back into the relative wind. This is expected under the current fiat rate model and is one of the features 2.4.4's moment-based rotation recovers naturally (horizontal stab + wing pitching moments produce α-dependent restoring torque). Called out here so a future reader doesn't mistake it for a bug introduced in 2.4.2 -- it's the dominant "why does this still feel wrong on pitch?" symptom until 2.4.4.
-- **Dynamics HUD (top-right):** shows airspeeds (total + horizontal-fwd, m/s + kt), α / β / Cl / Cd, airspeed-based stall alert (NORMAL / APPROACH / STALL vs `AircraftSpec.speeds.vs_clean_mps`), per-force breakdown (thrust / lift / drag / gravity), total acceleration, commanded vs actual angular velocity, active aircraft spec.
-- **Flight-model TODOs** live at the code site in `crates/sim/src/flight.rs` as `TODO(phase-N):` markers per CODING_RULES. Open: engine power curve + fuel burn (2.4.3), prop model (2.4.3), moment-based rotational dynamics + real stall / wing-drop / accelerated stall (2.4.4), flaps (2.4.5), ground effect / P-factor / adverse yaw / torque (2.4.6), density altitude (2.4.7), spin / gyroscopic precession / slipstream / slip-skid / icing (post-2.4).
-- **Known HUD heuristic false-positives (pre-2.4.4):**
-  - The stall alert compares horizontal forward airspeed against Vs_clean. It false-positives in a steep dive (vertical velocity doesn't count toward the ratio even when real α is well clear of stall) and misses accelerated / G-loaded stalls in tight turns (stall at higher IAS). `TODO(2.4.4)` in `debug_hud.rs::build_ui` and `flight.rs` documents both. Proper α-based stall detection lands with 2.4.4 wing-drop / accelerated-stall modeling.
+- **Pitch-feel observation (resolved by 2.4.4b).** Static pitch stability -- disturbed α produces restoring nose-down moment via `Cm_α` -- now emerges naturally from the moment model. Recorded here for historical context since it drove the 2.4.4 priority.
+- **Dynamics HUD (top-right):** shows airspeeds (total + horizontal-fwd, m/s + kt), α / β / Cl / Cd, airspeed-based stall alert (NORMAL / APPROACH / STALL vs `AircraftSpec.speeds.vs_clean_mps`), per-force breakdown (thrust / lift / drag / gravity), total acceleration, actual angular velocity + angular acceleration, per-axis moment breakdown (control / stability / damping), active aircraft spec.
+- **Current moment coefficients (Beaver placeholders, tuned by flight-test feel).** `Cm_α=-0.25, Cm_δe=0.24, Cm_q=-25` (pitch); `Cl_δa=0.075, Cl_p=-0.5` (roll); `Cn_β=0.08, Cn_δr=0.04, Cn_r=-0.6` (yaw). Moments of inertia: `I_xx=8000, I_yy=12000, I_zz=5000 kg·m²`. Reference lengths: `c=1.52 m, b=14.63 m`. All in `crates/sim/src/flight.rs`. Re-tune expected during 2.4.3 against the R-985 power curve.
+- **Flight-model TODOs** live at the code site in `crates/sim/src/flight.rs` as `TODO(phase-N):` markers per CODING_RULES. Open: engine power curve + fuel burn + prop model (2.4.3), real stall / wing-drop / accelerated stall / α-based stall alert (2.4.4d), flaps (2.4.5), ground effect / P-factor / adverse yaw / torque (2.4.6), density altitude (2.4.7), spin / gyroscopic precession / slipstream / slip-skid / icing (post-2.4).
+- **Known HUD heuristic false-positives (pending 2.4.4d):**
+  - The stall alert compares horizontal forward airspeed against Vs_clean. It false-positives in a steep dive (vertical velocity doesn't count toward the ratio even when real α is well clear of stall) and misses accelerated / G-loaded stalls in tight turns (stall at higher IAS). `TODO(2.4.4d)` in `debug_hud.rs::build_ui` and `flight.rs` documents both. Proper α-based stall detection lands with 2.4.4d wing-drop / accelerated-stall modeling.
   - The stall alert doesn't know about flaps; at Vso ~ 21 m/s with flaps down a real aircraft isn't stalling, but the HUD would show APPROACH against Vs-clean = 23.25 m/s.
 
 ### Milestone 2.3 deliverables (CORE SHIPPED; 2.3.4 culling deferred)
@@ -265,8 +274,7 @@ Feature flags introduced:
 - **No lateral / horizontal collision.** Plane can fly horizontally into a hillside. The altitude clamp only affects Y. Proper AABB or per-pontoon contact lands with 2.5.
 - **Back-face culling off.** See Phase 2 bug #6.
 - **Terrain is placeholder-at-scale.** Sum-of-sines produces mountain-scale geometry but cannot independently tune amplitude and gradient -- genuinely gentle beach flats beneath steep mountain backdrops (per ref1/2/3 aesthetic targets) are not achievable without a different representation. Related gaps: no elevation lakes, no rivers, no drainage basins, no shore classification (sand / gravel / rock / cliff / delta), no erosion-shaped coastlines. Tracked under [FEATURES.md § Terrain & Static Landscape](FEATURES.md#terrain--static-landscape) for a proper hydrology-aware terrain rebuild in Phase 3+ alongside the world-scope decision.
-- **Flight model covers 2.4.1 / 2.4.2 / 2.4.2b; 2.4.3+ still open.** *Translational* forces are real airfoil physics (`0.5 ρ V² S Cl(α)`, polar `Cd0 + Cl²/(π·AR·e)`, lift perpendicular to velocity) -- coordinated banked turns feel plausible in flight testing. *Rotational* dynamics are still fiat stick-to-body-rate with no aero (no q-scaling, no β generation from rudder, no damping, no moments) -- major 2.4.4 refactor. Thrust is still a throttle-proportional constant (no RPM / MAP / altitude; engine power curve is 2.4.3). No flaps (2.4.5), no real stall physics beyond a post-stall `Cl` drop and drag spike -- no wing-drop, no accelerated-stall speed, no nose-down pitching moment (2.4.4). No ground effect / P-factor / adverse yaw / torque roll (2.4.6). No density altitude (2.4.7). Each gap is marked with a `TODO(phase-N):` at its code site in `crates/sim/src/flight.rs` and closes as its milestone lands.
-- **Keyboard input ramp pending (TODO(2.4.4 / UX)).** 0%/100% step inputs are more violent than real control pedals; a linear slew-rate clamp (~1.5 full-deflection / s) on `Controls.pitch / yaw / roll` at the input layer will smooth this without faking physics. Analog sources (gamepad, HOTAS) bypass the ramp when added.
+- **Flight model covers 2.4.1 / 2.4.2 / 2.4.2b / 2.4.4 (rotation); 2.4.3 / 2.4.4d / 2.4.5+ still open.** *Translational* forces are real airfoil physics (`0.5 ρ V² S Cl(α)`, polar `Cd0 + Cl²/(π·AR·e)`, lift perpendicular to velocity) -- coordinated banked turns feel plausible in flight testing. *Rotational* dynamics are moment-based -- control authority scales with q, weathervane stability restores toward velocity, α-stability pitches back toward trim, damping prevents runaway rates. Thrust is still a throttle-proportional constant (no RPM / MAP / altitude; engine power curve is 2.4.3). No flaps (2.4.5). Post-stall `Cl` drop and drag spike exist in the table but no nose-down pitching moment on stall, no wing-drop, no accelerated-stall speed correction -- 2.4.4d. No ground effect / P-factor / adverse yaw / torque roll (2.4.6). No density altitude (2.4.7). Each gap is marked with a `TODO(phase-N):` at its code site in `crates/sim/src/flight.rs` and closes as its milestone lands.
 
 ### New invariants / conventions locked in Phase 2
 

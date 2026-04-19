@@ -234,13 +234,14 @@ Each biome contributes to the shared feature taxonomy below (surface types, weat
 - **Why this aircraft:** iconic bush/float archetype, universally recognized, canonical configuration diversity (wheels / floats / amphibs / skis / tundra tires), wealth of public technical reference data, forgiving flight envelope for MVP tuning, distinctive radial audio signature.
 - **Core flight-model parameters** (Phase 2 target):
     - Empty weight ~2,900 lb; MTOW 5,100 lb (wheels), 5,370 lb (floats).
-    - Wing area ~250 sq ft; aspect ratio ~9.2.
+    - Wing area ~250 sq ft; aspect ratio ~9.2; mean aerodynamic chord ~1.52 m; wingspan ~14.63 m.
     - Airfoil: NACA 64A416 root tapering to 64A412 tip (verify against published NACA TN data before lock).
     - Power: 450 hp radial at sea level; fuel burn ~27 gph cruise.
     - Vne ~160 mph, cruise ~125 kt (143 mph), Vs (clean) ~52 mph, Vso (flaps, floats) ~47 mph.
     - Slotted flaps, 4 positions (up / climb / takeoff / landing).
     - No retract; tailwheel configuration for wheeled variant.
     - Fuel: 95 US gal main (front + rear tanks; fuel selector modeled simply).
+    - **Rotational dynamics (Phase 2.4.4b shipped values; tuning continues through 2.4.3+).** Moments of inertia placeholders: `I_xx=8000, I_yy=12000, I_zz=5000 kg·m²`. Moment coefficients: `Cm_α=-0.25, Cm_δe=0.24, Cm_q=-25` (pitch); `Cl_δa=0.075, Cl_p=-0.5` (roll); `Cn_β=0.08, Cn_δr=0.04, Cn_r=-0.6` (yaw). All currently hardcoded in `crates/sim/src/flight.rs`; migration to `AircraftSpec` is a 2.4.x follow-up so different aircraft can tune independently.
 - **Configurations supported at v1 (MVP spans all three):**
     - **Wheeled taildragger** (bush tires optional).
     - **Straight floats** (Edo 4930 analogue geometry; hydrodynamic model at step transition).
@@ -433,7 +434,7 @@ v1 ships with fully-working keyboard and gamepad profiles plus the mapping UI. H
 - **[shipped: Phase 2.4.2]** Real airfoil translational forces: lift `0.5 ρ V² S Cl(α)` with NACA 64A416-shaped `CL_TABLE` (whole-wing `Cl_max ≈ 1.65` at α=16°), drag polar `Cd = Cd0 + Cl²/(π·AR·e)` with post-stall parasite spike, α and β computed from body-frame velocity.
 - **[shipped: Phase 2.4.2b, in test]** Lift direction perpendicular to velocity (not body-+Y). Fixes the stall-cascade on pitch-up that resulted from spurious `L·sin(α)` backward force. Coordinated banked turns feel realistic -- lift correctly tilts into the turn as the plane rolls. Full throttle climbs; full pitch-up does not bleed into stall at reasonable airspeed.
 - **[shipped: Phase 2.4.2b]** Tuning: `THRUST_ACCEL_MAX` 2.0 → 3.5 m/s² for climb margin (proper power curve is 2.4.3); spawn velocity 50 → 55 m/s for ~2.4× Vs stall margin.
-- **[shipped: Phase 2.4.1]** Dynamics debug HUD (top-right egui panel): airspeeds, α / β / Cl / Cd, per-force vectors, total accel, commanded vs actual angular velocity, active aircraft spec. Includes an airspeed-based heuristic stall alert (NORMAL / APPROACH / STALL vs `spec.vs_clean_mps`) with known false-positives in dives and accelerated stalls, pending the real 2.4.4 α-based model.
+- **[shipped: Phase 2.4.1 / refreshed 2.4.4c]** Dynamics debug HUD (top-right egui panel): airspeeds, α / β / Cl / Cd, per-force vectors, total accel, actual angular velocity + angular acceleration, per-axis moment breakdown (control / stability / damping), active aircraft spec. Includes an airspeed-based heuristic stall alert (NORMAL / APPROACH / STALL vs `spec.vs_clean_mps`) with known false-positives in dives and accelerated stalls, pending the real 2.4.4d α-based model.
 - **[shipped: Phase 2.4.2c]** Telemetry plumbing (`flowplan_render::Telemetry`) as a single-source derivation from `SimSnapshot + FlightOutputs`. Both debug HUD panels and the orientation widget read from it; no consumer reaches into `SimState` directly.
 - **[shipped: Phase 2.4.2c]** Bottom-right cel-shaded orientation widget. Unit-length direction vectors for body axes (+X/+Y/-Z = RGB), velocity (white), thrust (yellow), lift (cyan), drag (orange), gravity (grey), total accel (magenta) in a 180×180 px panel. Always on; direction-only display (magnitudes live in the top-right dynamics HUD). Arrows are cel-shaded (dark outline quad behind, colored fill quad on top) with the outline intentionally a hair thinner than the main scene's sobel outline. A fixed isometric display rotation ensures all three body axes are visible at any attitude. Rendered via a new `TriangleList` pipeline with a dedicated screen-space ortho projection, reused in Phase 4 for hand-rolled HUD ladders.
 
@@ -510,9 +511,11 @@ Each phase adds one consumer of the same telemetry layer; the layer itself grows
 
 ### Fields the `Telemetry` struct will carry (progressive)
 
-**Phase 2 (initial):** `airspeed_total`, `airspeed_horizontal_fwd`, `airspeed_vertical`, `altitude_agl`, `altitude_msl`, `heading_rad`, `bank_rad`, `pitch_rad`, `alpha_rad`, `beta_rad`, `vertical_speed_mps`, `forces: ForceBreakdown { thrust, lift, drag, gravity, total }`, `commanded_angular_vel`, `actual_angular_vel`.
+**Phase 2 (shipped):** `airspeed_total`, `airspeed_horizontal_fwd`, `airspeed_vertical`, `altitude_msl`, `heading_rad`, `bank_rad`, `pitch_rad`, `alpha_rad`, `beta_rad`, `vertical_speed_mps`, force vectors (`thrust`, `lift`, `drag`, `gravity`, `linear_accel`), angular state (`actual_angular_vel`, `angular_accel`), per-axis moment breakdowns (`pitch_moment`, `roll_moment`, `yaw_moment` each with `control / stability / damping`), control positions (`throttle`, `pitch_input`, `yaw_input`, `roll_input`), `cl`, `cd`, `tick`.
 
-**Phase 2.4.4+:** `load_factor`, `stall_margin` (α-based, not airspeed heuristic), `slip_skid_ball`, `control_surface_deflections` (after keyboard-ramp lands).
+**Phase 2.4.4d+:** `load_factor`, `stall_margin` (α-based, not airspeed heuristic), `slip_skid_ball`, `control_surface_deflections` (post-input-ramp -- distinguishing commanded from deflected).
+
+**Phase 3+:** `altitude_agl` (needs terrain sampler plumbed through `SimSnapshot`).
 
 **Phase 3:** `wind_world`, `wind_relative`, `crosswind_component`, `headwind_component`, `density_altitude`.
 
