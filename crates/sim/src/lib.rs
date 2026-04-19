@@ -13,6 +13,7 @@ pub mod aircraft_spec;
 pub mod camera;
 pub mod controls;
 pub mod difficulty;
+pub mod flight;
 pub mod hash;
 pub mod input;
 pub mod snapshot;

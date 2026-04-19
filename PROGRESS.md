@@ -3,7 +3,7 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
-Last updated: **2026-04-19** (Phase 2 in progress; Milestones 2.1, 2.6, 2.3 core, and 2.2 core shipped; 2.2 foam + 2.4 flight model next).
+Last updated: **2026-04-19** (Phase 2 in progress; 2.1 / 2.6 / 2.2 core + 2.3 core all shipped; Milestone 2.4 flight model is NEXT).
 
 ## Current status
 

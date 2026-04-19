@@ -6,11 +6,13 @@
 //! Phase 2 replaces `tick_dynamics` with the DHC-2 Beaver flight model.
 
 use flowplan_core::{Rng, TickCount};
-use glam::{Quat, Vec3};
+use glam::Quat;
 
+use crate::aircraft_spec::AircraftSpec;
 use crate::camera::Camera;
 use crate::controls::Controls;
 use crate::difficulty::DifficultyDials;
+use crate::flight;
 use crate::input::{InputEvent, InputEvents};
 use crate::vehicle::VehicleState;
 
@@ -24,49 +26,14 @@ pub const FIXED_DT: f32 = 1.0 / 120.0;
 /// becomes a later tuning pass.
 pub const DAY_LENGTH_SECONDS: f32 = 1200.0;
 
-/// Gravitational acceleration at the placeholder flat Earth.
-const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
-
-/// Thrust produced at full throttle along the vehicle's local forward axis (m/s^2).
-///
-/// Tuned so level-flight thrust comfortably exceeds gravity (32 > 9.81). This is not
-/// realistic for an aircraft -- it is placeholder behavior so the Phase 1 cube can
-/// actually climb without flopping into steep pitch. Phase 2 replaces this with the
-/// Beaver's published power-to-weight characteristics.
-const THRUST_ACCEL_MAX: f32 = 32.0;
-
-/// Peak commanded angular rates per axis (radians per second).
-///
-/// Dialled back from the first iteration so controls feel deliberate rather than
-/// saturating in under a second. Still arcade-level responsive.
-const ROLL_RATE_MAX: f32 = 1.6;
-const PITCH_RATE_MAX: f32 = 1.0;
-const YAW_RATE_MAX: f32 = 0.6;
-
-/// Angular-velocity smoothing toward the commanded rate (1/s).
-const ANG_RESPONSE: f32 = 10.0;
-
-/// Linear-velocity drag (1/s). Applies at all speeds; used for low-speed stability.
-const LIN_DAMPING: f32 = 0.05;
-
-/// Quadratic drag (1/m). Dominates at higher speeds and bounds terminal velocity.
-/// With `THRUST_ACCEL_MAX = 32` and default throttle 0.4 (thrust accel 12.8 m/s^2), this
-/// produces a terminal speed around 28 m/s -- balances the lift coefficient below for
-/// near-level cruise at default throttle.
-const QUAD_DRAG: f32 = 0.014;
-
-/// Lift coefficient: m/s^2 of vertical acceleration per m/s of *horizontal* forward
-/// airspeed. At ~28 m/s horizontal forward airspeed, lift balances gravity (level flight).
-/// Using horizontal-only airspeed means diving reduces lift (nose-down -> less horizontal
-/// forward -> less lift -> gravity wins -> dive accelerates), which is the behavior a
-/// placeholder flight model needs to feel plane-like. Phase 2 replaces with per-aircraft
-/// `Cl(alpha)` tables aligned with the body's up axis.
-const LIFT_COEFF: f32 = 0.344;
-
-// Ground plane height is no longer a sim-crate constant. Callers pass `min_altitude`
-// into `tick` each step; the sim clamps the CG Y to that floor. Terrain and water
-// sampling live in `world` / app, so the sim stays decoupled from them while the
-// invariant "vehicle CG never dips below the floor" sits at the sim boundary.
+// Flight-dynamics constants have moved to `crate::flight`. See that module for the
+// Phase 1 placeholder values and the ROADMAP § 2.4 plan for their airfoil-driven
+// replacements.
+//
+// The ground-plane floor is caller-supplied per tick via `min_altitude`; the sim
+// clamps CG Y to that value. Terrain and water sampling live in `world` / app so the
+// sim stays decoupled from them while the "CG never dips below the floor" invariant
+// stays at the sim boundary.
 
 /// Authoritative simulation state.
 ///
@@ -86,6 +53,13 @@ pub struct SimState {
     pub rng: Rng,
     /// World seed for replay / state-hash purposes.
     pub seed: u64,
+    /// Optional aircraft spec driving the flight model. `None` = Phase 1 placeholder
+    /// constants are used. App sets this at startup from the loaded RON data.
+    pub aircraft: Option<AircraftSpec>,
+    /// Last flight-model result. Diagnostic (fed to the debug HUD). Not folded into
+    /// `state_hash` because it's derivable from the other state and changes every
+    /// tick; including it would just duplicate work.
+    pub last_flight: crate::flight::FlightOutputs,
 }
 
 impl SimState {
@@ -101,6 +75,8 @@ impl SimState {
             time_of_day: 0.5,
             rng: Rng::from_seed(seed),
             seed,
+            aircraft: None,
+            last_flight: crate::flight::FlightOutputs::default(),
         }
     }
 
@@ -119,7 +95,8 @@ impl SimState {
         min_altitude: f32,
     ) {
         apply_inputs(&mut self.vehicle.controls, &mut self.camera, inputs);
-        tick_dynamics(&mut self.vehicle, dt, min_altitude);
+        self.last_flight =
+            tick_dynamics(&mut self.vehicle, self.aircraft.as_ref(), dt, min_altitude);
         self.camera
             .follow(self.vehicle.position, self.vehicle.orientation, dt);
         self.time_of_day = (self.time_of_day + dt / DAY_LENGTH_SECONDS).rem_euclid(1.0);
@@ -150,52 +127,29 @@ fn apply_inputs(controls: &mut Controls, camera: &mut Camera, inputs: &InputEven
     controls.clamp();
 }
 
-/// Advance vehicle dynamics by `dt` given its current controls.
-fn tick_dynamics(v: &mut VehicleState, dt: f32, min_altitude: f32) {
-    // Commanded angular rates per axis, expressed in the *body frame*.
-    // Sign conventions (right-handed, Y-up, -Z forward):
-    //   pitch positive = nose up      -> rotate +X (right)
-    //   yaw positive   = nose right   -> rotate -Y (positive rot around +Y yaws LEFT)
-    //   roll positive  = roll right   -> rotate -Z (positive rot around +Z rolls LEFT)
-    let commanded = Vec3::new(
-        v.controls.pitch * PITCH_RATE_MAX,
-        -v.controls.yaw * YAW_RATE_MAX,
-        -v.controls.roll * ROLL_RATE_MAX,
-    );
-    // First-order tracking of commanded rate.
-    let response = 1.0 - (-ANG_RESPONSE * dt).exp();
-    v.angular_velocity = v.angular_velocity.lerp(commanded, response);
+/// Advance vehicle dynamics by `dt` given its current controls, the flight-model
+/// forces from `flight::compute_forces`, and the caller's min-altitude floor.
+///
+/// Integration and ground-clamp live here; force computation is in `crate::flight`.
+fn tick_dynamics(
+    v: &mut VehicleState,
+    spec: Option<&AircraftSpec>,
+    dt: f32,
+    min_altitude: f32,
+) -> flight::FlightOutputs {
+    let forces = flight::compute_forces(v, spec, dt);
 
-    // Integrate orientation. For small dt, (axis * angle)-form exponential is fine.
+    // Angular: first-order tracking of commanded rate, then body-frame rotation
+    // composition via axis-angle exponential.
+    let response = 1.0 - (-forces.ang_response_rate * dt).exp();
+    v.angular_velocity = v
+        .angular_velocity
+        .lerp(forces.commanded_angular_vel, response);
     let dq = Quat::from_scaled_axis(v.orientation * v.angular_velocity * dt);
     v.orientation = (dq * v.orientation).normalize();
 
-    // Thrust along current forward.
-    let forward = v.orientation * Vec3::NEG_Z;
-    let thrust_accel = forward * (v.controls.throttle * THRUST_ACCEL_MAX);
-
-    // Placeholder "wing" lift: vertical acceleration proportional to the HORIZONTAL
-    // component of forward airspeed. Projecting to the world XZ plane means that as
-    // the nose pitches down, horizontal forward drops and so does lift -- dives
-    // accelerate rather than being held level by wing lift. Lift is always along
-    // world +Y (horizon-relative); Phase 2 replaces with body-up + airfoil tables.
-    let horiz_velocity = Vec3::new(v.velocity.x, 0.0, v.velocity.z);
-    let horiz_forward = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
-    let horiz_airspeed = horiz_velocity.dot(horiz_forward).max(0.0);
-    let lift_accel = Vec3::Y * (horiz_airspeed * LIFT_COEFF);
-
-    // Drag: linear + quadratic, opposing velocity. Linear dominates at low speeds
-    // (stability); quadratic dominates at high speeds (bounded terminal velocity).
-    let speed = v.velocity.length();
-    let drag_accel = if speed > 1e-3 {
-        -v.velocity.normalize_or_zero() * (speed * (LIN_DAMPING + QUAD_DRAG * speed))
-    } else {
-        Vec3::ZERO
-    };
-
-    // Linear integration.
-    let accel = thrust_accel + lift_accel + drag_accel + GRAVITY;
-    v.velocity += accel * dt;
+    // Linear: explicit Euler integration of velocity, then position.
+    v.velocity += forces.linear_accel * dt;
     v.position += v.velocity * dt;
 
     // Caller-supplied floor (terrain + float offset, or water + float offset, whichever
@@ -206,10 +160,14 @@ fn tick_dynamics(v: &mut VehicleState, dt: f32, min_altitude: f32) {
             v.velocity.y = 0.0;
         }
     }
+
+    forces
 }
 
 #[cfg(test)]
 mod tests {
+    use glam::Vec3;
+
     use super::*;
     use crate::camera::ViewKind;
 

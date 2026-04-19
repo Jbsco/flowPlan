@@ -128,6 +128,7 @@ impl DebugHud {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn build_ui(ctx: &Context, snap: &SimSnapshot, live: &SimState, frame_ms: f32, pending_ticks: u32) {
     // glam's `to_euler(YXZ)` returns the angles in the axis order of the enum: (y, x, z).
     let (yaw, pitch, roll) = live.vehicle.orientation.to_euler(EulerRot::YXZ);
@@ -186,5 +187,86 @@ fn build_ui(ctx: &Context, snap: &SimSnapshot, live: &SimState, frame_ms: f32, p
             ));
             ui.separator();
             ui.small("W/S throttle  |  stick: ↑ dive / ↓ climb  |  ←/→ roll  |  Q/E yaw  |  1/2/3 view  |  V cycle  |  R reset  |  Esc quit");
+        });
+
+    // Top-right: flight-model dynamics breakdown. Shows the current force
+    // composition, airspeeds, and commanded vs actual angular velocity.
+    let f = &live.last_flight;
+    egui::Window::new("flowPlan dynamics")
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-10.0, 10.0))
+        .default_width(280.0)
+        .resizable(false)
+        .collapsible(true)
+        .show(ctx, |ui| {
+            ui.heading("Airspeeds");
+            ui.label(format!(
+                "total     {:6.2} m/s  ({:5.1} kt)",
+                f.airspeed,
+                f.airspeed * 1.944,
+            ));
+            ui.label(format!(
+                "horiz fwd {:6.2} m/s  ({:5.1} kt)",
+                f.horizontal_airspeed,
+                f.horizontal_airspeed * 1.944,
+            ));
+            ui.separator();
+            ui.heading("Forces (m/s^2)");
+            ui.label(format!(
+                "thrust   x {:+6.2}  y {:+6.2}  z {:+6.2}  (|{:5.2}|)",
+                f.thrust.x,
+                f.thrust.y,
+                f.thrust.z,
+                f.thrust.length(),
+            ));
+            ui.label(format!(
+                "lift     x {:+6.2}  y {:+6.2}  z {:+6.2}  (|{:5.2}|)",
+                f.lift.x,
+                f.lift.y,
+                f.lift.z,
+                f.lift.length(),
+            ));
+            ui.label(format!(
+                "drag     x {:+6.2}  y {:+6.2}  z {:+6.2}  (|{:5.2}|)",
+                f.drag.x,
+                f.drag.y,
+                f.drag.z,
+                f.drag.length(),
+            ));
+            ui.label(format!(
+                "gravity  x {:+6.2}  y {:+6.2}  z {:+6.2}",
+                f.gravity.x, f.gravity.y, f.gravity.z,
+            ));
+            ui.separator();
+            ui.label(format!(
+                "total    x {:+6.2}  y {:+6.2}  z {:+6.2}  (|{:5.2}|)",
+                f.linear_accel.x,
+                f.linear_accel.y,
+                f.linear_accel.z,
+                f.linear_accel.length(),
+            ));
+            ui.separator();
+            ui.heading("Angular (rad/s, body frame)");
+            ui.label(format!(
+                "commanded  p {:+.3}  r {:+.3}  y {:+.3}",
+                f.commanded_angular_vel.x, f.commanded_angular_vel.z, f.commanded_angular_vel.y,
+            ));
+            ui.label(format!(
+                "actual     p {:+.3}  r {:+.3}  y {:+.3}",
+                live.vehicle.angular_velocity.x,
+                live.vehicle.angular_velocity.z,
+                live.vehicle.angular_velocity.y,
+            ));
+            ui.label(format!("response rate  {:.2} / s", f.ang_response_rate));
+            ui.separator();
+            if let Some(spec) = &live.aircraft {
+                ui.heading("Aircraft");
+                ui.label(format!("{} ({:.0} hp)", spec.name, spec.engine.power_hp));
+                ui.label(format!(
+                    "cruise {:.1} m/s   Vs clean {:.1} m/s   Vso {:.1} m/s",
+                    spec.speeds.cruise_mps, spec.speeds.vs_clean_mps, spec.speeds.vso_mps,
+                ));
+            } else {
+                ui.small("(no AircraftSpec loaded -- using placeholder constants)");
+            }
         });
 }

@@ -250,7 +250,7 @@ impl Runtime {
             event_loop
                 .create_window(
                     Window::default_attributes()
-                        .with_title("flowPlan (Phase 1 core loop)")
+                        .with_title("flowPlan")
                         .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0)),
                 )
                 .context("create window")?,
@@ -330,7 +330,7 @@ impl Runtime {
         // above y=0.
         let vehicle_float_offset = (-vehicle_mesh.bbox_min_y()).max(0.0);
         let water_mesh = CpuMesh::water_grid(WATER_CELLS, WATER_HALF_EXTENT, WATER_COLOR);
-        let _aircraft_spec = load_aircraft_spec();
+        let aircraft_spec = load_aircraft_spec();
 
         let renderer = Renderer::new(
             &device,
@@ -347,6 +347,7 @@ impl Runtime {
 
         // Sim.
         let mut sim = SimState::new(WORLD_SEED);
+        sim.aircraft = aircraft_spec;
         // Start the vehicle a comfortable distance above the procedural terrain,
         // already in cruise forward velocity so placeholder-wing lift balances gravity
         // from frame zero. This avoids the "I pressed throttle but fell" confusion

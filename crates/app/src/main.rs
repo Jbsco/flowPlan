@@ -20,7 +20,7 @@ use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
     install_tracing();
-    tracing::info!("flowPlan starting (Phase 1 core loop)");
+    tracing::info!("flowPlan starting");
     game_app::run()
 }
 
