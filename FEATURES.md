@@ -428,10 +428,21 @@ v1 ships with fully-working keyboard and gamepad profiles plus the mapping UI. H
 
 ### Phase 2 state (implemented)
 
-- **[shipped: Phase 2.4.1]** Flight-model skeleton at `sim/src/flight.rs`: pure `compute_forces(state, spec, dt) -> FlightOutputs` function. Placeholder dynamics -- constant-thrust + horizontal-airspeed-lift + linear+quadratic drag + gravity. `AircraftSpec` parameter plumbed but not yet consumed. Per-force breakdown exposed to the debug HUD.
-- **[shipped: Phase 2.4.1]** Dynamics debug HUD (top-right egui panel): airspeeds, per-force vectors, total accel, commanded vs actual angular velocity, active aircraft spec. Includes an airspeed-based heuristic stall alert (NORMAL / APPROACH / STALL vs `spec.vs_clean_mps`) with known false-positives in dives and accelerated stalls, pending the real 2.4.4 AoA-based model.
+- **[shipped: Phase 2.4.1]** Flight-model skeleton at `sim/src/flight.rs`: pure `compute_forces(state, spec, dt) -> FlightOutputs` function. `AircraftSpec` parameter plumbed. Per-force breakdown exposed to the debug HUD.
+- **[shipped: Phase 2.4.2]** Real airfoil translational forces: lift `0.5 ρ V² S Cl(α)` with NACA 64A416-shaped `CL_TABLE` (whole-wing `Cl_max ≈ 1.65` at α=16°), drag polar `Cd = Cd0 + Cl²/(π·AR·e)` with post-stall parasite spike, α and β computed from body-frame velocity.
+- **[shipped: Phase 2.4.2b, in test]** Lift direction perpendicular to velocity (not body-+Y). Fixes the stall-cascade on pitch-up that resulted from spurious `L·sin(α)` backward force. Coordinated banked turns feel realistic -- lift correctly tilts into the turn as the plane rolls. Full throttle climbs; full pitch-up does not bleed into stall at reasonable airspeed.
+- **[shipped: Phase 2.4.2b]** Tuning: `THRUST_ACCEL_MAX` 2.0 → 3.5 m/s² for climb margin (proper power curve is 2.4.3); spawn velocity 50 → 55 m/s for ~2.4× Vs stall margin.
+- **[shipped: Phase 2.4.1]** Dynamics debug HUD (top-right egui panel): airspeeds, α / β / Cl / Cd, per-force vectors, total accel, commanded vs actual angular velocity, active aircraft spec. Includes an airspeed-based heuristic stall alert (NORMAL / APPROACH / STALL vs `spec.vs_clean_mps`) with known false-positives in dives and accelerated stalls, pending the real 2.4.4 α-based model.
 
 ### Phase 2 open items (each carries a `TODO(phase-N):` at `sim/src/flight.rs`)
+
+- **[ready, major: Phase 2.4.4]** **Rotational dynamics are fiat, not aerodynamic.** Stick input → body-frame angular velocity directly, with no moments, no q-scaling, no sideslip generation from rudder, no damping. Symptom reported in flight testing: rudder yaws the aircraft identically at any airspeed and generates no β. The 2.4.4 refactor replaces the fixed-rate model with moment-based rotation:
+    - Rudder δ_r + β + q → side force on vertical stabilizer → yaw moment N → angular acceleration
+    - Elevator δ_e + α + q → pitch moment M
+    - Aileron δ_a + q → roll moment L via differential wing lift
+    - Each surface adds damping proportional to (rate × q) so the plane self-stabilizes at altitude but mushes at low speed
+    - Real stall / wing-drop / accelerated-stall behavior falls out of the same frame naturally
+- **[ready: Phase 2.4.4, UX sub-step]** **Keyboard input slew-rate clamp.** Keyboard is 0%/100% step; real control pedals/sticks are analog and rate-limited by human motor capability. Apply a linear slew-rate clamp at the `Controls` input-layer boundary: target value - current value, max Δ per tick bounded by `slew_rate × dt`, full-deflection reach in ~0.7 s (slew rate ~1.5 / s). Linear chosen over progressive to match the physical behavior of a human pushing a pedal at bounded speed; progressive ease would feel mushy near neutral. Apply to pitch / yaw / roll. Throttle gets its own rate (~0.4 / s on hold). Analog sources (gamepad, HOTAS) bypass the ramp.
 
 - **[sketch]** Sim-like, sim-realistic in selected ways. Feel-first; accept liberties where they preserve fun.
 - **[sketch]** Airfoil-based lift per aircraft: tabulated `Cl(alpha)` curve, drag polar, stall region characteristics. No CFD.

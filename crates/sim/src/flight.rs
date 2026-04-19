@@ -253,15 +253,39 @@ pub fn compute_forces(
     //   pitch positive = nose up      -> rotate +X (right)
     //   yaw positive   = nose right   -> rotate -Y (positive rot around +Y yaws LEFT)
     //   roll positive  = roll right   -> rotate -Z (positive rot around +Z rolls LEFT)
-    // TODO(2.4.4): angular response should depend on airspeed (slow-flight has weak
-    //   control authority; Vne-plus has heavy authority, approaching Vne/Vd limits).
-    //   Current fixed-rate tracking is a gross simplification.
+    //
+    // TODO(2.4.4): this entire block is fiat: stick position -> body-frame angular
+    //   velocity directly, with no aero in the loop. Real control surfaces produce
+    //   *moments* via pressure differentials; the body then experiences angular
+    //   *acceleration* proportional to (moment / inertia). The cleanest refactor is:
+    //     - rudder deflection δ_r (rad) + β + q (dynamic pressure) -> side force on
+    //       vertical stabilizer -> yaw moment N -> body yaw accel (not rate).
+    //     - elevator δ_e + α + q -> pitch moment M -> body pitch accel.
+    //     - aileron δ_a + q -> differential lift on wings -> roll moment L -> body
+    //       roll accel.
+    //   Each surface also contributes damping proportional to (rate × q), so the
+    //   plane self-stabilizes at altitude but mushes at low speed. This is the
+    //   right physical frame for 2.4.4 to sit in; the current fixed-rate model
+    //   produces nonphysical behaviors like "full rudder at any airspeed yaws
+    //   identically" and "rudder yaw doesn't generate β, the plane just rotates".
+    // TODO(2.4.4): airspeed-scaled control authority follows from the moment model
+    //   above (q = 0.5 ρ V² is the scaling factor). Until 2.4.4 lands, even an
+    //   interim ramp like `authority = (V / V_ref).clamp(0.0, 1.2)` on the rate
+    //   constants would be an improvement over the flat rate.
     // TODO(2.4.4): post-stall, elevator authority is normal but ailerons lose authority
     //   (differentially: the retreating-inside-roll blade can be deep in stall). Rudder
-    //   retains authority (hence PARE recovery).
+    //   retains authority (hence PARE recovery). Falls out of the moment model
+    //   naturally once `Cl(α)` on each wing half drives the aileron-moment coupling.
     // TODO(2.4.6): aileron input should couple into a yaw contribution (adverse yaw).
+    //   Also falls out of the moment model (extra induced drag on the up-going wing).
     // TODO(2.4.6): throttle + nose-high attitude should couple into a yaw contribution
-    //   (P-factor, right-rudder-required on takeoff).
+    //   (P-factor, right-rudder-required on takeoff). Requires prop model (2.4.3).
+    // TODO(2.4.4 / UX): keyboard input is 0/1 step. Even under a proper moment model,
+    //   "full rudder mashed in one frame" is a more violent command than any human
+    //   could produce on a real pedal. An input-layer control ramp (surface deflection
+    //   slews toward target at a bounded rate, e.g., ~1.5/s so full deflection needs
+    //   ~0.7 s) would smooth this without faking physics. Gamepad / HOTAS analog
+    //   support lands in a later UX pass; the ramp is useful regardless.
     let commanded = Vec3::new(
         state.controls.pitch * PITCH_RATE_MAX,
         -state.controls.yaw * YAW_RATE_MAX,

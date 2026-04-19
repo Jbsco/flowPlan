@@ -192,14 +192,18 @@ A cube can be flown (WASD/gamepad) over a terrain. Frame budget check passes at 
 
 ### Milestone 2.4: Flight model (Beaver-tuned reference)
 
-- [ ] Airfoil-based lift using published NACA 64A416 / 64A412 Cl/Cd tables (cross-reference NACA TN-1945 and related reports)
-- [ ] Drag polar and stall region keyed to Beaver performance envelope
-- [ ] Engine model: Pratt & Whitney R-985 radial, 450 hp at sea level, published fuel burn curve
-- [ ] Fixed-pitch / ground-adjustable prop model (constant-speed prop is a post-MVP upgrade option)
-- [ ] Slotted flaps: 4 positions matching POH lift-boost and drag-penalty figures
-- [ ] Pitch/yaw/roll damping and ground effect tuned against documented Beaver handling notes
-- [ ] Tunable feel: decide final arcade-dial-default vs sim-lite-default by playtest; determinism invariant preserved under any dial setting
-- [ ] Property tests:
+- [x] **2.4.1 Skeleton**: `sim::flight::compute_forces` pure function; `AircraftSpec` wired; `FlightOutputs` diagnostics.
+- [x] **2.4.2 Airfoil physics (translational)**: lift `0.5 ρ V² S Cl(α)`, drag polar `Cd0 + Cl²/(π·AR·e)`, NACA-shaped `Cl(α)` table with whole-wing `Cl_max ≈ 1.65`, α and β computed from body-frame velocity.
+- [x] **2.4.2b Lift direction**: perpendicular to velocity (not body-+Y). Coordinated banked turns feel realistic in flight test.
+- [ ] **2.4.3 Engine + prop**: R-985 power curve (`T = P(RPM, MAP, alt) × η_prop / V`), published cruise fuel burn (27 gph), fixed-pitch prop model. Constant-speed prop remains post-MVP.
+- [ ] **2.4.4 Rotational dynamics (moment-based) + real stall**: replace the current fiat stick-to-body-rate model with aerodynamic moments -- rudder deflection + β + q → side force on vertical stab → yaw moment N → angular acceleration; elevator δ_e + α + q → pitch moment M; aileron δ_a + q → roll moment L via differential wing lift. Includes damping (rate × q). Real stall / wing-drop / accelerated-stall behavior falls out of the same frame because `Cl(α)` on each wing half drives the aileron-moment coupling; post-stall, ailerons lose authority differentially while rudder retains it (PARE recovery works). Supersedes the `PITCH_RATE_MAX / YAW_RATE_MAX / ROLL_RATE_MAX` constants.
+- [ ] **2.4.4 (UX sub-step)**: keyboard input slew-rate clamp. Keyboard 0%/100% step inputs are more violent than real control pedals; apply a linear slew (~1.5 full-deflection / s, full travel in ~0.7 s) at the `Controls` boundary before the moment model sees them. Analog sources (gamepad, HOTAS) bypass the ramp.
+- [ ] **2.4.4 (HUD)**: α-based stall alert, replacing the current Vs_clean airspeed heuristic that false-positives in dives and misses accelerated stall.
+- [ ] **2.4.5 Flaps**: 4 slotted positions matching POH lift-boost (higher `Cl_max`, Vs → Vso) and drag-penalty (ΔCd ~ 0.02 per notch) figures.
+- [ ] **2.4.6 Secondary effects**: ground effect (~30% induced-drag drop within 1 wingspan), P-factor (right-rudder-required at low airspeed + high power), adverse yaw (aileron → opposite yaw via induced-drag asymmetry), torque roll (engine torque opposing prop rotation on power changes). All these couple naturally into 2.4.4's moment model.
+- [ ] **2.4.7 Density altitude**: `ρ(h, T)` drives both lift and engine power; Vne, cruise speed, and climb rate degrade with altitude.
+- [ ] **2.4.8 Feel tuning**: decide arcade-dial-default vs sim-lite-default by playtest; determinism invariant preserved under any dial setting.
+- [ ] Property tests (close at end of 2.4):
     - Level flight at cruise power holds altitude within tolerance under zero wind
     - Published cruise speed achievable at published power setting within tolerance
     - Stall speeds (clean / flaps / floats) match POH figures within tolerance
