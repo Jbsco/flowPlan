@@ -16,7 +16,7 @@ pub trait HeightSampler: Send + Sync {
 #[derive(Clone, Debug)]
 pub struct Terrain {
     seed: u64,
-    octaves: [Octave; 4],
+    octaves: [Octave; 5],
     base_amplitude: f32,
 }
 
@@ -31,19 +31,31 @@ struct Octave {
 impl Terrain {
     /// Build a seeded procedural terrain.
     ///
-    /// Four octaves with roughly tripling frequency and halving amplitude. Phase 2
-    /// tuning (Milestone 2.2.5): amplitudes halved from the Phase 1 values so terrain
-    /// peaks stay plausible at aircraft scale (Beaver height ~4 m). Frequencies
-    /// slightly reduced for broader rolling hills that read more like coastal Alaskan
-    /// bush terrain than choppy noise.
+    /// Five octaves. The coarsest (octave 0) acts as a regional bias -- a ~1 km
+    /// wavelength shift that creates broad highland and lowland zones, giving the map
+    /// occasional tall plateaus and low basins among the rolling mid-scale detail.
+    /// The four finer octaves match the Phase 2.2.5 tuning: halved amplitudes so peaks
+    /// stay plausible at aircraft scale. Phase 2.2.4 polish (regional term) pushes max
+    /// amplitude to ±6.4 m.
     #[must_use]
     pub fn from_seed(seed: u64) -> Self {
         let mut rng = Rng::from_seed(splitmix64(seed));
+        // Phase 2.2.4 mountain-scale tuning (per ref1/2/3 reference photos: coastal
+        // Alaska fjord and alpine-lake imagery with 300-500 m peaks).
+        // - Regional: ~1 km wavelength, ±200 m -- broad mountain ranges vs. valley floors.
+        // - Coarse: ~419 m, ±120 m -- major ridges and buttresses.
+        // - Mid: ~157 m, ±40 m -- foothill rolls, side ridges.
+        // - Fine: ~52 m, ±12 m -- local hillocks.
+        // - Detail: ~21 m, ±3 m -- surface texture.
+        // Total ±375 m max; sea level cuts the lowlands, forests climb the middle,
+        // rock and snow crown the ridges. Plane's 4 m height is now small relative to
+        // the terrain, matching real-world floatplane photography scale.
         let octaves = [
-            make_octave(&mut rng, 0.015, 2.25), // ~419 m wavelength, ±2.25 m
-            make_octave(&mut rng, 0.04, 1.0),   // ~157 m, ±1.0 m
-            make_octave(&mut rng, 0.12, 0.45),  // ~52 m, ±0.45 m
-            make_octave(&mut rng, 0.3, 0.18),   // ~21 m, ±0.18 m
+            make_octave(&mut rng, 0.006, 200.0), // regional
+            make_octave(&mut rng, 0.015, 120.0),
+            make_octave(&mut rng, 0.04, 40.0),
+            make_octave(&mut rng, 0.12, 12.0),
+            make_octave(&mut rng, 0.3, 3.0),
         ];
         Self {
             seed,
@@ -132,7 +144,7 @@ mod tests {
     fn octaves_enumerable() {
         let t = Terrain::from_seed(7);
         let count = t.octaves().count();
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
     }
 
     #[test]

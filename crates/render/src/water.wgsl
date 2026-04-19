@@ -134,9 +134,16 @@ fn fs_water(in: VsOut) -> @location(0) vec4<f32> {
     let spec_align = max(dot(view_reflect, sun_dir), 0.0);
     let spec = pow(spec_align, 64.0) * 0.35;
 
-    let lit = in.vert_color.rgb * diffuse * scene.sun_color.rgb
+    // Whitecap foam: wave crests above a threshold get a cream-white tint. Cheap and
+    // reads as "water has surface texture" without needing a depth-compare pass for
+    // shoreline foam (that's deferred to 2.5 with proper contact physics).
+    let crest = smoothstep(0.12, 0.28, in.world_pos.y);
+    let foam_color = vec3<f32>(0.94, 0.96, 0.98);
+
+    let base_lit = in.vert_color.rgb * diffuse * scene.sun_color.rgb
         + rim
         + scene.sun_color.rgb * spec;
+    let lit = mix(base_lit, foam_color, crest * 0.55);
 
     // Matching scene fog so water fades at the same horizon as terrain.
     let dist = length(camera.view_pos.xyz - in.world_pos);

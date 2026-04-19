@@ -121,14 +121,10 @@ impl CpuMesh {
                 let dy_dz = (sample_height(x, z + eps) - sample_height(x, z - eps)) / (2.0 * eps);
                 let normal = Vec3::new(-dy_dx, 1.0, -dy_dz).normalize_or(Vec3::Y);
 
-                // Gentle color ramp: green at sea level -> brown at altitude.
-                let tier = (y / 20.0).clamp(0.0, 1.0);
-                let color = [
-                    0.35 + 0.4 * tier,
-                    0.55 - 0.2 * tier,
-                    0.22 - 0.15 * tier,
-                    1.0,
-                ];
+                // Multi-tier color ramp by height. Sand -> field -> forest -> rock.
+                // Breakpoints chosen for the Phase 2.2.5 terrain envelope (±3.88 m
+                // fine detail + ±2.5 m regional bias, so y spans roughly [-6.4, 6.4]).
+                let color = terrain_color_for_height(y);
 
                 mesh.vertices.push(Vertex {
                     position: [x, y, z],
@@ -245,6 +241,48 @@ impl CpuMesh {
             v.position[2] += offset[2];
         }
     }
+}
+
+/// Terrain color ramp used by [`CpuMesh::terrain_patch`].
+///
+/// Five smoothly-blended tiers by height. Tuned for the Phase 2.2.4 mountain-scale
+/// terrain envelope (±375 m max, per ref1/2/3 reference photos):
+/// - below 6 m -- sandy beige (beach / shoreline approach)
+/// - 6 to 60 m -- field green (lowland grass)
+/// - 60 to 180 m -- forest green (wooded slopes)
+/// - 180 to 320 m -- rocky brown (bare ridge / cliff)
+/// - above 320 m -- snow white (peaks / glaciers)
+fn terrain_color_for_height(y: f32) -> [f32; 4] {
+    const SAND: [f32; 3] = [0.80, 0.72, 0.54];
+    const FIELD: [f32; 3] = [0.50, 0.62, 0.32];
+    const FOREST: [f32; 3] = [0.25, 0.40, 0.20];
+    const ROCK: [f32; 3] = [0.52, 0.44, 0.34];
+    const SNOW: [f32; 3] = [0.95, 0.96, 0.98];
+    let rgb = if y < 6.0 {
+        let t = ((y + 4.0) / 10.0).clamp(0.0, 1.0);
+        lerp3(SAND, FIELD, t)
+    } else if y < 60.0 {
+        FIELD
+    } else if y < 180.0 {
+        let t = ((y - 60.0) / 120.0).clamp(0.0, 1.0);
+        lerp3(FIELD, FOREST, t)
+    } else if y < 320.0 {
+        let t = ((y - 180.0) / 140.0).clamp(0.0, 1.0);
+        lerp3(FOREST, ROCK, t)
+    } else {
+        let t = ((y - 320.0) / 80.0).clamp(0.0, 1.0);
+        lerp3(ROCK, SNOW, t)
+    };
+    [rgb[0], rgb[1], rgb[2], 1.0]
+}
+
+#[inline]
+fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
 }
 
 // Compile-time sanity on Vertex layout. Kept tight so the render crate can rely on it.

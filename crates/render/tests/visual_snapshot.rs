@@ -85,18 +85,31 @@ fn init_wgpu() -> (wgpu::Device, wgpu::Queue) {
 
 #[cfg(feature = "hardware-tests")]
 fn build_snapshot() -> SimSnapshot {
+    // Camera above lowland, looking toward the mountain range.
+    build_camera_snapshot(
+        Vec3::new(150.0, 220.0, 320.0),
+        Vec3::new(0.0, 60.0, 0.0),
+        60.0,
+        Vec3::new(40.0, 30.0, -30.0),
+    )
+}
+
+#[cfg(feature = "hardware-tests")]
+fn build_camera_snapshot(
+    cam_pos: Vec3,
+    look_target: Vec3,
+    fov_deg: f32,
+    vehicle_pos: Vec3,
+) -> SimSnapshot {
     let mut snap = SimSnapshot::default();
-    // Camera pose aimed at the origin from behind-and-above. Quat derived so -Z body
-    // points roughly toward the origin and +Y stays up.
-    let cam_pos = Vec3::new(8.0, 6.0, 16.0);
     snap.camera.position = cam_pos;
-    let forward = (Vec3::ZERO - cam_pos).normalize();
+    let forward = (look_target - cam_pos).normalize();
     let right = forward.cross(Vec3::Y).normalize();
     let up = right.cross(forward);
     let basis = glam::Mat3::from_cols(right, up, -forward);
     snap.camera.orientation = Quat::from_mat3(&basis);
-    snap.camera.fov_y_radians = 60.0_f32.to_radians();
-    snap.vehicle.position = Vec3::new(0.0, 2.0, 0.0);
+    snap.camera.fov_y_radians = fov_deg.to_radians();
+    snap.vehicle.position = vehicle_pos;
     snap.vehicle.orientation = Quat::IDENTITY;
     snap
 }
@@ -227,8 +240,13 @@ fn build_beaver_snapshot(float_offset: f32) -> SimSnapshot {
 fn beaver_preview() {
     let (device, queue) = init_wgpu();
 
-    // Flat ground patch so the aircraft stands out cleanly.
-    let terrain = CpuMesh::terrain_patch(24, 60.0, |_x, _z| 0.0);
+    // Gently varying terrain so the preview shows beach / field / forest tiers
+    // alongside the aircraft without overwhelming the silhouette. Peaks rise to
+    // ~4 m, so the rock tier stays out of this shot (the scene_minimal test covers
+    // the full range).
+    let terrain = CpuMesh::terrain_patch(32, 60.0, |x, z| {
+        ((x * 0.05).sin() + (z * 0.05).cos()) * 1.5 + ((x * 0.015).sin() * (z * 0.015).cos()) * 1.5
+    });
     let glb_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../data/aircraft/northlander.glb"
@@ -260,11 +278,67 @@ fn beaver_preview() {
 
 #[cfg(feature = "hardware-tests")]
 #[test]
+fn scene_extended() {
+    let (device, queue) = init_wgpu();
+
+    // Large tessellated terrain with all five color tiers in one frame -- beach at
+    // the shoreline, field / forest on the lower slopes, rock ridges, snow peaks.
+    // Matches the scale of ref1/2/3 reference photos (fjords / coastal Alaska).
+    let terrain = CpuMesh::terrain_patch(128, 800.0, |x, z| {
+        ((x * 0.003).sin() + (z * 0.003).cos()) * 220.0
+            + ((x * 0.012).sin() * (z * 0.012).cos()) * 80.0
+            + ((x * 0.04).cos() + (z * 0.04).sin()) * 22.0
+            + ((x * 0.12).sin() * (z * 0.12).sin()) * 6.0
+    });
+    let water = CpuMesh::water_grid(48, 900.0, WATER_COLOR);
+    let glb_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../data/aircraft/northlander.glb"
+    );
+    let glb_bytes = std::fs::read(glb_path).expect("read northlander.glb");
+    let beaver = flowplan_assets::load_mesh(&glb_bytes).expect("parse northlander.glb");
+    let beaver_float_offset = (-beaver.bbox_min_y()).max(0.0);
+
+    const EXTENDED_SIZE: (u32, u32) = (1024, 640);
+
+    let renderer = Renderer::new(
+        &device,
+        &queue,
+        FORMAT,
+        EXTENDED_SIZE,
+        &terrain,
+        TERRAIN_SHADING,
+        &water,
+        WATER_SHADING,
+        &beaver,
+        VEHICLE_SHADING,
+    );
+
+    // Camera pose: low over the water, wide FOV, looking toward the mountains so the
+    // plane in foreground, water mid-ground, rising terrain beyond. Vehicle position
+    // raised to float on water surface (beaver_float_offset above y=0).
+    let snap = build_camera_snapshot(
+        Vec3::new(-60.0, 25.0, 180.0),
+        Vec3::new(80.0, 80.0, -200.0),
+        62.0,
+        Vec3::new(-20.0, beaver_float_offset, 140.0),
+    );
+    let png = capture_png(&device, &queue, &renderer, &snap, EXTENDED_SIZE);
+    insta::assert_binary_snapshot!("scene_extended.png", png);
+}
+
+#[cfg(feature = "hardware-tests")]
+#[test]
 fn scene_minimal_snapshot() {
     let (device, queue) = init_wgpu();
 
-    let terrain =
-        CpuMesh::terrain_patch(24, 40.0, |x, z| ((x * 0.08).sin() + (z * 0.08).cos()) * 1.6);
+    // Mountain-scale terrain per the Phase 2.2.4 tuning: amplitudes span sand up
+    // through snow. Large half-extent so camera can see peaks, valleys, and water.
+    let terrain = CpuMesh::terrain_patch(64, 400.0, |x, z| {
+        ((x * 0.008).sin() + (z * 0.008).cos()) * 160.0
+            + ((x * 0.025).sin() * (z * 0.025).cos()) * 60.0
+            + ((x * 0.08).cos() + (z * 0.08).sin()) * 15.0
+    });
     // Cube built at 2 m directly now that the Renderer renders meshes at authored scale.
     let cube = CpuMesh::cube(2.0, [1.0, 0.82, 0.28, 1.0]);
     let water = CpuMesh::water_grid(16, 80.0, WATER_COLOR);

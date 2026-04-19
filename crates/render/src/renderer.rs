@@ -149,9 +149,10 @@ impl Default for SceneParams {
             sun_color: Vec3::splat(1.0),
             ambient: Vec3::splat(0.35),
             fog_color: Vec3::new(0.55, 0.73, 0.90),
-            // 0.0015 /m: ~14% fog at 100 m, ~78% at 1 km, ~95% at 2 km. Moderate haze
-            // on the current 4 km terrain patch; tuning moves to per-biome data later.
-            fog_density: 0.0015,
+            // 0.0005 /m: ~5% fog at 100 m, ~39% at 1 km, ~63% at 2 km. Tuned for the
+            // mountain-scale terrain (±375 m peaks) so distant ridges read through
+            // atmospheric haze without disappearing. Per-biome tuning lands later.
+            fog_density: 0.0005,
             time_seconds: 0.0,
         }
     }
