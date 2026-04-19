@@ -164,6 +164,28 @@ impl CpuMesh {
     pub fn index_count(&self) -> usize {
         self.indices.len()
     }
+
+    /// Minimum Y coordinate across all vertices. Returns 0.0 for an empty mesh.
+    #[must_use]
+    pub fn bbox_min_y(&self) -> f32 {
+        if self.vertices.is_empty() {
+            return 0.0;
+        }
+        self.vertices
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::INFINITY, f32::min)
+    }
+
+    /// Translate every vertex by `offset`. Normals are unchanged (rotation/scale-only
+    /// transforms would require normal-matrix handling; translation does not).
+    pub fn translate(&mut self, offset: [f32; 3]) {
+        for v in &mut self.vertices {
+            v.position[0] += offset[0];
+            v.position[1] += offset[1];
+            v.position[2] += offset[2];
+        }
+    }
 }
 
 // Compile-time sanity on Vertex layout. Kept tight so the render crate can rely on it.
@@ -220,5 +242,30 @@ mod tests {
     #[test]
     fn vertex_stride_matches_size_of() {
         assert_eq!(Vertex::STRIDE.0, core::mem::size_of::<Vertex>());
+    }
+
+    #[test]
+    fn bbox_min_y_of_cube_is_minus_half_size() {
+        let m = CpuMesh::cube(2.0, [1.0, 1.0, 1.0, 1.0]);
+        assert!((m.bbox_min_y() - -1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bbox_min_y_empty_mesh() {
+        let m = CpuMesh::new("empty");
+        assert!((m.bbox_min_y() - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn translate_shifts_positions() {
+        let mut m = CpuMesh::cube(2.0, [1.0, 1.0, 1.0, 1.0]);
+        m.translate([0.0, 2.0, 0.0]);
+        assert!((m.bbox_min_y() - 1.0).abs() < 1e-6);
+        // Normals untouched by translation.
+        for v in &m.vertices {
+            let n2 =
+                v.normal[0] * v.normal[0] + v.normal[1] * v.normal[1] + v.normal[2] * v.normal[2];
+            assert!((n2 - 1.0).abs() < 1e-5);
+        }
     }
 }

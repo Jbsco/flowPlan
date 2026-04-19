@@ -100,12 +100,18 @@ fn build_snapshot() -> SimSnapshot {
 }
 
 #[cfg(feature = "hardware-tests")]
-fn capture_png(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &Renderer) -> Vec<u8> {
+fn capture_png(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &Renderer,
+    snap: &SimSnapshot,
+    size: (u32, u32),
+) -> Vec<u8> {
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("snapshot-color"),
         size: wgpu::Extent3d {
-            width: SIZE.0,
-            height: SIZE.1,
+            width: size.0,
+            height: size.1,
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
@@ -117,15 +123,13 @@ fn capture_png(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &Renderer) 
     });
     let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
 
-    let snap = build_snapshot();
-
     // Buffer-aligned row stride. wgpu requires bytes_per_row to be 256-byte aligned for
     // texture-to-buffer copies.
     let bpp: u32 = 4;
-    let unpadded = SIZE.0 * bpp;
+    let unpadded = size.0 * bpp;
     let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
     let padded = unpadded.div_ceil(align) * align;
-    let buf_size = u64::from(padded) * u64::from(SIZE.1);
+    let buf_size = u64::from(padded) * u64::from(size.1);
 
     let buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("snapshot-readback"),
@@ -141,9 +145,9 @@ fn capture_png(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &Renderer) 
         queue,
         &mut encoder,
         &target_view,
-        SIZE,
-        &snap,
-        &snap,
+        size,
+        snap,
+        snap,
         1.0,
         CLEAR,
     );
@@ -159,12 +163,12 @@ fn capture_png(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &Renderer) 
             layout: wgpu::ImageDataLayout {
                 offset: 0,
                 bytes_per_row: Some(padded),
-                rows_per_image: Some(SIZE.1),
+                rows_per_image: Some(size.1),
             },
         },
         wgpu::Extent3d {
-            width: SIZE.0,
-            height: SIZE.1,
+            width: size.0,
+            height: size.1,
             depth_or_array_layers: 1,
         },
     );
@@ -173,18 +177,18 @@ fn capture_png(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &Renderer) 
     buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
     device.poll(wgpu::Maintain::Wait);
 
-    let mut pixels = Vec::with_capacity((SIZE.0 * SIZE.1 * 4) as usize);
+    let mut pixels = Vec::with_capacity((size.0 * size.1 * 4) as usize);
     {
         let data = buf.slice(..).get_mapped_range();
-        for y in 0..SIZE.1 {
+        for y in 0..size.1 {
             let start = (y * padded) as usize;
-            let end = start + (SIZE.0 * bpp) as usize;
+            let end = start + (size.0 * bpp) as usize;
             pixels.extend_from_slice(&data[start..end]);
         }
     }
     buf.unmap();
 
-    let img = image::RgbaImage::from_raw(SIZE.0, SIZE.1, pixels).expect("raw -> image");
+    let img = image::RgbaImage::from_raw(size.0, size.1, pixels).expect("raw -> image");
     let mut png_bytes: Vec<u8> = Vec::new();
     img.write_to(
         &mut std::io::Cursor::new(&mut png_bytes),
@@ -192,6 +196,61 @@ fn capture_png(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &Renderer) 
     )
     .expect("png encode");
     png_bytes
+}
+
+#[cfg(feature = "hardware-tests")]
+fn build_beaver_snapshot() -> SimSnapshot {
+    let mut snap = SimSnapshot::default();
+    // Pull the camera back and up from a representative 10 m aircraft pose.
+    let cam_pos = Vec3::new(18.0, 9.0, 22.0);
+    snap.camera.position = cam_pos;
+    let forward = (Vec3::ZERO - cam_pos).normalize();
+    let right = forward.cross(Vec3::Y).normalize();
+    let up = right.cross(forward);
+    let basis = glam::Mat3::from_cols(right, up, -forward);
+    snap.camera.orientation = Quat::from_mat3(&basis);
+    snap.camera.fov_y_radians = 55.0_f32.to_radians();
+    snap.vehicle.position = Vec3::new(0.0, 0.0, 0.0);
+    snap.vehicle.orientation = Quat::IDENTITY;
+    snap
+}
+
+/// Renders the committed Beaver glTF to an insta snapshot so we can iterate on the
+/// Blender export visually. First run produces a `.new` baseline to inspect; accept
+/// only when the mesh displays correctly.
+#[cfg(feature = "hardware-tests")]
+#[test]
+fn beaver_preview() {
+    let (device, queue) = init_wgpu();
+
+    // Flat ground patch so the aircraft stands out cleanly.
+    let terrain = CpuMesh::terrain_patch(24, 60.0, |_x, _z| 0.0);
+    let glb_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../data/aircraft/northlander.glb"
+    );
+    let glb_bytes = std::fs::read(glb_path).expect("read northlander.glb");
+    let mut beaver = flowplan_assets::load_mesh(&glb_bytes).expect("parse northlander.glb");
+    // Match the app's load-time shift so the preview matches what players see.
+    let min_y = beaver.bbox_min_y();
+    if min_y.abs() > 1e-4 {
+        beaver.translate([0.0, -min_y, 0.0]);
+    }
+
+    const BEAVER_SIZE: (u32, u32) = (512, 384);
+    let renderer = Renderer::new(
+        &device,
+        &queue,
+        FORMAT,
+        BEAVER_SIZE,
+        &terrain,
+        TERRAIN_SHADING,
+        &beaver,
+        VEHICLE_SHADING,
+    );
+    let snap = build_beaver_snapshot();
+    let png = capture_png(&device, &queue, &renderer, &snap, BEAVER_SIZE);
+    insta::assert_binary_snapshot!("beaver_preview.png", png);
 }
 
 #[cfg(feature = "hardware-tests")]
@@ -214,6 +273,7 @@ fn scene_minimal_snapshot() {
         &cube,
         VEHICLE_SHADING,
     );
-    let png = capture_png(&device, &queue, &renderer);
+    let snap = build_snapshot();
+    let png = capture_png(&device, &queue, &renderer, &snap, SIZE);
     insta::assert_binary_snapshot!("scene_minimal.png", png);
 }

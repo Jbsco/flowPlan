@@ -479,7 +479,20 @@ enum FrameError {
 fn load_vehicle_mesh() -> CpuMesh {
     match std::fs::read(VEHICLE_GLB_PATH) {
         Ok(bytes) => match flowplan_assets::load_mesh(&bytes) {
-            Ok(mesh) => {
+            Ok(mut mesh) => {
+                // Shift the mesh so its lowest point sits at local y=0. The authoring
+                // Blender pivot is often at model center; the sim wants the contact
+                // surface (wheels / floats underside) on the ground. A log line makes
+                // the adjustment transparent; once the Blender origin is set correctly
+                // this becomes a no-op.
+                let min_y = mesh.bbox_min_y();
+                if min_y.abs() > 1e-4 {
+                    mesh.translate([0.0, -min_y, 0.0]);
+                    tracing::info!(
+                        "vehicle mesh: shifted y by {:+.3} m so bottom sits at y=0",
+                        -min_y
+                    );
+                }
                 tracing::info!(
                     "loaded aircraft mesh: {} ({} verts, {} tris)",
                     VEHICLE_GLB_PATH,
