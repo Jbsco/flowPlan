@@ -4,7 +4,8 @@
 //!
 //! Phase 1 bindings (fixed):
 //!   W / S               throttle up / down  (continuous while held)
-//!   Arrow Up / Down     pitch up / down
+//!   Arrow Up            stick forward: pitch nose DOWN  (dive)
+//!   Arrow Down          stick back:    pitch nose UP    (climb)
 //!   Arrow Left / Right  roll left / right
 //!   Q / E               yaw left / right
 //!   1 / 2 / 3           view: first-person / chase / orbit
@@ -52,8 +53,12 @@ impl KeyState {
         match code {
             KeyCode::KeyW => self.throttle_up = pressed,
             KeyCode::KeyS => self.throttle_down = pressed,
-            KeyCode::ArrowUp => self.pitch_up = pressed,
-            KeyCode::ArrowDown => self.pitch_down = pressed,
+            // Stick convention: arrow up = stick forward = nose DOWN; arrow down = nose UP.
+            // The held-state fields document pitch *intent* (nose-up vs nose-down), so
+            // the arrow-to-field mapping is deliberately inverted from the key symbols.
+            // Phase 4's full remapping UI will make this user-configurable.
+            KeyCode::ArrowUp => self.pitch_down = pressed,
+            KeyCode::ArrowDown => self.pitch_up = pressed,
             KeyCode::ArrowLeft => self.roll_left = pressed,
             KeyCode::ArrowRight => self.roll_right = pressed,
             KeyCode::KeyQ => self.yaw_left = pressed,

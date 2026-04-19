@@ -174,7 +174,11 @@ impl Renderer {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
+                // Phase 1 pragma: no culling. Hand-authored cube + terrain meshes do not
+                // yet guarantee CCW winding in every case. Phase 2 brings glTF-imported
+                // meshes with trusted winding, at which point we re-enable back-face
+                // culling and save the fragment work.
+                cull_mode: None,
                 polygon_mode: wgpu::PolygonMode::Fill,
                 unclipped_depth: false,
                 conservative: false,

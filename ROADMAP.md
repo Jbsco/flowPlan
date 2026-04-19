@@ -57,9 +57,11 @@ Additionally, per-phase gates (below) list any phase-specific verification on to
 
 ---
 
-## Phase 0: Skeleton
+## Phase 0: Skeleton -- COMPLETE 2026-04-19
 
 **Goal:** a pip-installable cargo workspace with the directory structure from [DESIGN.md](DESIGN.md#directory-structure), an entry point that opens a window and clears it, and the full lint/test toolchain wired up.
+
+> **Status:** Gate passed. See [PROGRESS.md § Phase 0 deliverables](PROGRESS.md#phase-0-deliverables-complete) for the built artifacts.
 
 ### Steps
 
@@ -103,9 +105,11 @@ Running `cargo run -p flow-app` opens a window showing a cleared color, exits cl
 
 ---
 
-## Phase 1: Core Loop
+## Phase 1: Core Loop -- COMPLETE 2026-04-19
 
 **Goal:** fixed-timestep simulation, interpolated rendering, input plumbing, basic camera, flat terrain. Fly a cube over a heightmap.
+
+> **Status:** Gate passed and phase locked. 81 tests pass. See [PROGRESS.md § Phase 1 deliverables](PROGRESS.md#phase-1-deliverables-complete) for built artifacts, frozen tuning constants, sign conventions, and bugs fixed during the phase (do not re-introduce).
 
 ### Milestone 1.1: Fixed-timestep loop
 

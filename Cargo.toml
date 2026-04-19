@@ -40,6 +40,12 @@ wgpu = "22"
 winit = "0.30"
 pollster = "0.4"
 
+# Debug-overlay immediate-mode UI (dev/debug only; in-game HUD is hand-rolled per
+# DESIGN.md non-goals).
+egui = "0.29"
+egui-wgpu = "0.29"
+egui-winit = "0.29"
+
 # Determinism primitives
 rand = { version = "0.8", default-features = false, features = ["std_rng"] }
 rand_pcg = "0.3"

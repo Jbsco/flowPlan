@@ -10,6 +10,7 @@
 // Binary crates do not expose APIs externally; `unreachable_pub` warnings are noise.
 #![allow(unreachable_pub)]
 
+mod debug_hud;
 mod game_app;
 mod input_map;
 mod snapshot_buf;

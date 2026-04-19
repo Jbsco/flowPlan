@@ -1,6 +1,8 @@
 # CLAUDE.md
 
-Read these six documents in full, in this exact order, before any work in this repository:
+**If you are resuming mid-project:** read [PROGRESS.md](PROGRESS.md) first for the current phase, tech stack versions, conventions, and the list of bugs that must not return. It is the authoritative snapshot for session-compaction recovery.
+
+Then read the six specification documents in full, in this exact order, before any work in this repository:
 
 1. **[PLAN.md](PLAN.md)** -- creative vision, design pillars, and the "why". The mood, the loop, the thing being built.
 2. **[DESIGN.md](DESIGN.md)** -- technical architecture, subsystems, dependency rules, invariants, non-goals. The "what".
@@ -13,8 +15,9 @@ Read these six documents in full, in this exact order, before any work in this r
 
 When in doubt at any point: stop and ask. Re-open the spec docs rather than guessing.
 
-### Backlog and content catalogs
+### Progress snapshot and backlog
 
+- **[PROGRESS.md](PROGRESS.md)** -- current phase, locked tech-stack versions, conventions, bugs-fixed-don't-reintroduce, file map, known warnings, and verification commands. **Read this first on cold-start or after session compaction.** Updated at each phase lock.
 - **[FEATURES.md](FEATURES.md)** -- granular feature backlog, authoritative source for design *detail* not yet lifted into the specs. Features promote from `[sketch]` to `[ready]` only after they (a) reconcile with the specs above, (b) gain acceptance criteria, and (c) land in a phase in [ROADMAP.md](ROADMAP.md). **Read it whenever scoping new work so you can see what is already captured, including open questions and deferred ideas.** Do not invent features that could instead be promoted from the backlog.
 - **[AIRCRAFT.md](AIRCRAFT.md)** -- living aircraft catalog with design-model spec sheets. Adding an aircraft here is free; implementing one requires a ROADMAP slot. Consult before inventing flight-model data.
 

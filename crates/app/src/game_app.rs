@@ -24,6 +24,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+use crate::debug_hud::DebugHud;
 use crate::input_map::KeyState;
 use crate::snapshot_buf::SnapshotBuffer;
 
@@ -46,10 +47,13 @@ const WORLD_SEED: u64 = 0x1337_CAFE_B0A7_5EAF;
 /// producing a sim storm on resume.
 const MAX_TICKS_PER_FRAME: u32 = 8;
 
-/// Terrain patch dimensions. 96 cells at 400 m half-extent = fly over a meaningful area
-/// while still fitting in a tiny vertex buffer.
-const TERRAIN_CELLS: u32 = 96;
-const TERRAIN_HALF_EXTENT: f32 = 400.0;
+/// Terrain patch dimensions. 200 cells at 2000 m half-extent = 4 km x 4 km patch,
+/// ~20 m per cell. Large enough that the plane is visibly moving over recognizable
+/// terrain at cruise speed; small enough that the vertex buffer (~40 k verts, ~240 k
+/// indices) uploads and renders trivially. Phase 2 replaces this with a streamed
+/// heightmap tied to the chosen world scope.
+const TERRAIN_CELLS: u32 = 200;
+const TERRAIN_HALF_EXTENT: f32 = 2000.0;
 
 /// Cube size for the placeholder vehicle (meters).
 const CUBE_SIZE: f32 = 2.0;
@@ -80,6 +84,12 @@ struct Runtime {
     // Render.
     renderer: Renderer,
 
+    // World (kept on the app side; sim doesn't depend on terrain in Phase 1).
+    terrain: Terrain,
+
+    // Linear (non-sRGB) view format for the egui HUD pass. See `linear_variant`.
+    hud_format: wgpu::TextureFormat,
+
     // Sim.
     sim: SimState,
     difficulty: DifficultyDials,
@@ -92,6 +102,11 @@ struct Runtime {
     // Input.
     input_queue: Arc<ArrayQueue<InputEvent>>,
     key_state: KeyState,
+
+    // Debug HUD (egui overlay -- Phase 1 debug only).
+    debug_hud: DebugHud,
+    /// Number of fixed-step ticks executed in the last frame, exposed to the HUD.
+    ticks_last_frame: u32,
 }
 
 impl ApplicationHandler for GameApp {
@@ -121,6 +136,9 @@ impl ApplicationHandler for GameApp {
         let Some(rt) = self.runtime.as_mut() else {
             return;
         };
+        // Debug HUD sees every event first (for scale factor, scroll, etc.). It never
+        // consumes game input in Phase 1; the sim still receives subsequent processing.
+        rt.debug_hud.on_window_event(&rt.window, &event);
         match event {
             WindowEvent::CloseRequested => {
                 tracing::info!("close requested");
@@ -177,6 +195,9 @@ fn is_escape_pressed(ev: &KeyEvent) -> bool {
 }
 
 impl Runtime {
+    // wgpu initialization is a linear descriptor-chain; splitting it doesn't improve
+    // readability, so allow the slight overrun on this function's line count.
+    #[allow(clippy::too_many_lines)]
     fn init(event_loop: &ActiveEventLoop) -> Result<Self> {
         // Window.
         let window = Arc::new(
@@ -224,6 +245,16 @@ impl Runtime {
             .find(|f| f.is_srgb())
             .copied()
             .unwrap_or(surface_caps.formats[0]);
+        // Linear (non-sRGB) counterpart for the egui HUD pass. egui's shader output is
+        // already in sRGB space; writing through an sRGB view would re-encode and
+        // produce slightly washed-out colors. Declaring this in `view_formats` allows
+        // making a linear `TextureView` of the same swapchain texture.
+        let hud_format = linear_variant(surface_format);
+        let view_formats = if hud_format == surface_format {
+            Vec::new()
+        } else {
+            vec![hud_format]
+        };
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
@@ -237,7 +268,7 @@ impl Runtime {
                 .unwrap_or(wgpu::PresentMode::AutoVsync),
             desired_maximum_frame_latency: 2,
             alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: Vec::new(),
+            view_formats,
         };
         surface.configure(&device, &config);
 
@@ -260,12 +291,26 @@ impl Runtime {
 
         // Sim.
         let mut sim = SimState::new(WORLD_SEED);
-        // Start the vehicle a comfortable distance above the procedural terrain.
+        // Start the vehicle a comfortable distance above the procedural terrain,
+        // already in cruise forward velocity so placeholder-wing lift balances gravity
+        // from frame zero. This avoids the "I pressed throttle but fell" confusion
+        // that a dead-stop start produces with only thrust and gravity.
         sim.vehicle = VehicleState::at_origin();
-        sim.vehicle.position = glam::Vec3::new(0.0, terrain.max_height() + 40.0, 0.0);
+        let start_y = terrain.max_height() + 25.0;
+        sim.vehicle.position = glam::Vec3::new(0.0, start_y, 0.0);
+        sim.vehicle.velocity = glam::Vec3::new(0.0, 0.0, -28.0); // ~28 m/s forward (-Z)
+        sim.vehicle.controls.throttle = 0.4; // idle cruise
+                                             // Seed the camera at a chase-valid pose behind+above the vehicle so the first
+                                             // frame shows a sensible view rather than converging from the Camera::default
+                                             // position (which is far from the vehicle on startup).
+        sim.camera.position = sim.vehicle.position
+            + glam::Vec3::new(0.0, sim.camera.chase.height, sim.camera.chase.distance);
+        sim.camera
+            .follow(sim.vehicle.position, sim.vehicle.orientation, 1.0);
 
         let snapshots = SnapshotBuffer::new(SimSnapshot::from_state(&sim));
         let input_queue = Arc::new(ArrayQueue::new(INPUT_QUEUE_CAP));
+        let debug_hud = DebugHud::new(&device, hud_format, &window);
 
         Ok(Self {
             window,
@@ -274,12 +319,16 @@ impl Runtime {
             queue,
             config,
             renderer,
+            terrain,
+            hud_format,
             sim,
             difficulty: DifficultyDials::default(),
             tick_budget: 0.0,
             last_frame_time: Instant::now(),
             snapshots,
             input_queue,
+            debug_hud,
+            ticks_last_frame: 0,
             key_state: KeyState::default(),
         })
     }
@@ -315,10 +364,17 @@ impl Runtime {
                 batch.push(ev);
             }
             self.sim.tick(&batch, &self.difficulty, FIXED_DT);
+            // Post-tick terrain-aware camera clamp: prevents chase camera from
+            // clipping through hills. Kept outside `sim.tick` so sim stays pure.
+            let cam_ground = self
+                .terrain
+                .height(self.sim.camera.position.x, self.sim.camera.position.z);
+            self.sim.camera.clamp_above(cam_ground + 2.0);
             self.snapshots.publish(SimSnapshot::from_state(&self.sim));
             self.tick_budget -= FIXED_DT;
             tick_count += 1;
         }
+        self.ticks_last_frame = tick_count;
         let alpha = self.tick_budget / FIXED_DT;
 
         // Acquire next surface frame.
@@ -332,9 +388,17 @@ impl Runtime {
             },
             Err(e) => return Err(FrameError::Other(e)),
         };
-        let view = output
+        // Main (sRGB) view for the scene pass -- hardware applies linear->sRGB on write.
+        let main_view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        // Linear view for the HUD pass -- egui's shader output is already in sRGB space,
+        // so writing through a non-sRGB view preserves its intended colors.
+        let hud_view = output.texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("hud-linear-view"),
+            format: Some(self.hud_format),
+            ..Default::default()
+        });
 
         let (prev, curr) = self.snapshots.read();
         let mut encoder = self
@@ -345,12 +409,23 @@ impl Runtime {
         self.renderer.render(
             &self.queue,
             &mut encoder,
-            &view,
+            &main_view,
             self.size(),
             &prev,
             &curr,
             alpha,
             CLEAR_COLOR,
+        );
+        // Debug HUD pass on top of the main scene, rendered via the linear view.
+        self.debug_hud.render(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &hud_view,
+            &self.window,
+            &curr,
+            &self.sim,
+            self.ticks_last_frame,
         );
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
@@ -362,4 +437,16 @@ enum FrameError {
     Lost,
     OutOfMemory,
     Other(wgpu::SurfaceError),
+}
+
+/// Map an sRGB surface format to its linear counterpart for the egui HUD view. wgpu 22
+/// does not expose `TextureFormat::remove_srgb_suffix` as a stable helper, so this match
+/// covers the cases we actually encounter on the target platforms. Unmapped formats are
+/// returned unchanged.
+const fn linear_variant(format: wgpu::TextureFormat) -> wgpu::TextureFormat {
+    match format {
+        wgpu::TextureFormat::Rgba8UnormSrgb => wgpu::TextureFormat::Rgba8Unorm,
+        wgpu::TextureFormat::Bgra8UnormSrgb => wgpu::TextureFormat::Bgra8Unorm,
+        other => other,
+    }
 }

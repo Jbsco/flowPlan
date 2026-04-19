@@ -21,18 +21,40 @@ pub const FIXED_DT: f32 = 1.0 / 120.0;
 const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
 
 /// Thrust produced at full throttle along the vehicle's local forward axis (m/s^2).
-const THRUST_ACCEL_MAX: f32 = 18.0;
+///
+/// Tuned so level-flight thrust comfortably exceeds gravity (32 > 9.81). This is not
+/// realistic for an aircraft -- it is placeholder behavior so the Phase 1 cube can
+/// actually climb without flopping into steep pitch. Phase 2 replaces this with the
+/// Beaver's published power-to-weight characteristics.
+const THRUST_ACCEL_MAX: f32 = 32.0;
 
 /// Peak commanded angular rates per axis (radians per second).
-const ROLL_RATE_MAX: f32 = 3.0;
-const PITCH_RATE_MAX: f32 = 2.0;
-const YAW_RATE_MAX: f32 = 1.5;
+///
+/// Dialled back from the first iteration so controls feel deliberate rather than
+/// saturating in under a second. Still arcade-level responsive.
+const ROLL_RATE_MAX: f32 = 1.6;
+const PITCH_RATE_MAX: f32 = 1.0;
+const YAW_RATE_MAX: f32 = 0.6;
 
 /// Angular-velocity smoothing toward the commanded rate (1/s).
-const ANG_RESPONSE: f32 = 8.0;
+const ANG_RESPONSE: f32 = 10.0;
 
-/// Linear-velocity drag (1/s). Very weak -- Phase 2 replaces with proper drag polar.
-const LIN_DAMPING: f32 = 0.1;
+/// Linear-velocity drag (1/s). Applies at all speeds; used for low-speed stability.
+const LIN_DAMPING: f32 = 0.05;
+
+/// Quadratic drag (1/m). Dominates at higher speeds and bounds terminal velocity.
+/// With `THRUST_ACCEL_MAX = 32` and default throttle 0.4 (thrust accel 12.8 m/s^2), this
+/// produces a terminal speed around 28 m/s -- balances the lift coefficient below for
+/// near-level cruise at default throttle.
+const QUAD_DRAG: f32 = 0.014;
+
+/// Lift coefficient: m/s^2 of vertical acceleration per m/s of *horizontal* forward
+/// airspeed. At ~28 m/s horizontal forward airspeed, lift balances gravity (level flight).
+/// Using horizontal-only airspeed means diving reduces lift (nose-down -> less horizontal
+/// forward -> less lift -> gravity wins -> dive accelerates), which is the behavior a
+/// placeholder flight model needs to feel plane-like. Phase 2 replaces with per-aircraft
+/// `Cl(alpha)` tables aligned with the body's up axis.
+const LIFT_COEFF: f32 = 0.344;
 
 /// Ground plane height. Placeholder until terrain sampling lands later in Phase 1.
 const GROUND_Y: f32 = 0.5;
@@ -106,11 +128,15 @@ fn apply_inputs(controls: &mut Controls, camera: &mut Camera, inputs: &InputEven
 
 /// Advance vehicle dynamics by `dt` given its current controls.
 fn tick_dynamics(v: &mut VehicleState, dt: f32) {
-    // Commanded angular rates per axis.
+    // Commanded angular rates per axis, expressed in the *body frame*.
+    // Sign conventions (right-handed, Y-up, -Z forward):
+    //   pitch positive = nose up      -> rotate +X (right)
+    //   yaw positive   = nose right   -> rotate -Y (positive rot around +Y yaws LEFT)
+    //   roll positive  = roll right   -> rotate -Z (positive rot around +Z rolls LEFT)
     let commanded = Vec3::new(
         v.controls.pitch * PITCH_RATE_MAX,
-        v.controls.yaw * YAW_RATE_MAX,
-        -v.controls.roll * ROLL_RATE_MAX, // roll right = roll about -Z locally
+        -v.controls.yaw * YAW_RATE_MAX,
+        -v.controls.roll * ROLL_RATE_MAX,
     );
     // First-order tracking of commanded rate.
     let response = 1.0 - (-ANG_RESPONSE * dt).exp();
@@ -124,10 +150,28 @@ fn tick_dynamics(v: &mut VehicleState, dt: f32) {
     let forward = v.orientation * Vec3::NEG_Z;
     let thrust_accel = forward * (v.controls.throttle * THRUST_ACCEL_MAX);
 
+    // Placeholder "wing" lift: vertical acceleration proportional to the HORIZONTAL
+    // component of forward airspeed. Projecting to the world XZ plane means that as
+    // the nose pitches down, horizontal forward drops and so does lift -- dives
+    // accelerate rather than being held level by wing lift. Lift is always along
+    // world +Y (horizon-relative); Phase 2 replaces with body-up + airfoil tables.
+    let horiz_velocity = Vec3::new(v.velocity.x, 0.0, v.velocity.z);
+    let horiz_forward = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+    let horiz_airspeed = horiz_velocity.dot(horiz_forward).max(0.0);
+    let lift_accel = Vec3::Y * (horiz_airspeed * LIFT_COEFF);
+
+    // Drag: linear + quadratic, opposing velocity. Linear dominates at low speeds
+    // (stability); quadratic dominates at high speeds (bounded terminal velocity).
+    let speed = v.velocity.length();
+    let drag_accel = if speed > 1e-3 {
+        -v.velocity.normalize_or_zero() * (speed * (LIN_DAMPING + QUAD_DRAG * speed))
+    } else {
+        Vec3::ZERO
+    };
+
     // Linear integration.
-    let accel = thrust_accel + GRAVITY;
+    let accel = thrust_accel + lift_accel + drag_accel + GRAVITY;
     v.velocity += accel * dt;
-    v.velocity *= (1.0 - LIN_DAMPING * dt).max(0.0);
     v.position += v.velocity * dt;
 
     // Simple ground plane.

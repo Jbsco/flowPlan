@@ -123,6 +123,18 @@ impl Camera {
         self.pov_look = Vec2::ZERO;
     }
 
+    /// Clamp the camera's Y position to be at least `min_y` (meters in world space).
+    ///
+    /// Called by the app layer post-tick with a terrain-sampled ground height plus a
+    /// small margin, to prevent the chase camera from clipping through hills. Kept
+    /// external to `follow()` so that the sim tick remains independent of terrain
+    /// geometry; terrain is an app-owned concern.
+    pub fn clamp_above(&mut self, min_y: f32) {
+        if self.position.y < min_y {
+            self.position.y = min_y;
+        }
+    }
+
     /// Advance the camera one tick toward following `target_pos` / `target_orient`.
     ///
     /// Uses exponential smoothing (critical-damping factor) for the chase view; orbit
@@ -140,8 +152,12 @@ impl Camera {
                 self.orientation = target_orient * pov;
             },
             ViewKind::ChaseThirdPerson => {
-                // Desired chase pose.
-                let back = target_orient * Vec3::new(0.0, 0.0, 1.0); // local +Z is backward
+                // Body-frame chase: back direction tracks the full body orientation,
+                // including bank and pitch. The camera leans with the vehicle, which
+                // gives a cinematic feel when banking into a turn and makes the vehicle's
+                // orientation immediately readable without needing an artificial
+                // horizon.
+                let back = target_orient * Vec3::Z; // local +Z is backward
                 let up = Vec3::Y;
                 let desired_pos = target_pos + back * self.chase.distance + up * self.chase.height;
                 // Exponential smoothing -- damping factor 1.0 = critical.
@@ -149,8 +165,8 @@ impl Camera {
                 self.position = self.position.lerp(desired_pos, alpha);
                 // Look at a point slightly above the target to avoid looking at the ground.
                 let look_target = target_pos + Vec3::new(0.0, 0.8, 0.0);
-                let forward = (look_target - self.position).normalize_or_zero();
-                let look = look_at_quat(forward, Vec3::Y);
+                let forward_look = (look_target - self.position).normalize_or_zero();
+                let look = look_at_quat(forward_look, Vec3::Y);
                 let pov =
                     Quat::from_euler(glam::EulerRot::YXZ, self.pov_look.x, self.pov_look.y, 0.0);
                 self.orientation = look * pov;
@@ -173,17 +189,22 @@ impl Camera {
 
 /// Build a world-space rotation quaternion that looks along `forward` with `up` as the
 /// reference up vector. Returns identity for zero or degenerate inputs.
+///
+/// Convention: camera looks along its local `-Z`; local `+X` is right; local `+Y` is up.
+/// The cross-product order is `right = forward x up`, not `up x forward` -- swapping
+/// them flips the camera's up vector and renders the scene upside-down. Corresponding
+/// test: `up_stays_above`.
 fn look_at_quat(forward: Vec3, up: Vec3) -> Quat {
     let forward = forward.normalize_or_zero();
     if forward.length_squared() < f32::EPSILON {
         return Quat::IDENTITY;
     }
-    // Build an orthonormal basis with forward as -Z (camera convention).
-    let right = up.cross(forward).normalize_or_zero();
+    // Right-handed camera basis: local +X = right, local +Y = up, local -Z = view.
+    let right = forward.cross(up).normalize_or_zero();
     if right.length_squared() < f32::EPSILON {
         return Quat::IDENTITY;
     }
-    let corrected_up = forward.cross(right);
+    let corrected_up = right.cross(forward);
     let m = glam::Mat3::from_cols(right, corrected_up, -forward);
     Quat::from_mat3(&m)
 }
@@ -247,6 +268,41 @@ mod tests {
         cam.follow(target, Quat::IDENTITY, 0.016);
         let actual_distance = (cam.position - target).length();
         assert!((actual_distance - cam.orbit.distance).abs() < 0.01);
+    }
+
+    /// Regression guard: camera's local +Y axis must point upward in world space after
+    /// `follow()`. A swapped cross-product in `look_at_quat` flipped this and rendered
+    /// the scene upside-down; this test fires if that bug returns.
+    #[test]
+    fn chase_up_stays_above() {
+        let mut cam = Camera {
+            view_kind: ViewKind::ChaseThirdPerson,
+            ..Camera::default()
+        };
+        let target_pos = Vec3::new(0.0, 50.0, 0.0);
+        for _ in 0..300 {
+            cam.follow(target_pos, Quat::IDENTITY, 0.016);
+        }
+        let cam_up = cam.orientation * Vec3::Y;
+        assert!(
+            cam_up.y > 0.7,
+            "camera local +Y must point upward in world space; got {cam_up:?}"
+        );
+    }
+
+    #[test]
+    fn orbit_up_stays_above() {
+        let mut cam = Camera {
+            view_kind: ViewKind::ExteriorOrbit,
+            ..Camera::default()
+        };
+        let target = Vec3::new(5.0, 20.0, 5.0);
+        cam.follow(target, Quat::IDENTITY, 0.016);
+        let cam_up = cam.orientation * Vec3::Y;
+        assert!(
+            cam_up.y > 0.7,
+            "orbit camera local +Y must point upward; got {cam_up:?}"
+        );
     }
 
     #[test]
