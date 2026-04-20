@@ -559,6 +559,141 @@ Shippable v1.0.0.
 
 ---
 
+## Phase 6 (Stretch Goal, Post-v1): Multiplayer
+
+**Goal:** 2-4 player lockstep co-op over LAN and wide network, with single-player progression carrying into multiplayer sessions. A natural extension of flowPlan's design methodology: the determinism invariant, fixed-timestep sim, snapshot architecture, and deterministic scenario replay — all baked in since Phase 0 — make this tractable without rewriting subsystems.
+
+**This phase is a stretch goal, not a v1 commitment.** Entry criteria are strict: v1 has shipped, playtesting confirms a complete single-player experience, and community signal supports the investment. If any of those don't hold, the phase stays deferred. See [DESIGN.md § Non-Goals](DESIGN.md#non-goals) — "Not an MMO, not multiplayer-first" remains true; this is 2-4 player friends-list co-op, not massively multiplayer.
+
+### Why this is a methodology dividend, not a retrofit
+
+Every invariant and architectural choice in flowPlan's specs was written with *single-player determinism* as the primary motivator — reproducible replays, deterministic testing, frame-budget discipline. It turns out those same invariants are exactly what lockstep multiplayer needs. Specifically:
+
+| flowPlan invariant | Multiplayer payoff |
+|--------------------|---------------------|
+| Fixed 120 Hz sim tick, accumulator-driven (Invariant #1) | Clear sync boundary every peer agrees on |
+| Deterministic sim: `(seed, inputs, dials, dt, tick) → bit-identical state` (Invariant #8) | The core lockstep requirement, already proven by the flight bench |
+| Bounded input queue drained per tick (Invariant #7) | Network sync is just "broadcast this queue to peers" |
+| Read-only POD snapshots (Invariant #3) | Cross-thread architecture already matches cross-peer boundary |
+| No wall-clock in sim (Invariant #6, codified in rules) | Sim advances at its own rate regardless of network jitter |
+| Lock-free audio SPSC ring (Invariant #4) | Each peer renders its own audio locally; no network coupling |
+| No retained scene graph (§ State Discipline) | Render just redraws from snapshot; extends naturally to N aircraft |
+| Seeded RNG with stream separation (§ Simulation Architecture) | Weather, wildlife, missions deterministic per seed |
+
+Said another way: the work to make flowPlan testable, deterministic, and single-player-replayable *is* most of the work to make it networkable. The design-forward methodology pays here in a way that most games — which bolt multiplayer on late — can't replicate.
+
+### Entry criteria
+
+Phase 6 is not opened unless all of:
+
+- [ ] v1.0.0 has shipped and stabilized for at least one update cycle.
+- [ ] Playtesting confirms the single-player experience is complete, polished, and well-received.
+- [ ] Community / audience signal warrants the investment (not pursued speculatively).
+- [ ] Resources (time, engineering focus) are available for a 12-18 month dedicated effort.
+
+If these aren't met, Phase 6 stays closed. Shipping a complete v1 is the forcing function; multiplayer without v1 is an anti-pattern flowPlan is explicitly built to avoid.
+
+### Milestone 6.1: Determinism hardening (cross-platform)
+
+The single biggest risk to lockstep is floating-point divergence across OSes / CPU microarchitectures. This milestone closes that risk *before* networking work begins.
+
+- [ ] Pin compiler flags for strict IEEE float behavior (`-ffp-contract=off`, no fast-math).
+- [ ] Replace `std` trig (`sin`, `cos`, `atan2`) with `libm` crate (pure Rust, platform-independent) in sim hot paths.
+- [ ] Audit every `f32` operation in `flight.rs`, `state.rs`, `world::weather`, and `world::water` for platform-dependent patterns.
+- [ ] Cross-platform determinism test: run the flight-test bench on Linux + Windows + macOS + Steam Deck; CSVs must be byte-identical across all targets. This extends the existing bench at `crates/sim/tests/flight_bench.rs`.
+- [ ] CI addition: every PR runs the bench on all three major-OS runners; byte-divergence fails the gate.
+
+### Milestone 6.2: Async ghost-plane sightings
+
+The smallest multiplayer feature — practically free given the scenario-replay machinery. Can ship as a stretch feature even before committing to live co-op.
+
+- [ ] Player exports a flight log (seed, input trace, scenario config) as a shareable file.
+- [ ] Other players import it into their session.
+- [ ] The imported trace plays back as an NPC plane in the world, deterministically at every tick.
+- [ ] Multiple ghosts per session, each independently replayed.
+- [ ] Ghosts use the same visual pipeline as remote players will (aircraft rendered from snapshot, no direct sim coupling).
+- [ ] Flight log format matches the eventual save format (see FEATURES.md § Flight Log & Save Format) — forward-compatible.
+
+### Milestone 6.3: Sim-vehicle refactor (N vehicles)
+
+- [ ] `SimState.vehicle: VehicleState` → `SimState.vehicles: ArrayVec<VehicleState, MAX_PLAYERS>`. Fixed capacity so no hot-path allocation.
+- [ ] Camera becomes a render-side concern (one per peer, not in `SimState`).
+- [ ] Input events gain a `player_id`; tick dispatch routes each input to the correct vehicle.
+- [ ] Aircraft-aircraft collision detection (naïve AABB is fine for 4 players).
+- [ ] Per-vehicle fuel, damage, livery, aircraft-type state.
+- [ ] Every existing single-player scenario still passes the bench post-refactor (regression guard).
+
+### Milestone 6.4: Multiplayer sim-rate policy
+
+Wide-area lockstep at 120 Hz sim would need a 2-12 tick input buffer depending on RTT — perceptible but playable. Relaxed sim rate is an option for multiplayer specifically.
+
+- [ ] Decide: keep 120 Hz sim with hybrid 60 Hz network-tick (inputs exchanged every 2 sim ticks), OR drop sim to 60 Hz in multiplayer sessions (requires coefficient re-tune or explicit acceptance of coarser physics).
+- [ ] If 60 Hz: a config flag switches sim rate for multiplayer sessions; single-player remains 120 Hz. Scenario compatibility: single-player scenarios run at 120 Hz and cannot be directly replayed in a 60 Hz MP session — they're flagged as "single-player only" in the save format.
+- [ ] Whichever choice: preserve determinism within the chosen rate. The determinism invariant scales to N peers regardless of rate.
+
+### Milestone 6.5: Progression carry-over (SP → MP)
+
+Single-player progress carries into multiplayer as a reward for completing the base experience. Keeps MP from being a parallel grind.
+
+- [ ] Bring into MP: owned fleet (aircraft + liveries + hangar customizations), pilot character, accumulated wildlife/exploration unlocks, paint-shop creations.
+- [ ] Do NOT bring: money, mission progress, hub discoveries (MP world is fresh / seeded separately — discoveries are per-world).
+- [ ] MP-earned rewards optional: cosmetic unlocks earned in MP can be applied to SP fleet (celebrating shared experiences). Credits and reputation do NOT carry back (avoids MP-as-grind-tool-for-SP).
+- [ ] Host selects world seed + dial state; joining players confirm the session config before joining (prevents silent downgrades).
+- [ ] Aircraft selection at session start: each player picks from their owned fleet.
+- [ ] Save format versioning handles the SP ↔ MP boundary cleanly.
+
+### Milestone 6.6: Lockstep networking layer
+
+- [ ] UDP transport via `renet` or `laminar` (both Rust-native, approved-stack candidates — require DESIGN.md amendment).
+- [ ] Session discovery: LAN broadcast (zero-config friends-over-a-wifi) + lobby codes (wide-network friends).
+- [ ] Handshake: protocol version, scenario-config hash, seed, dial state must all match before session starts.
+- [ ] Input buffering: 2-6 tick sliding window, configurable per-session based on measured RTT.
+- [ ] Tick-sync protocol: all peers confirm inputs for tick N collected before any peer executes tick N.
+- [ ] Periodic state-hash exchange (every 60 ticks ≈ 1 s): all peers compare `state_hash()`. Mismatch = desync = session ends with clear reason.
+- [ ] Disconnect handling: graceful if a peer drops (others continue); host-migration if the host drops.
+- [ ] No anti-cheat beyond state-hash desync detection. Sessions are friends-list trust-based.
+
+### Milestone 6.7: Multiplayer UI
+
+- [ ] Session browser: LAN discovery list + "enter lobby code" for wide-network.
+- [ ] Pre-flight lobby: player list, each player's selected aircraft, session config, ready state.
+- [ ] In-session HUD additions: other players' callsigns overlaid on their aircraft at distance, player list with pings, chat box (text).
+- [ ] Post-session summary: per-player stats, shared moments captured (landings, wildlife sightings, discoveries).
+- [ ] Voice chat NOT in scope for stretch-goal phase; third-party (Discord, TeamSpeak) is the assumed channel.
+
+### Milestone 6.8: Playtest + platform certification
+
+- [ ] 2, 3, and 4 player sessions all stable over LAN.
+- [ ] Wide-network stress test: cross-region sessions with 50-150 ms RTT; gameplay remains playable.
+- [ ] NAT traversal / edge-case network conditions documented.
+- [ ] Steam Deck MP viable (hosting and joining).
+- [ ] Documentation: how to host, how to join, what progression carries over, what's shared.
+
+### Deliverable
+
+2-4 player flowPlan co-op sessions over LAN and wide network. Each player brings their single-player fleet + unlocks. Shared world, per-player progression. Physics identical across all peers by determinism invariant. Desyncs caught early via state-hash exchange. Friends-list trust model.
+
+Spiritually: what single-player flowPlan feels like, shared with three friends.
+
+> **Gate:** Phase 6 is complete when a 4-player wide-network session can run a full delivery mission from spawn to completion without desync, with each player bringing a saved single-player fleet, and the post-session state persists (with appropriate restrictions) back to their save files. Playtested by 10+ independent groups before release.
+
+### What Phase 6 does NOT include
+
+Stays explicitly out of scope even in the stretch-goal phase:
+
+- Matchmaking service (no central servers; peer-to-peer only).
+- Leaderboards, ranks, seasonal events.
+- In-game voice chat.
+- More than 4 players.
+- PvP / competitive modes.
+- Dedicated server support.
+- Cheat detection beyond desync hashes.
+- Anti-piracy / DRM.
+
+All of the above would require additional scoping and are not promised.
+
+---
+
 ## Future Considerations (Post-v1)
 
 Potential additions that maintain the design principles. These are deferrals, not non-goals (see [DESIGN.md](DESIGN.md#explicit-deferrals-may-revisit-after-v1)).
@@ -571,8 +706,7 @@ Potential additions that maintain the design principles. These are deferrals, no
 - Weather regimes beyond v1 core: sandstorm, hurricane cells, ice fog, lake-effect, katabatic winds.
 - Seasonal cycle upgrade: dev-toggle is available in v1; full player-facing seasonal cycle post-v1.
 - **Event-log save format**: the save *is* the flight log (templated, human-readable, deterministic replay). Hooks for async cartography, ghost-plane sightings, exportable route replays, and co-op via shared seeds. See [FEATURES.md § Flight Log & Save Format](FEATURES.md#flight-log--save-format).
-- Shared-seed co-op: two live players on the same seed + same world-scope + same dial state share weather and world events; input traces interleave.
-- Async ghost-plane sightings from other players' flight logs on the same seed.
+- **Async ghost-plane sightings + live 2-4 player co-op**: now formalized as [Phase 6 (Stretch Goal): Multiplayer](#phase-6-stretch-goal-post-v1-multiplayer) above. Elevated from an open deferral to a concrete stretch-goal phase with entry criteria, because the determinism invariant makes it a natural (not retrofit) extension of flowPlan's design.
 - Photo mode (orbit camera, pause, export). Long-exposure / star-trail mode ties into the astrophotography sky.
 - Modding interface (scoped: aircraft parameters and livery assets only, no code injection).
 - Additional regions / map expansions (the three regions not chosen as Phase 2 Region 4 become post-v1 packs).

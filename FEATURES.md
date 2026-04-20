@@ -48,6 +48,7 @@ Granular feature bullets for later expansion. Every idea captured here is intent
 - [Display & Graphics Settings](#display--graphics-settings)
 - [Difficulty & Accessibility](#difficulty--accessibility)
 - [Flight Log & Save Format](#flight-log--save-format)
+- [Multiplayer (Stretch Goal, Post-v1)](#multiplayer-stretch-goal-post-v1)
 - [Remaining Open Questions](#remaining-open-questions)
 
 ---
@@ -1041,6 +1042,109 @@ The flight log *is* the saved game. Rather than serializing the entire live stat
 - **[sketch]** Post-v1 co-op hook: two live players on the same seed share weather and world events; their input traces are interleaved in a combined log.
 - **[sketch]** Implementation note: the sim crate must already expose all state-changing events as structured records (for the event log), which aligns with the deterministic tick design. No special layer needed.
 - **[shipped: Phase 2.4.8 framework]** The flight test bench (`crates/sim/src/flight_bench.rs`, see [TEST_PLAN.md § Flight Test Bench](TEST_PLAN.md#flight-test-bench)) already implements the core replay primitive: a `FlightScenario` bundles initial state, aircraft spec, scripted `(tick, InputEvent)` trace, and assertions; the runner produces a per-tick CSV telemetry log via the same `SimState::tick` production code path; `--scenario <name>` plays a scenario visually. Phase 5+ flight log extends this format with non-flight event categories (economy / missions / damage / weather / wildlife transitions) and exposes it as a player-facing save file.
+
+---
+
+## Multiplayer (Stretch Goal, Post-v1)
+
+flowPlan's design methodology — invariant-first, determinism as first-class concern, fixed-timestep sim independent of render — means multiplayer is a *natural extension* rather than a retrofit. The work to build a testable, deterministic, single-player-replayable sim is most of the work needed for lockstep multiplayer. This pays off the design discipline in a way most games can't replicate.
+
+Tracked as [ROADMAP.md § Phase 6 (Stretch Goal): Multiplayer](ROADMAP.md#phase-6-stretch-goal-post-v1-multiplayer). Entry criteria: v1 shipped, playtesting confirms complete single-player experience, community signal warrants investment. All items here are `[sketch]` until Phase 6 is opened.
+
+### Architectural fit (why this works for flowPlan specifically)
+
+- **[sketch]** Lockstep networking: peers exchange only *inputs*, not state. Every peer runs the same deterministic sim and regenerates identical state from identical inputs. Bandwidth is tiny (~200 bytes/sec/player).
+- **[sketch]** Determinism invariant (DESIGN.md Invariant #8) is already the lockstep prerequisite — validated by the flight-test bench proving `(seed, inputs, dials, dt, tick) → bit-identical state`.
+- **[sketch]** Fixed-timestep sim (Invariant #1) gives every peer a clear sync boundary per tick.
+- **[sketch]** Snapshot architecture (Invariant #3) naturally extends from cross-thread to cross-peer: peers already read snapshots, not live sim state.
+- **[sketch]** Input queue (Invariant #7) is the sync channel: "broadcast this queue to peers" is the network layer.
+
+### Session model
+
+- **[sketch]** 2-4 players per session. Hard cap at 4 for scope reasons (NOT an MMO).
+- **[sketch]** Friends-list / trust-based. No public matchmaking, no anti-cheat beyond desync detection.
+- **[sketch]** Peer-to-peer, no dedicated server. Host-migration on host disconnect.
+- **[sketch]** Session types (proposed):
+    - **LAN**: zero-config broadcast discovery, lowest latency (< 5 ms RTT typical).
+    - **Wide network**: lobby-code pairing, NAT traversal via STUN.
+- **[sketch]** Session config locked at lobby: seed, world scope, difficulty dials, aircraft selections. All peers must agree before session starts.
+
+### Async ghosts (smallest MP feature — ships independently if desired)
+
+- **[sketch]** Player exports a flight log (seed + input trace + scenario config) as a shareable file.
+- **[sketch]** Other players import it; the trace plays back as an NPC plane in their session deterministically.
+- **[sketch]** Multiple ghosts per session, each independently replayed.
+- **[sketch]** Uses same visual pipeline as live-MP remote players — aircraft rendered from snapshot, no sim coupling.
+- **[sketch]** Natural prerequisite for live co-op (proves the N-vehicle render path and replay-from-trace machinery).
+
+### Progress migration (SP ↔ MP boundary)
+
+Single-player progression carries into multiplayer selectively. Design goal: multiplayer is a *social celebration* of completed single-player content, not an alternate grind path.
+
+- **[sketch]** Carries SP → MP:
+    - Owned fleet (aircraft + liveries + hangar customizations).
+    - Pilot character.
+    - Accumulated wildlife / exploration unlocks (cosmetic).
+    - Paint-shop creations.
+- **[sketch]** Does NOT carry SP → MP:
+    - Credits / money (MP world uses its own economy if any).
+    - Mission progress (MP missions are session-scoped).
+    - Hub discoveries (MP world is seeded separately — discoveries per-world).
+    - Damage state (everyone starts session with chosen aircraft in airworthy condition).
+- **[sketch]** Carries MP → SP:
+    - Cosmetic unlocks (liveries earned for shared moments apply to the SP fleet too).
+    - Logbook "moments" (first-time-together sightings).
+- **[sketch]** Does NOT carry MP → SP:
+    - Credits / money (prevents "farm MP to upgrade SP" anti-pattern).
+    - Reputation (SP reputation is per-NPC-hub; MP doesn't have NPC hubs).
+
+### Sim-rate policy for MP
+
+Wide-network RTT means lockstep at 120 Hz needs a multi-tick input buffer — perceptible input lag. Two candidate policies:
+
+- **[sketch, candidate A]** Keep 120 Hz sim; exchange inputs every 2 sim ticks (60 Hz "network tick"). Physics determinism preserved exactly; network frequency halved; single tick of "relaxation" in the sync cadence.
+- **[sketch, candidate B]** Drop sim to 60 Hz in MP sessions (SP remains 120 Hz). Simpler networking; requires either coefficient re-tune at 60 Hz or explicit acceptance of coarser physics in MP. SP scenarios cannot be replayed in 60 Hz MP sessions.
+- **[sketch]** Decision deferred to Phase 6.4; choice depends on playtesting perception of input-lag tradeoffs.
+
+### Session state — shared vs per-player
+
+- **[sketch]** Shared (world-state): weather, wind, time-of-day, wildlife spawns, water chop, terrain, hubs. All deterministic per seed; naturally identical across peers.
+- **[sketch]** Shared (mission-board-level): community events, seasonal demand, mission templates at hubs.
+- **[sketch]** Per-player: aircraft state, fuel, damage, cargo, mission-acceptance log, logbook, voice comms channel.
+
+### Networking layer
+
+- **[sketch]** Transport: UDP-reliable-ordered via `renet` or `laminar` (both Rust-native). Requires DESIGN.md tech-stack amendment.
+- **[sketch]** NAT traversal: STUN for NAT discovery; relay fallback where symmetric NAT blocks direct connection. Steam Networking SDK considered but adds platform coupling (conflicts with "no cloud" non-goal).
+- **[sketch]** Handshake: protocol version match, scenario-config hash match, seed match, dial-state match before session starts.
+- **[sketch]** State-hash exchange: every 60 ticks (~1 s), all peers exchange `state_hash()`. Mismatch triggers desync-with-reason disconnect. Protects against float-divergence bugs.
+
+### Anti-cheat posture
+
+- **[sketch]** Friends-list trust model. No real anti-cheat beyond state-hash desync detection.
+- **[sketch]** A peer who modifies their client to deviate from deterministic sim will desync and disconnect. A peer who modifies only their *input stream* can cheat in limited ways (e.g., clip through terrain on their local view, but the world state all peers see is computed from their reported inputs, so macro-cheating is bounded by input-event space).
+- **[sketch]** Users who want competitive anti-cheat should host private sessions with known friends. This is consistent with the single-player-first ethos.
+
+### UI
+
+- **[sketch]** Session browser: LAN-discovered list + "enter lobby code" text input.
+- **[sketch]** Pre-flight lobby: player list, each player's selected aircraft, session config preview, "ready" toggle per player.
+- **[sketch]** In-session HUD additions:
+    - Remote player callsigns overlaid on their aircraft (distance-faded).
+    - Player list with pings.
+    - Chat box (text; voice via third-party like Discord / TeamSpeak is explicitly the assumed channel).
+- **[sketch]** Post-session summary: per-player stats, shared moments captured (coordinated landings, wildlife encounters witnessed together).
+
+### Not in scope even in Phase 6
+
+- Matchmaking service.
+- Leaderboards / ranks / seasonal events.
+- In-game voice chat.
+- More than 4 players.
+- PvP / competitive modes.
+- Dedicated server hosting.
+- DRM / anti-piracy.
+- Modding interface for MP (mod-compatibility is its own design problem; deferred separately).
 
 ---
 

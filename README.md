@@ -205,7 +205,7 @@ Every design and implementation decision honors this one-liner.
 ## What flowPlan is not
 
 - **Not an engine.** flowPlan uses `wgpu` directly. No reusable engine will emerge from v1.
-- **Not an MMO.** Single-player in v1. Async / co-op hooks considered for post-v1 via shared seeds and deterministic replay.
+- **Not an MMO.** Single-player in v1. 2-4 player friends-list co-op is a stretch goal for post-v1 — tractable because flowPlan's determinism invariant, fixed-timestep sim, and scenario-replay machinery already provide the foundation lockstep multiplayer needs. See [ROADMAP.md § Phase 6](ROADMAP.md#phase-6-stretch-goal-post-v1-multiplayer).
 - **Not photorealistic.** Cel shading is the art direction.
 - **Not a full flight sim.** No CFD, no engine-management minigames. Aerodynamics are tabulated and faithful; systems are simplified to meaningful toggles.
 - **Not a scripted narrative game.** No authored dialog trees, no branching quests. Missions are template-driven and parameterized by world state.
