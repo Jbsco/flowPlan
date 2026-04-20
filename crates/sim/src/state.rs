@@ -122,6 +122,8 @@ fn apply_inputs(controls: &mut Controls, camera: &mut Camera, inputs: &InputEven
                 // Controls remain so the player keeps their current stick input.
                 // (Debug-only input; not exposed in production UI.)
             },
+            InputEvent::ExtendFlaps => controls.flaps = controls.flaps.extended(),
+            InputEvent::RetractFlaps => controls.flaps = controls.flaps.retracted(),
         }
     }
     controls.clamp();

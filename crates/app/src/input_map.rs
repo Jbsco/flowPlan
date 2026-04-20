@@ -12,6 +12,8 @@
 //!   V                   cycle view
 //!   L                   reset POV look (no-op until look input lands)
 //!   R                   reset vehicle
+//!   F                   flaps extend one notch (UP→CLIMB→TAKEOFF→LANDING)
+//!   C                   flaps retract one notch (LANDING→TAKEOFF→CLIMB→UP)
 //!   Esc                 quit (handled in `game_app`)
 //!
 //! # Keyboard axis ramp (Phase 2.4.4a)
@@ -102,6 +104,12 @@ impl KeyState {
             },
             KeyCode::KeyR if pressed && !ev.repeat => {
                 let _ = queue.push(InputEvent::ResetVehicle);
+            },
+            KeyCode::KeyF if pressed && !ev.repeat => {
+                let _ = queue.push(InputEvent::ExtendFlaps);
+            },
+            KeyCode::KeyC if pressed && !ev.repeat => {
+                let _ = queue.push(InputEvent::RetractFlaps);
             },
             _ => {},
         }

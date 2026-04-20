@@ -22,7 +22,7 @@ pub mod vehicle;
 
 pub use aircraft_spec::{AircraftSpec, EngineSpec, SpeedsSpec};
 pub use camera::{Camera, ChaseConfig, ViewKind};
-pub use controls::Controls;
+pub use controls::{Controls, FlapPosition};
 pub use difficulty::DifficultyDials;
 pub use flight::{FlightOutputs, MomentBreakdown, StallState};
 pub use hash::state_hash;

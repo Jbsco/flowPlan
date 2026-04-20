@@ -19,7 +19,7 @@
 
 #![deny(unsafe_code)]
 
-use flowplan_sim::{MomentBreakdown, SimSnapshot, StallState};
+use flowplan_sim::{ControlsSnapshot, FlapPosition, MomentBreakdown, SimSnapshot, StallState};
 use glam::{EulerRot, Quat, Vec3};
 
 /// Derived per-frame telemetry. Every display surface reads from this.
@@ -131,6 +131,10 @@ pub struct Telemetry {
     /// in dives and missed accelerated stalls.
     pub stall_state: StallState,
 
+    // --- Flaps (Phase 2.4.5) ---
+    /// Current flap detent.
+    pub flap_position: FlapPosition,
+
     /// Sim tick this telemetry was derived from. `u64::MAX` reserved for defaults.
     pub tick: u64,
 }
@@ -209,6 +213,8 @@ impl Telemetry {
             },
 
             stall_state: f.stall_state,
+
+            flap_position: ControlsSnapshot::flap_position_from_u32(veh.controls.flap_position),
 
             tick: snapshot.tick,
         }

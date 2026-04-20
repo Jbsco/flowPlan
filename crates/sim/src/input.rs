@@ -31,6 +31,10 @@ pub enum InputEvent {
     ResetLook,
     /// Reset the vehicle to its starting state (debug).
     ResetVehicle,
+    /// Advance flap handle one detent toward LANDING. No-op if already at LANDING.
+    ExtendFlaps,
+    /// Advance flap handle one detent toward UP. No-op if already at UP.
+    RetractFlaps,
 }
 
 /// A per-tick batch of input events drained from the input queue.

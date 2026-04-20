@@ -75,6 +75,7 @@
 use glam::Vec3;
 
 use crate::aircraft_spec::AircraftSpec;
+use crate::controls::FlapPosition;
 use crate::vehicle::VehicleState;
 
 /// Gravitational acceleration, world-space m/s².
@@ -263,6 +264,59 @@ impl StallState {
     }
 }
 
+/// Per-flap-position aerodynamic deltas applied on top of the clean-configuration
+/// Cl curve, Cd0, and pitching moment. Beaver-calibrated values:
+///
+/// | Position | Δ Cl | Δ Cd0 | Δ Cm   | Notes                                |
+/// |----------|------|-------|--------|--------------------------------------|
+/// | Up       | 0.00 | 0.000 |  0.00  | Clean                                |
+/// | Climb    | 0.12 | 0.005 | -0.02  | ~20° deflection; takeoff climb out   |
+/// | Takeoff  | 0.25 | 0.015 | -0.06  | ~35°; soft-field / short-field       |
+/// | Landing  | 0.37 | 0.040 | -0.10  | ~58° slotted; Vso ~21 m/s target     |
+///
+/// Landing `Cl` offset puts `Cl_max ≈ 1.65 + 0.37 = 2.02`, which at MTOW drops the
+/// stall airspeed from `Vs_clean = 23 m/s → Vso ≈ 20.8 m/s`, matching the Beaver POH
+/// `Vso = 21 m/s` (47 mph). Drag penalty at Landing (+89% zero-lift drag) is what
+/// makes the approach descend aggressively when flaps are hung out.
+#[derive(Clone, Copy, Debug)]
+pub struct FlapAeroDeltas {
+    pub delta_cl: f32,
+    pub delta_cd0: f32,
+    pub delta_cm: f32,
+}
+
+/// Per-position flap-aero lookup.
+///
+/// `Δ Cm` tuning history: initial 2.4.5 values (Climb -0.02, Takeoff -0.06, Landing
+/// -0.10) pitched the plane down ~0.82 rad/s² at Landing in cruise q -- much stronger
+/// than the pilot-manageable trim change a real Beaver shows. Reduced by ~3× at
+/// Landing so the moment is clearly noticeable but easily countered with back-stick.
+#[must_use]
+pub fn flap_aero(position: FlapPosition) -> FlapAeroDeltas {
+    match position {
+        FlapPosition::Up => FlapAeroDeltas {
+            delta_cl: 0.00,
+            delta_cd0: 0.000,
+            delta_cm: 0.000,
+        },
+        FlapPosition::Climb => FlapAeroDeltas {
+            delta_cl: 0.12,
+            delta_cd0: 0.005,
+            delta_cm: -0.010,
+        },
+        FlapPosition::Takeoff => FlapAeroDeltas {
+            delta_cl: 0.25,
+            delta_cd0: 0.015,
+            delta_cm: -0.020,
+        },
+        FlapPosition::Landing => FlapAeroDeltas {
+            delta_cl: 0.37,
+            delta_cd0: 0.040,
+            delta_cm: -0.030,
+        },
+    }
+}
+
 // --- Placeholder (no-spec) drag constants ---
 
 /// Linear drag coefficient (1/s), low-speed stability -- only used when no
@@ -349,12 +403,25 @@ fn lift_coefficient(alpha_rad: f32) -> f32 {
 }
 
 /// `Cd(α) = Cd0 + Cl² / (π · AR · e)` plus a post-stall parasite-drag spike.
+/// Test-only convenience wrapper; production callers use
+/// `drag_coefficient_with_cd0_offset` directly so the flap `Cd0` contribution is
+/// always applied.
+#[cfg(test)]
 fn drag_coefficient(alpha_rad: f32, cl: f32, aspect_ratio: f32) -> f32 {
+    drag_coefficient_with_cd0_offset(alpha_rad, cl, aspect_ratio, 0.0)
+}
+
+/// Same as `drag_coefficient`, with a `Cd0` offset (flap-deployment contribution).
+fn drag_coefficient_with_cd0_offset(
+    alpha_rad: f32,
+    cl: f32,
+    aspect_ratio: f32,
+    delta_cd0: f32,
+) -> f32 {
     let induced = cl * cl / (core::f32::consts::PI * aspect_ratio.max(1.0) * OSWALD_E);
-    // Post-stall drag rises roughly quadratically in |α - α_stall|.
-    let stall_excess = (alpha_rad.abs() - 0.2793).max(0.0); // 16° stall boundary
+    let stall_excess = (alpha_rad.abs() - 0.2793).max(0.0);
     let stall_drag = stall_excess * stall_excess * 2.0;
-    CD0 + induced + stall_drag
+    CD0 + delta_cd0 + induced + stall_drag
 }
 
 /// Compute α (angle of attack, rad) and β (sideslip, rad) from body-frame velocity.
@@ -560,9 +627,15 @@ pub fn compute_forces(
             let thrust_vec = forward * (thrust_n / mass_kg);
             let fuel_gph = fuel_flow_gph(state.controls.throttle, fuel_ok);
 
-            // Airfoil lift + drag polar (2.4.2).
-            let cl = lift_coefficient(alpha);
-            let cd = drag_coefficient(alpha, cl, aspect_ratio);
+            // Airfoil lift + drag polar (2.4.2) with flap deltas (2.4.5). Flaps shift
+            // the Cl curve up by `delta_cl` (camber increase), add a zero-lift drag
+            // penalty, and produce a nose-down pitching moment (applied later to
+            // `pitch_moment.stability`).
+            let flap_deltas = flap_aero(state.controls.flaps);
+            let cl = lift_coefficient(alpha) + flap_deltas.delta_cl;
+            // Induced drag uses the new (higher) Cl; parasite Cd0 gets the flap add.
+            let cd =
+                drag_coefficient_with_cd0_offset(alpha, cl, aspect_ratio, flap_deltas.delta_cd0);
             let q = 0.5 * AIR_DENSITY_SEA_LEVEL * speed * speed;
             let lift_force_n = q * wing_area * cl;
             let drag_force_n = q * wing_area * cd;
@@ -638,19 +711,20 @@ pub fn compute_forces(
     let roll_damp_nd = roll_rate * WING_SPAN_M / (2.0 * v_damp);
     let yaw_damp_nd = yaw_rate * WING_SPAN_M / (2.0 * v_damp);
 
-    // Pitch: control (elevator) + α-stability (with post-stall nose-down) + pitch-rate
-    // damping. Past α_stall, the center of lift shifts aft, producing an additional
-    // nose-down moment that tries to self-recover the aircraft. Modeled as a linear
-    // ramp `CM_STALL_PITCH_SLOPE × (|α| - α_stall)` in the direction opposite α (so
-    // positive α past stall gives negative, nose-down, moment).
+    // Pitch: control (elevator) + α-stability (with post-stall nose-down and flap
+    // pitching-moment contribution) + pitch-rate damping. Past α_stall, the center
+    // of lift shifts aft, producing an additional nose-down moment that tries to
+    // self-recover the aircraft. Flap deployment also produces a nose-down moment
+    // (Cm_0 shift -- the lift increment acts aft of CG for positive-camber airfoils).
     let stall_excess = (alpha.abs() - ALPHA_STALL_RAD).max(0.0);
     let stall_pitch_addend = CM_STALL_PITCH_SLOPE * stall_excess * alpha.signum();
+    let flap_cm = flap_aero(state.controls.flaps).delta_cm;
     let pitch_moment = MomentBreakdown {
         control: q_dyn * wing_area_moments * MEAN_CHORD_M * CM_DELTA_E * state.controls.pitch,
         stability: q_dyn
             * wing_area_moments
             * MEAN_CHORD_M
-            * (CM_ALPHA * alpha + stall_pitch_addend),
+            * (CM_ALPHA * alpha + stall_pitch_addend + flap_cm),
         damping: q_dyn * wing_area_moments * MEAN_CHORD_M * CM_Q * pitch_damp_nd,
     };
 
@@ -1132,6 +1206,102 @@ mod tests {
         assert!(
             (0.4..=1.0).contains(&burned),
             "60 s full-power burn should be 0.4-1.0 gal, got {burned}",
+        );
+    }
+
+    // ---- Flaps (2.4.5) ----
+
+    #[test]
+    fn flap_deltas_grow_with_extension() {
+        let up = flap_aero(FlapPosition::Up);
+        let climb = flap_aero(FlapPosition::Climb);
+        let takeoff = flap_aero(FlapPosition::Takeoff);
+        let landing = flap_aero(FlapPosition::Landing);
+        // Cl rises monotonically with extension.
+        assert!(up.delta_cl < climb.delta_cl);
+        assert!(climb.delta_cl < takeoff.delta_cl);
+        assert!(takeoff.delta_cl < landing.delta_cl);
+        // Cd0 rises monotonically with extension.
+        assert!(up.delta_cd0 < climb.delta_cd0);
+        assert!(climb.delta_cd0 < takeoff.delta_cd0);
+        assert!(takeoff.delta_cd0 < landing.delta_cd0);
+        // Cm (pitching moment) gets more nose-down (more negative) with extension.
+        assert!(up.delta_cm > climb.delta_cm);
+        assert!(climb.delta_cm > takeoff.delta_cm);
+        assert!(takeoff.delta_cm > landing.delta_cm);
+    }
+
+    #[test]
+    fn landing_flaps_raise_cl_in_compute_forces() {
+        use crate::aircraft_spec::{AircraftSpec, EngineSpec, SpeedsSpec};
+        let spec = AircraftSpec {
+            name: "test".into(),
+            inspiration: String::new(),
+            empty_mass_kg: 1000.0,
+            max_mass_wheels_kg: 2313.0,
+            max_mass_floats_kg: 2435.0,
+            wing_area_m2: 23.23,
+            aspect_ratio: 9.2,
+            airfoil_root: String::new(),
+            airfoil_tip: String::new(),
+            engine: EngineSpec {
+                name: String::new(),
+                power_hp: 450.0,
+                cruise_fuel_gph: 27.0,
+            },
+            fuel_capacity_gal: 95.0,
+            speeds: SpeedsSpec {
+                vne_mps: 71.5,
+                cruise_mps: 64.3,
+                vs_clean_mps: 23.25,
+                vso_mps: 21.0,
+                vx_mps: 29.0,
+                vy_mps: 38.0,
+            },
+        };
+        let mut s = zero_state();
+        s.velocity = Vec3::new(0.0, 0.0, -40.0);
+        s.fuel_gal = 50.0;
+        // Clean.
+        s.controls.flaps = FlapPosition::Up;
+        let out_clean = compute_forces(&s, Some(&spec), 1.0 / 120.0);
+        // Landing.
+        s.controls.flaps = FlapPosition::Landing;
+        let out_land = compute_forces(&s, Some(&spec), 1.0 / 120.0);
+        assert!(
+            out_land.cl > out_clean.cl + 0.2,
+            "landing flaps should add ≥0.2 to Cl; clean {} land {}",
+            out_clean.cl,
+            out_land.cl,
+        );
+        assert!(
+            out_land.cd > out_clean.cd + 0.02,
+            "landing flaps should add ≥0.02 to Cd; clean {} land {}",
+            out_clean.cd,
+            out_land.cd,
+        );
+        // Flaps down produces a nose-down pitching contribution (strictly more
+        // negative stability term than clean at same α).
+        assert!(
+            out_land.pitch_moment.stability < out_clean.pitch_moment.stability,
+            "flaps-down stability should be more nose-down; clean {} land {}",
+            out_clean.pitch_moment.stability,
+            out_land.pitch_moment.stability,
+        );
+    }
+
+    #[test]
+    fn flap_extend_retract_clamps_at_endpoints() {
+        assert_eq!(FlapPosition::Landing.extended(), FlapPosition::Landing);
+        assert_eq!(FlapPosition::Up.retracted(), FlapPosition::Up);
+        assert_eq!(FlapPosition::Up.extended(), FlapPosition::Climb);
+        assert_eq!(
+            FlapPosition::Climb.extended().extended(),
+            FlapPosition::Landing
+        );
+        assert_eq!(
+            FlapPosition::Landing.retracted().retracted(),
+            FlapPosition::Climb
         );
     }
 

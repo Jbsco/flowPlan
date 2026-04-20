@@ -10,14 +10,19 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Quat, Vec3};
 
 use crate::camera::{Camera, ViewKind};
+use crate::controls::FlapPosition;
 use crate::flight::FlightOutputs;
 use crate::state::SimState;
 use crate::vehicle::VehicleState;
 
-/// Control-stick + throttle position snapshot.
+/// Control-stick + throttle + flap position snapshot.
 ///
 /// Part of `VehicleSnapshot` so every display surface (debug HUD, cockpit, HUD tapes)
 /// reads control input from one place rather than reaching into live `SimState`.
+///
+/// `flap_position` is encoded as a `u32` discriminant (0=Up, 1=Climb, 2=Takeoff,
+/// 3=Landing) so the struct stays `Pod`/`Zeroable` for potential GPU upload.
+/// `Telemetry::derive` converts it back to `FlapPosition` for the HUD.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 pub struct ControlsSnapshot {
@@ -25,6 +30,34 @@ pub struct ControlsSnapshot {
     pub pitch: f32,
     pub yaw: f32,
     pub roll: f32,
+    pub flap_position: u32,
+    pad0: [f32; 3],
+}
+
+impl ControlsSnapshot {
+    /// Encode a `FlapPosition` as the `u32` we store. Inverse of
+    /// `flap_position_from_u32`.
+    #[must_use]
+    pub fn flap_position_to_u32(pos: FlapPosition) -> u32 {
+        match pos {
+            FlapPosition::Up => 0,
+            FlapPosition::Climb => 1,
+            FlapPosition::Takeoff => 2,
+            FlapPosition::Landing => 3,
+        }
+    }
+
+    /// Decode the stored `u32` back to a `FlapPosition`. Unknown values collapse to
+    /// `Up` so invalid snapshots (shouldn't happen) don't panic.
+    #[must_use]
+    pub fn flap_position_from_u32(value: u32) -> FlapPosition {
+        match value {
+            1 => FlapPosition::Climb,
+            2 => FlapPosition::Takeoff,
+            3 => FlapPosition::Landing,
+            _ => FlapPosition::Up,
+        }
+    }
 }
 
 /// Vehicle snapshot: the fields render + audio care about.
@@ -66,6 +99,8 @@ impl VehicleSnapshot {
                 pitch: v.controls.pitch,
                 yaw: v.controls.yaw,
                 roll: v.controls.roll,
+                flap_position: ControlsSnapshot::flap_position_to_u32(v.controls.flaps),
+                pad0: [0.0; 3],
             },
             fuel_gal: v.fuel_gal,
             pad3: [0.0; 3],

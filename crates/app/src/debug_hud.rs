@@ -181,8 +181,13 @@ fn build_ui(
                 "pitch {:+.2}  yaw {:+.2}  roll {:+.2}",
                 t.pitch_input, t.yaw_input, t.roll_input,
             ));
+            ui.label(format!(
+                "flaps   {}  ({:2.0}°)",
+                t.flap_position.label(),
+                t.flap_position.deflection_deg(),
+            ));
             ui.separator();
-            ui.small("W/S throttle  |  stick: ↑ dive / ↓ climb  |  ←/→ roll  |  Q/E yaw  |  1/2/3 view  |  V cycle  |  R reset  |  Esc quit");
+            ui.small("W/S throttle  |  stick: ↑ dive / ↓ climb  |  ←/→ roll  |  Q/E yaw  |  F/C flaps ext/ret  |  1/2/3 view  |  V cycle  |  R reset  |  Esc quit");
         });
 
     // Top-right: flight-model dynamics breakdown. Same Telemetry source as the left
