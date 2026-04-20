@@ -267,6 +267,38 @@ Feature flags introduced:
 - `beaver_preview.snap.png` committed as a visual regression baseline for the loaded Beaver.
 - **Deferred:** 2.3.4 back-face culling. Attempted; snapshot views remained clean but interior chase-camera / first-person views made the Beaver's exterior shell disappear (see-through plane effect). Culling stays off until a cockpit model + chase-camera clearance rework lands.
 
+### Bench-identified model gaps (open, from Phase 2.4.8 audit)
+
+Gaps the flight-test bench has surfaced between `crates/sim/src/flight.rs` coefficients and POH/real-pilot expectations. Each entry is kept up to date per the triage process in [skills/flowplan-flight-bench/references/model-gap-triage.md](skills/flowplan-flight-bench/references/model-gap-triage.md). Entries move to "resolved" and eventually out of the list once closed.
+
+Process rules (do not tune silently): every coefficient change cites its gap entry, writes a ripple-impact table, runs the full bench suite, and passes regression check before commit.
+
+**Gap 1 — Cd0 light (cruise equilibrium throttle).**
+- Symptom: `beaver_cruise_sl` equilibrates level flight at throttle 0.55 for 55 m/s; POH says 65% power (throttle ~0.65) at 64 m/s cruise.
+- Diagnosis: model's parasite-drag `Cd0 = 0.045` under-predicts true Beaver zero-lift drag at cruise α. Lower drag → less thrust needed to hold cruise speed → equilibrium at lower throttle.
+- Candidate fix: raise `Cd0` toward 0.055–0.060.
+- Ripple: affects all drag at cruise α (every scenario), slightly reduces cruise airspeed equilibrium at constant throttle, slightly reduces climb rate.
+- Scenarios affected: all cruise / climb scenarios; stall scenarios minimally (drag dominated by induced at high α).
+- Status: OPEN. Scenario accommodates with wide airspeed tolerance + note that throttle tracks toward POH as `Cd0` tunes.
+
+**Gap 2 — P-factor / slipstream magnitude (full-power rudder demand).**
+- Symptom: `beaver_cruise_climb` holds coordinated flight with 5.5% right-rudder trim; real Beaver pilots at full power use 20–40% right rudder.
+- Diagnosis: either `P_FACTOR_ARM_M = 10.0` is low, OR we lack a separate "slipstream over rudder" physics (prop wash raises local air velocity over the rudder at high power, multiplying rudder effectiveness — also shifts the effective-yaw equation the other direction).
+- Candidate fixes: (a) raise `P_FACTOR_ARM_M`; (b) add slipstream-rudder interaction as new physics.
+- Ripple: (a) over-predicts yaw at cruise (already small) → cruise would need more counter-rudder; (b) adds a new code path to `compute_forces`.
+- Scenarios affected: cruise_climb most; any future climb-at-Vy scenario (blocked), any takeoff/go-around scenario (blocked on 2.5).
+- Status: OPEN. Probably missing physics (slipstream); revisit during 2.4.8 coefficient tune — if (a) over-corrects cruise, (b) becomes a roadmap item.
+
+**Gap 3 — Cl_max under-set (stall speed above POH Vs).**
+- Symptom: `beaver_stall_clean` reaches min airspeed ~29 m/s; POH Vs_clean = 23.25 m/s.
+- Diagnosis: pure `Vs² = 2W/(ρSCl_max)` gives Vs = 31 m/s at our Cl_max = 1.65. POH Vs implies Cl_max ~2.95 at MTOW 2313 kg, wing area 23.23 m². Either our Cl_max is low, or POH figure applies to a configuration we don't match (power-on, lighter weight, slight flap deflection).
+- Candidate fix: (a) raise `Cl_max` in `CL_TABLE`; (b) verify POH-cited configuration (see AIRCRAFT.md `(verify)`); (c) check if NACA 64A416 + fuselage lift should produce higher whole-wing Cl_max than table shows.
+- Ripple: raising Cl_max affects lift at high α (stall region), induced drag at high α, flap-aero composition, wing-drop differential, ground-effect factor. Cruise α~3° unaffected.
+- Scenarios affected: stall_clean (target); future stall_landing_flaps (Vso target); future accelerated stall in banked turn; negligible on cruise/climb.
+- Status: OPEN. Analytic cause identified; needs coefficient + table-shape work + POH-citation verification.
+
+**Resolved** (none yet; all three open above until 2.4.8 tuning pass).
+
 ### Phase 2 tech-stack additions in Cargo.toml
 
 | Crate | Version | Role |

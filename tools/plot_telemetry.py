@@ -3,21 +3,21 @@
 Plot flowPlan flight-test-bench telemetry CSVs.
 
 Reads one or more CSVs produced by the bench (`target/flight-bench/*.csv` or the
-visual-playback `--log-dir`) and emits one PNG per scenario with a 2x3 panel layout
-of the most informative time series.
+visual-playback `--log-dir`) and emits one PNG per scenario with a 2x4 panel
+layout of the most informative time series.
+
+Panels (reading left-right, top-bottom):
+    altitude | airspeed + VS | attitude (pitch/roll/yaw) | α / β + stall
+    ground-track (x-z) | moments (M, L, N) | controls | engine + fuel
 
 Usage:
     python3 tools/plot_telemetry.py target/flight-bench/*.csv
     python3 tools/plot_telemetry.py --outdir docs/plots target/flight-bench/*.csv
 
-Dependencies: matplotlib, pandas (both via pip / apt). The script is deliberately
-small and readable -- no CLI library, no config files. Extend the panels as you
-need more views; a Beaver performance plot for in-game aircraft descriptions is a
-straightforward extension.
+Dependencies: matplotlib, pandas.
 """
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -36,80 +36,128 @@ def plot_scenario(csv_path: Path, out_dir: Path) -> Path:
     df = pd.read_csv(csv_path)
     scenario = csv_path.stem
 
-    # 2x3 grid of the fields we care about the most. Add more panels as needed.
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8), sharex=True)
+    fig, axes = plt.subplots(2, 4, figsize=(20, 9))
     fig.suptitle(f"{scenario}", fontsize=14)
 
     t = df["time_s"]
 
-    # Altitude
+    # (0,0) Altitude
     ax = axes[0, 0]
     ax.plot(t, df["pos_y"], color="tab:blue")
+    ax.axhline(df["pos_y"].iloc[0], color="grey", linewidth=0.5, linestyle=":")
     ax.set_ylabel("altitude (m, MSL)")
+    ax.set_xlabel("time (s)")
     ax.set_title("altitude")
     ax.grid(True, alpha=0.3)
 
-    # Airspeed + vertical speed
+    # (0,1) Airspeed (left y) + VS (right y)
     ax = axes[0, 1]
     ax.plot(t, df["airspeed_mps"], label="airspeed", color="tab:orange")
-    ax.plot(t, df["vs_mps"], label="vertical speed", color="tab:green", alpha=0.7)
-    ax.axhline(0, color="grey", linewidth=0.5)
-    ax.set_ylabel("m/s")
+    ax.set_ylabel("airspeed (m/s)", color="tab:orange")
+    ax.tick_params(axis="y", labelcolor="tab:orange")
+    ax2 = ax.twinx()
+    ax2.plot(t, df["vs_mps"], label="VS", color="tab:green", alpha=0.8)
+    ax2.axhline(0, color="grey", linewidth=0.5)
+    ax2.set_ylabel("VS (m/s)", color="tab:green")
+    ax2.tick_params(axis="y", labelcolor="tab:green")
+    ax.set_xlabel("time (s)")
     ax.set_title("airspeed + VS")
-    ax.legend(loc="best", fontsize=8)
     ax.grid(True, alpha=0.3)
 
-    # Pitch / roll / yaw angles (attitude)
+    # (0,2) Attitude: pitch + roll + yaw (degrees)
     ax = axes[0, 2]
     ax.plot(t, df["pitch_deg"], label="pitch", color="tab:red")
-    ax.plot(t, df["roll_deg"], label="roll", color="tab:green", alpha=0.7)
-    ax.plot(t, df["fpa_deg"], label="γ (FPA)", color="tab:blue", linestyle="--", alpha=0.7)
+    ax.plot(t, df["roll_deg"], label="roll", color="tab:green", alpha=0.8)
+    ax.plot(t, df["yaw_deg"], label="yaw (heading Δ)", color="tab:blue", alpha=0.8)
+    ax.plot(t, df["fpa_deg"], label="γ (FPA)", color="tab:purple", linestyle="--", alpha=0.7)
     ax.axhline(0, color="grey", linewidth=0.5)
     ax.set_ylabel("degrees")
+    ax.set_xlabel("time (s)")
     ax.set_title("attitude + flight path")
     ax.legend(loc="best", fontsize=8)
     ax.grid(True, alpha=0.3)
 
-    # Alpha + stall-state threshold
-    ax = axes[1, 0]
+    # (0,3) α / β + stall threshold
+    ax = axes[0, 3]
     ax.plot(t, df["alpha_deg"], color="tab:red", label="α")
     ax.plot(t, df["beta_deg"], color="tab:purple", alpha=0.7, label="β")
-    ax.axhline(16.0, color="crimson", linestyle=":", alpha=0.5, label="α_stall")
+    ax.axhline(16.0, color="crimson", linestyle=":", alpha=0.5, label="α_stall (16°)")
+    ax.axhline(12.8, color="orange", linestyle=":", alpha=0.5, label="α_approach (12.8°)")
     ax.axhline(-16.0, color="crimson", linestyle=":", alpha=0.5)
     ax.set_ylabel("degrees")
-    ax.set_title("α / β + stall threshold")
+    ax.set_xlabel("time (s)")
+    ax.set_title("α / β + stall thresholds")
     ax.legend(loc="best", fontsize=8)
     ax.grid(True, alpha=0.3)
 
-    # Controls
+    # (1,0) Ground track (world XZ, equal aspect). flowPlan convention: nose -Z
+    # forward, +X to the right. Show path, start marker, end marker. Note that
+    # "pos_z" grows more negative as the plane flies forward, so we plot -pos_z
+    # as "distance ahead" to read naturally.
+    ax = axes[1, 0]
+    ax.plot(df["pos_x"], -df["pos_z"], color="tab:blue", linewidth=1)
+    ax.scatter([df["pos_x"].iloc[0]], [-df["pos_z"].iloc[0]],
+               color="tab:green", s=60, zorder=3, label="start")
+    ax.scatter([df["pos_x"].iloc[-1]], [-df["pos_z"].iloc[-1]],
+               color="tab:red", s=60, zorder=3, marker="X", label="end")
+    ax.set_xlabel("x (m, +right)")
+    ax.set_ylabel("distance ahead (m, -z)")
+    ax.set_title("ground track (world)")
+    ax.set_aspect("equal", adjustable="datalim")
+    ax.legend(loc="best", fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    # (1,1) Moment breakdown (N·m). pitch_M, roll_L, yaw_N are the TOTAL per-axis
+    # aerodynamic moments after all contributions (control / stability / damping /
+    # coupling). Useful to see which axis is uncancelled in trimmed flight.
     ax = axes[1, 1]
-    ax.plot(t, df["throttle"], label="throttle", color="tab:blue")
-    ax.plot(t, df["pitch_in"], label="pitch in", color="tab:red", alpha=0.7)
-    ax.plot(t, df["roll_in"], label="roll in", color="tab:green", alpha=0.7)
-    ax.plot(t, df["yaw_in"], label="yaw in", color="tab:orange", alpha=0.7)
-    ax.set_ylabel("input")
-    ax.set_title("controls")
-    ax.set_ylim(-1.1, 1.1)
+    ax.plot(t, df["pitch_M"], label="pitch M", color="tab:red", alpha=0.8)
+    ax.plot(t, df["roll_L"], label="roll L", color="tab:green", alpha=0.8)
+    ax.plot(t, df["yaw_N"], label="yaw N", color="tab:blue", alpha=0.8)
+    ax.axhline(0, color="grey", linewidth=0.5)
+    ax.set_ylabel("moment (N·m)")
+    ax.set_xlabel("time (s)")
+    ax.set_title("moments (total per axis)")
     ax.legend(loc="best", fontsize=8)
     ax.grid(True, alpha=0.3)
 
-    # Engine
+    # (1,2) Controls
     ax = axes[1, 2]
-    ax.plot(t, df["engine_kw"], label="engine (kW)", color="tab:blue")
-    ax.plot(t, df["fuel_gph"], label="fuel (gph)", color="tab:orange", alpha=0.7)
-    ax.set_ylabel("")
-    ax.set_title("engine + fuel flow")
+    ax.plot(t, df["throttle"], label="throttle", color="tab:blue")
+    ax.plot(t, df["pitch_in"], label="pitch in", color="tab:red", alpha=0.8)
+    ax.plot(t, df["roll_in"], label="roll in", color="tab:green", alpha=0.8)
+    ax.plot(t, df["yaw_in"], label="yaw in", color="tab:orange", alpha=0.8)
+    ax.set_ylabel("input [-1,1]")
+    ax.set_xlabel("time (s)")
+    ax.set_title("controls")
+    ax.set_ylim(-0.1, 1.1)
     ax.legend(loc="best", fontsize=8)
     ax.grid(True, alpha=0.3)
+    # Overlay flap position on secondary axis if any non-zero
+    if (df["flap_deg"] != 0).any():
+        ax2 = ax.twinx()
+        ax2.plot(t, df["flap_deg"], label="flap (°)", color="tab:purple", alpha=0.5,
+                 linestyle=":")
+        ax2.set_ylabel("flap (°)", color="tab:purple")
+        ax2.tick_params(axis="y", labelcolor="tab:purple")
 
-    axes[1, 0].set_xlabel("time (s)")
-    axes[1, 1].set_xlabel("time (s)")
-    axes[1, 2].set_xlabel("time (s)")
+    # (1,3) Engine + fuel (dual axis)
+    ax = axes[1, 3]
+    ax.plot(t, df["engine_kw"], label="engine (kW)", color="tab:blue")
+    ax.set_ylabel("engine power (kW)", color="tab:blue")
+    ax.tick_params(axis="y", labelcolor="tab:blue")
+    ax2 = ax.twinx()
+    ax2.plot(t, df["fuel_gph"], label="fuel (gph)", color="tab:orange", alpha=0.7)
+    ax2.set_ylabel("fuel flow (gph)", color="tab:orange")
+    ax2.tick_params(axis="y", labelcolor="tab:orange")
+    ax.set_xlabel("time (s)")
+    ax.set_title("engine + fuel flow")
+    ax.grid(True, alpha=0.3)
 
     fig.tight_layout(rect=[0, 0, 1, 0.96])
 
     out_path = out_dir / f"{scenario}.png"
-    fig.savefig(out_path, dpi=120, bbox_inches="tight")
+    fig.savefig(out_path, dpi=110)
     plt.close(fig)
     return out_path
 

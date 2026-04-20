@@ -2,20 +2,22 @@
 
 A plot tells you the *what*; this map tells you *where to look first*. All coefficients live in [`crates/sim/src/flight.rs`](../../../crates/sim/src/flight.rs). Current Beaver values are at the bottom.
 
-## How to read the 2×3 panel plot
+## How to read the 2×4 panel plot
 
-`tools/plot_telemetry.py` produces a six-panel PNG:
+`tools/plot_telemetry.py` produces an 8-panel PNG:
 
 | Panel | Trace | What it tells you |
 |-------|-------|-------------------|
-| top-left | Altitude vs time | Long-term trend: climb / cruise / sink / phugoid oscillation |
-| top-mid | Airspeed (left axis) + VS (right axis) | Energy state + climb/descent rate |
-| top-right | Pitch, FPA, (optionally bank) | Attitude vs flight-path — difference is α |
-| bot-left | α, β + stall threshold line | Where we are in the lift curve |
-| bot-mid | Throttle, pitch/roll/yaw input, flap deg | What the pilot (or scripted scenario) commanded |
-| bot-right | Engine kW + prop efficiency + fuel flow | Power chain state |
+| (0,0) altitude | pos_y vs time, dotted line at initial altitude | Long-term trend: climb / cruise / sink / phugoid |
+| (0,1) airspeed + VS | airspeed (left y) + vs (right y) | Energy state + climb/descent rate |
+| (0,2) attitude | pitch / roll / yaw / γ (FPA) | Full attitude story on one chart |
+| (0,3) α / β + thresholds | α, β, 16° stall, 12.8° approach | Where we are in the lift curve |
+| (1,0) ground-track | pos_x vs -pos_z, equal aspect, start/end markers | Ground-truth course drift (invisible in time-series panels) |
+| (1,1) moments | pitch_M, roll_L, yaw_N | Which axis has residual moment; transients from staged inputs |
+| (1,2) controls | throttle, pitch/roll/yaw input (optionally flap overlay) | What the scripted scenario commanded |
+| (1,3) engine + fuel | engine kW (left y) + fuel gph (right y) | Power chain state; density-altitude derate visible |
 
-Read top-left first. If the aircraft is not doing what the scenario asks, the story is always in the attitude panel (top-right) and the α panel (bot-left).
+Read (0,0) altitude first for the one-number summary. If altitude is doing something unexpected, jump to (1,1) moments and (0,3) α — they almost always explain the attitude story. Ground-track (1,0) is for catching course drift (torque/P-factor residuals) that never shows up in time-series.
 
 ## Symptom → coefficient
 

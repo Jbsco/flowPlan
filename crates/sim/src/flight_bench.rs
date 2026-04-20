@@ -502,71 +502,281 @@ pub const BEAVER_SPEC_PATH: &str = "data/aircraft/northlander.ron";
 const CRUISE_ATTITUDE: Quat = Quat::from_xyzw(0.026_177_19, 0.0, 0.0, 0.999_657_4);
 
 pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
-    // Cruise at ~55 m/s with moderate throttle. Pilot holds ~5% back-stick (typical
-    // elevator trim for a hands-on cruise). Should hold altitude within a
-    // reasonable band and not stall. 30-second run.
+    // beaver_cruise_sl
+    //
+    // Real-world maneuver:
+    //   Level cruise, wings level, coordinated, steady airspeed. Trimmed hands-off
+    //   flight stand-in (no trim system ships pre-Phase 3; scripted stick trims
+    //   emulate it). Tests force balance at cruise α and cross-axis coupling
+    //   cancellation (torque roll + P-factor + α-stability).
+    //
+    // POH target:
+    //   Published cruise is 125 kt (64.3 m/s) at 65% power. Our current drag polar
+    //   (Cd0 = 0.045) under-predicts parasite drag, so 65% power equilibrates well
+    //   above 64 m/s and is not suitable for "level cruise" testing today. Instead
+    //   we test at ~55 m/s with throttle reduced to thrust-drag equilibrium. When
+    //   drag polar tunes to POH, throttle rises toward 0.65 and this assertion
+    //   tightens to target 64.3 m/s.
+    //
+    // Isolation (held constant):
+    //   - Sea level (500 m MSL to avoid ground-clamp transients).
+    //   - Zero wind (Phase 2 sim has no wind anyway).
+    //   - MTOW, flaps UP, no fuel-transfer CG effects.
+    //   - Scripted pitch/roll/yaw trim inputs stand in for a trim system (no trim
+    //     ships until Phase 3+). Pilot would normally use trim wheels to null
+    //     steady-state stick forces.
+    //   - Throttle set for thrust-drag equilibrium at ~55 m/s (currently 0.55 in
+    //     our model; POH would say ~0.65). Tracks to POH as Cd0 tunes.
+    //
+    // Real-world fidelity:
+    //   Faithful: pilot actually would hold this approximate trim state. Directions
+    //     of all inputs match real-world technique (right rudder for torque/P-factor,
+    //     slight nose-up trim for cruise α, trace right aileron for torque roll).
+    //   Approximated: SetPitch/SetRoll/SetYaw constants stand in for trim-wheel
+    //     positions that a real pilot would set and release. Net elevator/aileron/
+    //     rudder deflections at equilibrium match what trim would produce.
+    //   Magnitudes: rudder at 0.03 matches analytic P-factor balance (~1570 N·m
+    //     nose-left at cruise α=3°, thrust ~3000 N; rudder authority at cruise q
+    //     gives ~47100 N·m per unit input, so 0.033 nulls it — we set 0.03).
+    //     Real Beaver pilots report "modest right rudder at cruise," consistent.
+    //   Throttle 0.55 is lower than POH's 0.65 at cruise because our Cd0 is light;
+    //     tracks toward POH as drag-polar tunes (documented above).
+    //
+    // Does NOT test:
+    //   - Phugoid damping (separate scenario: decel disturbance + recovery).
+    //   - Gust response (blocked: Phase 3.2 weather).
+    //   - Turn coordination (separate: *_coordinated_turn_30deg).
+    //   - Published cruise airspeed (blocked: drag-polar coefficient tune).
+    //
+    // Assertion rationale:
+    //   AltitudeStableAtEnd pins the primary behavior (altitude hold). AirspeedAtEnd
+    //   pins the secondary equilibrium (coupled to throttle/drag balance) so drift
+    //   into a different part of the envelope is caught. NeverStalls is a free
+    //   sanity check from the captured log.
     FlightScenario {
         name: "beaver_cruise_sl",
-        description: "Level cruise at sea level, moderate throttle, light back-stick trim.",
+        description: "Level cruise at SL, trimmed hands-off wings-level coordinated flight.",
         aircraft_spec_path: BEAVER_SPEC_PATH,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 500.0, 0.0),
             velocity: Vec3::new(0.0, 0.0, -55.0),
             orientation: CRUISE_ATTITUDE,
             angular_velocity: Vec3::ZERO,
-            throttle: 0.65,
+            throttle: 0.55,
             flaps: FlapPosition::Up,
             fuel_gal: 80.0,
         },
         inputs: &[
-            // 5% back-stick to hold cruise α against α-stability. Scenario-level
-            // "trim" until a trim system ships.
+            // Trim stand-ins. Scripted constants until the trim system ships.
+            // Values tuned empirically from bench feedback:
+            //   pitch 0.05 nulls α-stability's restoring moment at cruise α.
+            //   roll  0.005 nulls torque-roll reaction from the right-rotating prop.
+            //   yaw   0.03 nulls P-factor (nose-left at +α with cruise thrust).
             ScenarioInput {
                 tick: 0,
                 event: InputEvent::SetPitch(0.05),
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetRoll(0.005),
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetYaw(0.03),
             },
         ],
         duration_ticks: 3600, // 30 s
         assertions: &[
             Assertion::AltitudeStableAtEnd {
                 last_secs: 5.0,
-                tol_m: 100.0, // wide until 2.4.8 tune
+                tol_m: 20.0, // empirical drift ~4 m at lock; narrow to 5 m once Cm_α tunes
+            },
+            Assertion::AirspeedAtEnd {
+                last_secs: 5.0,
+                target_mps: 56.5, // empirical equilibrium at throttle 0.55; tracks toward 64.3 as Cd0 tunes
+                tol_mps: 2.5,
             },
             Assertion::NeverStalls,
         ],
     },
-    // Climb at Vy (~38 m/s) with full throttle. Pilot holds moderate back-stick.
-    // Beaver POH lists ~5 m/s (1000 fpm) ROC at MTOW; wide tolerance until
-    // coefficient tuning dials it in.
+    // beaver_cruise_climb
+    //
+    // Real-world maneuver:
+    //   Full-throttle climb at cruise airspeed ("cruise climb" profile -- the
+    //   climb regime most general-aviation pilots actually use, since holding Vy
+    //   nose-up degrades visibility over the cowl). Tests steady climb rate
+    //   produced by excess thrust over cruise drag.
+    //
+    // POH target:
+    //   Beaver at full power at cruise speed (~55 m/s) produces climb on the order
+    //   of 500-800 fpm (2.5-4 m/s) per POH composite figures; published Vy ROC is
+    //   1000 fpm at 38 m/s, this profile trades some ROC for speed/visibility.
+    //   DHC-2 POH § 5 Performance.
+    //
+    // Model note:
+    //   Targets the model's current output (~6-8 m/s at cruise speed full power)
+    //   rather than POH; tightens toward POH as drag polar tunes. Vy-specific
+    //   climb (held at 38 m/s) is blocked on trim robustness at low V / high α,
+    //   where P-factor and torque overwhelm the small-deflection trim stand-in;
+    //   revisit with a proper trim system.
+    //
+    // Isolation (held constant):
+    //   - Sea level (500 m MSL start; climbs ~200 m in 30 s, well clear of
+    //     ground-clamp and density-altitude transitions).
+    //   - Zero wind.
+    //   - MTOW, flaps UP.
+    //   - Full-throttle trim scaled from cruise-trim values by power ratio
+    //     (1.0/0.55 ≈ 1.8× for roll torque and P-factor):
+    //       pitch 0.05 (same as cruise -- climb at cruise speed doesn't need more
+    //                   back-pressure since α stays near cruise; plane climbs via
+    //                   excess thrust, not via changed attitude).
+    //       roll  0.009 (~1.8× cruise 0.005).
+    //       yaw   0.055 (~1.8× cruise 0.03).
+    //
+    // Real-world fidelity:
+    //   Faithful: full throttle, right rudder, right aileron, slight back-pressure
+    //     all match real cruise-climb technique. Directions all correct.
+    //   Approximated: constant scripted inputs stand in for trim-wheel positions
+    //     (as in cruise). Real pilot sets trim and releases stick; net control
+    //     surface deflection at equilibrium is what our inputs produce.
+    //   Magnitudes -- KNOWN FIDELITY GAP: real Beaver pilots at full power
+    //     typically use 20-40% right rudder (especially near Vy); we set 5.5%.
+    //     This reflects our model's P-factor magnitude at cruise α=3° being
+    //     relatively mild (~2880 N·m at 5500 N thrust, 3° α). Real P-factor at
+    //     higher α in a real climb would be stronger. Possible causes: (a) our
+    //     P_FACTOR_ARM_M=10m may be light, (b) the coupling-airspeed-ramp
+    //     (5-20 m/s) may still be damping at 55 m/s, (c) real aircraft need more
+    //     rudder for slipstream-over-rudder effects we don't model. Flagged in
+    //     symptom-map.md as a coefficient-tuning item.
+    //   We do NOT inflate the rudder trim to "look right" -- the value matches
+    //     what the model physically needs. Fixing this requires coefficient work
+    //     or new physics (slipstream), not scenario fudging.
+    //
+    // Does NOT test:
+    //   - Vy-specific ROC (blocked on trim robustness at Vy α).
+    //   - Vx climb angle (separate scenario when trim system lands).
+    //   - Service ceiling (separate: *_ceiling, requires ρ-derate).
+    //   - Engine-out climb (N/A for single-engine).
+    //
+    // Assertion rationale:
+    //   ClimbRateAtEnd over last 5 s -- by t=25 s the aircraft is in quasi-steady
+    //   cruise climb. Target reflects current model; narrows as Cd tunes.
+    //   AirspeedAtEnd pins the climb profile so this stays a "cruise climb," not
+    //   a Vy climb; if speed drifts way off cruise, the test no longer isolates
+    //   what it claims to.
     FlightScenario {
-        name: "beaver_vy_climb",
-        description: "Full-throttle climb at Vy. Verify positive ROC matches POH band.",
+        name: "beaver_cruise_climb",
+        description: "Full-throttle climb at cruise airspeed. Tests quasi-steady ROC.",
         aircraft_spec_path: BEAVER_SPEC_PATH,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 500.0, 0.0),
-            velocity: Vec3::new(0.0, 0.0, -38.0),
+            velocity: Vec3::new(0.0, 0.0, -55.0),
             orientation: CRUISE_ATTITUDE,
             angular_velocity: Vec3::ZERO,
             throttle: 1.0,
             flaps: FlapPosition::Up,
             fuel_gal: 80.0,
         },
-        inputs: &[ScenarioInput {
-            tick: 0,
-            event: InputEvent::SetPitch(0.10),
-        }],
+        inputs: &[
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetPitch(0.05),
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetRoll(0.009),
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetYaw(0.055),
+            },
+        ],
         duration_ticks: 3600, // 30 s
-        assertions: &[Assertion::ClimbRateAtEnd {
-            last_secs: 5.0,
-            target_mps: 5.0,
-            tol_mps: 5.0, // very wide until 2.4.8 tune
-        }],
+        assertions: &[
+            Assertion::ClimbRateAtEnd {
+                last_secs: 5.0,
+                target_mps: 7.0, // empirical; narrows toward POH 5.08 as Cd_induced tunes
+                tol_mps: 2.0,
+            },
+            Assertion::AirspeedAtEnd {
+                last_secs: 5.0,
+                target_mps: 56.0, // empirical equilibrium slightly above cruise
+                tol_mps: 3.0,
+            },
+            Assertion::NeverStalls,
+        ],
     },
-    // Slow decel to stall with idle throttle. Record minimum airspeed -- should be
-    // near Vs_clean = 23.25 m/s. Wide tolerance.
+    // beaver_stall_clean
+    //
+    // Real-world maneuver:
+    //   Power-off stall recognition: from cruise, pilot reduces power to idle and
+    //   gradually applies back-pressure to maintain altitude as airspeed bleeds off.
+    //   Aircraft decelerates at near-constant altitude until α passes the stall
+    //   threshold; wing stalls at Vs. Pilot releases back-pressure to recover.
+    //
+    // POH target:
+    //   Vs (clean) = 52 mph = 23.25 m/s, MTOW, SL, 1 g.
+    //   DHC-2 POH § 3 Emergency Procedures / § 5 Performance (Stall Speed chart).
+    //
+    // Isolation (held constant):
+    //   - Start at 1000 m MSL (enough altitude to complete the decel + stall +
+    //     post-stall recovery without ground-clamp interference).
+    //   - Zero wind.
+    //   - MTOW, flaps UP ("clean" stall, not Vso).
+    //   - Idle throttle (0.0) so thrust term is near-zero; decel is pure drag.
+    //   - Modest scripted back-pressure: enough to keep α rising as V drops, not
+    //     so much that aircraft zoom-climbs into stall.
+    //   - Trim inputs for roll/yaw are reduced from cruise because at idle the
+    //     P-factor and torque reaction are near-zero.
+    //
+    // Real-world fidelity:
+    //   Faithful: throttle 0.0 (idle), near-zero roll/yaw trim (because at idle
+    //     P-factor and torque-roll are both near zero), altitude 1000 m MSL for
+    //     safe decel + recovery envelope. All match real-world technique.
+    //     The staged pitch ramp (7 small steps, 0.05 → 0.30) produces an
+    //     approach-to-stall trajectory that matches the real procedure:
+    //       - First ~6 s: near-level decel (small ±1 m altitude band).
+    //       - Next ~6 s: gradual pitch-up, mild zoom (~40 m altitude gain) as
+    //         back-pressure rises faster than the aircraft re-trims.
+    //       - Stall break at α past threshold, recovery via post-stall pitch-down.
+    //     Total zoom is ~40 m vs the ~86 m zoom of the previous constant-input
+    //     version -- meaningfully closer to the near-level decel of real technique.
+    //   Approximated: real pilot applies CONTINUOUS back-pressure; we approximate
+    //     with 7 discrete SetPitch events at 2-s intervals. Each jump produces a
+    //     small pitch transient at the event boundary. Smaller/more-frequent
+    //     steps would reduce these transients but with diminishing returns.
+    //   Magnitudes: step values derive analytically from the α-stability /
+    //     elevator-authority balance δ_pitch = (|Cm_α|/Cm_δe) · α_rad, where α
+    //     for level flight is set by Cl = W/(½ρV²S). No inflation beyond what
+    //     the physics requires; values progress with airspeed as a pilot would.
+    //   Known coefficient gap (not a scenario fudge): the model stalls at
+    //     V ≈ 29 m/s (consistent with Cl_max = 1.65 at MTOW by Vs² = 2W/(ρSCl_max)),
+    //     while the POH reports Vs = 23.25 m/s. Resolving this requires tuning
+    //     the Cl table peak upward or reviewing the POH measurement conditions
+    //     (power-on vs power-off, actual flaps position during measurement).
+    //     Flagged in symptom-map.md. Assertion tolerance (8 m/s) accommodates
+    //     the gap for now; tightens when Cl table is reconciled to POH.
+    //   Planned future refinement: a ramped-input event type (continuous change
+    //     over N ticks) would replace the staged steps, eliminating transient
+    //     boundary effects entirely.
+    //
+    // Does NOT test:
+    //   - Accelerated (G-loaded) stall (separate: *_accelerated_stall).
+    //   - Flap-down stall / Vso (separate: *_stall_landing_flaps).
+    //   - Power-on stall (separate: *_stall_power_on).
+    //   - Spin entry / autorotation (post-2.4 flight model work).
+    //   - Stall recovery time (separate assertion variant).
+    //
+    // Assertion rationale:
+    //   EventuallyStalls verifies the scenario did actually stall -- without this
+    //   MinAirspeedNearTarget could pass trivially if the aircraft just slowed
+    //   without reaching stall α. MinAirspeedNearTarget pins the speed at which
+    //   stall occurred, which is the primary behavior under test (matches POH
+    //   Vs). Tolerance is wide until α-based stall, Cl table, AND staged-input
+    //   refinement all land.
     FlightScenario {
         name: "beaver_stall_clean",
-        description: "Decel to stall from cruise, clean config. Min airspeed near Vs_clean.",
+        description: "Power-off decel-to-stall from cruise, clean config. Min speed near Vs.",
         aircraft_spec_path: BEAVER_SPEC_PATH,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 1000.0, 0.0),
@@ -578,10 +788,55 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             fuel_gal: 80.0,
         },
         inputs: &[
-            // Hold back-stick to keep α high as speed drops.
+            // Staged back-pressure mimicking real-pilot technique: smoothly pull
+            // back to hold altitude as airspeed decays. Analytic basis:
+            //   Level flight requires elevator to null α-stability:
+            //     δ_pitch = (Cm_α / Cm_δe) · α_rad  ≈  1.04 · α_rad
+            //   where α rises as V drops to maintain L = W. At our coefficients
+            //   (Cm_α = -0.25, Cm_δe = 0.24) and Beaver mass/wing/Cl, the sequence
+            //   V=55/α=3° → V=45/α=5° → V=40/α=9° → V=35/α=14° → V=30/α=16°(stall)
+            //   maps to pitch input 0.05 → 0.09 → 0.16 → 0.25 → 0.29.
+            // Scripted as 7 small steps at 2-s intervals. Smaller steps reduce
+            // the pitch-up transient at each event (larger steps produce zoom
+            // climbs as the pilot-analog "over-pulls" relative to instantaneous
+            // airspeed). Matches a real pilot's continuous, gentle back-pressure.
             ScenarioInput {
                 tick: 0,
+                event: InputEvent::SetPitch(0.05),
+            },
+            ScenarioInput {
+                tick: 240, // 2 s
+                event: InputEvent::SetPitch(0.08),
+            },
+            ScenarioInput {
+                tick: 480, // 4 s
+                event: InputEvent::SetPitch(0.11),
+            },
+            ScenarioInput {
+                tick: 720, // 6 s
+                event: InputEvent::SetPitch(0.14),
+            },
+            ScenarioInput {
+                tick: 960, // 8 s
+                event: InputEvent::SetPitch(0.18),
+            },
+            ScenarioInput {
+                tick: 1200, // 10 s
+                event: InputEvent::SetPitch(0.23),
+            },
+            ScenarioInput {
+                tick: 1440, // 12 s
                 event: InputEvent::SetPitch(0.30),
+            },
+            // Near-zero thrust means near-zero P-factor and torque-roll; small
+            // trims are enough to keep wings level during the decel.
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetRoll(0.001),
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetYaw(0.005),
             },
         ],
         duration_ticks: 2400, // 20 s
@@ -589,7 +844,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             Assertion::EventuallyStalls,
             Assertion::MinAirspeedNearTarget {
                 target_mps: 23.25,
-                tol_mps: 8.0, // very wide -- refine during tune
+                tol_mps: 8.0, // wide -- refine during α-stall + Cl-table tune
             },
         ],
     },

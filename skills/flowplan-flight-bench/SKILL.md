@@ -21,6 +21,8 @@ If you are picking flight coefficients out of thin air or eye-balling altitude t
 6. **Never script a workaround around a bug.** If a scenario needs unrealistic inputs to pass, the flight model is wrong, not the scenario. Fix the physics.
 7. **Headless for determinism, visual for feel.** Headless (`cargo test -p flowplan-sim --test flight_bench`) is the CI gate. Visual (`cargo run -- --scenario <name>`) is for watching a scenario play out through the HUD/gizmos when plots alone aren't enough.
 
+8. **A model gap discovered by the bench is a system-level event, not a scenario-level one.** When an assertion fails or a plot shows suspect behavior, *triage before touching anything*. The fix category (scenario / coefficient / missing physics / upstream) is not interchangeable. Coefficient changes require ripple-effect prediction against the full scenario suite and a regression check before commit. Never tune silently to hide a gap — the bench's value is that it catches inflated inputs and papered-over coefficients later. See [references/model-gap-triage.md](references/model-gap-triage.md) for the full protocol and current open gaps.
+
 ## Scenario Anatomy
 
 A `FlightScenario` has five parts. Each has a job:
@@ -89,6 +91,7 @@ Checklist:
 2. **Cite the POH figure.** Every assertion must map to a published number (POH ground roll, POH stall speed, POH ROC). "Feels right" is not a target. See [references/poh-targets-beaver.md](references/poh-targets-beaver.md) for the Beaver's table.
 3. **List the isolation variables.** What is deliberately held constant so the assertion points at one thing? Typical: sea-level altitude, zero wind, MTOW, flaps up, no flap transition during the window. Document these in the scenario's comment block (template below).
 4. **State what this scenario does NOT test.** Explicit non-goals prevent tolerance creep. Example: a cruise scenario does not test phugoid damping even though it would manifest in the altitude trace.
+4b. **Audit real-world fidelity.** For every scripted input, answer: does a real pilot do this? If yes (direction + magnitude): faithful. If the shape matches but we're using a stand-in (scripted constant for trim, staged pitch for smooth back-stick): approximated, name it. If the magnitude is off from real-world pilot reports: known fidelity gap, trace to a specific model coefficient. Never inflate values to "look right"; the fidelity section records the mismatch until the model catches up.
 5. **Pick initial conditions.** Altitude 500-1000 m MSL unless density altitude is the point. Airspeed at the test point. `CRUISE_ATTITUDE` unless testing a non-level attitude (takeoff rotation, steep approach, unusual-attitude recovery).
 6. **Pick the pilot-hold input.** Start with 0.05 for cruise, 0.10 for Vy, 0.30 for stall induction. Adjust only if the first run overshoots/undershoots. Document the value's purpose ("hold α high as speed decays").
 7. **Set `duration_ticks` conservatively.** 30 s (3600) for steady-state; 20 s (2400) for stall induction; 60 s (7200) for endurance trends; 10-15 s for takeoff/landing roll isolation.
@@ -99,45 +102,60 @@ Checklist:
 
 ## In-Code Documentation Template
 
-Every `FlightScenario` in the source gets a structured comment block above the `FlightScenario { ... }` literal. The `description:` field is a one-line summary; the comment block is the full rationale. This is where the scope, isolation, and non-goals live so a reader three phases from now can re-derive why tolerances were set where they were.
+Every `FlightScenario` in the source gets a structured comment block above the `FlightScenario { ... }` literal. The `description:` field is a one-line summary; the comment block is the full rationale. This is where the scope, isolation, non-goals, **and real-world fidelity** live so a reader three phases from now can re-derive why tolerances were set where they were.
+
+The block has six required sections, in order:
 
 ```rust
-// beaver_short_field_landing_nominal
+// <scenario_name>
 //
 // Real-world maneuver:
-//   Short-field approach and landing. Full flaps (LANDING), 1.3 × Vso approach,
-//   idle throttle at threshold, flare to touchdown.
+//   <One-paragraph description of the real-world flight procedure or maneuver
+//    this scenario represents. What a pilot would do, and under what conditions.>
 //
 // POH target:
-//   Ground roll ~530 ft = 162 m after touchdown at MTOW, no wind, paved runway,
-//   SL, ISA. (DHC-2 POH § 5 Performance, Short Field Landing chart.)
+//   <The specific published figure the assertion anchors against, with unit
+//    conversions and POH section reference. If no single number applies, name the
+//    qualitative behavior being validated.>
 //
 // Isolation (held constant):
-//   - Sea level ISA; no density-altitude effect.
-//   - Zero wind -- no headwind credit, no crosswind.
-//   - MTOW, clean airframe (no damage), full fuel.
-//   - Paved runway surface (once contact physics lands; until then, the passive
-//     min_altitude clamp stands in).
-//   - No pilot modulation after touchdown (brakes only, no differential).
+//   - <List every variable deliberately held fixed so the assertion points at
+//      one thing. Altitude, wind, weight, config, trim choices, throttle profile.>
+//
+// Real-world fidelity:
+//   <THIS SECTION IS LOAD-BEARING.> Document which of the scripted inputs match
+//   real pilot technique directly, which are trim-wheel stand-ins, which are
+//   approximations, and — for any approximation — WHY and WHAT consequence.
+//   Use three sub-labels so reviewers can scan:
+//     Faithful: <what in the scenario is a direct match to real-world>.
+//     Approximated: <what we've simplified, e.g. constant inputs standing in
+//       for trim, or staged inputs standing in for continuous pilot control>.
+//     Magnitudes: <analytical justification for numeric values, OR a KNOWN
+//       FIDELITY GAP note explaining where values don't match real-world and why
+//       that's traceable to a model limitation (not a scenario fudge)>.
+//   When a magnitude looks off from real-world pilot reports, NAME the suspected
+//   model coefficient gap and link to symptom-map.md / coefficient-tuning items.
+//   Never inflate a value "to look right" -- scenarios reflect what the model
+//   needs; model gaps stay visible in the fidelity note until coefficients tune.
 //
 // Does NOT test:
-//   - Crosswind technique (separate scenario: *_crosswind_15kt).
-//   - Soft-field / rough-surface rolling friction (separate: *_soft_field).
-//   - Tailwind landing (separate: *_tailwind_10kt).
-//   - Float water landing (separate: *_water_landing_calm).
+//   - <Explicit non-goals. What this scenario appears to touch but deliberately
+//      does not validate. Prevents tolerance creep and scope drift.>
 //
 // Assertion rationale:
-//   GroundRollDistanceFromTouchdown asserts the horizontal distance from
-//   first-ground-contact tick to airspeed-below-taxi-threshold tick. Starting
-//   tolerance ±40 m (pending contact-physics tuning); target ±10 m.
+//   <Why these specific assertions, in this order, with these tolerances. Include
+//    the tolerance-narrowing trajectory (starting value → target after which
+//    tune lands).>
 FlightScenario {
-    name: "beaver_short_field_landing_nominal",
-    description: "Short-field landing, paved, no wind, MTOW, full flaps. POH ~162 m ground roll.",
+    name: "<scenario_name>",
+    description: "<one-line summary used in plot titles>",
     // ... initial, inputs, assertions ...
 },
 ```
 
-Keep the blocks concise -- 10-20 lines, not a design document. The point is that anyone reading the file can answer "why does this exist, what does it prove, and what would I break if I changed the tolerance?" without cross-referencing a wiki.
+Why the fidelity section matters: without it, a future reader sees `SetPitch(0.20)` and can't tell whether that's "what a pilot would do" or "what our model needs to make the assertion pass." The fidelity block forces us to name the difference every time, keeping the feedback loop honest. When we fudge (because no trim system exists yet), we say so. When a model coefficient produces a value that doesn't match real pilot experience, we say so and point at the coefficient. Never silently.
+
+Keep the blocks concise -- 20-30 lines is typical, not a design document. The point is that anyone reading the file can answer "why does this exist, what does it prove, what differs from real pilot technique, and what would I break if I changed the tolerance?" without cross-referencing a wiki.
 
 ## Anti-Patterns (Do Not)
 
@@ -171,8 +189,9 @@ python tools/plot_telemetry.py target/flight-bench/*.csv --outdir target/flight-
 - [references/assertion-matrix.md](references/assertion-matrix.md) -- per-scenario assertion rationale + starting tolerances for the Beaver.
 - [references/symptom-map.md](references/symptom-map.md) -- plot symptoms mapped to likely coefficient culprits.
 - [references/poh-targets-beaver.md](references/poh-targets-beaver.md) -- the DHC-2 Beaver POH figures the bench validates against.
+- [references/model-gap-triage.md](references/model-gap-triage.md) -- the protocol for diagnosing bench anomalies, coefficient-change ripple analysis, regression checks. Read when a scenario fails or a plot shows suspect behavior.
 - [TEST_PLAN.md § Flight Test Bench](../../TEST_PLAN.md#flight-test-bench) -- architectural intent.
 - [crates/sim/src/flight_bench.rs](../../crates/sim/src/flight_bench.rs) -- the runner, `BEAVER_SCENARIOS`, `BenchSample` schema.
 - [crates/sim/src/flight.rs](../../crates/sim/src/flight.rs) -- the coefficients you'll tune.
-- [tools/plot_telemetry.py](../../tools/plot_telemetry.py) -- CSV → 2×3 panel plot.
+- [tools/plot_telemetry.py](../../tools/plot_telemetry.py) -- CSV → 2×4 panel plot (altitude, airspeed+VS, attitude, α/β; ground-track, moments, controls, engine+fuel).
 - [tools/run_flight_bench.sh](../../tools/run_flight_bench.sh) -- orchestrator.

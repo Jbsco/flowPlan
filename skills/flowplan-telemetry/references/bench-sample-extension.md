@@ -65,7 +65,7 @@ Precision discipline: match neighbors. Speeds at `{:.3}` (mm precision), angles 
 
 ### 5. Plot script (optional)
 
-`tools/plot_telemetry.py` has six panels (altitude, airspeed+VS, attitude+FPA, α+β, controls, engine+fuel). If the new field belongs in one of those panels, add the pandas column read + matplotlib plot call. If it deserves its own panel, extend the grid from 2×3 to 2×4 (or rework — the script is small, don't over-engineer).
+`tools/plot_telemetry.py` has eight panels in a 2×4 grid (altitude, airspeed+VS, attitude, α/β; ground-track, moments, controls, engine+fuel). If the new field belongs in one of those panels, add the pandas column read + matplotlib plot call. If it deserves its own panel, extend the grid (or rework — the script is small, don't over-engineer).
 
 ## Verification
 
