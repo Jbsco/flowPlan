@@ -417,12 +417,15 @@ pub fn density_ratio(h_msl_m: f32) -> f32 {
 /// Tuning history:
 ///   0.028 → "Cessna-retractable slippery"; `L/D_max` ~14 at cruise, plane barely slows
 ///           with throttle off (flight-test feedback: "feels like it glides forever").
-///   0.045 → current; `L/D_max` ~11 at cruise, matches typical DHC-2 published figures.
-///           A Beaver is a boxy airframe -- fixed gear, strut-braced wing, radial cowl,
-///           external fuel caps, the whole lineup of parasite-drag sources.
+///   0.045 → pre-2.4.8-tune; `L/D_max` ~11. Too low: bench revealed cruise equilibrium
+///           at throttle 0.55 vs POH 0.65, and best-glide V 45 m/s vs POH 31.
+///   0.050 → 2.4.8 Gap 1 tune step 1; measured ripples smaller than analytic due to
+///           self-regulating equilibrium (lower V → lower induced drag).
+///   0.055 → 2.4.8 Gap 1 tune step 2; closes more of cruise-throttle gap, brings
+///           best-glide V further down toward POH 31 m/s. See PROGRESS.md § gaps.
 ///
 /// TODO(2.4.5): flap-deployment bumps this by ~0.02 per notch.
-const CD0: f32 = 0.045;
+const CD0: f32 = 0.055;
 
 /// Oswald efficiency factor. Typical for small single-engine aircraft: 0.7-0.85.
 /// Set slightly toward the low end (0.75) because strut-bracing and fixed gear
@@ -431,31 +434,36 @@ const OSWALD_E: f32 = 0.75;
 
 /// NACA 64A416-shaped `Cl(α)` table adjusted for finite-span whole-wing effects.
 /// `α` in radians; `Cl` dimensionless. Piecewise linearly interpolated. Zero-lift at
-/// ~-2°, linear slope ~0.10/deg through the clean range, peak `Cl_max` ≈ 1.65 at 16°
-/// (2D section `Cl_max` ~1.4 lifted to ~1.65 to approximate whole-wing max with fuselage
-/// lift contribution and without flaps), post-stall drop to 1.25 by 18° and 1.0 by
-/// 20°, deep-stall plateau near 0.55 out to 60°. Mirror-extended to negative α for
-/// inverted flight.
+/// ~-2°, linear slope ~0.10/deg through the clean range, peak `Cl_max` ≈ 2.0 at 16°,
+/// post-stall drop -0.25 per 2° past peak, deep-stall plateau near 0.55 out to 60°.
+/// Mirror-extended to negative α for inverted flight.
+///
+/// Peak raised from 1.65 → 2.0 as Phase 2.4.8 Gap 3 tuning pass (see PROGRESS.md
+/// § Bench-identified model gaps). Analytic Vs at `Cl_max = 2.0` ≈ 26.3 m/s (was
+/// 29; POH = 23.25; residual 3 m/s gap attributed to missing slipstream physics
+/// and POH measurement conditions). Entries below 14° unchanged to preserve
+/// cruise / climb / glide behavior (those regimes never reach the peak region).
 ///
 /// TODO(2.4.2): per-aircraft tables should live in `AircraftSpec` rather than being
 /// hard-coded here. For the MVP (Beaver) this matches published NACA TN-1945-ish
-/// figures closely enough.
+/// figures closely enough, with whole-wing uplift approximating fuselage + vortex
+/// contributions that a 2D airfoil table wouldn't capture.
 #[allow(clippy::approx_constant)]
 const CL_TABLE: &[(f32, f32)] = &[
     (-1.5708, 0.0),   // -90° (flying backward / full sideways)
     (-0.5236, -0.85), // -30°
-    (-0.3491, -1.25), // -20°
-    (-0.2793, -1.50), // -16° (inverted Cl_max -- mirrored but still real)
+    (-0.3491, -1.45), // -20° (mirrored absolute drop from new peak)
+    (-0.2793, -1.85), // -16° (inverted Cl_max mirrored; slightly below positive peak for asymmetry)
     (-0.1745, -1.10), // -10°
     (-0.0873, -0.65), // -5°
     (-0.0349, 0.00),  // -2° zero-lift
     (0.0000, 0.21),   // 0°
     (0.0873, 0.80),   // 5°
     (0.1745, 1.25),   // 10°
-    (0.2443, 1.55),   // 14°
-    (0.2793, 1.65),   // 16° Cl_max
-    (0.3142, 1.40),   // 18° post-stall
-    (0.3491, 1.10),   // 20°
+    (0.2443, 1.85),   // 14° (smoothed rise toward new peak)
+    (0.2793, 2.00),   // 16° Cl_max (raised from 1.65 per Gap 3 tuning)
+    (0.3142, 1.75),   // 18° post-stall (absolute drop -0.25 preserved)
+    (0.3491, 1.45),   // 20° (absolute drop -0.30 preserved)
     (0.5236, 0.85),   // 30°
     (1.0472, 0.55),   // 60° deep stall
     (1.5708, 0.00),   // 90°
@@ -1040,9 +1048,10 @@ mod tests {
         let cl_peak = lift_coefficient(16.0_f32.to_radians());
         let cl_clean = lift_coefficient(5.0_f32.to_radians());
         assert!(cl_peak > cl_clean);
-        // Whole-wing Cl_max target ~1.65 (see CL_TABLE doc comment).
-        assert!(cl_peak > 1.5);
-        assert!(cl_peak < 1.8);
+        // Whole-wing Cl_max target 2.0 after Phase 2.4.8 Gap 3 tune
+        // (was 1.65 pre-tune; see PROGRESS.md § Bench-identified gaps).
+        assert!(cl_peak > 1.9);
+        assert!(cl_peak < 2.2);
     }
 
     #[test]

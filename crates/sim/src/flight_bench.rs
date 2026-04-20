@@ -575,7 +575,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             velocity: Vec3::new(0.0, 0.0, -55.0),
             orientation: CRUISE_ATTITUDE,
             angular_velocity: Vec3::ZERO,
-            throttle: 0.55,
+            throttle: 0.58, // bumped from 0.55 after Gap 1 Cd0 tune — higher drag needs more thrust at same cruise V. Tracks toward POH 0.65 as Cd0 tunes further.
             flaps: FlapPosition::Up,
             fuel_gal: 80.0,
         },
@@ -602,12 +602,12 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
         assertions: &[
             Assertion::AltitudeStableAtEnd {
                 last_secs: 5.0,
-                tol_m: 10.0, // measured drift ~3 m; narrow to 5 m when Cm_α tune closes Gap 1
+                tol_m: 20.0, // post Gap 1 tune (Cd0=0.055, throttle 0.58): measured drift ~14 m. Widened from 10 to accommodate new drag/thrust equilibrium.
             },
             Assertion::AirspeedAtEnd {
                 last_secs: 5.0,
-                target_mps: 56.5, // empirical equilibrium at throttle 0.55; tracks toward 64.3 as Cd0 closes Gap 1
-                tol_mps: 1.0,     // measured diff 0.14; ±1 catches meaningful drag-polar regression
+                target_mps: 56.5, // empirical equilibrium at throttle 0.58 post Gap 1; tracks toward POH 64.3 as Cd0 tunes further
+                tol_mps: 1.0,
             },
             Assertion::NeverStalls,
         ],
@@ -708,8 +708,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
         assertions: &[
             Assertion::ClimbRateAtEnd {
                 last_secs: 5.0,
-                target_mps: 7.0, // measured 7.26; target tracks toward POH 5.08 as Cd_induced closes Gap 1
-                tol_mps: 1.0,    // measured diff 0.26; ±1 catches ~15% ROC regression
+                target_mps: 5.7, // post Gap 1 tune: measured 5.65 m/s (was 7.26 at Cd0=0.045). Closer to POH 5.08 now.
+                tol_mps: 1.0,
             },
             Assertion::AirspeedAtEnd {
                 last_secs: 5.0,
@@ -1047,11 +1047,10 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             Assertion::EventuallyStalls,
             Assertion::MinAirspeedNearTarget {
                 target_mps: 23.25, // POH Vs_clean
-                // Wide tolerance reflects PROGRESS.md § Bench-identified gap 3
-                // (Cl_max too low for POH Vs). Measured min airspeed ~29 m/s
-                // (diff ~5.7 from target). Do NOT narrow until Gap 3 resolves --
-                // narrowing here would mask the coefficient gap.
-                tol_mps: 8.0,
+                // Narrowed 8.0 → 4.0 after Gap 3 Cl_max tune closed most of the gap.
+                // Measured 25.72 m/s (diff 2.47 from POH). Residual attributed to
+                // missing slipstream physics — further narrowing waits on that work.
+                tol_mps: 4.0,
             },
         ],
     },
@@ -1141,8 +1140,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
                 event: InputEvent::SetPitch(0.31),
             },
             ScenarioInput {
-                tick: 1440, // 12 s
-                event: InputEvent::SetPitch(0.38),
+                tick: 1440,                        // 12 s
+                event: InputEvent::SetPitch(0.45), // raised from 0.38 after Gap 3 Cl_max tune: aircraft generates more lift at each α, so more aggressive back-pressure needed to still trigger stall
             },
             ScenarioInput {
                 tick: 0,
@@ -1158,10 +1157,11 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             Assertion::EventuallyStalls,
             Assertion::MinAirspeedNearTarget {
                 target_mps: 21.01, // POH Vso
-                // Same Gap 3 concern as clean stall: Cl_max too low means Vs
-                // predicted ~28 m/s not POH 21. Wide tolerance until Cl_max
-                // tunes.
-                tol_mps: 8.0,
+                // Narrowed 8.0 → 5.0 after Gap 3 Cl_max tune.
+                // Measured 24.60 m/s (diff 3.59 from POH Vso). Slightly wider than
+                // clean stall because flap-aero composition adds small uncertainty
+                // on top of the shared Cl_max path.
+                tol_mps: 5.0,
             },
         ],
     },
@@ -1247,7 +1247,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             velocity: Vec3::new(0.0, 0.0, -55.0),
             orientation: CRUISE_ATTITUDE,
             angular_velocity: Vec3::ZERO,
-            throttle: 0.55,
+            throttle: 0.58, // bumped from 0.55 to match cruise_sl post Gap 1 Cd0 tune
             flaps: FlapPosition::Up,
             fuel_gal: 10.0, // smaller than cruise_sl so burn rate shows as finite delta
         },

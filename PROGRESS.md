@@ -277,35 +277,81 @@ Gaps the flight-test bench has surfaced between `crates/sim/src/flight.rs` coeff
 
 Process rules (do not tune silently): every coefficient change cites its gap entry, writes a ripple-impact table, runs the full bench suite, and passes regression check before commit.
 
-**Gap 1 — Cd0 light (cruise equilibrium throttle).**
+**Gap 1 — Cd0 light (cruise equilibrium throttle). — PARTIALLY RESOLVED**
 - Symptom: `beaver_cruise_sl` equilibrates level flight at throttle 0.55 for 55 m/s; POH says 65% power (throttle ~0.65) at 64 m/s cruise.
 - Diagnosis: model's parasite-drag `Cd0 = 0.045` under-predicts true Beaver zero-lift drag at cruise α. Lower drag → less thrust needed to hold cruise speed → equilibrium at lower throttle.
 - Candidate fix: raise `Cd0` toward 0.055–0.060.
 - Ripple: affects all drag at cruise α (every scenario), slightly reduces cruise airspeed equilibrium at constant throttle, slightly reduces climb rate.
 - Scenarios affected: all cruise / climb scenarios; stall scenarios minimally (drag dominated by induced at high α).
-- Status: OPEN. Scenario accommodates with wide airspeed tolerance + note that throttle tracks toward POH as `Cd0` tunes.
+- **Corroborating data (Step 1 additional scenarios):**
+  - `beaver_ldmax_glide`: model best-glide V ≈ 45 m/s vs POH 31 m/s. Lower Cd0 pushes L/D_max speed higher (Cl_opt = sqrt(Cd0·π·AR·e) is lower, requiring higher V for lift balance). Consistent with Gap 1.
+  - `beaver_vne_dive`: terminal dive speed ≈ 75 m/s at idle, exceeds POH Vne 71.5. Less drag = less restraint at terminal dive speed. Consistent.
+  - `beaver_endurance_cruise`: measured burn rate 22.8 gph vs POH 27. Lower throttle needed for cruise = lower engine kW = lower burn. Consistent.
+  - Multiple independent scenarios all point at the same coefficient — high-confidence diagnosis.
+- **Tuning applied (2.4.8 Step 2, staged):**
+  - Step 1: `Cd0` 0.045 → 0.050. Measured ripples smaller than analytic (self-regulating equilibrium: lower V reduces induced drag, partially offsetting parasite rise). All scenarios continued to pass with unchanged trim.
+  - Step 2: `Cd0` 0.050 → 0.055. Ripples now meaningful — cruise/climb/endurance required scenario retuning: cruise throttle 0.55 → 0.58 (matches POH direction 0.65), cruise_climb ROC target 7.0 → 5.7 (was too-fast pre-tune, now 5.65 matching POH 5.08), cruise_sl altitude tol widened 10 → 20 (drift 14 m in new equilibrium).
+- **Results (Cd0=0.055 final):**
+  - cruise_sl: V 56.5 unchanged, throttle 0.55 → 0.58 (toward POH 0.65). Altitude drift 14 m.
+  - cruise_climb: ROC 7.26 → 5.65 (target 7.0 → 5.7, tighter match to POH 5.08).
+  - ldmax_glide: V 45 unchanged (bigger drop would need Cd0 → 0.060+); sink rate steeper.
+  - vne_dive: terminal V 75.4 → 73.8 (1.6 closer to POH Vne 71.5).
+  - endurance: burn rate 22.8 → 24.0 gph (1.2 closer to POH 27).
+  - Stalls: negligible change (drag dominated by induced term at Cl_max).
+- Status: **PARTIALLY RESOLVED.** Coefficient moved from 0.045 → 0.055 (22% up). Further closure (0.055 → 0.060) possible but diminishing returns per triage — residual gaps split between slight Cd0 light and missing slipstream-contribution to induced drag. Throttle / climb / burn all measurably closer to POH.
 
-**Gap 2 — P-factor / slipstream magnitude (full-power rudder demand).**
+
+
+**Gap 2 — P-factor / slipstream magnitude (full-power rudder demand). — DEFERRED: MISSING PHYSICS**
 - Symptom: `beaver_cruise_climb` holds coordinated flight with 5.5% right-rudder trim; real Beaver pilots at full power use 20–40% right rudder.
 - Diagnosis: either `P_FACTOR_ARM_M = 10.0` is low, OR we lack a separate "slipstream over rudder" physics (prop wash raises local air velocity over the rudder at high power, multiplying rudder effectiveness — also shifts the effective-yaw equation the other direction).
 - Candidate fixes: (a) raise `P_FACTOR_ARM_M`; (b) add slipstream-rudder interaction as new physics.
-- Ripple: (a) over-predicts yaw at cruise (already small) → cruise would need more counter-rudder; (b) adds a new code path to `compute_forces`.
-- Scenarios affected: cruise_climb most; any future climb-at-Vy scenario (blocked), any takeoff/go-around scenario (blocked on 2.5).
-- Status: OPEN. Probably missing physics (slipstream); revisit during 2.4.8 coefficient tune — if (a) over-corrects cruise, (b) becomes a roadmap item.
+- **Coefficient experiment performed (2.4.8 Step 2):** raised `P_FACTOR_ARM_M` from 10 to 26 (value computed to demand ~30% rudder at cruise-climb). **Outcome as predicted by triage:**
+  - cruise_climb: yaw drift slightly reduced (target-ish).
+  - cruise_sl: yaw drift jumped 5.6° → 11.8°, X-drift 58 m → 102 m. **Over-corrected non-target scenarios.**
+  - beaver_endurance_cruise: yaw drift 6° → 34.6°, X-drift 666 m. Aircraft flying wildly off course.
+  - Assertion suite still passes (yaw/X-drift not asserted), but behavior is obviously wrong.
+- **Root cause identified:** the coefficient can't fix this because the actual physics is rudder *authority scaling with thrust* (slipstream over the rudder increases local airflow at high power, making rudder more effective). P-factor magnitude is approximately correct; the RUDDER EFFECTIVENESS is what's wrong. Needs new physics, not coefficient adjustment.
+- **Reverted.** `P_FACTOR_ARM_M` back to 10.0.
+- **Unblocking path:** add slipstream-rudder-effectiveness term to `compute_forces`. Roughly, `q_local_at_rudder = q + slipstream_boost(thrust)`, and rudder moment uses `q_local_at_rudder` instead of freestream `q`. Scope: new term added to yaw-moment calc; ripples: cruise minimally affected (small thrust), climb significantly affected (large thrust). Should close the real rudder-magnitude gap.
+- Status: **DEFERRED TO POST-Phase-2.4 slipstream physics work** (or to Phase 3 audio work, which already reads thrust/RPM and could plumb slipstream alongside). Not blocking Phase 2.5 — cruise-climb passes with "honest" trim value that matches what the model needs, clearly documented as under-real in the scenario's fidelity block.
 
 **Gap 3 — Cl_max under-set (stall speed above POH Vs).**
 - Symptom: `beaver_stall_clean` reaches min airspeed ~29 m/s; POH Vs_clean = 23.25 m/s.
-- Diagnosis: pure `Vs² = 2W/(ρSCl_max)` gives Vs = 31 m/s at our Cl_max = 1.65. POH Vs implies Cl_max ~2.95 at MTOW 2313 kg, wing area 23.23 m². Either our Cl_max is low, or POH figure applies to a configuration we don't match (power-on, lighter weight, slight flap deflection).
-- Candidate fix: (a) raise `Cl_max` in `CL_TABLE`; (b) verify POH-cited configuration (see AIRCRAFT.md `(verify)`); (c) check if NACA 64A416 + fuselage lift should produce higher whole-wing Cl_max than table shows.
-- Ripple: raising Cl_max affects lift at high α (stall region), induced drag at high α, flap-aero composition, wing-drop differential, ground-effect factor. Cruise α~3° unaffected.
-- Scenarios affected: stall_clean (target); future stall_landing_flaps (Vso target); future accelerated stall in banked turn; negligible on cruise/climb.
-- Status: OPEN. Analytic cause identified; needs coefficient + table-shape work + POH-citation verification.
+- Diagnosis: pure `Vs² = 2W/(ρSCl_max)` gives Vs = 31 m/s at our Cl_max = 1.65. POH Vs implies Cl_max ~2.95 at MTOW 2313 kg, wing area 23.23 m². POH-implied value is unrealistic for a clean wing (typical NACA 64-series whole-wing Cl_max ≈ 1.7-2.0); suggests POH figure includes power-on slipstream effect and/or is at lower operating weight than MTOW. A realistic Cl_max target is ~2.0-2.2; residual gap to POH (~3 m/s) becomes "missing physics" category (slipstream + weight-condition differences).
+- Candidate fix: (a) raise `Cl_max` in `CL_TABLE` toward 2.0-2.2 (realistic upper bound); (b) accept residual gap as documented non-fit to POH measurement conditions.
+- Ripple: raising Cl_max affects lift at high α (stall region), induced drag at high α, flap-aero composition, wing-drop differential, ground-effect factor. Cruise α~3° unaffected (below peak region).
+- Scenarios affected: stall_clean (target); stall_flaps_landing (Vso target); future accelerated stall in banked turn; negligible on cruise/climb.
+- **Corroborating data (Step 1 additional scenarios):**
+  - `beaver_stall_flaps_landing`: pre-tune model min V ≈ 28 m/s vs POH Vso 21. With Landing flap ΔCl = 0.37: analytic Vs_flapped = sqrt(2W/(ρS·(Cl_max+0.37))) = 28.1. Matches measured. The offset of 7 m/s to POH mirrored the clean-stall offset — confirms same root cause (Cl_max low), NOT a flap aero problem.
+  - Two stall scenarios with different configs both pointed at Cl_max low; flap Δ Cl itself is fine.
+- **Tuning applied (2.4.8 Step 2):** `CL_TABLE` peak raised from 1.65 → 2.0 at 16°, with smoothed rise from 14° (1.55 → 1.85) and preserved absolute post-stall drop (-0.25 per 2° past peak). Table entries below 14° unchanged (cruise / climb / glide α all < 10° so unaffected).
+- **Results:**
+  - `beaver_stall_clean` min V: 28.94 → 25.72 (moved 3.22 closer to POH 23.25; residual 2.47).
+  - `beaver_stall_flaps_landing` min V: 28.94 → 24.60 (moved 4.34 closer to POH Vso 21.01; residual 3.59).
+  - Every non-stall scenario: zero change (ripple-analysis was accurate).
+  - One regression caught + fixed: flap stall scenario's final pitch-input step 0.38 no longer reached stall α (aircraft generated more lift at each α → didn't need as high an α to maintain lift). Step raised to 0.45. Assertion passes.
+  - Tolerances narrowed: clean stall 8.0 → 4.0, flap stall 8.0 → 5.0 (2-3× measured margin).
+- Status: **PARTIALLY RESOLVED — coefficient tuned as far as realistic.** Residual 2-4 m/s gap to POH is documented "missing slipstream physics." Further closure blocked on Gap 2 resolution (slipstream over control surfaces).
 
-**Resolved** (none yet; all three open above until 2.4.8 tuning pass).
+**Resolved (partially):**
+- **Gap 3 (Cl_max)** — coefficient tuned 1.65 → 2.0. Residual gap now classified as missing slipstream physics (coupled to Gap 2).
+- **Gap 1 (Cd0)** — coefficient tuned 0.045 → 0.055. Cruise throttle and climb ROC both measurably closer to POH. Residual is a mix of drag polar shape and missing slipstream contributions.
+
+**Open (deferred to missing-physics work):**
+- Gap 2 (P-factor / slipstream) — coefficient experiment confirmed over-correction; documented as missing slipstream-over-rudder physics. Deferred to post-Phase-2.4 slipstream work or Phase 3 audio (which already plumbs thrust/RPM). Clear unblocking path. Not blocking Phase 2.5.
+
+**Step 2 status: COMPLETE.** Two gaps partially closed via coefficient tuning (Cl_max, Cd0); one gap confirmed as missing physics and cleanly deferred.
 
 ### Path to Phase 2.5 (2.4.8 completion order)
 
 The remaining 2.4.8 work is ordered so Phase 2.5 (contact physics) inherits a stable, locked flight model. Execute in this sequence — do not start 2.5 until the Pre-2.5 gate (below) is green.
+
+**Step 1 status: SHIPPED.** 4 new scenarios added (ldmax_glide, vne_dive, stall_flaps_landing, endurance_cruise), FinalFuelWithin assertion added, turn scenarios deferred with documented rationale. 7 scenarios total, 16 assertions, all passing. Multiple scenarios now independently corroborate Gaps 1 and 3 — high confidence entering Step 2 coefficient tuning.
+
+**Step 2 status: STARTING.** Execution order: Gap 3 (Cl_max) first because analytic basis is clearest and ripple affects are narrow (stall scenarios only; cruise/climb/glide/dive unaffected at cruise α). Then Gap 1 (Cd0). Then attempt Gap 2 (P-factor) knowing it will likely defer to slipstream-physics.
+
+**Step 3 status: pending.**
 
 **Step 1: Expand scenario suite (adds constraints for tuning).**
 
