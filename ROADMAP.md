@@ -261,6 +261,41 @@ A cube can be flown (WASD/gamepad) over a terrain. Frame budget check passes at 
 - [ ] Validate against DHC-2 POH performance charts (takeoff distance, climb rate, cruise fuel burn) before milestone close
 - [ ] **Scratch-branch prototype of the flight-model feel belongs in Phase 1**; this milestone is where feel locks. If feel has not clicked by 4-6 weeks into this milestone, trim scope per MVP re-planning in [skills/flowplan-methodology/SKILL.md](skills/flowplan-methodology/SKILL.md).
 
+### Milestone 2.4.9: Flight-model refinement (optional-before-2.5, required-before-v1)
+
+Closes the two missing-physics items identified by the 2.4.8 bench audit. Optional-before-2.5 (Phase 2.5 contact physics doesn't depend on either item), required-before-v1 (both materially improve feel at high power / in turns, and unblock scenario-taxonomy entries currently tagged `[deferred]`). Can run between 2.4.8 and 2.5, after 2.5, or during Phase 3 — scheduled at the implementer's discretion.
+
+Both items discovered via the triage protocol encoded in [skills/flowplan-flight-bench/references/model-gap-triage.md](skills/flowplan-flight-bench/references/model-gap-triage.md). Each required an explicit coefficient experiment to confirm the fix is *not* a coefficient change — which is exactly how the protocol is supposed to work.
+
+**2.4.9a Slipstream-over-rudder physics.**
+- Context: Gap 2 in [PROGRESS.md § Bench-identified gaps](PROGRESS.md#bench-identified-model-gaps-open-from-phase-248-audit). Real Beaver pilots at full power use 20-40% right rudder; our model only needs 5.5%. Confirmed via coefficient experiment (raising `P_FACTOR_ARM_M` over-corrects cruise while barely helping climb) that the issue is *rudder effectiveness scaling with thrust*, not P-factor magnitude.
+- Implementation sketch: add slipstream term to yaw-moment calc. `q_local_at_rudder = q_freestream + slipstream_boost(thrust)`, where `slipstream_boost` is a function of prop-disc velocity increment (derived from thrust, prop area, freestream velocity). Rudder moment uses `q_local_at_rudder` instead of `q_freestream`. Similar boost applies to elevator (if behind prop) but smaller due to geometry.
+- [ ] Add `slipstream_boost(thrust, airspeed)` helper in `flight.rs`.
+- [ ] Modify yaw-moment calculation to use slipstream-augmented q for rudder term.
+- [ ] Optionally modify pitch-moment for elevator (if geometry supports).
+- [ ] Ripple-analyze + regression check per [triage protocol](skills/flowplan-flight-bench/references/model-gap-triage.md).
+- [ ] Re-tune cruise / climb scenarios if rudder-trim values shift (expected: cruise_climb rudder rises toward 0.25-0.30; cruise_sl slightly rises too).
+- [ ] Update Gap 2 in PROGRESS to "Resolved" with final slipstream parameters + scenario rudder-trim updates.
+
+**2.4.9b Cl_β dihedral roll stability.**
+- Context: discovered during 2.4.8 Step 1 when attempting turn scenarios. Without Cl_β (rolling moment from sideslip), a banked aircraft has no restoring roll moment — bank spirals rather than locking. Coordinated turn scenarios blocked.
+- Implementation sketch: add `Cl_β` coefficient to flight.rs. Roll moment gains `q_dyn·S·b·Cl_β·β` term. Typical value for a Beaver-class GA single: Cl_β ≈ -0.07 to -0.10 per rad (negative = right-wing-down rolls induce nose-right yaw which induces nose-right β which induces right-wing-up rolling moment = restoring).
+- [ ] Add `CL_BETA` constant in `flight.rs`.
+- [ ] Add dihedral-roll term to roll moment calculation.
+- [ ] Ripple-analyze: unlikely to affect straight-line scenarios; may slightly dampen roll transients.
+- [ ] Add `beaver_coordinated_turn_30` scenario (previously deferred inline in `flight_bench.rs`). Validates turn holds at 30° bank without spiral.
+- [ ] Add `beaver_coordinated_turn_60` scenario. Validates accelerated-stall α calculation under 2 g load.
+- [ ] Update PROGRESS "Bench-identified gaps" section: remove turn-scenarios-deferred note.
+
+### Deliverable (2.4.9)
+
+- `beaver_cruise_climb` and hypothetical `beaver_climb_vy` scenarios use realistic rudder-trim values matching real Beaver pilot reports.
+- Turn scenarios (30° / 60°) pass with tight tolerance — bank angle pins at target, altitude holds, airspeed holds.
+- Gap 2 resolved; turn scenarios unblocked.
+- Nine scenarios total (seven existing + two turns), ~20 assertions, all passing.
+
+> **Gate (2.4.9):** All 7 existing scenarios still pass; new slipstream-physics tuning produces cruise-climb rudder trim in 0.20-0.35 range; turn scenarios bank-lock at target within ±2° over assertion window.
+
 ### Milestone 2.5: Ground + water contact physics
 
 Replaces the pre-2.5 passive altitude clamp (which keeps the CG above

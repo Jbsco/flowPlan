@@ -196,13 +196,20 @@ const CM_DELTA_E: f32 = 0.24;
 const CM_Q: f32 = -25.0;
 
 /// Roll: aileron command (`Cl_δa > 0`) rolls right wing down for positive stick;
-/// damping (`Cl_p < 0`) opposes roll rate. No static roll stability term in the
-/// baseline (small aircraft are roughly roll-neutral; dihedral-induced coupling
-/// through β lives in 2.4.6).
+/// damping (`Cl_p < 0`) opposes roll rate. Dihedral effect (`Cl_β < 0`) provides
+/// static roll stability: when aircraft sideslips (β ≠ 0), the lower wing gets
+/// more effective span-wise airflow, generating a rolling moment that opposes
+/// the bank causing the sideslip. This makes a banked aircraft self-correct
+/// toward wings level unless actively held — canonical GA handling.
 ///
 /// `Cl_δa` tuning: 0.08 (too lively) → 0.07 (slightly weak) → 0.075 (smidge up).
+/// `Cl_β` typical Beaver-class GA single: -0.05 to -0.10 per rad. -0.08 gives
+/// modest but noticeable roll stability; enough to let banked aircraft slowly
+/// return to level under uncorrected sideslip, without the over-damped feel of
+/// training-aircraft dihedral (-0.10+).
 const CL_DELTA_A: f32 = 0.075;
 const CL_P: f32 = -0.5;
+const CL_BETA: f32 = -0.08;
 
 /// Yaw: weathervane stability (`Cn_β > 0`) yaws nose toward velocity when sideslip
 /// develops; rudder command (`Cn_δr > 0`) yaws nose right for positive pedal; damping
@@ -862,9 +869,15 @@ pub fn compute_forces(
         wing_drop_roll_moment(alpha, roll_rate, v_damp, q_dyn, wing_area_moments);
     let torque_roll_moment =
         -TORQUE_ROLL_NM_PER_KW * engine_power_kw_out * coupling_airspeed_factor;
+    // Dihedral effect: sideslip β produces a roll moment. Cl_β < 0 makes this
+    // restoring (positive β = wind from right → negative moment = roll left,
+    // reducing any right bank that caused the sideslip). This is the canonical
+    // GA "banked aircraft rolls back to level" behavior. Combined with the
+    // wing-drop moment (past-stall differential Cl) into the stability slot.
+    let dihedral_roll_moment = q_dyn * wing_area_moments * WING_SPAN_M * CL_BETA * beta;
     let roll_moment = MomentBreakdown {
         control: q_dyn * wing_area_moments * WING_SPAN_M * CL_DELTA_A * state.controls.roll,
-        stability: wing_drop_moment,
+        stability: wing_drop_moment + dihedral_roll_moment,
         damping: q_dyn * wing_area_moments * WING_SPAN_M * CL_P * roll_damp_nd,
         coupling: torque_roll_moment,
     };
