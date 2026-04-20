@@ -72,6 +72,25 @@ impl Terrain {
         }
     }
 
+    /// Flat terrain that returns 0.0 height everywhere. Used for scenario-bench
+    /// visual playback (`cargo run -- --scenario <name>`) so the visual matches
+    /// the headless bench exactly — both operate over a flat y=0 surface, so
+    /// CSV outputs and visual trajectory agree. The normal game uses
+    /// `from_seed()` for procedural terrain.
+    #[must_use]
+    pub fn flat() -> Self {
+        Self {
+            seed: 0,
+            octaves: [Octave {
+                frequency: 0.0,
+                amplitude: 0.0,
+                phase_x: 0.0,
+                phase_z: 0.0,
+            }; 5],
+            base_amplitude: 0.0,
+        }
+    }
+
     /// The seed this terrain was built from.
     #[must_use]
     pub const fn seed(&self) -> u64 {

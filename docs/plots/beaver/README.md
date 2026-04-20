@@ -10,12 +10,34 @@ Panels (top-left → bottom-right): altitude, airspeed + VS, attitude, α/β + s
 
 ## Provenance
 
-These plots are the authoritative visual snapshot at the conclusion of **Phase 2.4.8 Step 2** (coefficient tuning pass). Flight-model coefficients locked for Phase 2.5:
+These plots are the authoritative visual snapshot at the conclusion of **Phase 2.4.9** (flight-model refinement: dihedral + slipstream + controller harness + capability/envelope-limit scenario pair). Flight-model coefficients locked for Phase 2.5:
 
-- `CL_TABLE` peak: 2.0 at 16°
-- `CD0`: 0.055
-- `P_FACTOR_ARM_M`: 10.0 (coefficient-experiment confirmed further raise is missing-physics territory; deferred to Milestone 2.4.9)
+- `CL_TABLE` peak: 2.0 at 16° (raised 2.4.8 Gap 3)
+- `CD0`: 0.055 (raised 2.4.8 Gap 1)
+- `CL_BETA`: -0.05 (NEW in 2.4.9a — dihedral roll stability)
+- `SPIRAL_SLIPSTREAM_ARM_M`: 2.0, `V_REF`: 20.0 (NEW in 2.4.9b — realistic rudder magnitude at high power)
+- `P_FACTOR_ARM_M`: 10.0 (unchanged; Gap 2 addressed via slipstream physics)
 - All other constants unchanged since 2.4.7
+
+## Scenarios covered (12 total)
+
+**Capability scenarios (11):**
+
+- `beaver_cruise_sl` — level cruise at SL, trimmed wings-level coordinated.
+- `beaver_cruise_climb` — full-throttle cruise-climb at 55 m/s.
+- `beaver_ldmax_glide` — idle-throttle glide at L/D_max.
+- `beaver_vne_dive` — idle-throttle pushover dive, bounded terminal airspeed.
+- `beaver_stall_clean` — power-off decel-to-stall, clean config, min V near Vs_clean.
+- `beaver_stall_flaps_landing` — power-off stall with LANDING flaps, min V near Vso.
+- `beaver_endurance_cruise` — extended cruise, fuel burn + long-term trim stability.
+- `beaver_coordinated_turn_30` — 30° right bank via full autopilot PID stack.
+- `beaver_coordinated_turn_30_left` — mirror of turn_30; asymmetry test (torque + P-factor + slipstream are all nose-LEFT).
+- `beaver_coordinated_turn_45` — 1.41 g right-bank steep turn.
+- `beaver_coordinated_turn_45_left` — mirror of turn_45.
+
+**Envelope-limit scenarios (1):**
+
+- `beaver_coordinated_turn_60_overbank` — over-bank at cruise; expects accelerated stall. Regression guard against silent over-tune of capability coefficients.
 
 See [PROGRESS.md § Bench-identified model gaps](../../../PROGRESS.md) for the full tuning history.
 
@@ -25,7 +47,8 @@ Update these plots when:
 
 1. **A flight-model coefficient changes.** Re-run the bench, copy refreshed PNGs here, commit in the same PR as the coefficient change. Reviewers can eyeball the diff.
 2. **A scenario's inputs or assertions change.** Same: regenerate, replace, commit together.
-3. **The plot script itself changes (new panels, different layout).** Regenerate all scenarios; one commit for the script + one replacement-pass for every plot.
+3. **A scenario is added or removed.** Remove the stale PNG in the same commit that removes the scenario; add fresh PNG when the scenario ships.
+4. **The plot script itself changes (new panels, different layout).** Regenerate all scenarios; one commit for the script + one replacement-pass for every plot.
 
 Do NOT update these when:
 
@@ -35,9 +58,13 @@ Do NOT update these when:
 ## Regeneration command
 
 ```sh
+# Full cycle: headless bench (also cleans stale target/flight-bench/*.png), then sync.
 tools/run_flight_bench.sh
+rm -f docs/plots/beaver/*.png
 cp target/flight-bench/*.png docs/plots/beaver/
 ```
+
+The `rm -f` step ensures deleted scenarios leave no stale PNG behind. The orchestrator handles the analogous cleanup for `target/flight-bench/` automatically.
 
 ## Reading the plots
 

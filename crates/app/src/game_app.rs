@@ -212,6 +212,11 @@ struct ScenarioPlayback {
     /// Have we finalized (wrote CSV)? Set after first frame past duration so we
     /// don't keep writing forever.
     finalized: bool,
+    /// Per-controller PID state. Parallels `scenario.controllers` — owned here
+    /// so the visual playback feeds the same closed-loop inputs the headless
+    /// runner does (required for turn scenarios and any future closed-loop
+    /// scenarios to behave identically visual-vs-bench).
+    controller_states: Vec<flowplan_sim::ControlLawState>,
 }
 
 impl ApplicationHandler for GameApp {
@@ -450,7 +455,18 @@ impl Runtime {
 
         // Build terrain + vehicle meshes. The vehicle comes from `VEHICLE_GLB_PATH` when
         // available; otherwise we fall back to the placeholder cube.
-        let terrain = Terrain::from_seed(WORLD_SEED);
+        //
+        // Scenario-playback mode uses `Terrain::flat()` (height = 0 everywhere) so the
+        // visual test matches the headless bench exactly — the bench always passes
+        // `min_altitude = 0.0` to `SimState::tick`, and here we do the same. Without
+        // this, the visual could diverge from the CSV when the aircraft's horizontal
+        // track crosses terrain higher than sea level, breaking the determinism
+        // invariant `(seed, inputs, dials, dt, min_altitude trace) → bit-identical`.
+        let terrain = if scenario.is_some() {
+            Terrain::flat()
+        } else {
+            Terrain::from_seed(WORLD_SEED)
+        };
         let terrain_mesh = CpuMesh::terrain_patch(TERRAIN_CELLS, TERRAIN_HALF_EXTENT, |x, z| {
             terrain.height(x, z)
         });
@@ -543,6 +559,10 @@ impl Runtime {
                 log_dir: opts.log_dir.clone(),
                 exit_on_end: opts.exit_on_scenario_end,
                 finalized: false,
+                controller_states: vec![
+                    flowplan_sim::ControlLawState::default();
+                    s.controllers.len()
+                ],
             }),
         })
     }
@@ -580,7 +600,7 @@ impl Runtime {
             // for Esc / reset / view). In normal mode, keyboard feeds the queue
             // through the standard ramp / axis pipeline.
             let mut batch = InputEvents::default();
-            if let Some(pb) = self.scenario_playback.as_ref() {
+            if let Some(pb) = self.scenario_playback.as_mut() {
                 // Inject scripted events whose `tick` matches the current scenario
                 // elapsed count. Scenarios use small, sparse input traces so the
                 // linear scan is cheap.
@@ -588,6 +608,17 @@ impl Runtime {
                     if input.tick == pb.elapsed_ticks {
                         batch.push(input.event);
                     }
+                }
+                // Controllers run every tick — same as `run_scenario_headless`.
+                // Without this, closed-loop scenarios (turn_30, turn_45, etc.)
+                // diverge from the bench because PID outputs are missing.
+                for (ctrl, state) in pb
+                    .scenario
+                    .controllers
+                    .iter()
+                    .zip(pb.controller_states.iter_mut())
+                {
+                    batch.push(ctrl.step(state, &self.sim, FIXED_DT));
                 }
                 // Discard anything the user might have typed -- keyboard events
                 // still pushed via apply_key_event() would leak into the queue.
@@ -602,10 +633,19 @@ impl Runtime {
             // plus float_offset plus a small margin to avoid surface z-fighting. Wave
             // crests can still clip floats briefly -- resolved by the Phase 2.5
             // buoyancy model, not this passive clamp.
-            let pos = self.sim.vehicle.position;
-            let terrain_here = self.terrain.height(pos.x, pos.z);
-            let floor = terrain_here.max(WATER_LEVEL);
-            let min_altitude = floor + self.vehicle_float_offset + SURFACE_MARGIN;
+            //
+            // Scenario-playback mode: pass `min_altitude = 0.0` exactly, matching
+            // `crates/sim/tests/flight_bench.rs`. This guarantees bench CSV and visual
+            // CSV are byte-identical for the same scenario (determinism invariant
+            // `(seed, inputs, dials, dt, min_altitude trace) → bit-identical`).
+            let min_altitude = if self.scenario_playback.is_some() {
+                0.0
+            } else {
+                let pos = self.sim.vehicle.position;
+                let terrain_here = self.terrain.height(pos.x, pos.z);
+                let floor = terrain_here.max(WATER_LEVEL);
+                floor + self.vehicle_float_offset + SURFACE_MARGIN
+            };
             self.sim
                 .tick(&batch, &self.difficulty, FIXED_DT, min_altitude);
             // Post-tick terrain-aware camera clamp: prevents chase camera from

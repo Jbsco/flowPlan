@@ -61,6 +61,14 @@ warn()    { echo "${YELLOW}  ! $*${RESET}"; }
 
 # ---- Step 1: headless bench --------------------------------------------------
 
+# Clean stale outputs from scenarios that have been renamed or deleted. The
+# headless bench writes the current set fresh; without a clean start, the
+# visual orchestrator (below) would discover stale CSVs from deleted scenarios
+# and try to run them through the app, hitting "unknown scenario" errors.
+if [[ -d "$OUT_DIR" ]]; then
+    rm -f "$OUT_DIR"/*.csv "$OUT_DIR"/*.png
+fi
+
 section "headless bench (all scenarios, deterministic, runs assertions)"
 if cargo test -p flowplan-sim --test flight_bench --release 2>&1 | tail -5; then
     ok "assertions passed"

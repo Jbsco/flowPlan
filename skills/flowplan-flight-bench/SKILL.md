@@ -41,6 +41,21 @@ If you are picking flight coefficients out of thin air or eye-balling altitude t
    - `cruise_sl` (capability) + future `cruise_over_vne` (limit, if sim ever models Vne behavior).
    - `stall_clean` (capability: correctly stalls at Vs) + `stall_recovery` (capability: recovers cleanly) vs. `stall_unrecovered_deep` (limit: held back-pressure, spin-like dive) in the future.
 
+10. **Test both directions when aircraft physics is asymmetric.** Right-rotating props (most US-built propeller aircraft including the Beaver) have left-turning tendencies — torque roll, P-factor, and spiral slipstream are all nose-LEFT. This means:
+    - A right turn fights torque during roll-in + hold, but is helped by P-factor/slipstream yawing into the turn.
+    - A left turn is helped by torque into the bank, but pilot must counter P-factor/slipstream with extra right rudder.
+    - The resulting flight path is NOT mirror-symmetric. Left and right turns produce different β, different airspeed decay, different coordination-rudder demands.
+
+    If a scenario uses target values where asymmetry matters (turn scenarios, climbs that drift heading, any banked or yawed state), author both a right-handed and left-handed variant. Headless bench is fast enough that the cost is negligible (milliseconds per scenario).
+
+    Don't force both directions to hit identical numbers — adjust target/tolerance for the expected asymmetry, document WHY in the scenario's fidelity block, and the bench becomes a regression guard against both coefficient drift AND physics-symmetry bugs. (If a future change breaks P-factor sign: one direction's scenarios would start passing easier, the other would start failing — the asymmetric-variants suite catches the direction-dependent effect that a single-direction suite would miss.)
+
+    Pairs currently in the suite:
+    - `coordinated_turn_30` / `coordinated_turn_30_left`
+    - `coordinated_turn_45` / `coordinated_turn_45_left`
+
+    Counter-rotating or symmetric-configuration aircraft (twin with counter-rotating props, jets) skip this discipline — they don't have left-turning tendencies.
+
 ## Scenario Anatomy
 
 A `FlightScenario` has five parts. Each has a job:

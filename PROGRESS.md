@@ -3,7 +3,7 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
-Last updated: **2026-04-20** (Phase 2 in progress; 2.1 / 2.6 / 2.2 core + 2.3 core shipped; Milestone 2.4 flight model **COMPLETE through 2.4.8** -- 2.4.1-2.4.7 shipped, 2.4.8 full cycle shipped (framework + 7-scenario bench suite + plot pipeline + model-gap triage process + coefficient tuning pass closing Gaps 1+3 + Gap 2 confirmed missing-physics + reference plots committed + final snapshot). Pre-Phase-2.5 gate green. 2.4.9 (slipstream + Cl_β dihedral) optional-before-2.5 milestone documented. 2.5 contact physics is the last pre-Phase-3 milestone.).
+Last updated: **2026-04-20** (Phase 2 in progress; 2.1 / 2.6 / 2.2 core + 2.3 core shipped; Milestone 2.4 flight model **COMPLETE through 2.4.9** -- 2.4.1-2.4.7 shipped, 2.4.8 shipped (bench + tuning Gaps 1+3), 2.4.9 shipped (Cl_β dihedral + spiral slipstream + closed-loop ControlLaw harness + turn scenarios + envelope-limit pattern). 10 bench scenarios (9 capability + 1 envelope-limit). ControlLaw module shared between bench and Phase 4.7 autopilot. Pre-Phase-2.5 gate green. 2.5 contact physics is the last pre-Phase-3 milestone.).
 
 ## Current status
 
