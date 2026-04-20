@@ -215,16 +215,37 @@ A cube can be flown (WASD/gamepad) over a terrain. Frame budget check passes at 
 - [ ] Validate against DHC-2 POH performance charts (takeoff distance, climb rate, cruise fuel burn) before milestone close
 - [ ] **Scratch-branch prototype of the flight-model feel belongs in Phase 1**; this milestone is where feel locks. If feel has not clicked by 4-6 weeks into this milestone, trim scope per MVP re-planning in [skills/flowplan-methodology/SKILL.md](skills/flowplan-methodology/SKILL.md).
 
-### Milestone 2.5: Pontoon buoyancy (Beaver floats)
+### Milestone 2.5: Ground + water contact physics
 
+Replaces the pre-2.5 passive altitude clamp (which keeps the CG above
+`max(terrain, water_level) + float_offset` but does not resolve rotation, apply
+friction, or drag the plane in water) with proper contact physics. Both the floatplane
+(buoyancy + hydrodynamics) and wheeled (runway / soft-field contact) configurations
+are in scope -- the Beaver is flown on both.
+
+**2.5a Water contact (floats):**
 - [ ] Hydrodynamic model for Beaver-sized floats (Edo 4930 analogue geometry)
-- [ ] Per-pontoon water height sample + buoyancy force
+- [ ] Per-pontoon water height sample + buoyancy force (uses `world::water_height` from 2.2)
 - [ ] Horizontal drag when in contact with water, tuned to produce realistic plowing and on-step behavior
 - [ ] Step transition ("on step") as a deliberate feel moment; porpoising risk modeled and avoidable with technique
 - [ ] Water rudder for low-speed taxi; weather-vaning when retracted
 - [ ] Wake spawn: particle + decal trail
 - [ ] Spray effects obstructing forward view at high speed or chop
 - [ ] Touchdown moment feels good in playtest (subjective, required)
+
+**2.5b Ground contact (wheels / taildragger):**
+- [ ] Per-contact-point normal force distributed across wheels + tailwheel (or ski pair in winter biome), resolving roll / pitch the CG clamp currently ignores
+- [ ] Rolling resistance + per-surface friction (paved / grass / gravel / sand / tundra), feeding both longitudinal drag and lateral grip for taxi steering
+- [ ] Brake input (`B` held when on ground → symmetric braking; asymmetric toe-brake support arrives with remap UI in Phase 4)
+- [ ] Tailwheel steering: locked above a threshold ground speed, castoring at taxi speeds (Beaver's actual behavior)
+- [ ] Pitch / roll attitude constrained when on surface: plane can rotate into nose-high (stall-taildown) or wingtip-scrape attitudes but the contact resolution pushes back with the appropriate torque
+- [ ] Prop strike, tail strike, wingtip strike detection -- damage consequences land in Phase 4+, but the detection events are raised from this milestone so the hooks exist
+
+**2.5c Invariants + tests:**
+- [ ] Determinism preserved: contact forces are a deterministic function of `(state, terrain/water sample, dt)`; no wall-clock in the contact path.
+- [ ] Property test: a stationary plane on level ground remains stationary (no drift, no chatter) for 10 s of sim time.
+- [ ] Property test: a plane taxiing straight on paved surface at low throttle reaches a steady taxi speed determined by rolling resistance and idle thrust (not runaway).
+- [ ] Property test: a float-configured plane at rest on water settles to equilibrium height matching displacement of the fully-loaded vehicle.
 
 ### Milestone 2.6: Sky (daytime foundation) -- COMPLETE
 
