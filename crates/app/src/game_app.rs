@@ -400,8 +400,9 @@ impl Runtime {
         // ~55 m/s (~107 kt) forward (-Z). Below POH cruise of 64 m/s but well above
         // Vs_clean (23 m/s), giving the airfoil model a comfortable ~2.4× stall-margin
         // at spawn -- enough to bank a 60° turn (which demands 2× Cl) without pushing
-        // α past stall. Thrust is still placeholder (TODO(2.4.3)), so equilibrium
-        // cruise speed will drift once the power curve replaces the constant.
+        // α past stall. Engine model (2.4.3) now produces realistic thrust-vs-airspeed,
+        // so equilibrium cruise settles near the actual thrust = drag intersection
+        // rather than drifting upward.
         sim.vehicle.velocity = glam::Vec3::new(0.0, 0.0, -55.0);
         sim.vehicle.controls.throttle = 0.55;
         // Seed the camera at a chase-valid pose behind+above the vehicle so the first

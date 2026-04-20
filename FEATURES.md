@@ -459,7 +459,7 @@ v1 ships with fully-working keyboard and gamepad profiles plus the mapping UI. H
 - **[sketch]** Cross-controls / slip / skid: intentional slip for short-field approaches; unintentional skid in uncoordinated turns as a classic stall-spin setup.
 - **[sketch]** CG shift: fuel burn and cargo movement shift CG over time, affecting pitch trim and stall characteristics.
 - **[sketch]** Wind response: gusts perturb attitude; crosswind demands rudder/aileron coordination on landing; wind shear near terrain and thunderstorm gust fronts.
-- **[sketch]** Flap model: per-notch lift boost + drag penalty + stall-speed reduction, aircraft-specific.
+- **[shipped: Phase 2.4.5]** Flap model: 4-position discrete handle (UP / CLIMB / TAKEOFF / LANDING) with per-notch `Δ Cl`, `Δ Cd0`, `Δ Cm` deltas. Landing flap drops stall speed from Vs ≈ 23 m/s to Vso ≈ 21 m/s (POH match), adds ~89% to zero-lift drag, and produces a manageable nose-down pitching moment. Keys F / C. Aircraft-specific tuning (per-spec overrides) is a later per-aircraft follow-up.
 - **[sketch]** Trim: continuous, persistent between control inputs; full-trim setting per-aircraft (elevator, rudder, aileron).
 - **[sketch]** Engine failure modes: fuel starvation (tank empty / wrong selector), carb ice (in certain conditions, carb heat mitigates), overheat (sustained max power + low airspeed), mechanical (damage state). Glide model meaningful; feather prop for max glide.
 - **[sketch]** Density altitude: temperature and altitude combine to reduce performance. Hot-day / high-altitude strips are notably harder.

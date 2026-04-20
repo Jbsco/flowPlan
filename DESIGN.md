@@ -357,7 +357,7 @@ Weather advances on a slow RNG stream. Forecast accuracy at hubs decays with dis
 
 ### Difficulty dials and determinism
 
-Difficulty dials (see [FEATURES.md § Difficulty & Accessibility](FEATURES.md#difficulty--accessibility)) are *parameters* to the sim. They scale magnitudes -- wind, gust variance, shear, storm intensity, stall severity, damage sensitivity, economy harshness, autopilot authority -- but never swap physics models. The determinism invariant remains: for a given `(seed, input trace, difficulty state, tick count)` the sim produces bit-identical output. Dial changes take effect at the next tick and are themselves part of the state that feeds the deterministic hash.
+Difficulty dials (see [FEATURES.md § Difficulty & Accessibility](FEATURES.md#difficulty--accessibility)) are *parameters* to the sim. They scale magnitudes -- wind, gust variance, shear, storm intensity, stall severity, damage sensitivity, economy harshness, autopilot authority -- but never swap physics models. The determinism invariant remains: for a given `(seed, input trace, difficulty state, dt, min_altitude trace, tick count)` the sim produces bit-identical output. `min_altitude` is the per-tick surface-floor the app supplies (added in Milestone 2.2 to decouple terrain sampling from the sim; it's still caller-supplied until 2.5's proper contact physics lands). Dial changes take effect at the next tick and are themselves part of the state that feeds the deterministic hash.
 
 ### Time-of-day and season
 

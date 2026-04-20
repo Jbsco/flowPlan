@@ -13,40 +13,35 @@
 //!
 //! The function does not allocate and is safe to call per tick.
 //!
-//! # Current limitations (Phase 2.4.1 placeholder)
+//! # Milestone ledger
 //!
-//! This is a toy model. TODOs below enumerate every physical aspect that needs work
-//! before the flight model is "correct" in the ROADMAP § 2.4 sense. Each TODO names the
-//! milestone that should close it. A careful reader should be able to cross-reference
-//! any dynamics concern against this list.
+//! CLOSED items list the function / constant that carries the work. OPEN items name
+//! the milestone that should close them. A careful reader should be able to
+//! cross-reference any dynamics concern against this list.
 //!
-//! TODO(2.4.2): Lift should come from `0.5 ρ v² S Cl(α)`, not `horizontal_airspeed * k`.
-//!   The horizontal-airspeed shortcut produces false-positive stalls in a dive (no
-//!   horizontal component -> no lift -> "stall") even though true angle of attack
-//!   may be fine. Also collapses into zero lift when flying backward, which is
-//!   technically correct but for the wrong reason (Cl(α) at α > 90° is just the
-//!   post-stall region of the table).
-//! TODO(2.4.2): Angle of attack is not computed or exposed. Correct `α` is the angle
-//!   between the chord line (body-frame approximation: -Z) and the relative wind
-//!   (negated body-frame velocity projected onto the lift plane).
-//! TODO(2.4.2): Sideslip angle (β) is not computed. Affects Cl / Cd coupling,
-//!   rudder authority, and asymmetric wing loading.
-//! TODO(2.4.3): Thrust must come from the R-985 power curve `T = P(RPM, MAP) / V`
-//!   rather than a constant acceleration. Fuel burn follows.
-//! TODO(2.4.3): Propeller model (fixed-pitch CS for 2.4, feathering post-MVP). Affects
-//!   thrust at low airspeed (blade stall at high `AoA`) and drag of a feathered prop.
-//! CLOSED(2.4.4d): Real stall nose-down pitching moment -- `CM_STALL_PITCH_SLOPE`
-//!   activates when `|α| > ALPHA_STALL_RAD`, adding a nose-down contribution to the
-//!   pitch-stability moment that self-recovers a stable aircraft.
-//! CLOSED(2.4.4d): Accelerated / G-loaded stall emerges naturally from the airfoil
-//!   model (fixed `Cl_max` means high-G pulls hit the peak at higher airspeed). The
-//!   α-based stall alert handles it correctly because it tests α directly, not Vs.
-//! CLOSED(2.4.4d): Wing drop -- `wing_drop_roll_moment()` samples Cl at each wing's
-//!   quarter-span with roll-rate-induced α perturbation; the non-linear portion of
-//!   the left/right differential past stall becomes a destabilizing rolling moment.
-//! TODO(2.4.5): Flaps: 4 slotted positions matching POH lift-boost and drag-penalty.
-//!   Flaps down lowers Vs (via higher `Cl_max`) and raises Cd; both must track the
-//!   deployed notch.
+//! Closed (Phase 2.4.x shipped):
+//!
+//! CLOSED(2.4.2): Lift = `0.5 ρ V² S Cl(α)` via `lift_coefficient()`; `CL_TABLE`
+//!   is a NACA 64A416-shaped piecewise-linear curve with whole-wing `Cl_max ≈ 1.65`.
+//! CLOSED(2.4.2): Angle of attack + sideslip computed in
+//!   `angle_of_attack_and_sideslip()` from body-frame velocity.
+//! CLOSED(2.4.2b): Lift vector perpendicular to velocity, in the plane containing
+//!   body-up (not body +Y). Closed out the high-α stall-cascade symptom from the
+//!   body-+Y placeholder.
+//! CLOSED(2.4.3): Thrust from R-985 power curve via `engine_power_kw()` +
+//!   `prop_efficiency()` + `thrust_force_newtons()`. Fuel flow tracks with
+//!   `fuel_flow_gph()`; `VehicleState.fuel_gal` depletes each tick.
+//! CLOSED(2.4.4a): Keyboard input slew (`AXIS_SLEW_RATE` in `input_map.rs`).
+//! CLOSED(2.4.4b): Moment-based rotational dynamics -- pitch / roll / yaw moments
+//!   drive `angular_accel`, Euler-integrated in `tick_dynamics`.
+//! CLOSED(2.4.4d): Real stall nose-down moment (`CM_STALL_PITCH_SLOPE`), wing drop
+//!   (`wing_drop_roll_moment()`), α-based stall alert (`StallState`). Accelerated
+//!   stall emerges from the model (fixed `Cl_max` + α-driven test).
+//! CLOSED(2.4.5): Flaps -- `flap_aero()` returns per-position Cl / Cd0 / Cm deltas;
+//!   `FlapPosition` on `Controls`, wired to F / C keys.
+//!
+//! Open (still to ship in Phase 2.4):
+//!
 //! TODO(2.4.6): Ground effect -- within ~1 wingspan of the surface, induced drag
 //!   drops ~30%, giving a cushion on landing and helping heavy takeoffs.
 //! TODO(2.4.6): P-factor -- right-rotating prop's descending blade is on the right,
@@ -58,6 +53,9 @@
 //!   rotation. Small for a single-engine Beaver but visible on power changes.
 //! TODO(2.4.7): Density altitude -- lift and thrust fall with thinner air. `ρ` varies
 //!   with temperature and pressure altitude; feeds both lift and engine power curves.
+//!
+//! Open (post-2.4):
+//!
 //! TODO(post-2.4): Spin dynamics (autorotation after a stall). Recovery procedure is
 //!   PARE: Power idle, Ailerons neutral, Rudder opposite, Elevator forward through
 //!   stall.
