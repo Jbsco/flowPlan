@@ -3,7 +3,7 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
-Last updated: **2026-04-20** (Phase 2 in progress; 2.1 / 2.6 / 2.2 core + 2.3 core shipped; Milestone 2.4 flight model substantially complete -- 2.4.1 through 2.4.7 shipped plus 2.4.8 flight-test-bench framework + first 3 Beaver scenarios + `--scenario` CLI playback; remaining under 2.4.8: expanded scenario suite + POH coefficient tuning + plotting tooling. 2.5 contact physics is the last pre-Phase-3 milestone.).
+Last updated: **2026-04-20** (Phase 2 in progress; 2.1 / 2.6 / 2.2 core + 2.3 core shipped; Milestone 2.4 flight model substantially complete -- 2.4.1 through 2.4.7 shipped plus 2.4.8 flight-test-bench framework, first 3 Beaver scenarios with structured fidelity documentation, `tools/plot_telemetry.py` 2×4 panel pipeline, `--scenario` CLI playback, model-gap triage process encoded, bench-identified gaps logged (see below). Remaining under 2.4.8: expanded scenario suite (most blocked on 2.5 or 3.2) + POH coefficient tuning pass closing the three open gaps. 2.5 contact physics is the last pre-Phase-3 milestone.).
 
 ## Current status
 
@@ -18,7 +18,7 @@ Last updated: **2026-04-20** (Phase 2 in progress; 2.1 / 2.6 / 2.2 core + 2.3 co
     - Milestone 2.5 (ground + water contact physics): QUEUED (needs 2.2 water height sampler for buoyancy; replaces the pre-2.5 passive altitude clamp with per-part normal force + hydrodynamic drag + wheel friction)
 - Milestone order taken (deviates from ROADMAP's numeric order): **2.1 -> 2.6 -> 2.3 -> 2.2 -> 2.4 -> 2.5**. Sky landed before plane because it made visual tuning of the Beaver easier; water came before flight model because buoyancy (2.5) needs it. Within 2.4: 2.4.4 jumped ahead of 2.4.3 because the moment model fundamentally changes handling feel and was a prerequisite for sensible tuning against any thrust model.
 - Gate: green. `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `cargo bench --bench frame_budget -- --test`, and the hardware snapshot tests all pass.
-- Test count: **172 total** (up from 161 pre-2.4.8; the bench integration test counts as one `beaver_scenarios_all_pass` test but runs the full `BEAVER_SCENARIOS` array and validates every assertion inside). Three hardware snapshots committed: `scene_minimal`, `beaver_preview`, `scene_extended` (1024x640; uses the real `Terrain::from_seed` so it reflects in-game terrain faithfully). Reference photos `ref1.png`, `ref2.png`, `ref3.png` in `crates/render/tests/snapshots/` as aesthetic targets (coastal Alaska / fjord floatplane photography).
+- Test count: **169 total** (the bench integration test counts as one `beaver_scenarios_all_pass` test but runs the full `BEAVER_SCENARIOS` array and validates every assertion inside — 3 scenarios × 2-3 assertions each = 7 POH-anchored assertions). Three hardware snapshots committed: `scene_minimal`, `beaver_preview`, `scene_extended` (1024x640; uses the real `Terrain::from_seed` so it reflects in-game terrain faithfully). Reference photos `ref1.png`, `ref2.png`, `ref3.png` in `crates/render/tests/snapshots/` as aesthetic targets (coastal Alaska / fjord floatplane photography).
 
 ## Quick commands
 
@@ -42,7 +42,11 @@ cargo test -p flowplan-sim --test flight_bench
 # Visual playback of a single scenario (same sim code path; scripted inputs).
 # Names come from flowplan_sim::flight_bench::BEAVER_SCENARIOS.
 cargo run -p flowplan-app --release -- --scenario beaver_cruise_sl
-cargo run -p flowplan-app --release -- --scenario beaver_vy_climb --log-dir target/flight-bench --exit-on-scenario-end
+cargo run -p flowplan-app --release -- --scenario beaver_cruise_climb --log-dir target/flight-bench --exit-on-scenario-end
+
+# Or run the whole suite visually with the orchestrator (game window opens for each).
+tools/run_flight_bench.sh --visual
+tools/run_flight_bench.sh --visual --pause  # wait for Enter between scenarios
 ```
 
 Controls in the window: **W/S** throttle | **↑** dive / **↓** climb (stick convention) | **←/→** roll | **Q/E** yaw | **F/C** flaps extend / retract | **1/2/3** view first-person / chase / orbit | **V** cycle view | **R** reset vehicle | **Esc** quit.

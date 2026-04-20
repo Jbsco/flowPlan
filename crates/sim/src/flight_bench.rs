@@ -589,12 +589,12 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
         assertions: &[
             Assertion::AltitudeStableAtEnd {
                 last_secs: 5.0,
-                tol_m: 20.0, // empirical drift ~4 m at lock; narrow to 5 m once Cm_α tunes
+                tol_m: 10.0, // measured drift ~3 m; narrow to 5 m when Cm_α tune closes Gap 1
             },
             Assertion::AirspeedAtEnd {
                 last_secs: 5.0,
-                target_mps: 56.5, // empirical equilibrium at throttle 0.55; tracks toward 64.3 as Cd0 tunes
-                tol_mps: 2.5,
+                target_mps: 56.5, // empirical equilibrium at throttle 0.55; tracks toward 64.3 as Cd0 closes Gap 1
+                tol_mps: 1.0,     // measured diff 0.14; ±1 catches meaningful drag-polar regression
             },
             Assertion::NeverStalls,
         ],
@@ -695,13 +695,13 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
         assertions: &[
             Assertion::ClimbRateAtEnd {
                 last_secs: 5.0,
-                target_mps: 7.0, // empirical; narrows toward POH 5.08 as Cd_induced tunes
-                tol_mps: 2.0,
+                target_mps: 7.0, // measured 7.26; target tracks toward POH 5.08 as Cd_induced closes Gap 1
+                tol_mps: 1.0,    // measured diff 0.26; ±1 catches ~15% ROC regression
             },
             Assertion::AirspeedAtEnd {
                 last_secs: 5.0,
-                target_mps: 56.0, // empirical equilibrium slightly above cruise
-                tol_mps: 3.0,
+                target_mps: 56.0, // measured 56.7; equilibrium slightly above cruise
+                tol_mps: 1.5,     // measured diff 0.69; ±1.5 catches meaningful regression
             },
             Assertion::NeverStalls,
         ],
@@ -843,8 +843,12 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
         assertions: &[
             Assertion::EventuallyStalls,
             Assertion::MinAirspeedNearTarget {
-                target_mps: 23.25,
-                tol_mps: 8.0, // wide -- refine during α-stall + Cl-table tune
+                target_mps: 23.25, // POH Vs_clean
+                // Wide tolerance reflects PROGRESS.md § Bench-identified gap 3
+                // (Cl_max too low for POH Vs). Measured min airspeed ~29 m/s
+                // (diff ~5.7 from target). Do NOT narrow until Gap 3 resolves --
+                // narrowing here would mask the coefficient gap.
+                tol_mps: 8.0,
             },
         ],
     },

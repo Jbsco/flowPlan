@@ -59,9 +59,12 @@ cargo run -p flowplan-app --release -- --scenario beaver_vy_climb \
     --log-dir target/flight-bench --exit-on-scenario-end
 
 # Full orchestrator: headless suite → CSVs → PNG plots (requires matplotlib +
-# pandas). Add --visual to additionally watch each scenario in sequence.
+# pandas). Add --visual to additionally watch each scenario in sequence
+# (game window opens, plays scripted inputs, auto-exits per scenario).
+# Add --pause to wait for Enter between visual runs.
 tools/run_flight_bench.sh
 tools/run_flight_bench.sh --visual
+tools/run_flight_bench.sh --visual --pause
 
 # Ad-hoc plot generation from captured CSVs.
 python3 tools/plot_telemetry.py target/flight-bench/*.csv
@@ -70,7 +73,7 @@ python3 tools/plot_telemetry.py target/flight-bench/*.csv
 cargo run -p flowplan-app --release -- --help
 ```
 
-Scenario names currently in `BEAVER_SCENARIOS`: `beaver_cruise_sl` (level cruise at SL), `beaver_vy_climb` (Vy full-throttle climb), `beaver_stall_clean` (clean stall validation). Expand by appending a `FlightScenario` const to the array; no other wiring needed.
+Scenario names currently in `BEAVER_SCENARIOS`: `beaver_cruise_sl` (level cruise at SL), `beaver_cruise_climb` (full-throttle climb at cruise airspeed), `beaver_stall_clean` (clean stall validation). Expand by appending a `FlightScenario` const to the array; no other wiring needed.
 
 ### Quality gate
 
