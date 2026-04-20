@@ -136,7 +136,7 @@ fn build_ui(
     frame_ms: f32,
     pending_ticks: u32,
 ) {
-    egui::Window::new("flowPlan debug")
+    egui::Window::new("debug")
         .default_pos([10.0, 10.0])
         .default_width(260.0)
         .resizable(false)
@@ -187,7 +187,7 @@ fn build_ui(
 
     // Top-right: flight-model dynamics breakdown. Same Telemetry source as the left
     // panel -- single-source invariant per DESIGN.md § Telemetry derivation.
-    egui::Window::new("flowPlan dynamics")
+    egui::Window::new("dynamics")
         .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-10.0, 10.0))
         .default_width(280.0)
         .resizable(false)
@@ -326,5 +326,37 @@ fn build_ui(
             } else {
                 ui.small("(no AircraftSpec loaded -- using placeholder constants)");
             }
+        });
+
+    // Bottom-left: glide-slope / flight-path readouts that pair with the attitude
+    // indicator widget rendered below this panel. Anchored via `LEFT_BOTTOM` with a
+    // vertical offset that lifts the panel above the widget's 180 px + 20 px margin.
+    egui::Window::new("glide")
+        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(10.0, -210.0))
+        .default_width(220.0)
+        .resizable(false)
+        .collapsible(true)
+        .show(ctx, |ui| {
+            ui.label(format!(
+                "FPA    {:+6.2}°     pitch {:+6.2}°",
+                t.flight_path_angle_rad.to_degrees(),
+                t.pitch_rad.to_degrees(),
+            ));
+            ui.label(format!(
+                "α      {:+6.2}°     β     {:+6.2}°",
+                t.alpha_rad.to_degrees(),
+                t.beta_rad.to_degrees(),
+            ));
+            ui.label(format!(
+                "VS   {:+6.2} m/s  ({:+5.0} ft/min)",
+                t.vertical_speed_mps,
+                t.vertical_speed_mps * 196.85,
+            ));
+            let ld_label = if t.glide_ratio.is_finite() {
+                format!("L/D  {:5.2} : 1", t.glide_ratio)
+            } else {
+                "L/D    --  (level / climbing)".to_string()
+            };
+            ui.label(ld_label);
         });
 }

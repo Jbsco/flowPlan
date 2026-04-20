@@ -159,6 +159,8 @@ struct Runtime {
     /// not part of `SimState` so determinism is preserved (the widget is presentation-
     /// only per [`DESIGN.md § Telemetry derivation`](../../../../DESIGN.md#telemetry-derivation-render-side)).
     gizmo_batch: DebugLineBatch,
+    /// Reused CPU batch for the attitude-indicator widget (2.4.4e).
+    attitude_batch: DebugLineBatch,
 }
 
 impl ApplicationHandler for GameApp {
@@ -275,13 +277,16 @@ impl Runtime {
     // readability, so allow the slight overrun on this function's line count.
     #[allow(clippy::too_many_lines)]
     fn init(event_loop: &ActiveEventLoop) -> Result<Self> {
-        // Window.
+        // Window. 1080p baseline gives the debug widgets (orientation BR + attitude BL
+        // + top-left / top-right / bottom-left text panels) comfortable room without
+        // overlapping the scene. User remap / fullscreen toggle lands in Phase 4's
+        // settings UI; for now the size is fixed at startup.
         let window = Arc::new(
             event_loop
                 .create_window(
                     Window::default_attributes()
                         .with_title("flowPlan")
-                        .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0)),
+                        .with_inner_size(winit::dpi::LogicalSize::new(1920.0, 1080.0)),
                 )
                 .context("create window")?,
         );
@@ -428,6 +433,7 @@ impl Runtime {
             ticks_last_frame: 0,
             key_state: KeyState::default(),
             gizmo_batch: DebugLineBatch::new(),
+            attitude_batch: DebugLineBatch::new(),
         })
     }
 
@@ -528,9 +534,10 @@ impl Runtime {
         // 3D cockpit instruments as additional consumers of the same struct.
         let telemetry = Telemetry::derive(&curr);
 
-        // Rebuild the orientation-widget batch every frame (always on; the widget is
-        // a debug-first instrument and will later inform the real HUD instruments).
+        // Rebuild both debug widgets every frame (always on; debug-first instruments
+        // that inform the real HUD later).
         debug_gizmo::build(&mut self.gizmo_batch, &telemetry);
+        debug_gizmo::build_attitude(&mut self.attitude_batch, &telemetry);
 
         let mut encoder = self
             .device
@@ -548,6 +555,7 @@ impl Runtime {
             alpha,
             CLEAR_COLOR,
             Some(&self.gizmo_batch),
+            Some(&self.attitude_batch),
         );
         // Debug HUD pass on top of the main scene, rendered via the linear view.
         self.debug_hud.render(

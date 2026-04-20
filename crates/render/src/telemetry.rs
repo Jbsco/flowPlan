@@ -86,13 +86,21 @@ pub struct Telemetry {
     pub roll_moment: MomentBreakdown,
     pub yaw_moment: MomentBreakdown,
 
-    // --- Altitude / VSI ---
+    // --- Altitude / VSI / flight path ---
     /// Mean-sea-level altitude in meters. AGL arrives when terrain-sample is plumbed
     /// through `SimSnapshot`.
     pub altitude_msl: f32,
     /// Vertical speed in m/s. Alias of `airspeed_vertical` for instrument-reading
     /// clarity.
     pub vertical_speed_mps: f32,
+    /// Flight path angle (γ) in radians. Positive when climbing; negative when
+    /// descending. `atan2(vertical, horizontal)` of the velocity vector.
+    pub flight_path_angle_rad: f32,
+    /// Lift-to-drag ratio at the current instant, approximated as
+    /// `horizontal_airspeed / |vertical_speed|` when descending. `f32::INFINITY`
+    /// when the aircraft is level or climbing (not in a glide). The attitude-indicator
+    /// widget shows this as "--" in that case.
+    pub glide_ratio: f32,
 
     // --- Controls (input state) ---
     /// Throttle position in `[0, 1]`.
@@ -148,6 +156,23 @@ impl Telemetry {
 
             altitude_msl: veh.position.y,
             vertical_speed_mps: veh.velocity.y,
+            flight_path_angle_rad: {
+                let horiz = veh.velocity.x.hypot(veh.velocity.z);
+                if horiz < 1e-3 && veh.velocity.y.abs() < 1e-3 {
+                    0.0
+                } else {
+                    veh.velocity.y.atan2(horiz)
+                }
+            },
+            glide_ratio: {
+                let horiz = veh.velocity.x.hypot(veh.velocity.z);
+                // Only meaningful when descending; infinity indicates level/climbing.
+                if veh.velocity.y < -0.1 {
+                    horiz / -veh.velocity.y
+                } else {
+                    f32::INFINITY
+                }
+            },
 
             throttle: veh.controls.throttle,
             pitch_input: veh.controls.pitch,

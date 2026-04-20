@@ -168,7 +168,8 @@ fn capture_png(
         snap,
         1.0,
         CLEAR,
-        None, // no debug gizmo in snapshot renders
+        None, // no orientation widget in snapshot renders
+        None, // no attitude widget
     );
     encoder.copy_texture_to_buffer(
         wgpu::ImageCopyTexture {

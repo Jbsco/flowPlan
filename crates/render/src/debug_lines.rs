@@ -185,24 +185,34 @@ fn push_quad(
     });
 }
 
-/// GPU-side quad pipeline + dynamic vertex buffers for outline and fill.
-pub struct DebugLinesRenderer {
-    pipeline: wgpu::RenderPipeline,
+/// Per-widget vertex buffer pair. `DebugLinesRenderer` holds one per slot so multiple
+/// widgets in the same command buffer can keep independent vertex data -- without
+/// per-slot buffers, a `queue.write_buffer` for slot N would overwrite slot N-1 before
+/// the GPU executed either draw, because queue writes all happen before submit.
+struct SlotVbos {
     outline_vbo: wgpu::Buffer,
     outline_capacity: u64,
     fill_vbo: wgpu::Buffer,
     fill_capacity: u64,
 }
 
+/// GPU-side quad pipeline + per-slot vertex buffers.
+pub struct DebugLinesRenderer {
+    pipeline: wgpu::RenderPipeline,
+    slots: Vec<SlotVbos>,
+}
+
 impl DebugLinesRenderer {
-    /// Build the pipeline. The caller-supplied camera BGL is reused for the widget's
-    /// dedicated uniform so one pipeline serves both scene-camera and widget-camera
-    /// draws.
+    /// Build the pipeline. `slot_count` is the number of simultaneous widgets that can
+    /// be rendered in one command buffer without clobbering each other's vertex data.
+    /// The caller-supplied camera BGL is reused for the widget's dedicated uniform so
+    /// one pipeline serves all widgets.
     #[must_use]
     pub fn new(
         device: &wgpu::Device,
         camera_bgl: &wgpu::BindGroupLayout,
         surface_format: wgpu::TextureFormat,
+        slot_count: usize,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("flowplan-debug-lines-shader"),
@@ -257,50 +267,72 @@ impl DebugLinesRenderer {
             multiview: None,
             cache: None,
         });
-        let initial_capacity: u64 = 512; // ~85 segments before first growth
-        let outline_vbo = create_empty_vbo(device, "debug-lines-outline-vbo", initial_capacity);
-        let fill_vbo = create_empty_vbo(device, "debug-lines-fill-vbo", initial_capacity);
-        Self {
-            pipeline,
-            outline_vbo,
-            outline_capacity: initial_capacity,
-            fill_vbo,
-            fill_capacity: initial_capacity,
-        }
+        let initial_capacity: u64 = 512; // ~85 segments per slot before first growth
+        let slots = (0..slot_count)
+            .map(|i| SlotVbos {
+                outline_vbo: create_empty_vbo(
+                    device,
+                    &format!("debug-lines-slot{i}-outline-vbo"),
+                    initial_capacity,
+                ),
+                outline_capacity: initial_capacity,
+                fill_vbo: create_empty_vbo(
+                    device,
+                    &format!("debug-lines-slot{i}-fill-vbo"),
+                    initial_capacity,
+                ),
+                fill_capacity: initial_capacity,
+            })
+            .collect();
+        Self { pipeline, slots }
     }
 
-    /// Upload both vertex lists to their VBOs, growing if necessary.
-    pub fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, batch: &DebugLineBatch) {
+    /// Upload the given slot's vertex lists, growing if necessary. Slots are
+    /// independent; uploading to slot N does not touch slot M's buffers.
+    pub fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        slot: usize,
+        batch: &DebugLineBatch,
+    ) {
+        let s = &mut self.slots[slot];
         upload_or_grow(
             device,
             queue,
-            &mut self.outline_vbo,
-            &mut self.outline_capacity,
+            &mut s.outline_vbo,
+            &mut s.outline_capacity,
             &batch.outline_vertices,
             "debug-lines-outline-vbo-grown",
         );
         upload_or_grow(
             device,
             queue,
-            &mut self.fill_vbo,
-            &mut self.fill_capacity,
+            &mut s.fill_vbo,
+            &mut s.fill_capacity,
             &batch.fill_vertices,
             "debug-lines-fill-vbo-grown",
         );
     }
 
-    /// Issue draws for the outline (first) and fill (second). Caller must have bound
-    /// the camera BGL at `@group(0)`.
-    pub fn render<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, batch: &DebugLineBatch) {
+    /// Issue draws for slot `slot`'s outline (first) and fill (second). Caller must
+    /// have bound the camera BGL at `@group(0)`.
+    pub fn render<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        slot: usize,
+        batch: &DebugLineBatch,
+    ) {
+        let s = &self.slots[slot];
         pass.set_pipeline(&self.pipeline);
         let outline_count = batch.outline_vertices.len() as u32;
         if outline_count > 0 {
-            pass.set_vertex_buffer(0, self.outline_vbo.slice(..));
+            pass.set_vertex_buffer(0, s.outline_vbo.slice(..));
             pass.draw(0..outline_count, 0..1);
         }
         let fill_count = batch.fill_vertices.len() as u32;
         if fill_count > 0 {
-            pass.set_vertex_buffer(0, self.fill_vbo.slice(..));
+            pass.set_vertex_buffer(0, s.fill_vbo.slice(..));
             pass.draw(0..fill_count, 0..1);
         }
     }

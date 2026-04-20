@@ -225,15 +225,15 @@ pub struct Renderer {
     terrain: DrawModel,
     water: DrawModel,
     vehicle: DrawModel,
-    /// 2.4.2c: line-list pipeline used by the orientation widget and (later) HUD
-    /// ladders and wireframe debug views.
+    /// 2.4.2c: line-list pipeline used by the corner widgets and (later) HUD ladders
+    /// and wireframe debug views.
     debug_lines: DebugLinesRenderer,
-    /// Dedicated uniform buffer holding the widget's screen-space ortho view-proj.
-    /// Written every frame in `render()` so the widget tracks window resizes without
-    /// a dedicated callback.
-    widget_camera_buf: wgpu::Buffer,
-    /// Bind group pointing at `widget_camera_buf`. Swapped in for the widget draw.
-    widget_camera_bg: wgpu::BindGroup,
+    /// Widget uniform for the bottom-right orientation gizmo.
+    widget_camera_buf_br: wgpu::Buffer,
+    widget_camera_bg_br: wgpu::BindGroup,
+    /// Widget uniform for the bottom-left attitude indicator (2.4.4e).
+    widget_camera_buf_bl: wgpu::Buffer,
+    widget_camera_bg_bl: wgpu::BindGroup,
     // Kept for shader hot-reload pipeline rebuilds; feature-gated to avoid dead-code
     // warnings in release/default builds. Re-exposed without the gate when another
     // caller needs them.
@@ -507,24 +507,40 @@ impl Renderer {
             },
         };
 
-        let debug_lines = DebugLinesRenderer::new(device, &camera_bgl, surface_format);
+        // Two slots: slot 0 = bottom-right orientation gizmo, slot 1 = bottom-left
+        // attitude indicator. Each has its own VBO pair so queue writes between
+        // render passes in the same command buffer don't clobber each other.
+        let debug_lines = DebugLinesRenderer::new(device, &camera_bgl, surface_format, 2);
 
-        // Widget uniform: a second camera-shaped buffer + bind group used for the
-        // orientation widget. Holds a screen-space ortho view-proj recomputed per
-        // frame from viewport size. `view_pos` and `inverse_view_proj` are unused by
-        // the line shader; left zero.
-        let widget_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("widget-camera-ubo"),
+        // Two widget uniforms: one per corner-anchored debug widget. Each holds a
+        // screen-space ortho view-proj recomputed per frame from viewport size.
+        // `view_pos` and `inverse_view_proj` are unused by the line shader; left zero.
+        let widget_camera_buf_br = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("widget-camera-br-ubo"),
             size: core::mem::size_of::<CameraUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let widget_camera_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("widget-camera-bg"),
+        let widget_camera_bg_br = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("widget-camera-br-bg"),
             layout: &camera_bgl,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: widget_camera_buf.as_entire_binding(),
+                resource: widget_camera_buf_br.as_entire_binding(),
+            }],
+        });
+        let widget_camera_buf_bl = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("widget-camera-bl-ubo"),
+            size: core::mem::size_of::<CameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let widget_camera_bg_bl = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("widget-camera-bl-bg"),
+            layout: &camera_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: widget_camera_buf_bl.as_entire_binding(),
             }],
         });
 
@@ -546,8 +562,10 @@ impl Renderer {
             water,
             vehicle,
             debug_lines,
-            widget_camera_buf,
-            widget_camera_bg,
+            widget_camera_buf_br,
+            widget_camera_bg_br,
+            widget_camera_buf_bl,
+            widget_camera_bg_bl,
             #[cfg(feature = "shader-hot-reload")]
             scene_pipeline_layout,
             #[cfg(feature = "shader-hot-reload")]
@@ -646,7 +664,8 @@ impl Renderer {
         snapshot_curr: &SimSnapshot,
         alpha: f32,
         clear_color: wgpu::Color,
-        debug_lines: Option<&DebugLineBatch>,
+        orientation_widget: Option<&DebugLineBatch>,
+        attitude_widget: Option<&DebugLineBatch>,
     ) {
         let alpha = alpha.clamp(0.0, 1.0);
 
@@ -813,40 +832,65 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
-        // Orientation-widget pass (Phase 2.4.2c). The app builds a batch of unit-length
-        // line segments in widget-local `[-1, 1]` space; we project them into a small
-        // screen-space rectangle at the bottom-right. Drawn last so the widget always
-        // overlays; no depth attachment.
-        if let Some(batch) = debug_lines {
-            if !batch.is_empty() {
-                let widget_vp = widget_view_proj(size);
-                queue.write_buffer(
-                    &self.widget_camera_buf,
-                    0,
-                    bytemuck::bytes_of(&CameraUniform {
-                        view_proj: widget_vp.to_cols_array_2d(),
-                        view_pos: [0.0; 4],
-                        inverse_view_proj: [[0.0; 4]; 4],
-                    }),
-                );
-                self.debug_lines.upload(device, queue, batch);
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("orientation-widget-pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: target_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                pass.set_bind_group(0, &self.widget_camera_bg, &[]);
-                self.debug_lines.render(&mut pass, batch);
+        // Widget passes (Phase 2.4.2c orientation gizmo + 2.4.4e attitude indicator).
+        // Each widget has its own ortho view-proj and screen-space rectangle. Drawn
+        // last so the widgets always overlay; no depth attachment. Scissor rect
+        // clamps rendering to each widget's box so geometry that runs past widget-
+        // local `[-1, 1]` doesn't bleed into the rest of the screen (the attitude
+        // indicator's horizon can extend past bounds at extreme pitch).
+        for (slot, batch_opt, anchor, camera_buf, camera_bg, label) in [
+            (
+                0usize,
+                orientation_widget,
+                WidgetAnchor::BottomRight,
+                &self.widget_camera_buf_br,
+                &self.widget_camera_bg_br,
+                "orientation-widget-pass",
+            ),
+            (
+                1,
+                attitude_widget,
+                WidgetAnchor::BottomLeft,
+                &self.widget_camera_buf_bl,
+                &self.widget_camera_bg_bl,
+                "attitude-widget-pass",
+            ),
+        ] {
+            let Some(batch) = batch_opt else { continue };
+            if batch.is_empty() {
+                continue;
             }
+            let widget_vp = widget_view_proj(size, anchor);
+            queue.write_buffer(
+                camera_buf,
+                0,
+                bytemuck::bytes_of(&CameraUniform {
+                    view_proj: widget_vp.to_cols_array_2d(),
+                    view_pos: [0.0; 4],
+                    inverse_view_proj: [[0.0; 4]; 4],
+                }),
+            );
+            self.debug_lines.upload(device, queue, slot, batch);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(label),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            let (sx, sy, sw, sh) = widget_scissor_rect(size, anchor);
+            if sw > 0 && sh > 0 {
+                pass.set_scissor_rect(sx, sy, sw, sh);
+            }
+            pass.set_bind_group(0, camera_bg, &[]);
+            self.debug_lines.render(&mut pass, slot, batch);
         }
     }
 }
@@ -856,28 +900,61 @@ const WIDGET_PX: f32 = 180.0;
 /// Margin from the viewport edges (pixels).
 const WIDGET_MARGIN_PX: f32 = 20.0;
 
-/// Screen-space orthographic view-proj for the orientation widget.
+/// Anchor corner for a debug widget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WidgetAnchor {
+    BottomRight,
+    BottomLeft,
+}
+
+/// Screen-space orthographic view-proj for a corner-anchored debug widget.
 ///
 /// Maps widget-local `[-1, 1]³` to a `WIDGET_PX × WIDGET_PX` square anchored
-/// `WIDGET_MARGIN_PX` from the bottom-right. Z range `[-1, 1]` is mapped to NDC `[0, 1]`
-/// so widget-local Z roughly respects depth ordering if the pipeline ever re-enables
-/// depth; currently depth is disabled so Z is effectively ignored by the pipeline and
-/// overlap order comes from draw order.
-fn widget_view_proj(viewport: (u32, u32)) -> Mat4 {
+/// `WIDGET_MARGIN_PX` from the chosen corner. Z range `[-1, 1]` is mapped to NDC
+/// `[0, 1]`; the line pipeline currently has depth disabled so Z only matters for
+/// future depth-aware consumers.
+fn widget_view_proj(viewport: (u32, u32), anchor: WidgetAnchor) -> Mat4 {
     let vw = viewport.0.max(1) as f32;
     let vh = viewport.1.max(1) as f32;
-    // Half-width / half-height of the widget, in NDC units.
-    let sx = WIDGET_PX / vw; // (WIDGET_PX / 2) / (vw / 2)
+    let sx = WIDGET_PX / vw;
     let sy = WIDGET_PX / vh;
-    // Widget center in NDC. +X is right; +Y is up in NDC (wgpu).
-    let cx = 1.0 - (WIDGET_PX + 2.0 * WIDGET_MARGIN_PX) / vw;
-    let cy = -1.0 + (WIDGET_PX + 2.0 * WIDGET_MARGIN_PX) / vh;
+    // In NDC, +X is right and +Y is up (wgpu).
+    let cx_right = 1.0 - (WIDGET_PX + 2.0 * WIDGET_MARGIN_PX) / vw;
+    let cx_left = -1.0 + (WIDGET_PX + 2.0 * WIDGET_MARGIN_PX) / vw;
+    let cy_bottom = -1.0 + (WIDGET_PX + 2.0 * WIDGET_MARGIN_PX) / vh;
+    let (cx, cy) = match anchor {
+        WidgetAnchor::BottomRight => (cx_right, cy_bottom),
+        WidgetAnchor::BottomLeft => (cx_left, cy_bottom),
+    };
     Mat4::from_cols(
         Vec4::new(sx, 0.0, 0.0, 0.0),
         Vec4::new(0.0, sy, 0.0, 0.0),
         Vec4::new(0.0, 0.0, 0.5, 0.0),
         Vec4::new(cx, cy, 0.5, 1.0),
     )
+}
+
+/// Scissor rectangle in pixels (x, y, width, height) for a widget. `x, y` is the
+/// top-left corner in wgpu's top-left-origin convention.
+#[allow(
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss
+)]
+fn widget_scissor_rect(viewport: (u32, u32), anchor: WidgetAnchor) -> (u32, u32, u32, u32) {
+    let vw = viewport.0.max(1) as f32;
+    let vh = viewport.1.max(1) as f32;
+    let size = WIDGET_PX;
+    let margin = WIDGET_MARGIN_PX;
+    let (x_px, y_px) = match anchor {
+        WidgetAnchor::BottomRight => (vw - size - margin, vh - size - margin),
+        WidgetAnchor::BottomLeft => (margin, vh - size - margin),
+    };
+    let x = x_px.max(0.0) as u32;
+    let y = y_px.max(0.0) as u32;
+    let w = (size as u32).min(viewport.0.saturating_sub(x));
+    let h = (size as u32).min(viewport.1.saturating_sub(y));
+    (x, y, w, h)
 }
 
 impl DrawModel {
