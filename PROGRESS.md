@@ -3,7 +3,7 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
-Last updated: **2026-04-20** (Phase 2 in progress; 2.1 / 2.6 / 2.2 core + 2.3 core shipped; Milestone 2.4 flight model substantially complete -- 2.4.1 through 2.4.7 shipped plus 2.4.8 flight-test-bench framework, first 3 Beaver scenarios with structured fidelity documentation, `tools/plot_telemetry.py` 2×4 panel pipeline, `--scenario` CLI playback, model-gap triage process encoded, bench-identified gaps logged (see below). Remaining under 2.4.8: expanded scenario suite (most blocked on 2.5 or 3.2) + POH coefficient tuning pass closing the three open gaps. 2.5 contact physics is the last pre-Phase-3 milestone.).
+Last updated: **2026-04-20** (Phase 2 in progress; 2.1 / 2.6 / 2.2 core + 2.3 core shipped; Milestone 2.4 flight model substantially complete -- 2.4.1 through 2.4.7 shipped plus 2.4.8 flight-test-bench framework, first 3 Beaver scenarios with structured fidelity documentation, `tools/plot_telemetry.py` 2×4 panel pipeline, `--scenario` CLI playback, model-gap triage process encoded, bench-identified gaps logged (see below). Remaining under 2.4.8: 6 more scenarios (glide / Vne dive / 30° + 60° turns / flap stall / endurance), coefficient tuning pass closing Gaps 1+3 (Gap 2 expected to defer to slipstream physics), reference plots committed, final lock. Pre-2.5 gate criteria and completion order encoded in [ROADMAP § Milestone 2.4](ROADMAP.md#milestone-24-flight-model-beaver-tuned-reference). 2.5 contact physics is the last pre-Phase-3 milestone.).
 
 ## Current status
 
@@ -302,6 +302,76 @@ Process rules (do not tune silently): every coefficient change cites its gap ent
 - Status: OPEN. Analytic cause identified; needs coefficient + table-shape work + POH-citation verification.
 
 **Resolved** (none yet; all three open above until 2.4.8 tuning pass).
+
+### Path to Phase 2.5 (2.4.8 completion order)
+
+The remaining 2.4.8 work is ordered so Phase 2.5 (contact physics) inherits a stable, locked flight model. Execute in this sequence — do not start 2.5 until the Pre-2.5 gate (below) is green.
+
+**Step 1: Expand scenario suite (adds constraints for tuning).**
+
+**SHIPPED** — 4 new Beaver scenarios with full fidelity docs:
+
+1. **[shipped]** `beaver_ldmax_glide` — idle-throttle glide at L/D_max. Measured V ≈ 45 m/s (POH 31), sink ≈ 3.5 m/s. Gap 1 consequence.
+2. **[shipped]** `beaver_vne_dive` — pushover dive, staged pulse-release input. Measured terminal V ≈ 75 m/s (POH Vne 71.5). Gap 1 consequence.
+3. **[shipped]** `beaver_stall_flaps_landing` — LANDING-flaps stall. Measured min airspeed ≈ 28 m/s (POH Vso 21). Same Gap 3 as clean stall, offset by flap Δ Cl.
+4. **[shipped]** `beaver_endurance_cruise` — extended cruise with fuel burn validation. Measured burn 22.8 gph (POH 27). Gap 1 consequence.
+5. **[shipped]** `FinalFuelWithin { min_gal, max_gal }` assertion type added to enable scenario 4.
+
+**[deferred post-2.4.8]** `beaver_coordinated_turn_30` / `_turn_60` — attempted during 2.4.8 audit; hit a structural barrier. Flight model lacks Cl_β (dihedral roll stability), so a banked aircraft has no restoring roll moment. With scripted constant inputs and no trim system, bank spirals instead of locking at target. Rationale + unblocking options documented inline in `flight_bench.rs` where scenarios would have lived. Deferring is safe: coefficient tuning has 7 existing scenarios for constraints, which is sufficient. Revisit when:
+- (a) Cl_β coefficient added → aircraft self-stabilizes in bank; simple scripted inputs hold target bank
+- (b) trim system ships (Phase 3+) → pilot-trim inputs work regardless of roll stability
+- (c) `SetRoll_ramped`-style continuous input type → can simulate active pilot bank-holding
+
+Current scenario suite totals **7 scenarios, 15 assertions**, all passing with measured margins:
+
+| Scenario | Assertions | Status |
+|----------|-----------|--------|
+| `beaver_cruise_sl` | alt ±10m, airspeed 56.5±1.0, NeverStalls | passing |
+| `beaver_cruise_climb` | climb 7.0±1.0, airspeed 56±1.5, NeverStalls | passing |
+| `beaver_ldmax_glide` | airspeed 44±5, sink -3.5±2, NeverStalls | passing |
+| `beaver_vne_dive` | airspeed [60,95], NeverStalls | passing |
+| `beaver_stall_clean` | EventuallyStalls, MinV 23.25±8 | passing (Gap 3) |
+| `beaver_stall_flaps_landing` | EventuallyStalls, MinV 21.01±8 | passing (Gap 3) |
+| `beaver_endurance_cruise` | alt ±30, airspeed 56.5±3, fuel [9.35,9.75], NeverStalls | passing |
+
+**Step 2: Coefficient tuning pass.**
+
+Follow the triage protocol: one coefficient per commit, full ripple-impact prediction, regression check across all 9 scenarios. Expected order:
+
+1. **Gap 3 first (Cl_max vs Vs)** — clearest analytic basis. Raise `CL_TABLE` peak from 1.65 → ~2.0 (conservative first step; full POH alignment implies ~2.95 but that's suspect — likely POH Vs is measured with slight flap or at lower weight than MTOW). Commit, run bench, compare predicted vs actual ripple across stall, flap-stall, wing-drop, cruise (cruise α ≈ 3° is below peak region, should be ~unchanged).
+2. **Gap 1 second (Cd0 light)** — raise from 0.045 → 0.055–0.060. Tracks cruise-equilibrium throttle toward POH 0.65. Affects every scenario that reaches cruise α; neutral on stall (drag is induced-dominated at high α).
+3. **Gap 2 third (P-factor / slipstream)** — attempt coefficient-only fix (raise `P_FACTOR_ARM_M`). Expected outcome: over-corrects cruise rudder, which is the signature that the problem is *missing physics* (slipstream over rudder) rather than coefficient magnitude. Document the finding, mark Gap 2 as deferred to post-2.4 slipstream-physics work, revert any coefficient experiment that didn't help.
+
+Tolerance-narrowing after each coefficient lands: update per `skills/flowplan-flight-bench/references/assertion-matrix.md` discipline (2-3× measured margin).
+
+**Step 3: Lock references.**
+
+1. Narrow all 9 scenario tolerances to 2-3× post-tuning margins.
+2. Commit reference plots to `docs/plots/beaver/<scenario>.png` as versioned artifacts.
+3. Move resolved gaps to **Resolved** subsection above with final coefficient values. Gap 2 moves to a new **Deferred (slipstream physics)** subsection with target phase (post-Phase-2.4 flight-model work, or Phase 3 audio expansion if slipstream noise is scoped there).
+4. Write a "final 2.4.8 snapshot" subsection listing: final coefficient set, final scenario suite, final tolerance table, what Phase 2.5 inherits.
+
+### Pre-Phase-2.5 gate
+
+Before opening Phase 2.5 contact physics work, verify:
+
+1. **All 9 Beaver scenarios pass** with narrowed tolerances.
+2. **Gaps 1 and 3 resolved** (or explicitly deferred to a named phase with rationale); **Gap 2** resolved OR documented as missing-physics with decision on whether slipstream lands pre-v1.
+3. **Reference plots committed** under `docs/plots/beaver/`.
+4. **Determinism invariant re-verified**: run bench twice, confirm byte-identical CSVs across both runs.
+5. **Quality gate green**: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --workspace`, `cargo bench --bench frame_budget -- --test`, hardware snapshots.
+6. **No open flight-model regressions** in PROGRESS.md known-issues.
+
+Completing these locks the flight model before 2.5 contact physics starts mutating the vehicle-state boundary. Avoids coefficient drift under the contact-physics work.
+
+### Deferred (not blocking Phase 2.5 start)
+
+- **Per-aircraft coefficient migration** from `flight.rs` consts to `AircraftSpec`. Deferred to [Phase 5.1 content milestone](ROADMAP.md#milestone-51-content) when the 2nd aircraft lands. Migrating a single-aircraft state into a multi-aircraft schema and then waiting for the 2nd aircraft is a non-goal; better to migrate when it produces immediate value.
+- **Takeoff / landing / ground-contact scenarios**: blocked on 2.5 contact physics (correct — they need per-part normal force + friction to express).
+- **Wind / crosswind / turbulence / shear scenarios**: blocked on Phase 3.2 weather.
+- **Difficulty-dial arcade-vs-sim-lite default**: deferred to Phase 4.9 settings UI.
+- **Graphics settings UI**: Milestone 4.8.5.
+- **Slipstream-over-rudder physics** (resolving Gap 2 properly): deferred to post-Phase-2.4 flight-model refinement window (tentative) or rolled into Phase 3 audio expansion (where engine sound already reads RPM/airspeed for prop wash).
 
 ### Phase 2 tech-stack additions in Cargo.toml
 

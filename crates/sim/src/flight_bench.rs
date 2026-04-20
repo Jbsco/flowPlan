@@ -113,6 +113,11 @@ pub enum Assertion {
     /// Used for stall-speed validation: drive the plane into stall and check the
     /// speed at which it stalled.
     MinAirspeedNearTarget { target_mps: f32, tol_mps: f32 },
+
+    /// Final fuel remaining is within `[min_gal, max_gal]`. Used for
+    /// endurance / burn-rate validation: run at a known power setting for a known
+    /// duration and verify fuel consumed matches POH burn rate.
+    FinalFuelWithin { min_gal: f32, max_gal: f32 },
 }
 
 /// A `FlightScenario` is the top-level description of a test case.
@@ -472,6 +477,14 @@ fn check_one(assertion: Assertion, log: &[BenchSample]) -> AssertionResult {
                 ),
             }
         },
+        Assertion::FinalFuelWithin { min_gal, max_gal } => {
+            let last = log.last().map_or(0.0, |s| s.fuel_remaining_gal);
+            AssertionResult {
+                assertion,
+                passed: last >= min_gal && last <= max_gal,
+                message: format!("final fuel {last:.2} gal (range [{min_gal:.2}, {max_gal:.2}])"),
+            }
+        },
     }
 }
 
@@ -706,6 +719,196 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             Assertion::NeverStalls,
         ],
     },
+    // beaver_ldmax_glide
+    //
+    // Real-world maneuver:
+    //   Power-off glide at best-glide airspeed (L/D_max). From cruise, pilot
+    //   reduces throttle to idle and trims nose-down to hold best-glide speed.
+    //   Aircraft descends at a steady flight-path angle equal to the glide
+    //   angle γ = arctan(D/L) ≈ 1/(L/D_max).
+    //
+    // POH target:
+    //   Best glide speed ≈ 70 mph = 31.3 m/s. L/D ≈ 10 for a clean Beaver.
+    //   DHC-2 POH § 3 Emergency Procedures / § 5 Performance (Glide chart).
+    //
+    // Model analytic:
+    //   L/D_max at Cl_opt = sqrt(Cd0 · π · AR · e) = sqrt(0.045 · π · 9.2 · 0.75)
+    //   ≈ 0.988. Our model predicts V_best_glide = sqrt(2W/(ρS·Cl_opt)) ≈ 40 m/s,
+    //   L/D ≈ 11, sink rate ≈ 3 m/s. The gap from POH's 31 m/s/10:1 traces to
+    //   Gap 1 (Cd0 light) -- lower Cd0 pushes best-glide V upward because less
+    //   drag at low Cl lets aircraft find equilibrium at higher speed. This
+    //   scenario is a second data point that constrains the Cd0 tuning.
+    //
+    // Isolation (held constant):
+    //   - Altitude 1500 m MSL (allows 30 s of ~3 m/s descent without ground clamp).
+    //   - Zero wind, MTOW, flaps UP.
+    //   - Throttle 0.0 (idle); small residual thrust from engine idle 17 kW.
+    //   - Scripted pitch trim holds α near 7° (model's L/D_max α).
+    //   - Roll/yaw trim near zero (idle = negligible torque and P-factor).
+    //
+    // Real-world fidelity:
+    //   Faithful: idle throttle matches real power-off glide technique. Pitch
+    //     input 0.12 derived analytically from δ = (|Cm_α|/Cm_δe)·α_rad at α = 7°.
+    //     Matches what a real pilot would apply via elevator trim.
+    //   Approximated: scripted constant pitch. Real pilot continuously adjusts to
+    //     hold indicated airspeed; our constant value produces a stable glide at
+    //     whatever airspeed the model's coefficients equilibrate at (~40 m/s).
+    //   Known fidelity gap: model's best-glide V ≈ 40 m/s vs POH 31 m/s; traces
+    //     to Gap 1 (Cd0 light) in PROGRESS.md. Closing Gap 1 brings V down toward
+    //     POH. Scenario assertions target model's current equilibrium; tighten
+    //     toward POH as Cd0 tunes.
+    //
+    // Does NOT test:
+    //   - Post-flameout glide (engine damage) — no engine-failure model yet.
+    //   - Gliding with flaps deployed (separate: *_landing_approach).
+    //   - Glide-to-landing touchdown (blocked on 2.5 contact physics).
+    //   - Slipping glide / forward slip (separate scenario with rudder input).
+    //
+    // Assertion rationale:
+    //   AirspeedAtEnd pins best-glide speed (model's prediction). ClimbRateAtEnd
+    //   with negative target asserts we're sinking at the expected rate.
+    //   NeverStalls is free sanity. Narrow targets toward POH as Cd0 tunes.
+    FlightScenario {
+        name: "beaver_ldmax_glide",
+        description: "Power-off glide at L/D_max. Tests drag polar minimum + steady glide.",
+        aircraft_spec_path: BEAVER_SPEC_PATH,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 1500.0, 0.0),
+            velocity: Vec3::new(0.0, 0.0, -40.0),
+            orientation: CRUISE_ATTITUDE,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.0,
+            flaps: FlapPosition::Up,
+            fuel_gal: 80.0,
+        },
+        inputs: &[
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetPitch(0.12),
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetRoll(0.001),
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetYaw(0.005),
+            },
+        ],
+        duration_ticks: 7200, // 60 s — needed because phugoid period is ~25 s in this config
+        assertions: &[
+            // Averaging over last 15 s spans more than half a phugoid cycle so the
+            // mean is close to the oscillation center.
+            Assertion::AirspeedAtEnd {
+                last_secs: 15.0,
+                target_mps: 44.0, // mean of phugoid; tracks toward POH 31 as Cd0 tunes
+                tol_mps: 5.0,
+            },
+            Assertion::ClimbRateAtEnd {
+                last_secs: 15.0,
+                target_mps: -3.5, // mean sink across phugoid; analytic ~3.1 m/s at L/D_max
+                tol_mps: 2.0,
+            },
+            Assertion::NeverStalls,
+        ],
+    },
+    // beaver_vne_dive
+    //
+    // Real-world maneuver:
+    //   Throttle-managed pushover dive. From cruise, pilot reduces throttle and
+    //   commits nose-down attitude. Aircraft accelerates toward terminal dive
+    //   speed where drag balances gravity component along velocity. Pilot
+    //   responsibility is to not exceed Vne (structural airspeed limit).
+    //
+    // POH target:
+    //   Vne = 160 mph = 71.5 m/s. Never exceed. A 10° idle-throttle dive should
+    //   equilibrate near Vne without overshooting it structurally. DHC-2 POH
+    //   § 2 Limitations (Vne), § 5 Performance (Dive recovery).
+    //
+    // Model analytic:
+    //   Idle thrust ~300 N at dive speed; terminal airspeed V_dive where
+    //   D(V_dive) = W·sin(γ). For γ = 10°: D_required ≈ 3948 N. With our model's
+    //   Cd at cruise α ≈ 0.049, analytic V_dive ≈ 75 m/s. Slightly above Vne,
+    //   reflects Gap 1 (Cd0 light). Scenario tests bounded behavior, not exact
+    //   Vne match.
+    //
+    // Isolation (held constant):
+    //   - Altitude 2500 m MSL (enough altitude for 30 s dive at V·sin(γ) ≈ 13 m/s
+    //     descent rate — ~400 m loss, end at ~2100 m).
+    //   - Zero wind, MTOW, flaps UP.
+    //   - Throttle 0.0 (idle) — pilot cut power to avoid overspeed.
+    //   - Scripted nose-down pitch input to commit to dive, then hold.
+    //   - Roll/yaw trim near zero (idle power, low coupling).
+    //
+    // Real-world fidelity:
+    //   Faithful: idle throttle matches cautious-pilot dive technique.
+    //     Nose-down pitch input is the actual control action used to enter a dive.
+    //   Approximated: scripted constant SetPitch(-0.08). Real pilot would vary
+    //     pitch to maintain target dive angle and limit speed — our constant
+    //     produces whatever equilibrium the aerodynamics allow.
+    //   Known fidelity gap: model's terminal dive speed overshoots POH Vne
+    //     slightly (Gap 1, Cd0 light). Scenario accommodates with assertion
+    //     band [65, 85]; narrows toward [70, 73] as Cd0 tunes.
+    //
+    // Does NOT test:
+    //   - Vne recovery (pulling out of dive before structural damage).
+    //   - Full-throttle dive (the overspeed scenario — dangerous, tests hard limits).
+    //   - Spin entry from accelerated-stall at dive speed (separate).
+    //   - Wing flutter / aeroelastic effects (not modeled).
+    //
+    // Assertion rationale:
+    //   FinalAirspeedWithin bounded range catches: (a) aircraft failing to
+    //   accelerate past cruise (drag polar wrong); (b) aircraft over-accelerating
+    //   to ridiculous speeds (Cd0 catastrophically missing high-speed term).
+    //   NeverStalls ensures the dive doesn't weirdly stall (couldn't physically,
+    //   but catches model bugs).
+    FlightScenario {
+        name: "beaver_vne_dive",
+        description: "Idle-throttle nose-down dive. Tests high-speed drag envelope + Vne behavior.",
+        aircraft_spec_path: BEAVER_SPEC_PATH,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 2500.0, 0.0),
+            velocity: Vec3::new(0.0, 0.0, -55.0),
+            orientation: CRUISE_ATTITUDE,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.0,
+            flaps: FlapPosition::Up,
+            fuel_gal: 80.0,
+        },
+        inputs: &[
+            // Real pushover technique: brief forward push to establish dive
+            // angle, then release stick. A constant nose-down input would keep
+            // pitching — no steady-state exists for constant negative elevator
+            // because q·Cm_δe grows quadratically with airspeed. We simulate
+            // real pilot behavior: pulse the stick, then release to neutral,
+            // letting α-stability settle the aircraft into whatever dive angle
+            // matches neutral α.
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetPitch(-0.05),
+            },
+            ScenarioInput {
+                tick: 120,                        // 1 s pushover
+                event: InputEvent::SetPitch(0.0), // release to neutral
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetRoll(0.001),
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetYaw(0.005),
+            },
+        ],
+        duration_ticks: 1800, // 15 s — short enough aircraft doesn't overspeed unrealistically
+        assertions: &[
+            Assertion::FinalAirspeedWithin {
+                min_mps: 60.0, // must have accelerated past cruise
+                max_mps: 95.0, // must stay below catastrophic overspeed; narrows toward POH Vne 71.5 as Cd0 tunes and a proper dive-hold input shipsets
+            },
+            Assertion::NeverStalls,
+        ],
+    },
     // beaver_stall_clean
     //
     // Real-world maneuver:
@@ -850,6 +1053,235 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
                 // narrowing here would mask the coefficient gap.
                 tol_mps: 8.0,
             },
+        ],
+    },
+    // beaver_stall_flaps_landing
+    //
+    // Real-world maneuver:
+    //   Power-off stall with full LANDING flaps. Approach / landing-regime stall
+    //   recognition. Same technique as clean stall (idle throttle, progressive
+    //   back-pressure) but in landing configuration; aircraft stalls at Vso
+    //   (POH 47 mph = 21.01 m/s), lower than Vs_clean due to ΔCl_max from
+    //   flap deployment.
+    //
+    // POH target:
+    //   Vso = 47 mph = 21.01 m/s, MTOW, SL, 1 g, LANDING flap.
+    //   DHC-2 POH § 5 Performance (Stall Speed chart, flaps-down column).
+    //
+    // Model analytic:
+    //   Cl_max_flapped = Cl_max_clean + Δ Cl_landing = 1.65 + 0.37 = 2.02.
+    //   Vs_flapped = sqrt(2W/(ρSCl_max_flapped)) ≈ 28.1 m/s. The gap to POH Vso
+    //   is smaller than the clean-Vs gap (Gap 3) because the additive ΔCl brings
+    //   our total closer to POH-implied Cl_max. This scenario constrains the
+    //   flap ΔCl term separately from Cl_max_clean.
+    //
+    // Isolation (held constant):
+    //   - Same setup as beaver_stall_clean: 1000 m MSL, 55 m/s cruise, idle
+    //     throttle, 80 gal fuel. Only flaps change.
+    //   - LANDING flap detent deployed from tick 0 (aircraft enters scenario
+    //     already in approach configuration).
+    //
+    // Real-world fidelity:
+    //   Faithful: idle throttle (real approach-stall technique), staged back-
+    //     pressure mimicking continuous pilot pull, LANDING flaps (the approach
+    //     config where this stall would really happen).
+    //   Approximated: pitch input steps shifted upward by ~0.08 compared to
+    //     clean stall because the flap Δ Cm = -0.030 nose-down pitching moment
+    //     requires additional elevator to hold same α (Δδ = 0.030/Cm_δe = 0.125).
+    //   Known fidelity gap: same Cl_max-class gap as clean stall (Gap 3); wide
+    //     tolerance accommodates, narrows as Cl_max tunes.
+    //
+    // Does NOT test:
+    //   - Accelerated / G-loaded stall (separate).
+    //   - Clean stall (that's beaver_stall_clean).
+    //   - Flap-over-speed (Vfe — never-exceed-flaps; separate scenario).
+    //   - Power-on flaps stall (go-around scenario; separate).
+    //
+    // Assertion rationale:
+    //   EventuallyStalls verifies α reaches threshold. MinAirspeedNearTarget
+    //   pins Vso; wide tolerance while Gap 3 open.
+    FlightScenario {
+        name: "beaver_stall_flaps_landing",
+        description: "Power-off stall with LANDING flaps. Min speed near Vso = 21.01 m/s.",
+        aircraft_spec_path: BEAVER_SPEC_PATH,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 1000.0, 0.0),
+            velocity: Vec3::new(0.0, 0.0, -45.0), // slower start since landing approach is slower
+            orientation: CRUISE_ATTITUDE,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.0,
+            flaps: FlapPosition::Landing,
+            fuel_gal: 80.0,
+        },
+        inputs: &[
+            // Staged back-pressure, shifted up by ~0.08 vs clean stall to
+            // counter flap Δ Cm = -0.030 nose-down moment.
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetPitch(0.13),
+            },
+            ScenarioInput {
+                tick: 240, // 2 s
+                event: InputEvent::SetPitch(0.16),
+            },
+            ScenarioInput {
+                tick: 480, // 4 s
+                event: InputEvent::SetPitch(0.19),
+            },
+            ScenarioInput {
+                tick: 720, // 6 s
+                event: InputEvent::SetPitch(0.22),
+            },
+            ScenarioInput {
+                tick: 960, // 8 s
+                event: InputEvent::SetPitch(0.26),
+            },
+            ScenarioInput {
+                tick: 1200, // 10 s
+                event: InputEvent::SetPitch(0.31),
+            },
+            ScenarioInput {
+                tick: 1440, // 12 s
+                event: InputEvent::SetPitch(0.38),
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetRoll(0.001),
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetYaw(0.005),
+            },
+        ],
+        duration_ticks: 2400, // 20 s
+        assertions: &[
+            Assertion::EventuallyStalls,
+            Assertion::MinAirspeedNearTarget {
+                target_mps: 21.01, // POH Vso
+                // Same Gap 3 concern as clean stall: Cl_max too low means Vs
+                // predicted ~28 m/s not POH 21. Wide tolerance until Cl_max
+                // tunes.
+                tol_mps: 8.0,
+            },
+        ],
+    },
+    // Coordinated-turn scenarios (beaver_coordinated_turn_30, _60) are DEFERRED
+    // post-2.4.8. Attempted in development and hit a structural barrier: our
+    // flight model lacks Cl_β (dihedral roll stability), so a banked aircraft
+    // has no restoring roll moment. With only scripted constant inputs and no
+    // trim system, bank angle spirals rather than locking at a target. The
+    // aircraft physically executes the turn (yaw rate, altitude loss, load
+    // factor all compute correctly) but the bank angle at steady state can't
+    // be pinned to 30° or 60° precisely.
+    //
+    // Unblocking options (pick when feel-tuning next returns to rotational):
+    //   (a) Add Cl_β (dihedral) coefficient → aircraft self-stabilizes in bank,
+    //       simple SetRoll inputs hold target bank. Cleanest physics fix.
+    //   (b) Ship a trim system (Phase 3+) → pilot-trim-wheel inputs can hold
+    //       bank without needing dihedral stability.
+    //   (c) Add a `SetRoll_ramped` scripted input type that continuously adjusts
+    //       input over time → can simulate a pilot actively holding bank.
+    //
+    // Not blocking Phase 2.5 start: coefficient tuning has 7 existing scenarios
+    // for constraints (cruise, climb, glide, dive, 2 stalls, endurance) — plenty.
+    // Turn scenarios add value but aren't structurally required. Documented as
+    // deferred in PROGRESS.md § Path to Phase 2.5, behavior-taxonomy.md, and
+    // ROADMAP 2.4.8 Step 1.
+    //
+    // beaver_endurance_cruise
+    //
+    // Real-world maneuver:
+    //   Extended cruise segment. Validates fuel burn rate at cruise power and
+    //   that trim remains stable over longer durations than the other scenarios.
+    //
+    // POH target:
+    //   Cruise fuel burn = 27 gph at 65% power.
+    //   Full-tank endurance = 95 gal / 27 gph = 3.5 hours = 12600 s.
+    //   Range at cruise = 455 nm = 843 km.
+    //   DHC-2 POH § 5 Performance (Cruise Performance chart).
+    //
+    // Model analytic:
+    //   At throttle 0.55: engine_kw = 20 + 315·0.55 = 193 kW.
+    //   Fuel flow = 193 · 0.124 gph/kW = 23.9 gph.
+    //   POH 27 gph → model 23.9 gph = ~88% of POH rate. Gap is coupled to Gap 1
+    //   (Cd0 light → less power needed for cruise → lower burn). Closing Gap 1
+    //   raises throttle, raises power, raises burn toward POH.
+    //
+    // Isolation (held constant):
+    //   - Identical trim + config to beaver_cruise_sl (throttle 0.55, pitch 0.05,
+    //     roll 0.005, yaw 0.03). Only difference: smaller starting fuel + longer
+    //     duration, to expose the burn rate as a finite-change signal.
+    //   - 60 s duration with 10 gal starting fuel exposes ~0.4 gal burn window;
+    //     large enough to catch rate errors > ~5%, small enough that scenario
+    //     isn't wasteful in test time.
+    //
+    // Real-world fidelity:
+    //   Faithful: identical to cruise_sl setup, just longer duration. A real
+    //     pilot "just cruises" for this duration — no pilot input changes.
+    //   Magnitudes: trim values analytically matched (see cruise_sl fidelity
+    //     block). Fuel flow computed from the same engine model as a real
+    //     cruise leg.
+    //   Known fidelity gap: burn rate 23.9 gph vs POH 27 gph, traces to Gap 1
+    //     (Cd0 light means less throttle holds cruise, less power, less burn).
+    //     Target final-fuel band accommodates model's current burn rate; narrows
+    //     as Cd0 tunes.
+    //
+    // Does NOT test:
+    //   - Range (requires ground-track integration, not currently asserted).
+    //   - High-altitude endurance (would need density altitude + higher altitude start).
+    //   - Fuel exhaustion / flameout transition (separate scenario when needed).
+    //   - Cruise at POH-correct 65% throttle (blocked on Gap 1 closure).
+    //
+    // Assertion rationale:
+    //   AltitudeStableAtEnd + AirspeedAtEnd: confirms trim still holds at 60 s
+    //   (transients fully decayed, long-term stability demonstrated).
+    //   FinalFuelWithin: validates burn rate. At 23.9 gph model rate and 60 s
+    //   duration, starting 10 gal → end ~9.60 gal. Band [9.35, 9.75] = ±0.2 gal
+    //   tolerance catches > ~50% rate deviation; narrows as Gap 1 tunes.
+    FlightScenario {
+        name: "beaver_endurance_cruise",
+        description: "Extended cruise segment. Tests fuel burn rate + long-term trim stability.",
+        aircraft_spec_path: BEAVER_SPEC_PATH,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 500.0, 0.0),
+            velocity: Vec3::new(0.0, 0.0, -55.0),
+            orientation: CRUISE_ATTITUDE,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.55,
+            flaps: FlapPosition::Up,
+            fuel_gal: 10.0, // smaller than cruise_sl so burn rate shows as finite delta
+        },
+        inputs: &[
+            // Identical trim to beaver_cruise_sl.
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetPitch(0.05),
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetRoll(0.005),
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetYaw(0.03),
+            },
+        ],
+        duration_ticks: 7200, // 60 s
+        assertions: &[
+            Assertion::AltitudeStableAtEnd {
+                last_secs: 5.0,
+                tol_m: 30.0, // wider than cruise_sl because 60 s vs 30 s integrates more drift
+            },
+            Assertion::AirspeedAtEnd {
+                last_secs: 5.0,
+                target_mps: 56.5,
+                tol_mps: 3.0, // slightly wider than cruise_sl for the longer window
+            },
+            Assertion::FinalFuelWithin {
+                min_gal: 9.35, // 23.9 gph · 60s = 0.398 gal burned; band accommodates ± 0.2 gal
+                max_gal: 9.75, // narrows toward model's exact rate when Gap 1 tunes
+            },
+            Assertion::NeverStalls,
         ],
     },
 ];

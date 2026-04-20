@@ -205,7 +205,53 @@ A cube can be flown (WASD/gamepad) over a terrain. Frame budget check passes at 
 - [x] **2.4.5 Flaps**: 4 slotted positions (UP/CLIMB/TAKEOFF/LANDING). `Δ Cl`, `Δ Cd0`, `Δ Cm` per detent; Landing flap drops stall `23 m/s → 20.8 m/s` (matches `Vso` in Beaver POH) and ~doubles `Cd0`. Keyboard: `F` extend, `C` retract. Asymmetric-flap failure is post-v1.
 - [x] **2.4.6 Secondary effects**: ground effect (Phillips factor, ~49% induced-drag reduction at 1 m AGL for 14.6 m span), P-factor (thrust × sin(α) nose-left yaw), adverse yaw (aileron → opposite yaw), torque roll (engine-power-scaled left-roll reaction). All four sit in the new `MomentBreakdown.coupling` slot.
 - [x] **2.4.7 Density altitude**: exponential ISA approximation `ρ(h) = ρ₀·exp(-h/8500)` drives both q-based aero scaling and a linear engine power derate. 3 km ρ/ρ_0 ≈ 0.71; 5 km ≈ 0.56. Temperature / non-ISA atmosphere is post-MVP.
-- [~] **2.4.8 Flight test bench + feel-tuning pass**: framework shipped (`crates/sim/src/flight_bench.rs` + `--scenario` CLI playback + first 3 Beaver scenarios + plot pipeline + per-scenario fidelity docs + triage process); remaining: expanded scenario suite (~10 total — takeoff distance, L/D_max, Vne stability, turn radius, range-at-cruise, stall-flaps, service ceiling; most blocked on 2.5 contact physics or 3.2 weather), POH coefficient tuning pass driven by bench to close the gaps listed in [PROGRESS.md § Bench-identified model gaps](PROGRESS.md#bench-identified-model-gaps-open-from-phase-248-audit), committed reference plots under `docs/plots/`. Coefficient-change discipline is encoded in [skills/flowplan-flight-bench/references/model-gap-triage.md](skills/flowplan-flight-bench/references/model-gap-triage.md) — no silent tuning, ripple-analyze before commit. Difficulty-dial arcade-vs-sim-lite default decision stays deferred to Phase 4 when the settings UI lands (the bench is dial-agnostic; whichever default we pick for v1 has to pass the bench). Determinism invariant preserved under any dial setting by construction: dials scale parameters before the tick, same (seed, scenario, dials) → bit-identical log. See [TEST_PLAN.md § Flight Test Bench](TEST_PLAN.md#flight-test-bench) for design.
+- [~] **2.4.8 Flight test bench + feel-tuning pass**. See [TEST_PLAN.md § Flight Test Bench](TEST_PLAN.md#flight-test-bench) for design; coefficient-change discipline is encoded in [skills/flowplan-flight-bench/references/model-gap-triage.md](skills/flowplan-flight-bench/references/model-gap-triage.md) — no silent tuning, ripple-analyze before commit.
+
+    **Shipped:**
+    - [x] Bench framework (`crates/sim/src/flight_bench.rs`) — `FlightScenario`, `ScenarioInput`, `Assertion`, `BenchSample`, `run_scenario_headless`, `check_assertions`.
+    - [x] `--scenario <name>` CLI playback for visual replay through normal renderer/HUD/widgets.
+    - [x] First 3 Beaver scenarios with structured in-code fidelity docs: `beaver_cruise_sl`, `beaver_cruise_climb`, `beaver_stall_clean`.
+    - [x] Plot pipeline: `tools/plot_telemetry.py` (2×4 panels including ground-track and moment breakdown) + `tools/run_flight_bench.sh` orchestrator (progress indicators, `--pause`, summary).
+    - [x] Model-gap triage process (decision tree, ripple-impact discipline, regression protocol) encoded as `skills/flowplan-flight-bench/references/model-gap-triage.md`.
+    - [x] Standing bench-identified gaps log in [PROGRESS.md § Bench-identified model gaps](PROGRESS.md#bench-identified-model-gaps-open-from-phase-248-audit) — three gaps open (Cd0 light, P-factor/slipstream, Cl_max vs Vs).
+    - [x] Initial tolerance narrowing based on measured margins.
+
+    **Remaining, in order (pre-Phase-2.5 completion path):**
+
+    *Step 1 — Expand scenario suite (no new physics required; adds constraints for coefficient tuning):*
+    - [x] `beaver_ldmax_glide` — idle-throttle glide at L/D_max. Asserts airspeed + sink rate at best-glide equilibrium. **SHIPPED.** Model best-glide V ≈ 45 m/s vs POH 31 m/s (Gap 1 consequence).
+    - [x] `beaver_vne_dive` — pushover dive, staged pulse-release pitch input. Asserts airspeed lands in [60, 95] band. **SHIPPED.** Wide band until Cd0 tunes + ramped-input type lands.
+    - [x] `beaver_stall_flaps_landing` — stall with LANDING flaps. Asserts min airspeed near Vso = 21.01 m/s. **SHIPPED.** Min ~28 m/s (same Gap 3 as clean stall, offset by flap Δ Cl).
+    - [x] `beaver_endurance_cruise` — extended cruise validating fuel burn + long-term trim stability. Asserts altitude + airspeed + `FinalFuelWithin`. **SHIPPED.** Measured burn rate 22.8 gph vs POH 27 (Gap 1 consequence).
+    - [x] Added `FinalFuelWithin { min_gal, max_gal }` assertion type for endurance scenarios. **SHIPPED.**
+    - [deferred post-2.4.8] `beaver_coordinated_turn_30` / `_turn_60` — attempted during 2.4.8 audit; deferred with clear rationale inline in `flight_bench.rs`. Reason: flight model lacks Cl_β (dihedral roll stability), so a banked aircraft has no restoring roll moment. With only scripted constant inputs and no trim system, bank angle spirals instead of locking at a target. Unblocking options: (a) add Cl_β coefficient (cleanest), (b) ship trim system (Phase 3+), (c) add ramped scripted-input type. Not blocking 2.5 — the 4 new scenarios above (plus 3 original) give 7 constraints for coefficient tuning, which is enough. Revisit when feel-tuning returns to rotational or trim system ships.
+
+    *Step 2 — Coefficient tuning pass (follow [model-gap-triage.md](skills/flowplan-flight-bench/references/model-gap-triage.md); one coefficient per commit; full ripple analysis and regression check each):*
+    - [ ] Close Gap 3 (Cl_max) — raise `CL_TABLE` peak from 1.65 toward ~2.0. Analytic target `Vs² = 2W/(ρSCl_max)` → ~2.95 for POH Vs; choose conservative first step. Ripples: stall scenarios, flap-stall, wing-drop, ground-effect, induced drag at high α.
+    - [ ] Close Gap 1 (Cd0 light) — raise `Cd0` from 0.045 toward ~0.055-0.060. Ripples: cruise equilibrium throttle, cruise-climb ROC, L/D_max glide ratio.
+    - [ ] Attempt coefficient-only fix for Gap 2 (P-factor). If over-corrects cruise rudder, mark as missing-physics (slipstream over rudder) and defer to post-2.4 roadmap item. This is an expected outcome — document it cleanly rather than forcing a fit.
+
+    *Step 3 — Lock and commit references:*
+    - [ ] Narrow tolerances on all 9 scenarios based on post-tuning measured margins (2-3× actual margin per triage discipline).
+    - [ ] Commit reference plots to `docs/plots/beaver/<scenario>.png` (versioned artifacts, reviewed in PRs).
+    - [ ] Update [PROGRESS.md § Bench-identified gaps](PROGRESS.md#bench-identified-model-gaps-open-from-phase-248-audit): move closed gaps to "Resolved" subsection with final values; open-phase deferrals (slipstream physics) documented with target phase.
+    - [ ] Close out 2.4.8 with a section in PROGRESS summarizing final coefficient set, final scenario suite, and what Phase 2.5 inherits.
+
+    **Deferred (not required before 2.5):**
+    - Per-aircraft coefficient migration from `flight.rs` constants to `AircraftSpec`. Explicitly deferred to [Phase 5.1 Content milestone](#milestone-51-content) when the 2nd aircraft lands — migrating before multiple aircraft means migrating and then waiting. Beaver values in `flight.rs` are authoritative until then.
+    - Difficulty-dial arcade-vs-sim-lite default decision: deferred to Phase 4.9 when settings UI lands. The bench is dial-agnostic; whichever default we pick has to pass the bench. Determinism invariant preserved under any dial setting: dials scale parameters before the tick, same `(seed, scenario, dials) → bit-identical` log.
+    - Takeoff / landing / crosswind / headwind / tailwind / water-takeoff scenarios: blocked on 2.5 contact physics or 3.2 weather. Enumerated in [flowplan-flight-bench/references/behavior-taxonomy.md](skills/flowplan-flight-bench/references/behavior-taxonomy.md) with blocker tags; they become actionable as their prerequisites land.
+    - Service ceiling scenario: waits for a proper long-climb scenario + stable density-altitude behavior; low priority.
+
+    **Pre-Phase-2.5 gate (what must be true before starting 2.5 contact physics):**
+    1. All 9 scenarios above pass with narrowed tolerances.
+    2. Gaps 1 and 3 resolved or consciously-deferred with target phase; Gap 2 resolved OR documented as missing-physics with clear decision.
+    3. Reference plots committed to `docs/plots/beaver/`.
+    4. Determinism invariant verified: rerun bench twice, byte-identical CSVs.
+    5. No open flight-model regressions; fmt/clippy/test gate green across workspace.
+    6. Final coefficient set documented in PROGRESS so 2.5 contact physics work starts from a known-stable flight model.
+
+    Completing these six items means the flight model is *locked for 2.5* — contact physics development won't see coefficient drift mid-milestone.
 - [ ] Property tests (close at end of 2.4):
     - Level flight at cruise power holds altitude within tolerance under zero wind
     - Published cruise speed achievable at published power setting within tolerance
