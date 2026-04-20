@@ -316,6 +316,30 @@ fn build_ui(
                 t.yaw_moment.damping,
             ));
             ui.separator();
+            ui.heading("Engine");
+            ui.label(format!(
+                "power  {:5.1} kW  ({:4.0} hp)   η_prop  {:.2}",
+                t.engine_power_kw,
+                t.engine_power_kw * 1.341, // kW → hp
+                t.prop_efficiency,
+            ));
+            ui.label(format!(
+                "fuel flow {:5.1} gph   remaining {:5.1} gal",
+                t.fuel_flow_gph, t.fuel_gal,
+            ));
+            let endurance_label = if t.endurance_seconds.is_finite() {
+                let minutes = t.endurance_seconds / 60.0;
+                let hours = minutes / 60.0;
+                if hours >= 1.0 {
+                    format!("endurance {hours:.2} h at current burn")
+                } else {
+                    format!("endurance {minutes:.1} min at current burn")
+                }
+            } else {
+                "endurance  -- (idle / no fuel)".to_string()
+            };
+            ui.label(endurance_label);
+            ui.separator();
             if let Some(spec) = aircraft {
                 ui.heading("Aircraft");
                 ui.label(format!("{} ({:.0} hp)", spec.name, spec.engine.power_hp));

@@ -112,6 +112,19 @@ pub struct Telemetry {
     /// Roll stick position in `[-1, 1]`. Positive = roll right.
     pub roll_input: f32,
 
+    // --- Engine + fuel (Phase 2.4.3) ---
+    /// Shaft power this tick, kilowatts. Zero when fuel is exhausted.
+    pub engine_power_kw: f32,
+    /// Propeller efficiency this tick (0..~0.85).
+    pub prop_efficiency: f32,
+    /// Fuel flow (gallons per hour) at the current engine state.
+    pub fuel_flow_gph: f32,
+    /// Remaining fuel (US gallons).
+    pub fuel_gal: f32,
+    /// Estimated endurance in seconds at the current fuel flow. `f32::INFINITY` when
+    /// burn is zero (idle + out-of-fuel case).
+    pub endurance_seconds: f32,
+
     /// Sim tick this telemetry was derived from. `u64::MAX` reserved for defaults.
     pub tick: u64,
 }
@@ -178,6 +191,16 @@ impl Telemetry {
             pitch_input: veh.controls.pitch,
             yaw_input: veh.controls.yaw,
             roll_input: veh.controls.roll,
+
+            engine_power_kw: f.engine_power_kw,
+            prop_efficiency: f.prop_efficiency,
+            fuel_flow_gph: f.fuel_flow_gph,
+            fuel_gal: veh.fuel_gal,
+            endurance_seconds: if f.fuel_flow_gph > 1e-3 {
+                veh.fuel_gal / f.fuel_flow_gph * 3600.0
+            } else {
+                f32::INFINITY
+            },
 
             tick: snapshot.tick,
         }

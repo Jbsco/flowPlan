@@ -44,6 +44,10 @@ pub struct VehicleSnapshot {
     pub angular_velocity: Vec3,
     pad2: f32,
     pub controls: ControlsSnapshot,
+    /// Remaining fuel (US gallons). Phase 2.4.3: decremented each tick by the engine
+    /// model; when zero, thrust drops to zero regardless of throttle.
+    pub fuel_gal: f32,
+    pad3: [f32; 3],
 }
 
 impl VehicleSnapshot {
@@ -63,6 +67,8 @@ impl VehicleSnapshot {
                 yaw: v.controls.yaw,
                 roll: v.controls.roll,
             },
+            fuel_gal: v.fuel_gal,
+            pad3: [0.0; 3],
         }
     }
 }
@@ -139,6 +145,8 @@ impl Default for SimSnapshot {
                 angular_velocity: Vec3::ZERO,
                 pad2: 0.0,
                 controls: ControlsSnapshot::default(),
+                fuel_gal: 0.0,
+                pad3: [0.0; 3],
             },
             camera: CameraSnapshot {
                 position: Vec3::new(0.0, 5.0, 15.0),

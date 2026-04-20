@@ -84,15 +84,60 @@ pub const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
 // with airspeed-scaled / stall-aware authority; others are replaced in 2.4.2 below
 // by airfoil-driven force computation when an `AircraftSpec` is provided.
 
-/// Thrust acceleration at full throttle along body forward, m/s².
-///
-/// TODO(2.4.3): replace with engine power curve `T = P(rpm, map, alt) * η_prop / V`.
-/// A real 450 hp R-985 at 80% prop efficiency produces roughly 5.8 m/s² at takeoff
-/// airspeed (V=20 m/s, T=13.4 kN / 2313 kg) and ~1.95 m/s² at cruise (V=60 m/s);
-/// the constant 3.5 is a compromise that gives the plane enough climb / maneuver
-/// margin without overshooting Vne in level flight. A full power curve lands here
-/// in 2.4.3.
-const THRUST_ACCEL_MAX: f32 = 3.5;
+/// Legacy constant-thrust fallback (m/s²). Used on the no-spec path only, so the
+/// pure-sim tests that don't load an `AircraftSpec` still produce sane numbers. The
+/// airfoil path (2.4.3+) computes thrust from the R-985 power curve + prop efficiency
+/// -- see `engine_power_kw` / `prop_efficiency` / `thrust_force_newtons` below.
+const THRUST_ACCEL_MAX_FALLBACK: f32 = 3.5;
+
+// --- Engine + prop model (Phase 2.4.3) ----------------------------------------
+//
+// Shaft power from the R-985 Wasp Junior radial. Sea-level static rating is 450 hp
+// (~335 kW) at 2300 rpm; idle draw is ~6% of max. A detailed RPM + MAP simulation is
+// out of scope for MVP -- we map throttle position linearly to available power
+// between idle and max. Altitude density effects land with 2.4.7.
+//
+// Thrust is computed from power via `T = η_prop × P / V`. Prop efficiency is a
+// piecewise-linear curve vs airspeed (0.3 static, peaking at 0.82 around cruise,
+// falling to 0.55 past Vne). Below `V_MIN_FOR_THRUST` we clamp the denominator so
+// static thrust doesn't diverge -- the clamp value is tuned so full-throttle static
+// accel comes out near 3.6 m/s² (~9 kN / 2313 kg), matching the real Beaver's
+// "P(hp) × 4.5 lbf" rule of thumb for static thrust.
+//
+// Fuel: burn is proportional to power via a constant BSFC (gph / kW). Cruise burn of
+// 27 gph at 65% power gives `0.124 gph/kW`, which produces ~2.5 gph idle and ~42 gph
+// full-throttle. Fuel state lives in `VehicleState.fuel_gal`; the tick decrements it
+// each step. When fuel reaches zero, power drops to zero regardless of throttle
+// position (flameout -- matches how a carb engine actually behaves).
+
+/// Maximum sea-level shaft power (kW). 450 hp × 0.7457 kW/hp ≈ 335 kW.
+const ENGINE_POWER_MAX_KW: f32 = 335.0;
+/// Idle shaft power (kW). ~6% of max; represents residual combustion power that keeps
+/// the engine running at idle RPM and generates a small amount of prop thrust.
+const ENGINE_POWER_IDLE_KW: f32 = 20.0;
+
+/// Minimum airspeed used as the denominator in `T = η·P/V`, to prevent thrust from
+/// diverging as V → 0. Tuned so static thrust at max power ≈ 9 kN (Beaver rule-of-
+/// thumb 2025 lbf for 450 hp at static).
+const V_MIN_FOR_THRUST: f32 = 12.0;
+
+/// Prop efficiency piecewise-linear keypoints `(airspeed_m_s, efficiency)`. Peaks
+/// around cruise (55–70 m/s), falls off at both ends. Matches typical fixed-pitch
+/// prop curves for a general-aviation installation.
+#[allow(clippy::approx_constant)]
+const PROP_EFF_TABLE: &[(f32, f32)] = &[
+    (0.0, 0.30),
+    (10.0, 0.40),
+    (30.0, 0.70),
+    (55.0, 0.82),
+    (70.0, 0.82),
+    (85.0, 0.65),
+    (120.0, 0.45),
+];
+
+/// Brake specific fuel consumption as gallons-per-hour per kilowatt of shaft power.
+/// Calibrated from the Beaver's published cruise burn (27 gph at 65% of 450 hp).
+const BSFC_GPH_PER_KW: f32 = 0.124;
 
 // --- Rotational dynamics (Phase 2.4.4): moment-based, not fiat rate.
 //
@@ -287,6 +332,62 @@ fn angle_of_attack_and_sideslip(state: &VehicleState) -> (f32, f32) {
     (alpha, beta)
 }
 
+/// Shaft power in kW at a given throttle position and fuel-availability flag. Throttle
+/// is clamped to `[0, 1]`. Out of fuel → zero power regardless of throttle.
+#[must_use]
+pub fn engine_power_kw(throttle: f32, fuel_available: bool) -> f32 {
+    if !fuel_available {
+        return 0.0;
+    }
+    let t = throttle.clamp(0.0, 1.0);
+    ENGINE_POWER_IDLE_KW + t * (ENGINE_POWER_MAX_KW - ENGINE_POWER_IDLE_KW)
+}
+
+/// Prop efficiency at the given airspeed (m/s). Piecewise-linear interpolation of the
+/// `PROP_EFF_TABLE` keypoints; saturates at the table endpoints outside the range.
+#[must_use]
+pub fn prop_efficiency(airspeed_m_s: f32) -> f32 {
+    let v = airspeed_m_s.max(0.0);
+    if v <= PROP_EFF_TABLE[0].0 {
+        return PROP_EFF_TABLE[0].1;
+    }
+    let last = PROP_EFF_TABLE.len() - 1;
+    if v >= PROP_EFF_TABLE[last].0 {
+        return PROP_EFF_TABLE[last].1;
+    }
+    let mut i = 0;
+    while i + 1 < PROP_EFF_TABLE.len() && PROP_EFF_TABLE[i + 1].0 < v {
+        i += 1;
+    }
+    let (x0, y0) = PROP_EFF_TABLE[i];
+    let (x1, y1) = PROP_EFF_TABLE[i + 1];
+    if (x1 - x0).abs() < 1e-6 {
+        return y0;
+    }
+    let t = (v - x0) / (x1 - x0);
+    y0 + (y1 - y0) * t
+}
+
+/// Thrust force in newtons.
+///
+/// `T = η_prop × P / V`, clamped so the denominator doesn't drop below
+/// `V_MIN_FOR_THRUST` (prevents divergence at low airspeed). Takes throttle, airspeed,
+/// and the fuel-availability flag.
+#[must_use]
+pub fn thrust_force_newtons(throttle: f32, airspeed_m_s: f32, fuel_available: bool) -> f32 {
+    let power_watts = engine_power_kw(throttle, fuel_available) * 1000.0;
+    let eta = prop_efficiency(airspeed_m_s);
+    let v_eff = airspeed_m_s.max(V_MIN_FOR_THRUST);
+    eta * power_watts / v_eff
+}
+
+/// Fuel flow in gallons-per-hour at the given throttle + fuel availability. Uses a
+/// constant BSFC so burn scales linearly with shaft power. Out of fuel → zero burn.
+#[must_use]
+pub fn fuel_flow_gph(throttle: f32, fuel_available: bool) -> f32 {
+    engine_power_kw(throttle, fuel_available) * BSFC_GPH_PER_KW
+}
+
 /// Contributions that sum to a single-axis aerodynamic moment (N·m).
 ///
 /// Kept separate so the debug HUD can show which term dominates at the current flight
@@ -350,6 +451,14 @@ pub struct FlightOutputs {
     pub roll_moment: MomentBreakdown,
     /// Yaw moment N about the vertical axis (breakdown: rudder / β-weathervane / damping).
     pub yaw_moment: MomentBreakdown,
+
+    // --- Engine + prop diagnostics (Phase 2.4.3) ---
+    /// Shaft power output (kW) this tick. Zero when out of fuel.
+    pub engine_power_kw: f32,
+    /// Propeller efficiency this tick (dimensionless, 0..~0.85).
+    pub prop_efficiency: f32,
+    /// Fuel flow (gallons per hour) at the current engine state.
+    pub fuel_flow_gph: f32,
 }
 
 /// Compute flight forces for the current vehicle state.
@@ -367,16 +476,13 @@ pub struct FlightOutputs {
 /// close once this milestone's follow-ups (2.4.4d stall physics, 2.4.6 adverse
 /// coupling, 2.4.x per-aircraft data) land.
 #[must_use]
+#[allow(clippy::too_many_lines)] // Linear physics pipeline -- splitting hurts readability.
 pub fn compute_forces(
     state: &VehicleState,
     spec: Option<&AircraftSpec>,
     _dt: f32,
 ) -> FlightOutputs {
-    // Thrust along body forward.
-    // TODO(2.4.3): replace constant `THRUST_ACCEL_MAX` with engine power curve.
     let forward = state.orientation * Vec3::NEG_Z;
-    let thrust = forward * (state.controls.throttle * THRUST_ACCEL_MAX);
-
     let speed = state.velocity.length();
 
     // Always-useful diagnostics:
@@ -385,70 +491,79 @@ pub fn compute_forces(
     let horiz_airspeed = horiz_vel.dot(horiz_fwd).max(0.0);
     let (alpha, beta) = angle_of_attack_and_sideslip(state);
 
-    // Lift / drag branch: airfoil path when an AircraftSpec is available, placeholder
-    // otherwise. The airfoil path is physically derived (`0.5 ρ V² S C_*`) and uses
-    // mass to convert force to acceleration. `if let / else` stays -- map_or_else
-    // would obscure the two distinct physical paths.
+    // Thrust / lift / drag branch. Airfoil path is physically derived; the no-spec
+    // placeholder keeps pure-sim tests deterministic. `if let / else` stays -- the two
+    // paths compute fundamentally different physics.
     #[allow(clippy::option_if_let_else)]
-    let (lift, drag, cl, cd) = if let Some(s) = spec {
-        // Mass: MTOW on wheels as the Phase 2.4 placeholder (cargo / fuel update in
-        // Phase 4). TODO(4.2): use dynamic mass from current fuel + cargo loadout.
-        let mass_kg = s.max_mass_wheels_kg.max(1.0);
-        let wing_area = s.wing_area_m2.max(1.0);
-        // Aspect ratio comes from the spec; defaults to 1.0 if missing (won't happen
-        // for sane RON input).
-        let aspect_ratio = s.aspect_ratio.max(1.0);
+    let (thrust, lift, drag, cl, cd, engine_power_kw_out, prop_eff_out, fuel_flow_out) =
+        if let Some(s) = spec {
+            let mass_kg = s.max_mass_wheels_kg.max(1.0);
+            let wing_area = s.wing_area_m2.max(1.0);
+            let aspect_ratio = s.aspect_ratio.max(1.0);
 
-        let cl = lift_coefficient(alpha);
-        let cd = drag_coefficient(alpha, cl, aspect_ratio);
-        let q = 0.5 * AIR_DENSITY_SEA_LEVEL * speed * speed; // dynamic pressure, Pa
-        let lift_force_n = q * wing_area * cl;
-        let drag_force_n = q * wing_area * cd;
+            // Engine + prop (Phase 2.4.3): thrust from R-985 power curve times prop
+            // efficiency, clamped at low airspeed to avoid divergence. Out of fuel →
+            // zero power → zero thrust.
+            let fuel_ok = state.fuel_gal > 0.0;
+            let engine_power = engine_power_kw(state.controls.throttle, fuel_ok);
+            let prop_eff = prop_efficiency(speed);
+            let thrust_n = thrust_force_newtons(state.controls.throttle, speed, fuel_ok);
+            let thrust_vec = forward * (thrust_n / mass_kg);
+            let fuel_gph = fuel_flow_gph(state.controls.throttle, fuel_ok);
 
-        // Lift direction: perpendicular to velocity, in the plane containing velocity
-        // and body-up. This is the textbook aerodynamic convention -- lift is by
-        // definition orthogonal to the relative wind, not to the wing. Using body +Y
-        // instead (the previous placeholder) produced a large spurious backward force
-        // at high α (lift × sin α), which decelerated the plane every time the pilot
-        // pulled up and triggered stall-cascade behavior with no real control
-        // authority. Backward force on the plane now comes only from proper Cd.
-        //
-        // Construction: start with body-up, project out the velocity component, and
-        // normalize. If body-up happens to be parallel to velocity (plane aligned with
-        // its flight path in an unusual way), fall back to body-up.
-        let body_up = state.orientation * Vec3::Y;
-        let lift_dir = if speed > 1e-3 {
-            let v_hat = state.velocity / speed;
-            let perp = body_up - v_hat * body_up.dot(v_hat);
-            if perp.length_squared() > 1e-6 {
-                perp.normalize()
+            // Airfoil lift + drag polar (2.4.2).
+            let cl = lift_coefficient(alpha);
+            let cd = drag_coefficient(alpha, cl, aspect_ratio);
+            let q = 0.5 * AIR_DENSITY_SEA_LEVEL * speed * speed;
+            let lift_force_n = q * wing_area * cl;
+            let drag_force_n = q * wing_area * cd;
+
+            // Lift direction: perpendicular to velocity, in the plane containing
+            // velocity and body-up (2.4.2b). Falls back to body-up if velocity is
+            // parallel to body-up.
+            let body_up = state.orientation * Vec3::Y;
+            let lift_dir = if speed > 1e-3 {
+                let v_hat = state.velocity / speed;
+                let perp = body_up - v_hat * body_up.dot(v_hat);
+                if perp.length_squared() > 1e-6 {
+                    perp.normalize()
+                } else {
+                    body_up
+                }
             } else {
                 body_up
-            }
-        } else {
-            body_up
-        };
-        let lift = lift_dir * (lift_force_n / mass_kg);
+            };
+            let lift_vec = lift_dir * (lift_force_n / mass_kg);
 
-        // Drag acts opposite velocity.
-        let drag = if speed > 1e-3 {
-            -state.velocity.normalize_or_zero() * (drag_force_n / mass_kg)
-        } else {
-            Vec3::ZERO
-        };
+            let drag_vec = if speed > 1e-3 {
+                -state.velocity.normalize_or_zero() * (drag_force_n / mass_kg)
+            } else {
+                Vec3::ZERO
+            };
 
-        (lift, drag, cl, cd)
-    } else {
-        // No-spec fallback: the Phase 1 horizontal-airspeed placeholder. Kept so
-        // pure-sim tests without an AircraftSpec still behave deterministically.
-        let lift = Vec3::Y * (horiz_airspeed * LIFT_COEFF);
-        let drag = if speed > 1e-3 {
-            -state.velocity.normalize_or_zero() * (speed * (LIN_DAMPING + QUAD_DRAG * speed))
+            (
+                thrust_vec,
+                lift_vec,
+                drag_vec,
+                cl,
+                cd,
+                engine_power,
+                prop_eff,
+                fuel_gph,
+            )
         } else {
-            Vec3::ZERO
+            // No-spec fallback: horizontal-airspeed lift + constant thrust. Engine
+            // diagnostics left at zero since there's no fuel / power model in this
+            // path.
+            let thrust_vec = forward * (state.controls.throttle * THRUST_ACCEL_MAX_FALLBACK);
+            let lift_vec = Vec3::Y * (horiz_airspeed * LIFT_COEFF);
+            let drag_vec = if speed > 1e-3 {
+                -state.velocity.normalize_or_zero() * (speed * (LIN_DAMPING + QUAD_DRAG * speed))
+            } else {
+                Vec3::ZERO
+            };
+            (thrust_vec, lift_vec, drag_vec, 0.0, 0.0, 0.0, 0.0, 0.0)
         };
-        (lift, drag, 0.0, 0.0)
-    };
 
     // ----- Rotational dynamics (Phase 2.4.4): moments -> angular acceleration. -----
     //
@@ -525,6 +640,9 @@ pub fn compute_forces(
         pitch_moment,
         roll_moment,
         yaw_moment,
+        engine_power_kw: engine_power_kw_out,
+        prop_efficiency: prop_eff_out,
+        fuel_flow_gph: fuel_flow_out,
     }
 }
 
@@ -540,6 +658,7 @@ mod tests {
             orientation: Quat::IDENTITY,
             angular_velocity: Vec3::ZERO,
             controls: crate::controls::Controls::default(),
+            fuel_gal: 0.0,
         }
     }
 
@@ -776,6 +895,134 @@ mod tests {
             out.pitch_moment.stability < 0.0,
             "α-stability should be nose-down for α>0; got {}",
             out.pitch_moment.stability,
+        );
+    }
+
+    // ---- Engine + prop model (2.4.3) ----
+
+    #[test]
+    fn engine_power_zero_throttle_returns_idle_when_fueled() {
+        let p = engine_power_kw(0.0, true);
+        assert!(
+            (p - ENGINE_POWER_IDLE_KW).abs() < 1e-3,
+            "idle should be {ENGINE_POWER_IDLE_KW} kW, got {p}",
+        );
+    }
+
+    #[test]
+    fn engine_power_full_throttle_returns_max_when_fueled() {
+        let p = engine_power_kw(1.0, true);
+        assert!(
+            (p - ENGINE_POWER_MAX_KW).abs() < 1e-3,
+            "full should be {ENGINE_POWER_MAX_KW} kW, got {p}",
+        );
+    }
+
+    #[test]
+    fn engine_power_zero_when_out_of_fuel() {
+        let p = engine_power_kw(1.0, false);
+        assert!(p < 1e-6, "expected 0 power out of fuel, got {p}");
+    }
+
+    #[test]
+    fn prop_efficiency_peaks_at_cruise() {
+        let eta_static = prop_efficiency(0.0);
+        let eta_cruise = prop_efficiency(55.0);
+        let eta_vne = prop_efficiency(85.0);
+        assert!(eta_cruise > eta_static);
+        assert!(eta_cruise > eta_vne);
+    }
+
+    #[test]
+    fn thrust_finite_at_zero_airspeed() {
+        // Classic prop-blade theory has T → ∞ as V → 0 for a fixed-power prop. Our
+        // model clamps the denominator to prevent this; static thrust at max power
+        // should be in the real-world ballpark (~9 kN for a 450 hp Beaver).
+        let t = thrust_force_newtons(1.0, 0.0, true);
+        assert!(t.is_finite());
+        // Real Beaver static thrust ≈ 9 kN. Allow wide band while tuning.
+        assert!(
+            (5_000.0..=12_000.0).contains(&t),
+            "static thrust should be in the 5-12 kN ballpark, got {t}",
+        );
+    }
+
+    #[test]
+    fn thrust_at_cruise_roughly_balances_drag() {
+        // 0.55 throttle at 55 m/s cruise -> thrust should be ~1.2-1.5 m/s² accel.
+        let t_n = thrust_force_newtons(0.55, 55.0, true);
+        let a = t_n / 2313.0;
+        assert!(
+            (0.5..=2.5).contains(&a),
+            "cruise thrust accel should be ~1-2 m/s², got {a}",
+        );
+    }
+
+    #[test]
+    fn fuel_flow_scales_with_power() {
+        let gph_idle = fuel_flow_gph(0.0, true);
+        let gph_cruise = fuel_flow_gph(0.55, true);
+        let gph_full = fuel_flow_gph(1.0, true);
+        assert!(gph_idle < gph_cruise);
+        assert!(gph_cruise < gph_full);
+        // Beaver cruise burn ~27 gph. Our model maps 0.55 throttle to ~195 kW ->
+        // 0.124 × 195 = 24 gph. Close enough for a first cut.
+        assert!(
+            (18.0..=32.0).contains(&gph_cruise),
+            "cruise burn should be 18-32 gph, got {gph_cruise}",
+        );
+    }
+
+    #[test]
+    fn fuel_burn_depletes_tank() {
+        use crate::aircraft_spec::{AircraftSpec, EngineSpec, SpeedsSpec};
+        let spec = AircraftSpec {
+            name: "test".into(),
+            inspiration: String::new(),
+            empty_mass_kg: 1000.0,
+            max_mass_wheels_kg: 2000.0,
+            max_mass_floats_kg: 2000.0,
+            wing_area_m2: 20.0,
+            aspect_ratio: 9.0,
+            airfoil_root: String::new(),
+            airfoil_tip: String::new(),
+            engine: EngineSpec {
+                name: String::new(),
+                power_hp: 450.0,
+                cruise_fuel_gph: 27.0,
+            },
+            fuel_capacity_gal: 95.0,
+            speeds: SpeedsSpec {
+                vne_mps: 70.0,
+                cruise_mps: 60.0,
+                vs_clean_mps: 23.0,
+                vso_mps: 21.0,
+                vx_mps: 29.0,
+                vy_mps: 38.0,
+            },
+        };
+        let mut s = crate::state::SimState::new(1);
+        s.aircraft = Some(spec);
+        s.vehicle.fuel_gal = 95.0;
+        s.vehicle.velocity = Vec3::new(0.0, 0.0, -55.0);
+        s.vehicle.controls.throttle = 1.0;
+        // Run 60 s of simulated time; fuel should decrease measurably.
+        let start_fuel = s.vehicle.fuel_gal;
+        let d = crate::difficulty::DifficultyDials::default();
+        let dt = 1.0 / 120.0;
+        for _ in 0..(60 * 120) {
+            s.tick(&crate::input::InputEvents::empty(), &d, dt, 0.0);
+        }
+        assert!(
+            s.vehicle.fuel_gal < start_fuel,
+            "fuel should deplete: start {start_fuel} end {}",
+            s.vehicle.fuel_gal,
+        );
+        // At full throttle (~335 kW × 0.124 gph/kW = ~41.5 gph), 60 s burns ~0.69 gal.
+        let burned = start_fuel - s.vehicle.fuel_gal;
+        assert!(
+            (0.4..=1.0).contains(&burned),
+            "60 s full-power burn should be 0.4-1.0 gal, got {burned}",
         );
     }
 

@@ -382,12 +382,16 @@ impl Runtime {
 
         // Sim.
         let mut sim = SimState::new(WORLD_SEED);
+        // Initial fuel from the spec's capacity -- full tanks at startup. When save /
+        // load arrives in Phase 4 this will come from the persisted fuel state instead.
+        let initial_fuel_gal = aircraft_spec.as_ref().map_or(0.0, |s| s.fuel_capacity_gal);
         sim.aircraft = aircraft_spec;
         // Start the vehicle a comfortable distance above the procedural terrain,
         // already in cruise forward velocity so placeholder-wing lift balances gravity
         // from frame zero. This avoids the "I pressed throttle but fell" confusion
         // that a dead-stop start produces with only thrust and gravity.
         sim.vehicle = VehicleState::at_origin();
+        sim.vehicle.fuel_gal = initial_fuel_gal;
         // CG-centered mesh means `position.y` is the CG height. Lift by the float-to-CG
         // distance so the floats clear terrain peaks by the same 25 m margin the old
         // bottom-anchored mesh had.

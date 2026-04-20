@@ -21,10 +21,18 @@ pub struct VehicleState {
     pub angular_velocity: Vec3,
     /// Currently commanded control-surface positions.
     pub controls: Controls,
+    /// Fuel quantity (US gallons). Set from `AircraftSpec.fuel_capacity_gal` at startup
+    /// by the app; decremented each tick by the engine model (`flight.rs`). Zero fuel
+    /// cuts engine power to zero regardless of throttle position.
+    pub fuel_gal: f32,
 }
 
 impl VehicleState {
     /// A fresh vehicle sitting above the origin with controls neutral.
+    ///
+    /// Fuel starts at zero; the app is expected to refill from the loaded
+    /// `AircraftSpec.fuel_capacity_gal` after wiring the spec. Pure-sim tests that
+    /// don't load a spec use the no-spec thrust fallback, which bypasses fuel.
     #[must_use]
     pub fn at_origin() -> Self {
         Self {
@@ -33,6 +41,7 @@ impl VehicleState {
             orientation: Quat::IDENTITY,
             angular_velocity: Vec3::ZERO,
             controls: Controls::default(),
+            fuel_gal: 0.0,
         }
     }
 

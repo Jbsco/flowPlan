@@ -162,6 +162,14 @@ fn tick_dynamics(
         }
     }
 
+    // Fuel burn (Phase 2.4.3). gph × dt / 3600 = gallons this tick. Clamped at 0 so
+    // a running engine past fuel-exhaustion doesn't produce negative fuel; flameout
+    // is handled in `compute_forces` via `fuel_gal > 0.0`.
+    if v.fuel_gal > 0.0 && forces.fuel_flow_gph > 0.0 {
+        let used = forces.fuel_flow_gph * dt / 3600.0;
+        v.fuel_gal = (v.fuel_gal - used).max(0.0);
+    }
+
     forces
 }
 
