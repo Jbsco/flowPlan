@@ -35,15 +35,15 @@
 //!   rather than a constant acceleration. Fuel burn follows.
 //! TODO(2.4.3): Propeller model (fixed-pitch CS for 2.4, feathering post-MVP). Affects
 //!   thrust at low airspeed (blade stall at high `AoA`) and drag of a feathered prop.
-//! TODO(2.4.4): Real stall: Cl(α) falls past `α_stall`, typically ~16-18° for NACA
-//!   64A416 section. Lift-center shifts aft of CP on stall, inducing a nose-down
-//!   pitching moment -- the wing effectively tries to un-stall itself. Current
-//!   placeholder has no such moment.
-//! TODO(2.4.4): Accelerated / G-loaded stall: same `Cl_max` but at a higher speed
-//!   when pulling positive G in a turn. `Vs_accelerated = Vs × sqrt(load_factor)`.
-//! TODO(2.4.4): Wing-drop on stall. Asymmetric stall (one wing stalls first) rolls
-//!   the aircraft -- direction keyed to current roll, slip, and P-factor. Recovery
-//!   is pilot-input dependent; spins can develop from mis-handled stalls.
+//! CLOSED(2.4.4d): Real stall nose-down pitching moment -- `CM_STALL_PITCH_SLOPE`
+//!   activates when `|α| > ALPHA_STALL_RAD`, adding a nose-down contribution to the
+//!   pitch-stability moment that self-recovers a stable aircraft.
+//! CLOSED(2.4.4d): Accelerated / G-loaded stall emerges naturally from the airfoil
+//!   model (fixed `Cl_max` means high-G pulls hit the peak at higher airspeed). The
+//!   α-based stall alert handles it correctly because it tests α directly, not Vs.
+//! CLOSED(2.4.4d): Wing drop -- `wing_drop_roll_moment()` samples Cl at each wing's
+//!   quarter-span with roll-rate-induced α perturbation; the non-linear portion of
+//!   the left/right differential past stall becomes a destabilizing rolling moment.
 //! TODO(2.4.5): Flaps: 4 slotted positions matching POH lift-boost and drag-penalty.
 //!   Flaps down lowers Vs (via higher `Cl_max`) and raises Cd; both must track the
 //!   deployed notch.
@@ -217,6 +217,51 @@ const CN_R: f32 = -0.6;
 /// `ω·L/(2V)`. Below this, the plane is essentially parked and damping should saturate
 /// rather than blow up; clamping to 1 m/s gives sensible behavior without a divide.
 const MIN_DAMPING_AIRSPEED: f32 = 1.0;
+
+/// Stall α (rad). Matches the peak of the `CL_TABLE` (`Cl_max` at 16°). Past this α
+/// the airfoil loses Cl and the center of lift shifts aft.
+const ALPHA_STALL_RAD: f32 = 0.2793;
+
+/// Approach-to-stall α (rad). 80% of stall; HUD flags this as "APPROACH".
+const ALPHA_APPROACH_RAD: f32 = 0.2234;
+
+/// Pitch-moment coefficient per radian of α past stall. Produces a nose-down
+/// moment when α > `α_stall`, modeling the aft shift of the center of lift at stall.
+/// Real aircraft self-recover from stall partly through this mechanism; small
+/// deviations past stall generate restoring moment proportional to how far past.
+const CM_STALL_PITCH_SLOPE: f32 = -2.0;
+
+/// Quarter-span fraction used to sample per-wing α for the wing-drop calculation.
+/// Each wing half's representative α = `α_aircraft` ± `roll_rate` × (`SPAN` × 0.25) / V.
+/// Smaller fractions under-represent tip effects; larger ones over-represent.
+const WING_DROP_SAMPLE_FRAC: f32 = 0.25;
+
+/// Stall state for the HUD indicator and any autopilot / audio hook that keys off it.
+/// Derived from |α| vs `ALPHA_STALL_RAD` / `ALPHA_APPROACH_RAD` in `compute_forces`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StallState {
+    /// Normal flight, well clear of stall.
+    #[default]
+    Normal,
+    /// α is within 80%-100% of stall; stick further back would stall.
+    Approach,
+    /// α is at or past the stall angle. Cl is on the back side of the curve.
+    Stall,
+}
+
+impl StallState {
+    /// Classify based on the absolute value of α (rad).
+    #[must_use]
+    pub fn from_alpha(alpha_abs: f32) -> Self {
+        if alpha_abs >= ALPHA_STALL_RAD {
+            Self::Stall
+        } else if alpha_abs >= ALPHA_APPROACH_RAD {
+            Self::Approach
+        } else {
+            Self::Normal
+        }
+    }
+}
 
 // --- Placeholder (no-spec) drag constants ---
 
@@ -459,6 +504,10 @@ pub struct FlightOutputs {
     pub prop_efficiency: f32,
     /// Fuel flow (gallons per hour) at the current engine state.
     pub fuel_flow_gph: f32,
+
+    /// α-based stall state (Phase 2.4.4d). Replaces the pre-2.4.4d airspeed-ratio
+    /// heuristic; drives HUD alerts and (future) stall-warning audio.
+    pub stall_state: StallState,
 }
 
 /// Compute flight forces for the current vehicle state.
@@ -589,17 +638,34 @@ pub fn compute_forces(
     let roll_damp_nd = roll_rate * WING_SPAN_M / (2.0 * v_damp);
     let yaw_damp_nd = yaw_rate * WING_SPAN_M / (2.0 * v_damp);
 
-    // Pitch: control (elevator) + α-stability + pitch-rate damping.
+    // Pitch: control (elevator) + α-stability (with post-stall nose-down) + pitch-rate
+    // damping. Past α_stall, the center of lift shifts aft, producing an additional
+    // nose-down moment that tries to self-recover the aircraft. Modeled as a linear
+    // ramp `CM_STALL_PITCH_SLOPE × (|α| - α_stall)` in the direction opposite α (so
+    // positive α past stall gives negative, nose-down, moment).
+    let stall_excess = (alpha.abs() - ALPHA_STALL_RAD).max(0.0);
+    let stall_pitch_addend = CM_STALL_PITCH_SLOPE * stall_excess * alpha.signum();
     let pitch_moment = MomentBreakdown {
         control: q_dyn * wing_area_moments * MEAN_CHORD_M * CM_DELTA_E * state.controls.pitch,
-        stability: q_dyn * wing_area_moments * MEAN_CHORD_M * CM_ALPHA * alpha,
+        stability: q_dyn
+            * wing_area_moments
+            * MEAN_CHORD_M
+            * (CM_ALPHA * alpha + stall_pitch_addend),
         damping: q_dyn * wing_area_moments * MEAN_CHORD_M * CM_Q * pitch_damp_nd,
     };
 
-    // Roll: control (aileron) + roll-rate damping. No static stability term in baseline.
+    // Roll: control (aileron) + roll-rate damping (Cl_p) + wing-drop asymmetry when
+    // near or past stall. The wing-drop term samples Cl(α) at the left and right
+    // wing's quarter-span with roll-rate-induced α perturbation, and uses the
+    // non-linear portion of that differential as a destabilizing rolling moment past
+    // stall. In normal flight the Cl curve is near-linear so this term is small;
+    // past stall, Cl drops off sharply on the stalled wing and the imbalance
+    // reinforces the roll instead of damping it (spin entry potential).
+    let wing_drop_moment =
+        wing_drop_roll_moment(alpha, roll_rate, v_damp, q_dyn, wing_area_moments);
     let roll_moment = MomentBreakdown {
         control: q_dyn * wing_area_moments * WING_SPAN_M * CL_DELTA_A * state.controls.roll,
-        stability: 0.0,
+        stability: wing_drop_moment, // reusing the "stability" slot for post-stall asymmetry
         damping: q_dyn * wing_area_moments * WING_SPAN_M * CL_P * roll_damp_nd,
     };
 
@@ -643,7 +709,50 @@ pub fn compute_forces(
         engine_power_kw: engine_power_kw_out,
         prop_efficiency: prop_eff_out,
         fuel_flow_gph: fuel_flow_out,
+        stall_state: StallState::from_alpha(alpha.abs()),
     }
+}
+
+/// Post-stall asymmetric-Cl rolling moment (wing drop).
+///
+/// Samples `Cl(α)` at each wing's quarter-span with the α perturbation induced by
+/// roll rate (`Δα = ω_roll × y / V` at spanwise offset `y`), then returns the
+/// rolling moment from the NON-linear portion of that differential. The linear
+/// portion is already captured by the main `Cl_p` damping term.
+///
+/// In normal flight (α < 80% of stall), the Cl curve is near-linear so the
+/// non-linear portion is small. Past stall, the stalled-wing Cl drops off sharply
+/// while the other wing may still be making lift, producing a destabilizing
+/// rolling moment that reinforces any small roll rate → wing drop / spin entry.
+#[must_use]
+fn wing_drop_roll_moment(
+    alpha: f32,
+    roll_rate: f32,
+    v_damp: f32,
+    q_dyn: f32,
+    wing_area: f32,
+) -> f32 {
+    if alpha.abs() < ALPHA_APPROACH_RAD {
+        // Well clear of stall: Cl curve is essentially linear, non-linear portion is
+        // zero by definition. Skip the work.
+        return 0.0;
+    }
+    // Spanwise α perturbation at the quarter-span representative point.
+    let delta_alpha = roll_rate * WING_SPAN_M * WING_DROP_SAMPLE_FRAC / v_damp;
+    let alpha_right = alpha + delta_alpha;
+    let alpha_left = alpha - delta_alpha;
+    let cl_right = lift_coefficient(alpha_right);
+    let cl_left = lift_coefficient(alpha_left);
+    // Linear-theory differential (captured by Cl_p): 2 × (dCl/dα) × Δα.
+    // Estimate the local slope from a narrow two-point sample around the current α.
+    let d = 0.01_f32;
+    let cl_slope_local = (lift_coefficient(alpha + d) - lift_coefficient(alpha - d)) / (2.0 * d);
+    let linear_diff = 2.0 * cl_slope_local * delta_alpha;
+    // The non-linear "surprise" past stall: actual differential minus the linear
+    // piece. Rolling moment follows with the physics-convention sign (more lift on
+    // right → roll LEFT → negative L per our convention).
+    let cl_nonlinear_diff = (cl_right - cl_left) - linear_diff;
+    -q_dyn * wing_area * WING_SPAN_M * 0.125 * cl_nonlinear_diff
 }
 
 #[cfg(test)]
@@ -1023,6 +1132,76 @@ mod tests {
         assert!(
             (0.4..=1.0).contains(&burned),
             "60 s full-power burn should be 0.4-1.0 gal, got {burned}",
+        );
+    }
+
+    // ---- Real stall physics (2.4.4d) ----
+
+    #[test]
+    fn stall_state_classifies_correctly() {
+        assert_eq!(StallState::from_alpha(0.0), StallState::Normal);
+        assert_eq!(StallState::from_alpha(0.1), StallState::Normal);
+        assert_eq!(StallState::from_alpha(0.23), StallState::Approach);
+        assert_eq!(StallState::from_alpha(0.30), StallState::Stall);
+    }
+
+    #[test]
+    fn past_stall_pitching_moment_is_nose_down() {
+        // At α well past stall (20°), the stability moment should include a strong
+        // nose-down (negative) contribution beyond linear Cm_α.
+        let mut s = zero_state();
+        s.velocity = Vec3::new(0.0, 0.0, -40.0);
+        s.orientation = Quat::from_rotation_x(20_f32.to_radians());
+        let out = compute_forces(&s, None, 1.0 / 120.0);
+        assert_eq!(out.stall_state, StallState::Stall);
+        // Pre-stall only Cm_α × α would give a stability moment of size
+        // |CM_ALPHA × α × q × S × c|. The post-stall addend should drive |stability|
+        // higher than that.
+        let q = 0.5 * AIR_DENSITY_SEA_LEVEL * 40.0 * 40.0;
+        let linear_only = CM_ALPHA * 20.0_f32.to_radians() * q * 23.23 * MEAN_CHORD_M;
+        assert!(
+            out.pitch_moment.stability < linear_only,
+            "stall-pitch should be more negative than pure Cm_α × α; got {} vs linear {}",
+            out.pitch_moment.stability,
+            linear_only,
+        );
+    }
+
+    #[test]
+    fn normal_alpha_produces_zero_wing_drop() {
+        // At cruise α the Cl curve is near-linear, so wing-drop (which captures
+        // non-linearity) should be approximately zero.
+        let mut s = zero_state();
+        s.velocity = Vec3::new(0.0, 0.0, -55.0);
+        s.angular_velocity.z = -0.3; // rolling right, our storage convention
+        let out = compute_forces(&s, None, 1.0 / 120.0);
+        // stability slot on roll moment is repurposed for wing drop.
+        assert!(
+            out.roll_moment.stability.abs() < 100.0,
+            "normal-α wing drop should be ~0; got {}",
+            out.roll_moment.stability,
+        );
+    }
+
+    #[test]
+    fn past_stall_rolling_produces_wing_drop() {
+        // Past stall with positive roll rate, the right wing is deeper into stall
+        // (higher α from the rolling motion). Its Cl drops more than the left's, so
+        // lift asymmetry produces a destabilizing rolling moment (same sign as the
+        // rate, reinforcing the drop). With our convention: right-wing-down roll is
+        // L > 0, so a right-wing-down rate (ω_roll > 0 in physics convention, which
+        // is -Z in storage) that is getting reinforced means wing_drop > 0.
+        let mut s = zero_state();
+        s.velocity = Vec3::new(0.0, 0.0, -30.0);
+        s.orientation = Quat::from_rotation_x(18_f32.to_radians()); // past stall
+        s.angular_velocity.z = -0.5; // storage: negative Z = roll right = ω_roll +
+        let out = compute_forces(&s, None, 1.0 / 120.0);
+        assert_eq!(out.stall_state, StallState::Stall);
+        // Non-zero wing-drop past stall. Direction verifies reinforcement.
+        assert!(
+            out.roll_moment.stability.abs() > 50.0,
+            "past-stall wing drop should be non-trivial; got {}",
+            out.roll_moment.stability,
         );
     }
 

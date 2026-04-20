@@ -19,7 +19,7 @@
 
 #![deny(unsafe_code)]
 
-use flowplan_sim::{MomentBreakdown, SimSnapshot};
+use flowplan_sim::{MomentBreakdown, SimSnapshot, StallState};
 use glam::{EulerRot, Quat, Vec3};
 
 /// Derived per-frame telemetry. Every display surface reads from this.
@@ -125,6 +125,12 @@ pub struct Telemetry {
     /// burn is zero (idle + out-of-fuel case).
     pub endurance_seconds: f32,
 
+    // --- Stall state (Phase 2.4.4d) ---
+    /// α-based stall classification. Drives the HUD stall alert and (future) audio
+    /// warning. Replaces the pre-2.4.4d airspeed/Vs heuristic that false-positived
+    /// in dives and missed accelerated stalls.
+    pub stall_state: StallState,
+
     /// Sim tick this telemetry was derived from. `u64::MAX` reserved for defaults.
     pub tick: u64,
 }
@@ -201,6 +207,8 @@ impl Telemetry {
             } else {
                 f32::INFINITY
             },
+
+            stall_state: f.stall_state,
 
             tick: snapshot.tick,
         }

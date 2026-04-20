@@ -24,7 +24,7 @@ pub use aircraft_spec::{AircraftSpec, EngineSpec, SpeedsSpec};
 pub use camera::{Camera, ChaseConfig, ViewKind};
 pub use controls::Controls;
 pub use difficulty::DifficultyDials;
-pub use flight::{FlightOutputs, MomentBreakdown};
+pub use flight::{FlightOutputs, MomentBreakdown, StallState};
 pub use hash::state_hash;
 pub use input::{InputEvent, InputEvents};
 pub use snapshot::{ControlsSnapshot, SimSnapshot, VehicleSnapshot};

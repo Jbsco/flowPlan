@@ -16,7 +16,7 @@ use egui::Context;
 use egui_wgpu::{Renderer, ScreenDescriptor};
 use egui_winit::State;
 use flowplan_render::Telemetry;
-use flowplan_sim::AircraftSpec;
+use flowplan_sim::{AircraftSpec, StallState};
 use winit::event::WindowEvent;
 use winit::window::Window;
 
@@ -211,38 +211,26 @@ fn build_ui(
             ));
             ui.label(format!("Cl {:6.3}    Cd {:6.3}", t.cl, t.cd));
 
-            // Stall alert (pre-2.4.4 heuristic). Compares horizontal forward airspeed
-            // to the aircraft's published Vs (clean stall speed). Three tiers:
-            // NORMAL >= 1.2 Vs, APPROACH 1.0..1.2 Vs, STALL below Vs.
-            //
-            // TODO(2.4.4): replace with angle-of-attack-based stall detection. The
-            // airspeed heuristic false-positives in a dive (vertical velocity doesn't
-            // count as "airspeed" under the placeholder model) and misses
-            // accelerated/G-loaded stalls in tight turns (real stall at higher IAS).
-            // Also ignores flaps: with flaps down Vs drops to Vso ~ 21 m/s; the HUD
-            // doesn't know because flaps aren't modeled yet (2.4.5).
-            if let Some(spec) = aircraft {
-                ui.separator();
-                ui.heading("Stall alert");
-                let vs = spec.speeds.vs_clean_mps.max(1e-3);
-                let ratio = t.airspeed_horizontal_fwd / vs;
-                let (label, color) = if ratio >= 1.2 {
-                    ("NORMAL", egui::Color32::from_rgb(120, 200, 120))
-                } else if ratio >= 1.0 {
-                    ("APPROACH", egui::Color32::from_rgb(240, 200, 80))
-                } else {
-                    ("STALL", egui::Color32::from_rgb(240, 80, 80))
-                };
-                ui.colored_label(
-                    color,
-                    format!(
-                        "{label}    (airspeed / Vs = {:.2};  Vs = {:.1} m/s / {:.0} kt)",
-                        ratio,
-                        vs,
-                        vs * 1.944,
-                    ),
-                );
-            }
+            // α-based stall alert (Phase 2.4.4d). Reads the StallState classification
+            // that the flight model produces each tick from |α| vs the stall table
+            // peak. Handles dives (where airspeed is high but α can still exceed
+            // stall) and accelerated / G-loaded stalls (where airspeed is above Vs
+            // but high lift demand pushes α past stall) correctly because the test
+            // is directly on α.
+            ui.separator();
+            ui.heading("Stall alert");
+            let (label, color) = match t.stall_state {
+                StallState::Normal => ("NORMAL", egui::Color32::from_rgb(120, 200, 120)),
+                StallState::Approach => ("APPROACH", egui::Color32::from_rgb(240, 200, 80)),
+                StallState::Stall => ("STALL", egui::Color32::from_rgb(240, 80, 80)),
+            };
+            ui.colored_label(
+                color,
+                format!(
+                    "{label}    (α = {:+.1}°; stall at ±16.0°)",
+                    t.alpha_rad.to_degrees(),
+                ),
+            );
 
             ui.separator();
             ui.heading("Forces (m/s^2)");
