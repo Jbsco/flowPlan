@@ -219,6 +219,19 @@ Per-phase gate runs `cargo bench --bench frame_budget -- --test` which fails the
 - Phase 2: `scene_minimal` + `scene_standard` under reference-tier budget.
 - Phase 3+: all three scenes under reference-tier budget.
 
+### Refresh-rate coverage
+
+The bench harness exercises the full supported refresh set from [DESIGN.md § Performance Budget](DESIGN.md#performance-budget). Per hardware tier, each scene is run at its target refresh plus two neighbors to verify the interpolation path + accumulator hold under varied frame timing. Explicit test points:
+
+| Tier | Scene | Refresh points tested | Pass criterion |
+|------|-------|----------------------|----------------|
+| Low / Steam Deck | scene_minimal | 30 / 60 / 90 Hz | CPU frame time <= 50% of period; no sim-tick starvation |
+| Minimum | scene_minimal + scene_standard | 60 / 120 / 144 Hz | same, with all visual accents enabled |
+| Reference | all scenes | 120 / 144 / 165 / 240 Hz | GPU <= 60% at 240 Hz; CPU frame time <= 50% period at every tested rate |
+| High | all scenes | 240 / 500 Hz | budget holds at 500 Hz on `scene_stress` |
+
+Additionally, a dedicated **display-rate-independence** property test re-runs the flight-test bench (`cargo test -p flowplan-sim --test flight_bench`) with simulated render-side timing at 30, 60, 120, and 240 Hz; all four runs must produce byte-identical CSV output, proving sim determinism is preserved regardless of display choice.
+
 ### Regression detection
 
 Benchmark results are committed to `benches/baseline.json` (anonymous; no per-developer data). A 10%+ regression fails the PR gate. Intentional regressions require an amendment to the baseline in the same PR with justification.

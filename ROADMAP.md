@@ -415,6 +415,24 @@ The plane has a voice (engine, wind, water, splash). Weather actively shapes fli
 - [ ] Hand-drawn cel-shaded map view (fog-of-war / flight-log memory)
 - [ ] Logbook view summarizing flights
 
+### Milestone 4.8.5: Graphics & display settings
+
+- [ ] In-game graphics panel with all settings enumerated in [FEATURES.md § Display & Graphics Settings](FEATURES.md#display--graphics-settings)
+- [ ] Display-mode handling: exclusive fullscreen / borderless windowed / windowed; monitor selection on multi-monitor systems
+- [ ] Resolution + refresh-rate detection; user-selectable from detected list (30 / 60 / 90 / 120 / 144 / 165 / 240 Hz + any custom modes the display advertises)
+- [ ] Present-mode selector: VRR / Mailbox (default), VSync / FIFO, No-VSync / Immediate; explained with tradeoffs inline
+- [ ] Frame-rate cap (independent of present mode): unlimited / 30 / 60 / 90 / 120 / 144 / 165 / 240 / custom
+- [ ] Render-scale slider 50% - 125% (bilinear / nearest upsample only; TAA/DLSS/FSR explicitly excluded per non-goals)
+- [ ] Quality presets: Low / Medium / High / Ultra / Custom; per-subsystem overrides (water tessellation, MSAA 0/2/4/8x, view distance, foliage density, particle density, cel outline, rim light, bloom)
+- [ ] First-launch GPU tier detection with confirmation dialog; no silent override
+- [ ] FOV per view (cockpit / chase / orbit)
+- [ ] HUD / UI scale
+- [ ] Config persistence to `config.toml` at platform-appropriate location (XDG / %APPDATA% / `~/Library/Application Support/flowPlan/`); human-readable
+- [ ] Reset-to-default per section and global
+- [ ] Steam Deck profile auto-detected on launch (Low preset, 60 Hz handheld / 90 Hz docked, 75% render scale)
+- [ ] Integrated-GPU detection defaults to Low preset with non-blocking warning
+- [ ] Invariant: every setting preserves sim determinism (see [DESIGN.md § Display-refresh independence](DESIGN.md#display-refresh-independence)); changing any graphics setting does not alter physics, weather advancement, or scenario reproducibility
+
 ### Milestone 4.9: Difficulty dials and accessibility
 
 - [ ] In-game difficulty panel, adjustable any time; takes effect next tick
@@ -515,7 +533,15 @@ A full loop is playable. Fuel, cargo, weather, damage, and reputation all matter
 - [ ] Linux: native binary, AppImage + deb/rpm via `cargo-packager` or similar
 - [ ] Windows: native binary, installer
 - [ ] macOS: native binary, notarized .app (if feasible)
-- [ ] Steam Deck: verified at 90 Hz with reduced water tier
+- [ ] Full refresh-rate matrix verified across hardware tiers (per [DESIGN.md § Display-refresh independence](DESIGN.md#display-refresh-independence)):
+    - Low-end / Steam Deck: 60 Hz handheld, 90 Hz docked, Low preset, reduced water tier
+    - Minimum tier: 120 Hz at High preset, all visual accents enabled
+    - Reference tier: 144 / 165 / 240 Hz at High preset
+    - High tier: 240 Hz+ at Ultra, uncapped Mailbox
+    - Edge: 30 Hz display with all tiers (accumulator cap must hold physics determinism)
+- [ ] Present-mode coverage verified: VRR / Mailbox, VSync / FIFO, No-VSync / Immediate each produce playable output on representative hardware; tearing / input-latency characteristics match documented expectations.
+- [ ] Graphics-settings panel exercised on every platform; config persistence round-trips cleanly across OSes.
+- [ ] Scenario bench re-run at 30 / 60 / 240 Hz confirms byte-identical CSVs at every display rate (proves physics-to-display independence in shipping build).
 
 ### Milestone 5.5: Documentation and release
 

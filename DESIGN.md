@@ -473,10 +473,11 @@ Targets on the reference hardware tier (NVIDIA RTX 3060 / AMD RX 6600 class GPU,
 
 | Metric                                   | Budget                                    |
 | ---------------------------------------- | ----------------------------------------- |
-| Display refresh targets supported        | 120 / 144 / 165 / 240 Hz                  |
+| Display refresh targets supported        | 30 / 60 / 90 / 120 / 144 / 165 / 240 Hz   |
+| Primary tuning target                    | 240 Hz on reference tier                  |
 | GPU utilization at 240 Hz                | <= 60%                                    |
 | CPU frame time at 240 Hz (~4.2 ms period)| <= 2.1 ms total (<= 50% of period)        |
-| Sim tick (120 Hz fixed)                  | <= 2.0 ms per tick, <= 0.5 ms avg         |
+| Sim tick (120 Hz fixed, display-independent) | <= 2.0 ms per tick, <= 0.5 ms avg     |
 | Audio callback (per invocation, ~5 ms)   | <= 0.5 ms                                 |
 | Input-to-photon latency                  | <= 2 frames at display rate               |
 | Memory working set                       | <= 1 GB RAM, <= 2 GB VRAM                 |
@@ -488,12 +489,36 @@ These are not aspirations. A phase's quality gate includes an automated check th
 
 See [TEST_PLAN.md](TEST_PLAN.md#frame-budget-tests) for how these are measured.
 
+### Display-refresh independence
+
+Sim tick rate is fixed at 120 Hz (see [Invariants](#invariants) #1). Render rate follows the display. This means:
+
+- **Physics is identical at every display rate.** A coordinated 60° turn traces the same path at 30 Hz as at 240 Hz. Flight model, buoyancy, weather advancement, damage events, fuel burn, determinism invariants — all unaffected by display choice.
+- **Interpolated rendering fills intermediate frames.** Between sim ticks the renderer alpha-lerps position, slerps orientation, and reads telemetry off the most recent snapshot. Smoothness at 30 Hz and 240 Hz uses the same machinery.
+- **The accumulator handles display rates slower than sim.** At 30 Hz display, each render frame consumes up to 4 sim ticks (120 / 30); the accumulator is capped at 8 ticks / 250 ms to prevent spiral-of-death under hitches.
+- **Display rates faster than sim fill intermediate frames via interpolation.** The renderer keeps two snapshots (`prev_front` at tick N-1, `front` at tick N) and lerps position / slerps orientation by `alpha = accumulator / dt_sim ∈ [0, 1)`. At 240 Hz display with 120 Hz sim, two consecutive display frames render at different alphas (roughly 0.5 and 0.0) between the same two snapshots, producing smoothly continuous motion. At 500 Hz, four display frames span a sim tick. Physics resolution is fixed at 120 Hz regardless — the extra display frames are interpolated visual frames, not new physics states. Visual smoothness scales with display rate; physics granularity does not.
+- **Why sim rate isn't raised with display rate.** Bumping sim to 240 Hz would double CPU cost, break every saved scenario's determinism trace (input traces baked at 120 Hz tick IDs), and re-tune every coefficient. The feel payoff is small for slow-rotation subject matter: Beaver steady-state roll is ~60°/s, worst-case aerobatic roll ~180°/s = 1.5°/tick at 120 Hz. Interpolation between those ticks is visually indistinguishable from a raw higher-rate sim. Input-to-photon latency is sim-rate-bounded (≤ 8.3 ms at 120 Hz) plus display-rate-bounded (≤ 4 ms at 240 Hz, ≤ 17 ms at 60 Hz). 120 Hz sim is the sweet spot for flowPlan's motion profile.
+- **Input-to-photon latency scales with display rate.** At 240 Hz, one display frame is 4.2 ms; at 60 Hz, 16.7 ms. Sim-input latency is constant at 8.3 ms (120 Hz); the display-rate piece is added on top. This is a feel tradeoff, not a physics one — low-FPS displays feel "laggier" but the plane is not.
+
 ### Hardware tiers
 
-- **Minimum:** GTX 1060 / RX 580, 4-core CPU, 8 GB RAM. Must sustain 120 Hz with all visual accents enabled.
-- **Reference:** RTX 3060 / RX 6600, 8-core CPU, 16 GB RAM. 240 Hz with headroom.
-- **High:** RTX 4070+ / RX 7800+, modern CPU. 500 Hz capable.
-- **Steam Deck:** target 90 Hz at 1280x800 with reduced water tessellation tier.
+Rates here are *targets* (the primary refresh the hardware is expected to hit at the stated quality preset). All rates in the supported list (30 / 60 / 90 / 120 / 144 / 165 / 240) work on every tier; higher tiers simply have more visual-quality headroom at their target rate.
+
+- **Low-end / Steam Deck:** GTX 1050 / RX 560 / Steam Deck APU, 4-core CPU, 8 GB RAM. Target 60 Hz at "Medium" preset, 90 Hz on Steam Deck handheld mode, reduced water-tessellation tier.
+- **Minimum:** GTX 1060 / RX 580, 4-core CPU, 8 GB RAM. Target 120 Hz at "High" preset with all visual accents enabled.
+- **Reference:** RTX 3060 / RX 6600, 8-core CPU, 16 GB RAM. Target 240 Hz at "High" with headroom.
+- **High:** RTX 4070+ / RX 7800+, modern CPU. 500 Hz capable at "Ultra."
+
+### Presentation mode policy
+
+Default behavior: `wgpu::PresentMode::Mailbox` where supported (tearing-free without the forced frame pacing of FIFO), falling back to `AutoVsync` otherwise. User-configurable modes ship as part of the graphics-settings UI (see [ROADMAP.md § Milestone 4.8.5](ROADMAP.md#milestone-485-graphics--display-settings)):
+
+- **VRR / Mailbox** (default on supported hardware) — tearing-free, lowest latency at the display cap, plays well with G-Sync / FreeSync.
+- **VSync / FIFO** — tearing-free, locked to display; one extra frame of latency vs. mailbox.
+- **No VSync / Immediate** — tearing, lowest latency, uncapped GPU (highest power/heat).
+- **Frame cap** — user-chosen limit (30 / 60 / 90 / 120 / 144 / 165 / 240 / unlimited) to manage GPU utilization and thermals independently of VSync mode.
+
+The sim tick is never coupled to the present mode.
 
 ---
 

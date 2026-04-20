@@ -45,6 +45,7 @@ Granular feature bullets for later expansion. Every idea captured here is intent
 - [Vendors & Progression](#vendors--progression)
 - [Livery & Customization](#livery--customization)
 - [Audio / Soundtrack](#audio--soundtrack)
+- [Display & Graphics Settings](#display--graphics-settings)
 - [Difficulty & Accessibility](#difficulty--accessibility)
 - [Flight Log & Save Format](#flight-log--save-format)
 - [Remaining Open Questions](#remaining-open-questions)
@@ -895,6 +896,91 @@ Light side-activities that add texture without becoming mini-games in the negati
 - **[sketch]** Shared musical key per biome -- maintaining tonal cohesion across zones.
 - **[sketch]** No pre-recorded music stems; everything is generative.
 - **[sketch]** Soundtrack stems unlock as cosmetic progression (new layer textures, new biome motifs).
+
+---
+
+## Display & Graphics Settings
+
+Traditional video-game settings for accommodating the full hardware-tier matrix. Respects [DESIGN.md § Non-Goals](DESIGN.md#non-goals) (no TAA/DLSS/FSR, no deferred rendering, cel-shading is the art direction — settings tune the implemented systems, never add a fundamentally different rendering path). All adjustable in-game without restart unless noted; changes take effect on the next frame (or next pipeline rebuild for pipeline-level changes like MSAA).
+
+### Display
+
+- **[sketch]** **Display mode**: exclusive fullscreen / borderless windowed / windowed. Default borderless windowed (best compatibility + quick alt-tab).
+- **[sketch]** **Monitor selector** (multi-monitor systems).
+- **[sketch]** **Resolution**: detected list + custom. Default = monitor native. Borderless windowed auto-matches desktop.
+- **[sketch]** **Refresh rate**: detected list from the selected monitor. 30 / 60 / 90 / 120 / 144 / 165 / 240 Hz and any custom modes the display advertises. Sim tick stays at 120 Hz regardless (see [DESIGN.md § Display-refresh independence](DESIGN.md#display-refresh-independence)).
+- **[sketch]** **Present mode**:
+    - **VRR / Mailbox** (default; tearing-free, lowest latency at display cap, plays well with G-Sync / FreeSync).
+    - **VSync / FIFO** (tearing-free, one extra frame of latency).
+    - **No VSync / Immediate** (tearing, lowest latency, highest GPU utilization).
+- **[sketch]** **Frame rate cap**: unlimited / 30 / 60 / 90 / 120 / 144 / 165 / 240 / custom. Independent from VSync mode — lets the user limit GPU utilization and thermals even with Mailbox/Immediate.
+- **[sketch]** **Render scale**: 50% / 75% / 100% / 125%. Simple nearest-neighbor or bilinear upsample at the final composite. Explicitly *not* DLSS/FSR/TAA (non-goal). Useful for Steam Deck / minimum-tier hardware.
+- **[sketch]** **HDR**: off / on (HDR10 if the display reports support). Post-v1 nicety; skip if complexity doesn't pay off against cel shading.
+
+### Quality presets
+
+One-click tiers that set every subsystem at once. Presets are the default entry point; individual sliders override per-subsystem.
+
+- **[sketch]** **Low** — Minimum tier / Steam Deck. 60 Hz target, 75% render scale, MSAA off, low water tessellation, minimal particles, reduced view distance, bloom off.
+- **[sketch]** **Medium** — default on first launch if hardware detected as "minimum" class. 120 Hz target, 100% render scale, MSAA 2×, medium water, mid particles, full view distance, bloom on.
+- **[sketch]** **High** — default on reference hardware. 144 or 165 Hz target (depending on display), 100% render scale, MSAA 4×, high water tessellation, full particles, view distance + 1 LOD tier, bloom on.
+- **[sketch]** **Ultra** — high-tier hardware. 240 Hz+ target (uncapped Mailbox or user cap), all visuals at max, full particle budget, view distance maxed.
+- **[sketch]** **Custom** — persists when the user diverges from a preset.
+- **[sketch]** First-launch: detect GPU tier, pick preset, show confirmation. No silent override.
+
+### Per-subsystem quality (override individual presets)
+
+- **[sketch]** **Water tessellation**: low / medium / high / ultra. Controls vertex density of the Gerstner grid.
+- **[sketch]** **Water distant LOD transition distance**: slider. Closer = higher detail, higher GPU cost.
+- **[sketch]** **Anti-aliasing**: off / MSAA 2× / MSAA 4× / MSAA 8×. (No TAA per non-goals.)
+- **[sketch]** **Shadow quality** (when shadows land): off / low / medium / high.
+- **[sketch]** **View distance**: slider. Affects terrain LOD and object culling radius.
+- **[sketch]** **Foliage density**: low / medium / high.
+- **[sketch]** **Particle density**: low / medium / high. Controls water splash, wake, exhaust, weather particles.
+- **[sketch]** **Cel outline width**: off / subtle / standard / bold. Part of the art direction; exposed for player preference.
+- **[sketch]** **Rim light intensity**: slider 0-1.
+- **[sketch]** **Dithered bloom**: on / off / intensity slider.
+- **[sketch]** **Color grading LUT**: list (default + unlockables from wildlife / exploration progression).
+- **[sketch]** **Fog density**: biome default / slider override. (Affects visibility but not weather state — purely visual tuning.)
+- **[sketch]** **Motion blur**: off / subtle. Heavy motion blur conflicts with crisp cel shading; only "subtle per-object blur on fast-moving prop" is appropriate.
+
+### Field of view
+
+- **[sketch]** **FOV per view**: first-person cockpit / chase / orbit each get their own FOV (matches [Camera & Views](#camera--views) intent). Range typically 60°-110°.
+- **[sketch]** **Head-bob / camera inertia scale**: slider per view.
+
+### HUD & UI scale
+
+- **[sketch]** **HUD scale**: 75% / 100% / 125% / 150%.
+- **[sketch]** **UI scale**: menu and dialog scaling, separate from HUD.
+- **[sketch]** **Subtitle size**: small / medium / large (accessibility; cross-referenced with radio comms captions).
+- **[sketch]** **Reduced motion**: on/off. Disables or softens non-essential UI animations (panel slide-ins, button bounces).
+
+### Accessibility cross-refs
+
+The following already live in [Difficulty & Accessibility](#difficulty--accessibility) and are surfaced from the graphics panel for discoverability:
+
+- Colorblind palettes (Deuteranopia / Protanopia / Tritanopia / High-contrast).
+- Audio-only cues for critical events.
+- Pause-anywhere in single-player.
+
+### Platform adaptations
+
+- **[sketch]** **Steam Deck profile**: detected on launch, loads Low preset with 60 Hz handheld / 90 Hz docked, 75% render scale, reduced water tier, smaller default HUD scale.
+- **[sketch]** **Integrated-GPU detection**: if iGPU is detected, default to Low preset with a warning that performance may be limited; no block.
+- **[sketch]** **Small-window mode**: when window is <720 p, warn about text legibility and auto-offer 125% HUD scale.
+
+### Invariants for graphics settings
+
+- Sim determinism is preserved regardless of every setting above. Physics is identical at every refresh rate, present mode, render scale, MSAA level, and quality preset.
+- No graphics setting triggers a code-path swap that changes rendering semantics (e.g., no "PBR at Ultra, cel at Low"). Cel shading is universal.
+- No graphics setting unlocks post-processing that violates non-goals (TAA, DLSS, FSR, ray tracing, dynamic resolution scaling).
+- Every setting is explicitly listed above or in Difficulty & Accessibility. No hidden graphics options.
+
+### Config persistence
+
+- **[sketch]** Settings persist to `config.toml` at a platform-appropriate location (XDG on Linux, %APPDATA% on Windows, `~/Library/Application Support/flowPlan/` on macOS). Human-readable and hand-editable (advanced users).
+- **[sketch]** Reset-to-default per section and global.
 
 ---
 
