@@ -12,6 +12,7 @@ Agents are fast and capable but accumulate subtle bugs and technical debt across
 - [Hot-Path Enforcement Tests](#hot-path-enforcement-tests)
 - [Frame-Budget Tests](#frame-budget-tests)
 - [Determinism Tests](#determinism-tests)
+- [Flight Test Bench](#flight-test-bench)
 - [Visual Snapshot Tests](#visual-snapshot-tests)
 - [Audio Callback Tests](#audio-callback-tests)
 - [Test Fixture Strategy](#test-fixture-strategy)
@@ -255,6 +256,60 @@ proptest! {
 - **Flight energy conservation:** in level flight with no wind and no throttle change, total energy stays within a tolerance (small drift acceptable from integration; test the trend).
 - **Stall recovery:** triggered stall recovers within a bounded time window.
 - **Water surface sampling equivalence:** CPU sample and GPU sample agree within epsilon at the same (x, z, t).
+
+---
+
+## Flight Test Bench
+
+**Scope:** deterministic per-aircraft validation of the flight model against POH figures. Shipped as Phase 2.4.8 (framework + first Beaver scenarios); expands naturally as new aircraft land by adding per-aircraft scenario arrays.
+
+**Rationale:** the flight model covers enough effects now (translational aero, moment-based rotation, engine + prop, flaps, stall physics, secondary couplings, density altitude) that numerical validation is the only way to keep it honest as coefficients are tuned and aircraft are added. "Feel" tests alone can't catch a regression that a 15 % cruise-speed drift would cause.
+
+### Architecture
+
+Lives in `crates/sim/src/flight_bench.rs`. Four types:
+
+- **`ScenarioInitial`** — starting vehicle state (position, velocity, orientation, angular velocity, throttle, flaps, fuel).
+- **`ScenarioInput`** — `(tick, InputEvent)` pair; injected into the sim's `InputEvents` at the matching tick.
+- **`Assertion`** — enum of validation predicates. Current variants: `AltitudeStableAtEnd`, `ClimbRateAtEnd`, `AirspeedAtEnd`, `NeverStalls`, `EventuallyStalls`, `FinalAirspeedWithin`, `MinAirspeedNearTarget`. Extend as scenarios demand.
+- **`FlightScenario`** — bundles `name`, `description`, `aircraft_spec_path` (RON), `initial`, `inputs`, `duration_ticks`, `assertions`.
+
+A scenario array per aircraft (`BEAVER_SCENARIOS`, future `CARBONCUB_SCENARIOS`, etc.) is the per-aircraft test suite. Adding an aircraft = adding POH data to its `AircraftSpec` + a scenario array. The runner handles the rest.
+
+### Runner
+
+Two entry points, both sharing the same `SimState::tick` production code path:
+
+1. **Headless (`run_scenario_headless`)** — advances sim for `duration_ticks`, captures a `BenchSample` (subset of `Telemetry` + tick) each tick, returns `Vec<BenchSample>`. Used by the integration test `crates/sim/tests/flight_bench.rs`.
+2. **Visual playback (`cargo run -p flowplan-app -- --scenario <name>`)** — same sim code path, but inputs come from the scenario's scripted trace instead of the keyboard. Player watches in 3D with normal renderer + HUD + widgets. Optional `--log-dir <path>` captures the telemetry CSV; `--exit-on-scenario-end` closes the window automatically (useful for batch runs).
+
+Determinism invariant holds: `(seed, scenario)` → bit-identical log. No wall-clock inputs.
+
+### CSV schema
+
+`BenchSample::csv_header()` / `write_csv_row()` define the file format. One row per sim tick (120 Hz), columns: `tick, time_s, pos_x/y/z, pitch/roll/yaw_deg, vel_x/y/z, airspeed_mps, vs_mps, fpa_deg, alpha_deg, beta_deg, cl, cd, throttle, pitch/roll/yaw_in, flap_deg, engine_kw, prop_eff, fuel_gph, fuel_gal, pitch_M, roll_L, yaw_N, stall_state`. Everything a plot needs, stable schema so downstream scripts don't need to track a migration ledger.
+
+Output location: `target/flight-bench/<scenario_name>.csv`.
+
+### Plot pipeline
+
+`tools/plot_telemetry.py` (matplotlib) reads one or more CSVs and renders per-scenario reference plots (altitude trace, airspeed trace, α trace, moment breakdown, engine power + fuel flow, stall-state ribbon). Committed reference plots live in `docs/plots/`.
+
+`tools/run_flight_bench.sh` orchestrates: runs the headless bench, regenerates all CSVs, invokes the plotter, surfaces pass/fail. Single script for the full loop.
+
+### POH assertion tolerances
+
+Tolerances start deliberately wide and tighten as 2.4.8 coefficient tuning dials the model into POH range. A scenario that fails is a regression — either the physics changed (catch now) or the coefficient was re-tuned away from spec (intentional, update the tolerance). The diff makes the intent explicit.
+
+### When to add a scenario
+
+- A new aircraft lands → copy the Beaver scenario pattern, replace POH targets with the new aircraft's numbers.
+- A new flight-model effect lands → add a scenario that exercises it (e.g., 2.4.7 density altitude → "cruise at 3 km, verify engine power drop within band").
+- A flight-test feedback surfaces a specific numeric gap → encode it as an assertion so it can't silently re-appear.
+
+### Future integration
+
+Once Phase 5 flight-log / replay lands (`FEATURES.md § Flight Log & Save Format`), the bench's scenario format is the natural seed: a player's captured flight (input trace + seed) becomes a scenario, telemetry is extracted, they share it with another player who replays it bit-identically. The Phase 4 aircraft-description UI can also consume bench output: run the scenario suite at build time, generate per-aircraft performance-envelope plots, commit as cel-shaded content (hand-drawn-feel ROC-vs-airspeed curve on the Beaver's spec page, etc.).
 
 ---
 

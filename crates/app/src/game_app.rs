@@ -99,10 +99,39 @@ const WATER_LEVEL: f32 = 0.0;
 /// and the terrain / water mesh.
 const SURFACE_MARGIN: f32 = 0.05;
 
-pub fn run() -> Result<()> {
+pub fn run(opts: crate::CliOptions) -> Result<()> {
+    // Resolve scenario from CLI flag before opening the window so we can fail fast
+    // on typos.
+    let scenario_opt = if let Some(name) = &opts.scenario_name {
+        let scenario = flowplan_sim::flight_bench::BEAVER_SCENARIOS
+            .iter()
+            .find(|s| s.name == name.as_str())
+            .ok_or_else(|| {
+                let known: Vec<&str> = flowplan_sim::flight_bench::BEAVER_SCENARIOS
+                    .iter()
+                    .map(|s| s.name)
+                    .collect();
+                anyhow::anyhow!("unknown scenario '{name}'. Known: {known:?}")
+            })?;
+        tracing::info!(
+            "scenario playback: {} ({} ticks, {} inputs, {} assertions)",
+            scenario.name,
+            scenario.duration_ticks,
+            scenario.inputs.len(),
+            scenario.assertions.len(),
+        );
+        Some(*scenario)
+    } else {
+        None
+    };
+
     let event_loop = EventLoop::new().context("construct winit event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = GameApp::default();
+    let mut app = GameApp {
+        opts,
+        scenario: scenario_opt,
+        runtime: None,
+    };
     event_loop
         .run_app(&mut app)
         .context("run winit event loop")?;
@@ -111,6 +140,9 @@ pub fn run() -> Result<()> {
 
 #[derive(Default)]
 struct GameApp {
+    opts: crate::CliOptions,
+    /// Resolved scenario from `opts.scenario_name`, if any.
+    scenario: Option<flowplan_sim::flight_bench::FlightScenario>,
     runtime: Option<Runtime>,
 }
 
@@ -161,6 +193,25 @@ struct Runtime {
     gizmo_batch: DebugLineBatch,
     /// Reused CPU batch for the attitude-indicator widget (2.4.4e).
     attitude_batch: DebugLineBatch,
+
+    /// 2.4.8: if present, scenario driving scripted inputs + telemetry capture.
+    scenario_playback: Option<ScenarioPlayback>,
+}
+
+/// Scenario playback state: scripted-input source + telemetry log.
+struct ScenarioPlayback {
+    scenario: flowplan_sim::flight_bench::FlightScenario,
+    /// Tick counter since playback started.
+    elapsed_ticks: u32,
+    /// Buffered inputs sorted by tick; drained as ticks advance.
+    samples: Vec<flowplan_sim::flight_bench::BenchSample>,
+    /// Where to write CSV when playback ends. `None` means don't persist.
+    log_dir: Option<std::path::PathBuf>,
+    /// If true, exit the app when scenario duration elapses.
+    exit_on_end: bool,
+    /// Have we finalized (wrote CSV)? Set after first frame past duration so we
+    /// don't keep writing forever.
+    finalized: bool,
 }
 
 impl ApplicationHandler for GameApp {
@@ -168,7 +219,7 @@ impl ApplicationHandler for GameApp {
         if self.runtime.is_some() {
             return;
         }
-        match Runtime::init(event_loop) {
+        match Runtime::init(event_loop, self.scenario, &self.opts) {
             Ok(rt) => {
                 let (w, h) = rt.size();
                 tracing::info!("window + wgpu ready ({w}x{h}); sim + render online");
@@ -231,8 +282,17 @@ impl ApplicationHandler for GameApp {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(rt) = &self.runtime {
+            // Scenario auto-exit: once the scripted scenario has finalized its CSV
+            // and `exit_on_scenario_end` is set, request the event loop to exit so
+            // batch-driven runs return to the shell without manual intervention.
+            if let Some(pb) = &rt.scenario_playback {
+                if pb.finalized && pb.exit_on_end {
+                    event_loop.exit();
+                    return;
+                }
+            }
             rt.window.request_redraw();
         }
     }
@@ -262,6 +322,37 @@ impl ApplicationHandler for GameApp {
     }
 }
 
+/// Persist scenario telemetry to CSV + log assertion results. Called once per
+/// scenario, the first frame after the scenario's duration elapses.
+fn finalize_scenario_playback(pb: &mut ScenarioPlayback) {
+    pb.finalized = true;
+    let results = flowplan_sim::flight_bench::check_assertions(&pb.scenario, &pb.samples);
+    let passed = results.iter().filter(|r| r.passed).count();
+    tracing::info!(
+        "scenario '{}' complete: {}/{} assertions passed",
+        pb.scenario.name,
+        passed,
+        results.len(),
+    );
+    for r in &results {
+        let mark = if r.passed { "PASS" } else { "FAIL" };
+        tracing::info!("  [{mark}] {:?}: {}", r.assertion, r.message);
+    }
+    if let Some(dir) = &pb.log_dir {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            tracing::warn!("create log_dir {}: {e}", dir.display());
+            return;
+        }
+        let csv = flowplan_sim::flight_bench::log_to_csv(&pb.samples);
+        let path = dir.join(format!("{}.csv", pb.scenario.name));
+        if let Err(e) = std::fs::write(&path, csv) {
+            tracing::warn!("write {}: {e}", path.display());
+        } else {
+            tracing::info!("wrote telemetry CSV: {}", path.display());
+        }
+    }
+}
+
 fn is_escape_pressed(ev: &KeyEvent) -> bool {
     matches!(
         (ev.physical_key, ev.state),
@@ -276,7 +367,11 @@ impl Runtime {
     // wgpu initialization is a linear descriptor-chain; splitting it doesn't improve
     // readability, so allow the slight overrun on this function's line count.
     #[allow(clippy::too_many_lines)]
-    fn init(event_loop: &ActiveEventLoop) -> Result<Self> {
+    fn init(
+        event_loop: &ActiveEventLoop,
+        scenario: Option<flowplan_sim::flight_bench::FlightScenario>,
+        opts: &crate::CliOptions,
+    ) -> Result<Self> {
         // Window. 1080p baseline gives the debug widgets (orientation BR + attitude BL
         // + top-left / top-right / bottom-left text panels) comfortable room without
         // overlapping the scene. User remap / fullscreen toggle lands in Phase 4's
@@ -380,31 +475,33 @@ impl Runtime {
             VEHICLE_SHADING,
         );
 
-        // Sim.
+        // Sim. Scenario-mode init uses the scenario's ScenarioInitial so playback is
+        // deterministic and reproducible. Normal-mode init is the existing cruise-
+        // above-terrain seed.
         let mut sim = SimState::new(WORLD_SEED);
-        // Initial fuel from the spec's capacity -- full tanks at startup. When save /
-        // load arrives in Phase 4 this will come from the persisted fuel state instead.
         let initial_fuel_gal = aircraft_spec.as_ref().map_or(0.0, |s| s.fuel_capacity_gal);
         sim.aircraft = aircraft_spec;
-        // Start the vehicle a comfortable distance above the procedural terrain,
-        // already in cruise forward velocity so placeholder-wing lift balances gravity
-        // from frame zero. This avoids the "I pressed throttle but fell" confusion
-        // that a dead-stop start produces with only thrust and gravity.
         sim.vehicle = VehicleState::at_origin();
         sim.vehicle.fuel_gal = initial_fuel_gal;
-        // CG-centered mesh means `position.y` is the CG height. Lift by the float-to-CG
-        // distance so the floats clear terrain peaks by the same 25 m margin the old
-        // bottom-anchored mesh had.
-        let start_y = terrain.max_height() + vehicle_float_offset + 25.0;
-        sim.vehicle.position = glam::Vec3::new(0.0, start_y, 0.0);
-        // ~55 m/s (~107 kt) forward (-Z). Below POH cruise of 64 m/s but well above
-        // Vs_clean (23 m/s), giving the airfoil model a comfortable ~2.4× stall-margin
-        // at spawn -- enough to bank a 60° turn (which demands 2× Cl) without pushing
-        // α past stall. Engine model (2.4.3) now produces realistic thrust-vs-airspeed,
-        // so equilibrium cruise settles near the actual thrust = drag intersection
-        // rather than drifting upward.
-        sim.vehicle.velocity = glam::Vec3::new(0.0, 0.0, -55.0);
-        sim.vehicle.controls.throttle = 0.55;
+
+        if let Some(s) = scenario.as_ref() {
+            // Scenario playback: seed from the scenario's initial state. Aircraft
+            // spec was already set above from the default load path; scenario
+            // references the same spec file so this is consistent.
+            sim.vehicle.position = s.initial.position;
+            sim.vehicle.velocity = s.initial.velocity;
+            sim.vehicle.orientation = s.initial.orientation;
+            sim.vehicle.angular_velocity = s.initial.angular_velocity;
+            sim.vehicle.controls.throttle = s.initial.throttle;
+            sim.vehicle.controls.flaps = s.initial.flaps;
+            sim.vehicle.fuel_gal = s.initial.fuel_gal;
+        } else {
+            // Normal (free-flight) mode: cruise above terrain.
+            let start_y = terrain.max_height() + vehicle_float_offset + 25.0;
+            sim.vehicle.position = glam::Vec3::new(0.0, start_y, 0.0);
+            sim.vehicle.velocity = glam::Vec3::new(0.0, 0.0, -55.0);
+            sim.vehicle.controls.throttle = 0.55;
+        }
         // Seed the camera at a chase-valid pose behind+above the vehicle so the first
         // frame shows a sensible view rather than converging from the Camera::default
         // position (which is far from the vehicle on startup).
@@ -439,6 +536,14 @@ impl Runtime {
             key_state: KeyState::default(),
             gizmo_batch: DebugLineBatch::new(),
             attitude_batch: DebugLineBatch::new(),
+            scenario_playback: scenario.map(|s| ScenarioPlayback {
+                scenario: s,
+                elapsed_ticks: 0,
+                samples: Vec::with_capacity(s.duration_ticks as usize),
+                log_dir: opts.log_dir.clone(),
+                exit_on_end: opts.exit_on_scenario_end,
+                finalized: false,
+            }),
         })
     }
 
@@ -456,6 +561,7 @@ impl Runtime {
         self.renderer.resize(&self.device, (width, height));
     }
 
+    #[allow(clippy::too_many_lines)] // Linear frame pipeline -- splitting hurts readability.
     fn tick_and_render(&mut self) -> Result<(), FrameError> {
         #[cfg(feature = "shader-hot-reload")]
         self.renderer.maybe_reload_shaders(&self.device);
@@ -469,11 +575,28 @@ impl Runtime {
         // Advance the sim by fixed-timestep ticks while we have budget.
         let mut tick_count = 0u32;
         while self.tick_budget >= FIXED_DT && tick_count < MAX_TICKS_PER_FRAME {
-            // Gather input for this tick: held-axes first, then drain the queue.
-            self.key_state.push_axis_events(&self.input_queue, FIXED_DT);
+            // Gather input for this tick. In scenario mode the scripted source
+            // takes over -- keyboard is ignored for flight controls (still works
+            // for Esc / reset / view). In normal mode, keyboard feeds the queue
+            // through the standard ramp / axis pipeline.
             let mut batch = InputEvents::default();
-            while let Some(ev) = self.input_queue.pop() {
-                batch.push(ev);
+            if let Some(pb) = self.scenario_playback.as_ref() {
+                // Inject scripted events whose `tick` matches the current scenario
+                // elapsed count. Scenarios use small, sparse input traces so the
+                // linear scan is cheap.
+                for input in pb.scenario.inputs {
+                    if input.tick == pb.elapsed_ticks {
+                        batch.push(input.event);
+                    }
+                }
+                // Discard anything the user might have typed -- keyboard events
+                // still pushed via apply_key_event() would leak into the queue.
+                while self.input_queue.pop().is_some() {}
+            } else {
+                self.key_state.push_axis_events(&self.input_queue, FIXED_DT);
+                while let Some(ev) = self.input_queue.pop() {
+                    batch.push(ev);
+                }
             }
             // Min-altitude floor: highest of (terrain at vehicle's XZ, mean water level)
             // plus float_offset plus a small margin to avoid surface z-fighting. Wave
@@ -491,6 +614,23 @@ impl Runtime {
                 .terrain
                 .height(self.sim.camera.position.x, self.sim.camera.position.z);
             self.sim.camera.clamp_above(cam_ground + 2.0);
+
+            // Scenario telemetry capture + auto-exit.
+            if let Some(pb) = self.scenario_playback.as_mut() {
+                if pb.elapsed_ticks < pb.scenario.duration_ticks {
+                    let sample = flowplan_sim::flight_bench::BenchSample::capture(
+                        u64::from(pb.elapsed_ticks),
+                        &self.sim,
+                        &self.sim.last_flight,
+                    );
+                    pb.samples.push(sample);
+                }
+                pb.elapsed_ticks = pb.elapsed_ticks.saturating_add(1);
+                if !pb.finalized && pb.elapsed_ticks >= pb.scenario.duration_ticks {
+                    finalize_scenario_playback(pb);
+                }
+            }
+
             self.snapshots.publish(SimSnapshot::from_state(&self.sim));
             self.tick_budget -= FIXED_DT;
             tick_count += 1;

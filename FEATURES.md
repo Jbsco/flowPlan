@@ -491,6 +491,8 @@ Every display surface on the plane -- debug overlays, HUD, 3D cockpit gauges, au
 
 See [DESIGN.md § Telemetry derivation (render side)](DESIGN.md#telemetry-derivation-render-side) for the architectural boundary and invariants.
 
+The **flight test bench** (Phase 2.4.8, [TEST_PLAN.md § Flight Test Bench](TEST_PLAN.md#flight-test-bench)) is a second consumer of the telemetry pipeline: it captures a `BenchSample` (CSV-serializable subset of Telemetry) per sim tick during scripted scenarios, enabling per-aircraft POH validation and offline plotting. The Phase 5+ flight-log feature (below) inherits this capture format -- a captured player flight is a replayable scenario.
+
 ### The plumbing
 
 A single `Telemetry` struct (lives in `render` or `app`, not `sim`) is derived once per frame from the latest snapshot. Fields are SI internally; display-unit conversions happen at the consumer's format call. Every instrument / gauge / debug widget reads from this struct -- no reaching into `SimState`, no duplicated compute.
@@ -952,6 +954,7 @@ The flight log *is* the saved game. Rather than serializing the entire live stat
 - **[sketch]** Post-v1 shared gameplay hook: asynchronous ghosts (other-player flights replayed as planes in your sky) require nothing beyond sharing their flight logs on the same seed.
 - **[sketch]** Post-v1 co-op hook: two live players on the same seed share weather and world events; their input traces are interleaved in a combined log.
 - **[sketch]** Implementation note: the sim crate must already expose all state-changing events as structured records (for the event log), which aligns with the deterministic tick design. No special layer needed.
+- **[shipped: Phase 2.4.8 framework]** The flight test bench (`crates/sim/src/flight_bench.rs`, see [TEST_PLAN.md § Flight Test Bench](TEST_PLAN.md#flight-test-bench)) already implements the core replay primitive: a `FlightScenario` bundles initial state, aircraft spec, scripted `(tick, InputEvent)` trace, and assertions; the runner produces a per-tick CSV telemetry log via the same `SimState::tick` production code path; `--scenario <name>` plays a scenario visually. Phase 5+ flight log extends this format with non-flight event categories (economy / missions / damage / weather / wildlife transitions) and exposes it as a player-facing save file.
 
 ---
 

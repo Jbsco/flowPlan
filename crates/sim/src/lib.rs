@@ -14,6 +14,7 @@ pub mod camera;
 pub mod controls;
 pub mod difficulty;
 pub mod flight;
+pub mod flight_bench;
 pub mod hash;
 pub mod input;
 pub mod snapshot;

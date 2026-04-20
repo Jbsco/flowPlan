@@ -8,9 +8,100 @@ A small, lightweight, high-FPS 3D floatplane / bushplane game built around the *
 
 ## Status
 
-**Design phase.** No implementation yet. The repository currently holds the authoritative design documents and a methodology skill. Agents and humans working here read the specs before writing code; amendments to the specs precede amendments to the code. See [CLAUDE.md](CLAUDE.md) for the read order.
+**Phase 2 — Feel Core, in progress.** Phases 0 (Skeleton) and 1 (Core Loop) complete. Currently deep into the flight model (Milestone 2.4): airfoil lift/drag, moment-based rotational dynamics, engine + prop + fuel, flaps, secondary effects (adverse yaw / P-factor / torque roll / ground effect), density altitude, and a flight-test bench for scripted POH validation. Next: Phase 2.5 contact physics (buoyancy + ground friction). See [PROGRESS.md](PROGRESS.md) for the authoritative snapshot — it's kept current tick-by-tick and survives session compaction.
 
 This follows the front-loaded design discipline used in the author's prior projects ([hadlink](https://github.com/Jbsco/hadlink), admt) where specifications are the contract and code traces back to them. See [skills/flowplan-methodology/SKILL.md](skills/flowplan-methodology/SKILL.md) for the approach.
+
+---
+
+## Common commands
+
+All commands run from the workspace root. Release builds are recommended for running the app; debug builds work but are noticeably slower.
+
+### Running the game
+
+```bash
+# Open the window with full keyboard flight controls.
+cargo run -p flowplan-app --release
+```
+
+In-window controls:
+
+| Key | Action |
+|---|---|
+| W / S | throttle up / down |
+| ↑ / ↓ | stick forward (dive) / back (climb) |
+| ← / → | roll left / right |
+| Q / E | yaw left / right |
+| F / C | flaps extend / retract (4 detents: UP → CLIMB → TAKEOFF → LANDING) |
+| 1 / 2 / 3 | view: first-person / chase / exterior orbit |
+| V | cycle view |
+| L | reset POV look |
+| R | reset vehicle |
+| Esc | quit |
+
+Screen layout: top-left `debug` panel (tick, view, vehicle pos/vel/attitude, controls, flaps), top-right `dynamics` panel (airspeeds, α/β/Cl/Cd, stall alert, forces, moments-with-coupling, engine, aircraft spec), bottom-left `glide` panel (FPA / α / β / VS / L/D) above the attitude-indicator widget, bottom-right cel-shaded orientation gizmo (body axes + velocity + force vectors).
+
+### Flight test bench (Phase 2.4.8)
+
+The bench replays deterministic `FlightScenario`s through the production `SimState::tick` code path, capturing per-tick telemetry CSVs that feed the plotting pipeline. See [TEST_PLAN.md § Flight Test Bench](TEST_PLAN.md#flight-test-bench) for the design.
+
+```bash
+# Headless: runs all scenarios in crates/sim/src/flight_bench.rs::BEAVER_SCENARIOS,
+# writes target/flight-bench/<scenario>.csv, fails on assertion violation.
+cargo test -p flowplan-sim --test flight_bench
+
+# Visual playback of a single scenario (same sim code, scripted inputs, normal
+# renderer + HUD + widgets). Auto-exits when the scenario's duration elapses
+# so shell-driven runs don't need manual intervention.
+cargo run -p flowplan-app --release -- --scenario beaver_cruise_sl
+cargo run -p flowplan-app --release -- --scenario beaver_vy_climb \
+    --log-dir target/flight-bench --exit-on-scenario-end
+
+# Full orchestrator: headless suite → CSVs → PNG plots (requires matplotlib +
+# pandas). Add --visual to additionally watch each scenario in sequence.
+tools/run_flight_bench.sh
+tools/run_flight_bench.sh --visual
+
+# Ad-hoc plot generation from captured CSVs.
+python3 tools/plot_telemetry.py target/flight-bench/*.csv
+
+# List all known scenarios.
+cargo run -p flowplan-app --release -- --help
+```
+
+Scenario names currently in `BEAVER_SCENARIOS`: `beaver_cruise_sl` (level cruise at SL), `beaver_vy_climb` (Vy full-throttle climb), `beaver_stall_clean` (clean stall validation). Expand by appending a `FlightScenario` const to the array; no other wiring needed.
+
+### Quality gate
+
+Every phase ends with the same gate. Not negotiable — nothing moves forward with red bars.
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo bench --bench frame_budget -- --test
+```
+
+### Smoke run
+
+```bash
+# 3-second boot + exit, for CI-style sanity checks.
+timeout 3 env RUST_LOG=info cargo run -p flowplan-app --release
+```
+
+### Optional environment
+
+```bash
+# Silence noisy info logs (most commonly wgpu_hal). The default filter already
+# clamps wgpu_core / wgpu_hal / naga / calloop to warn/error; override with
+# RUST_LOG if you want something different.
+RUST_LOG=info,wgpu=warn cargo run -p flowplan-app --release
+
+# Shader hot-reload (dev-only convenience; feature-gated so release builds don't
+# pull the file-watcher in).
+cargo run -p flowplan-app --release --features shader-hot-reload
+```
 
 ---
 
