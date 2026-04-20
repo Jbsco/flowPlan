@@ -194,11 +194,21 @@ const LIFT_COEFF: f32 = 0.344;
 const AIR_DENSITY_SEA_LEVEL: f32 = 1.225;
 
 /// Zero-lift drag coefficient (clean airframe, no flaps).
+///
+/// Tuning history:
+///   0.028 → "Cessna-retractable slippery"; `L/D_max` ~14 at cruise, plane barely slows
+///           with throttle off (flight-test feedback: "feels like it glides forever").
+///   0.045 → current; `L/D_max` ~11 at cruise, matches typical DHC-2 published figures.
+///           A Beaver is a boxy airframe -- fixed gear, strut-braced wing, radial cowl,
+///           external fuel caps, the whole lineup of parasite-drag sources.
+///
 /// TODO(2.4.5): flap-deployment bumps this by ~0.02 per notch.
-const CD0: f32 = 0.028;
+const CD0: f32 = 0.045;
 
 /// Oswald efficiency factor. Typical for small single-engine aircraft: 0.7-0.85.
-const OSWALD_E: f32 = 0.8;
+/// Set slightly toward the low end (0.75) because strut-bracing and fixed gear
+/// disturb the lift distribution away from ideal elliptical.
+const OSWALD_E: f32 = 0.75;
 
 /// NACA 64A416-shaped `Cl(α)` table adjusted for finite-span whole-wing effects.
 /// `α` in radians; `Cl` dimensionless. Piecewise linearly interpolated. Zero-lift at
