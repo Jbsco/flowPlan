@@ -47,11 +47,16 @@
 //!   nose-left yaw moment (right-rotating prop). Strongest at high α + high power.
 //! CLOSED(2.4.6): Torque roll -- `TORQUE_ROLL_NM_PER_KW` × shaft power → left-roll
 //!   moment reaction in `roll_moment.coupling`.
+//! CLOSED(2.4.7): Density altitude -- `air_density(h)` exponential ISA approximation
+//!   (`ρ₀ · exp(-h/8500)`) feeds both `q = 0.5 ρ V²` and a linear engine-power derate
+//!   by `ρ/ρ_0`. At 3 km `ρ/ρ_0` ≈ 0.71; at 5 km ≈ 0.56.
 //!
 //! Open (still to ship in Phase 2.4):
 //!
-//! TODO(2.4.7): Density altitude -- lift and thrust fall with thinner air. `ρ` varies
-//!   with temperature and pressure altitude; feeds both lift and engine power curves.
+//! TODO(2.4.8): Feel-tuning pass against published DHC-2 POH performance figures
+//!   (cruise speed at published power, climb rate at Vy, stall speeds clean / flaps,
+//!   takeoff distance, max range / endurance). Now that every effect is modeled,
+//!   coefficients get a final reconciliation pass.
 //!
 //! Open (post-2.4):
 //!
@@ -381,8 +386,31 @@ const LIFT_COEFF: f32 = 0.344;
 // --- Airfoil / atmosphere constants (Phase 2.4.2) ---
 
 /// International Standard Atmosphere sea-level density, kg/m³.
-/// TODO(2.4.7): density altitude -- `ρ(h, T) = ρ₀ × (1 - Lh/T₀)^(g M / R L - 1)`.
 const AIR_DENSITY_SEA_LEVEL: f32 = 1.225;
+
+/// Scale height (m) for the exponential atmosphere approximation. `ρ(h) = ρ₀ ·
+/// exp(-h / H)` matches ISA to within a few percent up to ~5 km, which covers the
+/// Beaver's service ceiling. Full barometric formula with temperature lapse is a
+/// post-MVP refinement (would let the player fly into non-ISA-standard days).
+const ATMOSPHERE_SCALE_HEIGHT_M: f32 = 8500.0;
+
+/// Air density (kg/m³) at altitude `h_msl_m` above sea level, using the exponential
+/// atmosphere approximation. Negative altitudes (e.g., below-horizon terrain) are
+/// clamped to sea level.
+#[must_use]
+pub fn air_density(h_msl_m: f32) -> f32 {
+    let h = h_msl_m.max(0.0);
+    AIR_DENSITY_SEA_LEVEL * (-h / ATMOSPHERE_SCALE_HEIGHT_M).exp()
+}
+
+/// Ratio of air density at altitude to sea-level density.
+///
+/// Feeds both the aerodynamic `q = 0.5 ρ V²` scaling and the naturally-aspirated
+/// engine's linear power derate. At 3000 m the ratio is ~0.71; at 5000 m ~0.56.
+#[must_use]
+pub fn density_ratio(h_msl_m: f32) -> f32 {
+    air_density(h_msl_m) / AIR_DENSITY_SEA_LEVEL
+}
 
 /// Zero-lift drag coefficient (clean airframe, no flaps).
 ///
@@ -662,6 +690,14 @@ pub fn compute_forces(
     let forward = state.orientation * Vec3::NEG_Z;
     let speed = state.velocity.length();
 
+    // Density altitude (2.4.7): exponential atmosphere approximation. All aero
+    // forces (q = 0.5 ρ V²) and the naturally-aspirated engine's output scale with
+    // this ratio. Position.y is MSL altitude under the current "y=0 is sea level"
+    // convention; proper density-altitude with non-ISA temp / pressure is a
+    // post-MVP refinement.
+    let rho = air_density(state.position.y);
+    let rho_ratio = rho / AIR_DENSITY_SEA_LEVEL;
+
     // Always-useful diagnostics:
     let horiz_vel = Vec3::new(state.velocity.x, 0.0, state.velocity.z);
     let horiz_fwd = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
@@ -682,11 +718,20 @@ pub fn compute_forces(
             // efficiency, clamped at low airspeed to avoid divergence. Out of fuel →
             // zero power → zero thrust.
             let fuel_ok = state.fuel_gal > 0.0;
-            let engine_power = engine_power_kw(state.controls.throttle, fuel_ok);
+            // Engine altitude derate (2.4.7): naturally-aspirated pistons lose power
+            // roughly linearly with air density. At 3000 m, ρ/ρ_0 ≈ 0.71, so the
+            // R-985's 450 hp drops to ~320 hp; at 5000 m ~56% → ~253 hp. Fuel flow
+            // drops proportionally (BSFC ≈ constant). Prop efficiency is mostly a
+            // function of advance ratio, not density, so we don't derate it.
+            let engine_power_sl = engine_power_kw(state.controls.throttle, fuel_ok);
+            let engine_power = engine_power_sl * rho_ratio;
             let prop_eff = prop_efficiency(speed);
-            let thrust_n = thrust_force_newtons(state.controls.throttle, speed, fuel_ok);
+            // Re-derive thrust from the altitude-corrected power rather than calling
+            // thrust_force_newtons (which would re-compute at sea-level power).
+            let v_eff = speed.max(V_MIN_FOR_THRUST);
+            let thrust_n = prop_eff * engine_power * 1000.0 / v_eff;
             let thrust_vec = forward * (thrust_n / mass_kg);
-            let fuel_gph = fuel_flow_gph(state.controls.throttle, fuel_ok);
+            let fuel_gph = engine_power * BSFC_GPH_PER_KW;
 
             // Airfoil lift + drag polar (2.4.2) with flap deltas (2.4.5) and ground-
             // effect induced-drag reduction (2.4.6). Flaps shift the Cl curve up by
@@ -702,7 +747,7 @@ pub fn compute_forces(
                 flap_deltas.delta_cd0,
                 ge_factor,
             );
-            let q = 0.5 * AIR_DENSITY_SEA_LEVEL * speed * speed;
+            let q = 0.5 * rho * speed * speed;
             let lift_force_n = q * wing_area * cl;
             let drag_force_n = q * wing_area * cd;
 
@@ -760,7 +805,7 @@ pub fn compute_forces(
     // hardcoded Beaver area so the moment equations still produce sensible numbers
     // without an AircraftSpec loaded (e.g., in pure-sim tests).
     let wing_area_moments = spec.map_or(23.23_f32, |s| s.wing_area_m2.max(1.0));
-    let q_dyn = 0.5 * AIR_DENSITY_SEA_LEVEL * speed * speed;
+    let q_dyn = 0.5 * rho * speed * speed;
     let v_damp = speed.max(MIN_DAMPING_AIRSPEED);
 
     // Angular rates in physics convention: pitch > 0 nose-up, roll > 0 right-wing-down,
@@ -1419,6 +1464,134 @@ mod tests {
             out.yaw_moment.coupling.abs() < 1e-3,
             "P-factor + adverse yaw should be zero at V=0 with no aileron; got {}",
             out.yaw_moment.coupling,
+        );
+    }
+
+    // ---- Density altitude (2.4.7) ----
+
+    #[test]
+    fn density_at_sea_level_matches_isa() {
+        assert!((air_density(0.0) - 1.225).abs() < 1e-5);
+    }
+
+    #[test]
+    fn density_drops_with_altitude() {
+        let sl = air_density(0.0);
+        let at_1km = air_density(1000.0);
+        let at_3km = air_density(3000.0);
+        let at_5km = air_density(5000.0);
+        assert!(at_1km < sl);
+        assert!(at_3km < at_1km);
+        assert!(at_5km < at_3km);
+        // Spot-check the exponential approximation at 3 km (~71% of SL).
+        assert!(
+            (density_ratio(3000.0) - 0.702).abs() < 0.02,
+            "3 km density ratio should be ~0.71; got {}",
+            density_ratio(3000.0),
+        );
+    }
+
+    #[test]
+    fn thrust_drops_with_altitude() {
+        use crate::aircraft_spec::{AircraftSpec, EngineSpec, SpeedsSpec};
+        let spec = AircraftSpec {
+            name: "test".into(),
+            inspiration: String::new(),
+            empty_mass_kg: 1000.0,
+            max_mass_wheels_kg: 2313.0,
+            max_mass_floats_kg: 2435.0,
+            wing_area_m2: 23.23,
+            aspect_ratio: 9.2,
+            airfoil_root: String::new(),
+            airfoil_tip: String::new(),
+            engine: EngineSpec {
+                name: String::new(),
+                power_hp: 450.0,
+                cruise_fuel_gph: 27.0,
+            },
+            fuel_capacity_gal: 95.0,
+            speeds: SpeedsSpec {
+                vne_mps: 71.5,
+                cruise_mps: 64.3,
+                vs_clean_mps: 23.25,
+                vso_mps: 21.0,
+                vx_mps: 29.0,
+                vy_mps: 38.0,
+            },
+        };
+        // At SL, full throttle, cruise airspeed.
+        let mut s_sl = zero_state();
+        s_sl.fuel_gal = 50.0;
+        s_sl.velocity = Vec3::new(0.0, 0.0, -55.0);
+        s_sl.controls.throttle = 1.0;
+        s_sl.position = Vec3::new(0.0, 0.0, 0.0);
+        let out_sl = compute_forces(&s_sl, Some(&spec), 1.0 / 120.0, 1000.0);
+
+        // Same state at 3 km altitude.
+        let mut s_alt = s_sl;
+        s_alt.position = Vec3::new(0.0, 3000.0, 0.0);
+        let out_alt = compute_forces(&s_alt, Some(&spec), 1.0 / 120.0, 1000.0);
+
+        // Engine power should be ~71% of sea-level.
+        assert!(
+            out_alt.engine_power_kw < out_sl.engine_power_kw * 0.80,
+            "power should drop significantly at 3 km; SL {} alt {}",
+            out_sl.engine_power_kw,
+            out_alt.engine_power_kw,
+        );
+        // Thrust magnitude should also drop noticeably.
+        let sl_thrust = out_sl.thrust.length();
+        let alt_thrust = out_alt.thrust.length();
+        assert!(
+            alt_thrust < sl_thrust * 0.80,
+            "thrust should drop with altitude; SL {sl_thrust} alt {alt_thrust}",
+        );
+    }
+
+    #[test]
+    fn lift_drops_with_altitude() {
+        use crate::aircraft_spec::{AircraftSpec, EngineSpec, SpeedsSpec};
+        let spec = AircraftSpec {
+            name: "test".into(),
+            inspiration: String::new(),
+            empty_mass_kg: 1000.0,
+            max_mass_wheels_kg: 2313.0,
+            max_mass_floats_kg: 2435.0,
+            wing_area_m2: 23.23,
+            aspect_ratio: 9.2,
+            airfoil_root: String::new(),
+            airfoil_tip: String::new(),
+            engine: EngineSpec {
+                name: String::new(),
+                power_hp: 450.0,
+                cruise_fuel_gph: 27.0,
+            },
+            fuel_capacity_gal: 95.0,
+            speeds: SpeedsSpec {
+                vne_mps: 71.5,
+                cruise_mps: 64.3,
+                vs_clean_mps: 23.25,
+                vso_mps: 21.0,
+                vx_mps: 29.0,
+                vy_mps: 38.0,
+            },
+        };
+        let mut s_sl = zero_state();
+        s_sl.fuel_gal = 50.0;
+        s_sl.velocity = Vec3::new(0.0, 0.0, -55.0);
+        s_sl.orientation = Quat::from_rotation_x(5_f32.to_radians());
+        s_sl.position = Vec3::new(0.0, 0.0, 0.0);
+        let out_sl = compute_forces(&s_sl, Some(&spec), 1.0 / 120.0, 1000.0);
+
+        let mut s_alt = s_sl;
+        s_alt.position = Vec3::new(0.0, 3000.0, 0.0);
+        let out_alt = compute_forces(&s_alt, Some(&spec), 1.0 / 120.0, 1000.0);
+
+        let sl_lift = out_sl.lift.length();
+        let alt_lift = out_alt.lift.length();
+        assert!(
+            alt_lift < sl_lift * 0.80,
+            "lift should drop ~29% at 3 km; SL {sl_lift} alt {alt_lift}",
         );
     }
 

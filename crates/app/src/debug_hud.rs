@@ -325,6 +325,11 @@ fn build_ui(
                 "fuel flow {:5.1} gph   remaining {:5.1} gal",
                 t.fuel_flow_gph, t.fuel_gal,
             ));
+            ui.label(format!(
+                "ρ {:.3} kg/m³  ({:3.0}% SL)",
+                t.air_density_kg_m3,
+                t.density_ratio * 100.0,
+            ));
             let endurance_label = if t.endurance_seconds.is_finite() {
                 let minutes = t.endurance_seconds / 60.0;
                 let hours = minutes / 60.0;

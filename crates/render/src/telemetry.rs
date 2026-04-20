@@ -135,6 +135,14 @@ pub struct Telemetry {
     /// Current flap detent.
     pub flap_position: FlapPosition,
 
+    // --- Density altitude (Phase 2.4.7) ---
+    /// Air density at the aircraft's current altitude (kg/m³). Exponential ISA
+    /// approximation; 1.225 at sea level, ~0.69 at 5 km.
+    pub air_density_kg_m3: f32,
+    /// Ratio `air_density / ρ_0`. Drives both aero-force scaling and engine-power
+    /// derate. HUD shows this as a percentage for a quick sense of "thin air".
+    pub density_ratio: f32,
+
     /// Sim tick this telemetry was derived from. `u64::MAX` reserved for defaults.
     pub tick: u64,
 }
@@ -215,6 +223,9 @@ impl Telemetry {
             stall_state: f.stall_state,
 
             flap_position: ControlsSnapshot::flap_position_from_u32(veh.controls.flap_position),
+
+            air_density_kg_m3: flowplan_sim::flight::air_density(veh.position.y),
+            density_ratio: flowplan_sim::flight::density_ratio(veh.position.y),
 
             tick: snapshot.tick,
         }
