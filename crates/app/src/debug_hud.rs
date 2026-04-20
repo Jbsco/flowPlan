@@ -286,27 +286,32 @@ fn build_ui(
             ui.separator();
             ui.heading("Moments (N·m, physics convention)");
             // Physics convention: +M nose up, +L right-wing-down, +N nose right.
-            // For each axis, show total + (control, stability, damping).
+            // Columns: total + (control, stability, damping, coupling). The coupling
+            // column captures cross-axis effects (2.4.6): P-factor + adverse yaw on
+            // the yaw axis, torque reaction on roll.
             ui.label(format!(
-                "pitch M  {:+8.0}   ctl {:+7.0}  stab {:+7.0}  damp {:+7.0}",
+                "pitch M  {:+8.0}   ctl {:+6.0}  stab {:+6.0}  damp {:+6.0}  cpl {:+6.0}",
                 t.pitch_moment.total(),
                 t.pitch_moment.control,
                 t.pitch_moment.stability,
                 t.pitch_moment.damping,
+                t.pitch_moment.coupling,
             ));
             ui.label(format!(
-                "roll  L  {:+8.0}   ctl {:+7.0}  stab {:+7.0}  damp {:+7.0}",
+                "roll  L  {:+8.0}   ctl {:+6.0}  stab {:+6.0}  damp {:+6.0}  cpl {:+6.0}",
                 t.roll_moment.total(),
                 t.roll_moment.control,
                 t.roll_moment.stability,
                 t.roll_moment.damping,
+                t.roll_moment.coupling,
             ));
             ui.label(format!(
-                "yaw   N  {:+8.0}   ctl {:+7.0}  stab {:+7.0}  damp {:+7.0}",
+                "yaw   N  {:+8.0}   ctl {:+6.0}  stab {:+6.0}  damp {:+6.0}  cpl {:+6.0}",
                 t.yaw_moment.total(),
                 t.yaw_moment.control,
                 t.yaw_moment.stability,
                 t.yaw_moment.damping,
+                t.yaw_moment.coupling,
             ));
             ui.separator();
             ui.heading("Engine");

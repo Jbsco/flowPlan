@@ -139,7 +139,14 @@ fn tick_dynamics(
     dt: f32,
     min_altitude: f32,
 ) -> flight::FlightOutputs {
-    let forces = flight::compute_forces(v, spec, dt);
+    // AGL approximation for ground effect (2.4.6). `min_altitude` is the app-supplied
+    // surface clamp that includes the float offset + a small margin; for ground
+    // effect we want the wing's height above surface, which tracks CG height above
+    // surface closely enough. The float-offset + margin error is ~1-2 m out of a
+    // 14.6 m wingspan, so the induced-drag reduction is slightly overstated near
+    // the surface but converges to the right value above a few meters.
+    let agl = (v.position.y - min_altitude).max(0.0);
+    let forces = flight::compute_forces(v, spec, dt, agl);
 
     // Angular: Euler-integrate angular velocity from the aero-moment-derived
     // angular acceleration, then compose the resulting rotation onto orientation.
@@ -148,6 +155,16 @@ fn tick_dynamics(
     // (physics-convention moments are flipped on Y and Z inside `compute_forces`),
     // so we can simply integrate component-wise.
     v.angular_velocity += forces.angular_accel * dt;
+
+    // Residual rotational damping: a small airspeed-independent decay so angular
+    // velocity bleeds off even at V=0 (where all q-based damping vanishes). Stands
+    // in for gyroscopic stability / wheel friction / air viscosity not modeled in
+    // the aero moments. Time constant ~3 s (`0.3 / s`), so a 1 rad/s spin at V=0
+    // decays to 0.1 rad/s in ~8 s. Real ground contact physics in 2.5 will make
+    // this moot for the on-ground case.
+    let decay = (1.0 - 0.3 * dt).clamp(0.0, 1.0);
+    v.angular_velocity *= decay;
+
     let dq = Quat::from_scaled_axis(v.orientation * v.angular_velocity * dt);
     v.orientation = (dq * v.orientation).normalize();
 

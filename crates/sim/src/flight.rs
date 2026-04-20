@@ -39,18 +39,17 @@
 //!   stall emerges from the model (fixed `Cl_max` + α-driven test).
 //! CLOSED(2.4.5): Flaps -- `flap_aero()` returns per-position Cl / Cd0 / Cm deltas;
 //!   `FlapPosition` on `Controls`, wired to F / C keys.
+//! CLOSED(2.4.6): Ground effect -- `ground_effect_induced_drag_factor()` multiplies
+//!   induced drag by Phillips factor inside 1 wingspan AGL.
+//! CLOSED(2.4.6): Adverse yaw -- `CN_DELTA_A_ADVERSE` couples aileron input into the
+//!   yaw-moment coupling slot; aileron stick → opposite-direction yaw.
+//! CLOSED(2.4.6): P-factor -- `P_FACTOR_ARM_M` applied to thrust × sin(α) as a
+//!   nose-left yaw moment (right-rotating prop). Strongest at high α + high power.
+//! CLOSED(2.4.6): Torque roll -- `TORQUE_ROLL_NM_PER_KW` × shaft power → left-roll
+//!   moment reaction in `roll_moment.coupling`.
 //!
 //! Open (still to ship in Phase 2.4):
 //!
-//! TODO(2.4.6): Ground effect -- within ~1 wingspan of the surface, induced drag
-//!   drops ~30%, giving a cushion on landing and helping heavy takeoffs.
-//! TODO(2.4.6): P-factor -- right-rotating prop's descending blade is on the right,
-//!   yawing the nose left under power + high α. Right rudder pressure required on
-//!   takeoff and at low airspeed / high power.
-//! TODO(2.4.6): Adverse yaw -- aileron deflection creates asymmetric induced drag,
-//!   yawing the nose opposite to the roll direction. Rudder coordination fixes it.
-//! TODO(2.4.6): Torque roll -- engine torque rolls the airframe opposite to prop
-//!   rotation. Small for a single-engine Beaver but visible on power changes.
 //! TODO(2.4.7): Density altitude -- lift and thrust fall with thinner air. `ρ` varies
 //!   with temperature and pressure altitude; feeds both lift and engine power curves.
 //!
@@ -217,6 +216,51 @@ const CN_R: f32 = -0.6;
 /// rather than blow up; clamping to 1 m/s gives sensible behavior without a divide.
 const MIN_DAMPING_AIRSPEED: f32 = 1.0;
 
+// --- Secondary aerodynamic effects (Phase 2.4.6) ------------------------------
+//
+// Adverse yaw: rolling aileron → more lift on one wing → more induced drag on that
+// wing → nose yaws OPPOSITE to the roll direction. Coefficient applied to aileron
+// input, scaled by q·S·b like other yaw moments.
+const CN_DELTA_A_ADVERSE: f32 = -0.012;
+
+// P-factor: descending blade of a right-rotating prop is on the right; at high α +
+// high power, that blade generates asymmetric thrust → nose yaws LEFT. Modeled as an
+// effective moment arm applied to the current thrust force × sin(α). Real prop-disc
+// math is complex; this arm is a tunable lumped parameter.
+const P_FACTOR_ARM_M: f32 = 10.0;
+
+// Torque roll: engine torque reacts against the airframe. Right-rotating prop rolls
+// the airframe LEFT. Magnitude scales with shaft power. At 335 kW max: ~500 N·m
+// rolling-left moment → ~0.1 rad/s² roll accel on I_zz=5000. Noticeable on power
+// changes, easy to counter with slight right aileron.
+const TORQUE_ROLL_NM_PER_KW: f32 = 1.5;
+
+/// Airspeed ramp for rotational-coupling effects (P-factor + torque roll). Below
+/// `COUPLING_AIRSPEED_RAMP_MIN`, these effects are zero; above
+/// `COUPLING_AIRSPEED_RAMP_MAX`, full strength; linear in between. This is a
+/// physics-simplification to prevent the moments from accumulating rotation without
+/// bound on the ground or at hover-like low airspeeds. Real wheels provide the
+/// resistance we don't model until 2.5 contact physics lands; this ramp is the
+/// interim proxy.
+const COUPLING_AIRSPEED_RAMP_MIN: f32 = 5.0;
+const COUPLING_AIRSPEED_RAMP_MAX: f32 = 20.0;
+
+/// Ground-effect induced-drag factor (Phillips approximation).
+///
+/// Induced drag scales by `33·(h/b)^1.5 / (1 + 33·(h/b)^1.5)`. At h/b=0.1 ~49%
+/// reduction, at h/b=0.5 ~8%, above h/b=1 essentially no effect. `h` is altitude
+/// above surface, `b` is wingspan. Returns 1.0 when `agl_m >= wingspan_m` (outside
+/// effective range).
+#[must_use]
+pub fn ground_effect_induced_drag_factor(agl_m: f32, wingspan_m: f32) -> f32 {
+    if agl_m >= wingspan_m || wingspan_m < 1e-3 {
+        return 1.0;
+    }
+    let h_over_b = (agl_m / wingspan_m).max(0.0);
+    let k = 33.0 * h_over_b.powf(1.5);
+    k / (1.0 + k)
+}
+
 /// Stall α (rad). Matches the peak of the `CL_TABLE` (`Cl_max` at 16°). Past this α
 /// the airfoil loses Cl and the center of lift shifts aft.
 const ALPHA_STALL_RAD: f32 = 0.2793;
@@ -228,7 +272,12 @@ const ALPHA_APPROACH_RAD: f32 = 0.2234;
 /// moment when α > `α_stall`, modeling the aft shift of the center of lift at stall.
 /// Real aircraft self-recover from stall partly through this mechanism; small
 /// deviations past stall generate restoring moment proportional to how far past.
-const CM_STALL_PITCH_SLOPE: f32 = -2.0;
+///
+/// Tuning: started at -2.0 in 2.4.4d, reduced to -0.75 in 2.4.6 after flight-test
+/// feedback that stall pitch-down was too severe (combining with `Cm_α × α` it
+/// produced ~107°/s² nose-whip at α=20°). Current value gives ~25°/s² nose-down at
+/// 4° past stall -- clearly a stall, but recoverable.
+const CM_STALL_PITCH_SLOPE: f32 = -0.75;
 
 /// Quarter-span fraction used to sample per-wing α for the wing-drop calculation.
 /// Each wing half's representative α = `α_aircraft` ± `roll_rate` × (`SPAN` × 0.25) / V.
@@ -402,21 +451,28 @@ fn lift_coefficient(alpha_rad: f32) -> f32 {
 
 /// `Cd(α) = Cd0 + Cl² / (π · AR · e)` plus a post-stall parasite-drag spike.
 /// Test-only convenience wrapper; production callers use
-/// `drag_coefficient_with_cd0_offset` directly so the flap `Cd0` contribution is
-/// always applied.
+/// `drag_coefficient_with_induced_factor` directly so the flap `Cd0` contribution and
+/// ground-effect induced-drag factor are always applied.
 #[cfg(test)]
 fn drag_coefficient(alpha_rad: f32, cl: f32, aspect_ratio: f32) -> f32 {
-    drag_coefficient_with_cd0_offset(alpha_rad, cl, aspect_ratio, 0.0)
+    drag_coefficient_with_induced_factor(alpha_rad, cl, aspect_ratio, 0.0, 1.0)
 }
 
-/// Same as `drag_coefficient`, with a `Cd0` offset (flap-deployment contribution).
-fn drag_coefficient_with_cd0_offset(
+/// Full drag model: `Cd0 + Δ Cd0` parasite (with flap increment) plus
+/// `induced_factor × Cl² / (π · AR · e)` (ground effect modifies the induced term)
+/// plus post-stall parasite spike.
+///
+/// `induced_factor` is 1.0 outside ground effect; approaches 0.5 at ~1/10 wingspan
+/// AGL (see `ground_effect_induced_drag_factor`).
+fn drag_coefficient_with_induced_factor(
     alpha_rad: f32,
     cl: f32,
     aspect_ratio: f32,
     delta_cd0: f32,
+    induced_factor: f32,
 ) -> f32 {
-    let induced = cl * cl / (core::f32::consts::PI * aspect_ratio.max(1.0) * OSWALD_E);
+    let induced =
+        induced_factor * cl * cl / (core::f32::consts::PI * aspect_ratio.max(1.0) * OSWALD_E);
     let stall_excess = (alpha_rad.abs() - 0.2793).max(0.0);
     let stall_drag = stall_excess * stall_excess * 2.0;
     CD0 + delta_cd0 + induced + stall_drag
@@ -502,22 +558,28 @@ pub fn fuel_flow_gph(throttle: f32, fuel_available: bool) -> f32 {
 ///
 /// Kept separate so the debug HUD can show which term dominates at the current flight
 /// condition (e.g., "control is strong but damping cancels it", "stability is pulling
-/// you back").
+/// you back", "coupling from P-factor / adverse yaw / torque").
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MomentBreakdown {
     /// Control-surface contribution (elevator / aileron / rudder × stick position).
     pub control: f32,
-    /// Static-stability contribution (α for pitch, β for yaw; zero for roll).
+    /// Static-stability / α-β / flap / post-stall contribution.
     pub stability: f32,
     /// Damping contribution (opposes the current angular rate about this axis).
     pub damping: f32,
+    /// Cross-axis coupling from secondary effects (2.4.6): adverse yaw (aileron →
+    /// yaw), P-factor (throttle × α → yaw), torque reaction (engine power → roll),
+    /// and future slipstream / dihedral effects. Kept separate so the HUD can show
+    /// when the plane's behavior is driven by coupling rather than primary
+    /// aerodynamics.
+    pub coupling: f32,
 }
 
 impl MomentBreakdown {
-    /// Sum of the three contributions.
+    /// Sum of all four contributions.
     #[must_use]
     pub fn total(&self) -> f32 {
-        self.control + self.stability + self.damping
+        self.control + self.stability + self.damping + self.coupling
     }
 }
 
@@ -595,6 +657,7 @@ pub fn compute_forces(
     state: &VehicleState,
     spec: Option<&AircraftSpec>,
     _dt: f32,
+    altitude_agl_m: f32,
 ) -> FlightOutputs {
     let forward = state.orientation * Vec3::NEG_Z;
     let speed = state.velocity.length();
@@ -625,15 +688,20 @@ pub fn compute_forces(
             let thrust_vec = forward * (thrust_n / mass_kg);
             let fuel_gph = fuel_flow_gph(state.controls.throttle, fuel_ok);
 
-            // Airfoil lift + drag polar (2.4.2) with flap deltas (2.4.5). Flaps shift
-            // the Cl curve up by `delta_cl` (camber increase), add a zero-lift drag
-            // penalty, and produce a nose-down pitching moment (applied later to
-            // `pitch_moment.stability`).
+            // Airfoil lift + drag polar (2.4.2) with flap deltas (2.4.5) and ground-
+            // effect induced-drag reduction (2.4.6). Flaps shift the Cl curve up by
+            // `delta_cl` (camber increase) and add a zero-lift drag penalty; ground
+            // effect multiplies the induced portion of drag by Phillips' factor.
             let flap_deltas = flap_aero(state.controls.flaps);
             let cl = lift_coefficient(alpha) + flap_deltas.delta_cl;
-            // Induced drag uses the new (higher) Cl; parasite Cd0 gets the flap add.
-            let cd =
-                drag_coefficient_with_cd0_offset(alpha, cl, aspect_ratio, flap_deltas.delta_cd0);
+            let ge_factor = ground_effect_induced_drag_factor(altitude_agl_m, WING_SPAN_M);
+            let cd = drag_coefficient_with_induced_factor(
+                alpha,
+                cl,
+                aspect_ratio,
+                flap_deltas.delta_cd0,
+                ge_factor,
+            );
             let q = 0.5 * AIR_DENSITY_SEA_LEVEL * speed * speed;
             let lift_force_n = q * wing_area * cl;
             let drag_force_n = q * wing_area * cd;
@@ -724,33 +792,55 @@ pub fn compute_forces(
             * MEAN_CHORD_M
             * (CM_ALPHA * alpha + stall_pitch_addend + flap_cm),
         damping: q_dyn * wing_area_moments * MEAN_CHORD_M * CM_Q * pitch_damp_nd,
+        coupling: 0.0, // Pitch coupling reserved for future slipstream effects.
     };
 
     // Roll: control (aileron) + roll-rate damping (Cl_p) + wing-drop asymmetry when
-    // near or past stall. The wing-drop term samples Cl(α) at the left and right
-    // wing's quarter-span with roll-rate-induced α perturbation, and uses the
-    // non-linear portion of that differential as a destabilizing rolling moment past
-    // stall. In normal flight the Cl curve is near-linear so this term is small;
-    // past stall, Cl drops off sharply on the stalled wing and the imbalance
-    // reinforces the roll instead of damping it (spin entry potential).
+    // near or past stall + torque-reaction roll (2.4.6). The wing-drop term samples
+    // Cl(α) at the left and right wing's quarter-span with roll-rate-induced α
+    // perturbation, and uses the non-linear portion of that differential as a
+    // destabilizing rolling moment past stall. Torque reaction is a LEFT-roll from
+    // the right-rotating prop; scales linearly with shaft power AND by the
+    // airspeed-ramp factor so it doesn't accumulate rotation at V=0.
+    let coupling_airspeed_factor = ((speed - COUPLING_AIRSPEED_RAMP_MIN)
+        / (COUPLING_AIRSPEED_RAMP_MAX - COUPLING_AIRSPEED_RAMP_MIN))
+        .clamp(0.0, 1.0);
     let wing_drop_moment =
         wing_drop_roll_moment(alpha, roll_rate, v_damp, q_dyn, wing_area_moments);
+    let torque_roll_moment =
+        -TORQUE_ROLL_NM_PER_KW * engine_power_kw_out * coupling_airspeed_factor;
     let roll_moment = MomentBreakdown {
         control: q_dyn * wing_area_moments * WING_SPAN_M * CL_DELTA_A * state.controls.roll,
-        stability: wing_drop_moment, // reusing the "stability" slot for post-stall asymmetry
+        stability: wing_drop_moment,
         damping: q_dyn * wing_area_moments * WING_SPAN_M * CL_P * roll_damp_nd,
+        coupling: torque_roll_moment,
     };
 
-    // Yaw: control (rudder) + β-weathervane + yaw-rate damping.
+    // Yaw: control (rudder) + β-weathervane + yaw-rate damping + secondary coupling
+    // (2.4.6: adverse yaw from aileron input + P-factor from throttle × α).
     //
-    // flowplan's `beta = atan2(body_vel.x, forward_speed)` matches aerospace β in sign:
-    // both are positive when the aircraft has rightward lateral body velocity (wind
-    // from the right). With `Cn_β > 0`, the stability term produces a positive N
-    // (nose-right in physics convention) to restore.
+    // Adverse yaw: positive aileron input rolls the aircraft into the turn; the
+    // "into-turn" wing has higher Cl → higher induced drag → nose yaws OPPOSITE the
+    // roll (e.g., right roll stick → nose yaws left unless rudder compensates).
+    //
+    // P-factor: the descending blade of a right-rotating prop is on the right; at
+    // high α + high power, the descending blade bites into more air, producing
+    // asymmetric thrust that yaws the nose LEFT. Strongest at takeoff climb out
+    // (high α, full power); negligible at cruise.
+    let adverse_yaw_moment =
+        q_dyn * wing_area_moments * WING_SPAN_M * CN_DELTA_A_ADVERSE * state.controls.roll;
+    // Approximate thrust this tick from accel (thrust_vec = forward × thrust/mass);
+    // we could also recover thrust_n by multiplying back, but the vector's component
+    // on `forward` is cleaner.
+    let thrust_n_this_tick =
+        thrust.dot(forward) * spec.map_or(1.0, |s| s.max_mass_wheels_kg.max(1.0));
+    let p_factor_moment =
+        -P_FACTOR_ARM_M * thrust_n_this_tick * alpha.sin() * coupling_airspeed_factor;
     let yaw_moment = MomentBreakdown {
         control: q_dyn * wing_area_moments * WING_SPAN_M * CN_DELTA_R * state.controls.yaw,
         stability: q_dyn * wing_area_moments * WING_SPAN_M * CN_BETA * beta,
         damping: q_dyn * wing_area_moments * WING_SPAN_M * CN_R * yaw_damp_nd,
+        coupling: adverse_yaw_moment + p_factor_moment,
     };
 
     // Convert moments (physics convention) to body-frame angular acceleration. flowplan
@@ -845,7 +935,7 @@ mod tests {
 
     #[test]
     fn at_rest_idle_only_gravity() {
-        let out = compute_forces(&zero_state(), None, 1.0 / 120.0);
+        let out = compute_forces(&zero_state(), None, 1.0 / 120.0, 1000.0);
         assert!((out.linear_accel - GRAVITY).length() < 1e-5);
         // At rest (q = 0), every moment term should vanish.
         assert!(out.angular_accel.length() < 1e-6);
@@ -855,7 +945,7 @@ mod tests {
     fn full_throttle_pushes_forward() {
         let mut s = zero_state();
         s.controls.throttle = 1.0;
-        let out = compute_forces(&s, None, 1.0 / 120.0);
+        let out = compute_forces(&s, None, 1.0 / 120.0, 1000.0);
         // Forward is -Z at identity orientation, so horizontal component is negative Z.
         assert!(out.linear_accel.z < -1.0);
     }
@@ -865,7 +955,7 @@ mod tests {
         // No-spec placeholder path: lift = horiz_airspeed * LIFT_COEFF.
         let mut s = zero_state();
         s.velocity = Vec3::new(0.0, 0.0, -20.0);
-        let out = compute_forces(&s, None, 1.0 / 120.0);
+        let out = compute_forces(&s, None, 1.0 / 120.0, 1000.0);
         assert!(
             out.linear_accel.y > GRAVITY.y + 3.0,
             "y accel {}",
@@ -943,7 +1033,7 @@ mod tests {
                 vy_mps: 38.0,
             },
         };
-        let out = compute_forces(&s, Some(&spec), 1.0 / 120.0);
+        let out = compute_forces(&s, Some(&spec), 1.0 / 120.0, 1000.0);
         assert!(out.lift.length() > 1.0, "lift should be non-trivial");
         let dot = out.lift.dot(s.velocity) / (out.lift.length() * s.velocity.length());
         assert!(
@@ -974,7 +1064,7 @@ mod tests {
         let mut s = zero_state();
         s.velocity = Vec3::new(0.0, 0.0, -50.0);
         s.controls.pitch = 1.0;
-        let out = compute_forces(&s, None, 1.0 / 120.0);
+        let out = compute_forces(&s, None, 1.0 / 120.0, 1000.0);
         assert!(
             out.pitch_moment.control > 0.0,
             "pitch control moment should be positive with nose-up stick; got {}",
@@ -994,7 +1084,7 @@ mod tests {
         let mut s = zero_state();
         s.velocity = Vec3::new(0.0, 0.0, -50.0);
         s.controls.yaw = 1.0;
-        let out = compute_forces(&s, None, 1.0 / 120.0);
+        let out = compute_forces(&s, None, 1.0 / 120.0, 1000.0);
         assert!(
             out.yaw_moment.control > 0.0,
             "yaw control moment positive for nose-right pedal; got {}",
@@ -1014,7 +1104,7 @@ mod tests {
         let mut s = zero_state();
         s.velocity = Vec3::new(0.0, 0.0, -50.0);
         s.controls.roll = 1.0;
-        let out = compute_forces(&s, None, 1.0 / 120.0);
+        let out = compute_forces(&s, None, 1.0 / 120.0, 1000.0);
         assert!(
             out.roll_moment.control > 0.0,
             "roll control moment positive for right-wing-down stick; got {}",
@@ -1035,7 +1125,7 @@ mod tests {
         let mut s = zero_state();
         s.velocity = Vec3::new(0.0, 0.0, -50.0);
         s.angular_velocity = Vec3::new(0.5, 0.0, 0.0); // 0.5 rad/s pitch-up
-        let out = compute_forces(&s, None, 1.0 / 120.0);
+        let out = compute_forces(&s, None, 1.0 / 120.0, 1000.0);
         assert!(
             out.pitch_moment.damping < 0.0,
             "pitch damping should be negative when pitching up; got {}",
@@ -1051,7 +1141,7 @@ mod tests {
         let mut s = zero_state();
         s.orientation = Quat::from_rotation_y(10_f32.to_radians());
         s.velocity = Vec3::new(0.0, 0.0, -50.0);
-        let out = compute_forces(&s, None, 1.0 / 120.0);
+        let out = compute_forces(&s, None, 1.0 / 120.0, 1000.0);
         assert!(
             out.yaw_moment.stability > 0.0,
             "weathervane moment should be nose-right for nose-left-of-velocity; got {}",
@@ -1071,7 +1161,7 @@ mod tests {
         let mut s = zero_state();
         s.orientation = Quat::from_rotation_x(10_f32.to_radians());
         s.velocity = Vec3::new(0.0, 0.0, -50.0);
-        let out = compute_forces(&s, None, 1.0 / 120.0);
+        let out = compute_forces(&s, None, 1.0 / 120.0, 1000.0);
         assert!(
             out.pitch_moment.stability < 0.0,
             "α-stability should be nose-down for α>0; got {}",
@@ -1207,6 +1297,171 @@ mod tests {
         );
     }
 
+    // ---- Secondary aero effects (2.4.6) ----
+
+    #[test]
+    fn ground_effect_saturates_outside_one_wingspan() {
+        let span = 14.63;
+        assert!((ground_effect_induced_drag_factor(span, span) - 1.0).abs() < 1e-5);
+        assert!((ground_effect_induced_drag_factor(span * 2.0, span) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn ground_effect_cuts_induced_drag_close_to_surface() {
+        let span = 14.63;
+        let f_very_low = ground_effect_induced_drag_factor(1.0, span);
+        let f_quarter = ground_effect_induced_drag_factor(span * 0.25, span);
+        let f_half = ground_effect_induced_drag_factor(span * 0.5, span);
+        assert!(
+            f_very_low < 0.7,
+            "1 m AGL factor should be <0.7; got {f_very_low}",
+        );
+        assert!(f_quarter < 0.9);
+        assert!(f_half < 1.0 && f_half > 0.85);
+    }
+
+    #[test]
+    fn adverse_yaw_opposes_roll_input() {
+        let mut s = zero_state();
+        s.velocity = Vec3::new(0.0, 0.0, -55.0);
+        s.controls.roll = 1.0;
+        let out = compute_forces(&s, None, 1.0 / 120.0, 1000.0);
+        // Adverse yaw lives in yaw_moment.coupling. No-spec path has no P-factor
+        // (legacy thrust constant), so coupling here is pure adverse yaw.
+        assert!(
+            out.yaw_moment.coupling < 0.0,
+            "adverse yaw should be negative for positive aileron; got {}",
+            out.yaw_moment.coupling,
+        );
+    }
+
+    #[test]
+    fn p_factor_yaws_nose_left_at_high_alpha_with_power() {
+        use crate::aircraft_spec::{AircraftSpec, EngineSpec, SpeedsSpec};
+        let spec = AircraftSpec {
+            name: "test".into(),
+            inspiration: String::new(),
+            empty_mass_kg: 1000.0,
+            max_mass_wheels_kg: 2313.0,
+            max_mass_floats_kg: 2435.0,
+            wing_area_m2: 23.23,
+            aspect_ratio: 9.2,
+            airfoil_root: String::new(),
+            airfoil_tip: String::new(),
+            engine: EngineSpec {
+                name: String::new(),
+                power_hp: 450.0,
+                cruise_fuel_gph: 27.0,
+            },
+            fuel_capacity_gal: 95.0,
+            speeds: SpeedsSpec {
+                vne_mps: 71.5,
+                cruise_mps: 64.3,
+                vs_clean_mps: 23.25,
+                vso_mps: 21.0,
+                vx_mps: 29.0,
+                vy_mps: 38.0,
+            },
+        };
+        let mut s = zero_state();
+        s.fuel_gal = 50.0;
+        s.orientation = Quat::from_rotation_x(12_f32.to_radians());
+        s.velocity = Vec3::new(0.0, 0.0, -30.0);
+        s.controls.throttle = 1.0;
+        let out = compute_forces(&s, Some(&spec), 1.0 / 120.0, 1000.0);
+        assert!(
+            out.yaw_moment.coupling < 0.0,
+            "P-factor at high α + full power should yaw nose left; coupling = {}",
+            out.yaw_moment.coupling,
+        );
+    }
+
+    #[test]
+    fn coupling_ramps_off_at_low_airspeed() {
+        use crate::aircraft_spec::{AircraftSpec, EngineSpec, SpeedsSpec};
+        let spec = AircraftSpec {
+            name: "test".into(),
+            inspiration: String::new(),
+            empty_mass_kg: 1000.0,
+            max_mass_wheels_kg: 2313.0,
+            max_mass_floats_kg: 2435.0,
+            wing_area_m2: 23.23,
+            aspect_ratio: 9.2,
+            airfoil_root: String::new(),
+            airfoil_tip: String::new(),
+            engine: EngineSpec {
+                name: String::new(),
+                power_hp: 450.0,
+                cruise_fuel_gph: 27.0,
+            },
+            fuel_capacity_gal: 95.0,
+            speeds: SpeedsSpec {
+                vne_mps: 71.5,
+                cruise_mps: 64.3,
+                vs_clean_mps: 23.25,
+                vso_mps: 21.0,
+                vx_mps: 29.0,
+                vy_mps: 38.0,
+            },
+        };
+        let mut s = zero_state();
+        s.fuel_gal = 50.0;
+        s.controls.throttle = 1.0;
+        // Stationary on ground. Without the ramp, torque and P-factor would still
+        // fire; with it, coupling on both axes must be zero.
+        let out = compute_forces(&s, Some(&spec), 1.0 / 120.0, 0.0);
+        assert!(
+            out.roll_moment.coupling.abs() < 1e-3,
+            "torque roll should be zero at V=0; got {}",
+            out.roll_moment.coupling,
+        );
+        assert!(
+            out.yaw_moment.coupling.abs() < 1e-3,
+            "P-factor + adverse yaw should be zero at V=0 with no aileron; got {}",
+            out.yaw_moment.coupling,
+        );
+    }
+
+    #[test]
+    fn torque_roll_is_negative_under_power() {
+        use crate::aircraft_spec::{AircraftSpec, EngineSpec, SpeedsSpec};
+        let spec = AircraftSpec {
+            name: "test".into(),
+            inspiration: String::new(),
+            empty_mass_kg: 1000.0,
+            max_mass_wheels_kg: 2313.0,
+            max_mass_floats_kg: 2435.0,
+            wing_area_m2: 23.23,
+            aspect_ratio: 9.2,
+            airfoil_root: String::new(),
+            airfoil_tip: String::new(),
+            engine: EngineSpec {
+                name: String::new(),
+                power_hp: 450.0,
+                cruise_fuel_gph: 27.0,
+            },
+            fuel_capacity_gal: 95.0,
+            speeds: SpeedsSpec {
+                vne_mps: 71.5,
+                cruise_mps: 64.3,
+                vs_clean_mps: 23.25,
+                vso_mps: 21.0,
+                vx_mps: 29.0,
+                vy_mps: 38.0,
+            },
+        };
+        let mut s = zero_state();
+        s.fuel_gal = 50.0;
+        s.velocity = Vec3::new(0.0, 0.0, -55.0);
+        s.controls.throttle = 1.0;
+        let out = compute_forces(&s, Some(&spec), 1.0 / 120.0, 1000.0);
+        assert!(
+            out.roll_moment.coupling < 0.0,
+            "torque roll should be negative under power; got {}",
+            out.roll_moment.coupling,
+        );
+    }
+
     // ---- Flaps (2.4.5) ----
 
     #[test]
@@ -1262,10 +1517,10 @@ mod tests {
         s.fuel_gal = 50.0;
         // Clean.
         s.controls.flaps = FlapPosition::Up;
-        let out_clean = compute_forces(&s, Some(&spec), 1.0 / 120.0);
+        let out_clean = compute_forces(&s, Some(&spec), 1.0 / 120.0, 1000.0);
         // Landing.
         s.controls.flaps = FlapPosition::Landing;
-        let out_land = compute_forces(&s, Some(&spec), 1.0 / 120.0);
+        let out_land = compute_forces(&s, Some(&spec), 1.0 / 120.0, 1000.0);
         assert!(
             out_land.cl > out_clean.cl + 0.2,
             "landing flaps should add ≥0.2 to Cl; clean {} land {}",
@@ -1320,7 +1575,7 @@ mod tests {
         let mut s = zero_state();
         s.velocity = Vec3::new(0.0, 0.0, -40.0);
         s.orientation = Quat::from_rotation_x(20_f32.to_radians());
-        let out = compute_forces(&s, None, 1.0 / 120.0);
+        let out = compute_forces(&s, None, 1.0 / 120.0, 1000.0);
         assert_eq!(out.stall_state, StallState::Stall);
         // Pre-stall only Cm_α × α would give a stability moment of size
         // |CM_ALPHA × α × q × S × c|. The post-stall addend should drive |stability|
@@ -1342,7 +1597,7 @@ mod tests {
         let mut s = zero_state();
         s.velocity = Vec3::new(0.0, 0.0, -55.0);
         s.angular_velocity.z = -0.3; // rolling right, our storage convention
-        let out = compute_forces(&s, None, 1.0 / 120.0);
+        let out = compute_forces(&s, None, 1.0 / 120.0, 1000.0);
         // stability slot on roll moment is repurposed for wing drop.
         assert!(
             out.roll_moment.stability.abs() < 100.0,
@@ -1363,7 +1618,7 @@ mod tests {
         s.velocity = Vec3::new(0.0, 0.0, -30.0);
         s.orientation = Quat::from_rotation_x(18_f32.to_radians()); // past stall
         s.angular_velocity.z = -0.5; // storage: negative Z = roll right = ω_roll +
-        let out = compute_forces(&s, None, 1.0 / 120.0);
+        let out = compute_forces(&s, None, 1.0 / 120.0, 1000.0);
         assert_eq!(out.stall_state, StallState::Stall);
         // Non-zero wing-drop past stall. Direction verifies reinforcement.
         assert!(
@@ -1379,12 +1634,12 @@ mod tests {
         let mut slow = zero_state();
         slow.velocity = Vec3::new(0.0, 0.0, -25.0);
         slow.controls.pitch = 1.0;
-        let out_slow = compute_forces(&slow, None, 1.0 / 120.0);
+        let out_slow = compute_forces(&slow, None, 1.0 / 120.0, 1000.0);
 
         let mut fast = zero_state();
         fast.velocity = Vec3::new(0.0, 0.0, -50.0);
         fast.controls.pitch = 1.0;
-        let out_fast = compute_forces(&fast, None, 1.0 / 120.0);
+        let out_fast = compute_forces(&fast, None, 1.0 / 120.0, 1000.0);
 
         let ratio = out_fast.pitch_moment.control / out_slow.pitch_moment.control;
         assert!(
