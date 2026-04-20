@@ -82,6 +82,40 @@ When two PRs both try to narrow the same tolerance, the second one must re-run t
 
 For the full space of intended scenarios — including which are ready-to-author today and which are blocked on 2.5 contact physics / 3.2 weather / Phase 4 damage — see [behavior-taxonomy.md](behavior-taxonomy.md). The taxonomy is the authoritative list of what the bench *should* cover; this matrix tracks what it *does* cover.
 
+## Capability vs envelope-limit assertion patterns
+
+A scenario is one or the other. Don't mix.
+
+**Capability pattern** (aircraft is IN its flight envelope):
+
+| Assertion | Use | Example |
+|-----------|-----|---------|
+| `AltitudeStableAtEnd { tol_m }` | aircraft must hold altitude | cruise, steady turn |
+| `AirspeedAtEnd { target, tol }` | aircraft must hold target speed | cruise, climb, glide |
+| `ClimbRateAtEnd { target, tol }` | aircraft must achieve expected ROC | climb scenarios |
+| `NeverStalls` | must not stall (free sanity) | every capability scenario |
+| `FinalFuelWithin { min, max }` | burn rate match | endurance scenarios |
+| `FinalAirspeedWithin { min, max }` | V bounded in a band | cruise speed-cap |
+| `MinAirspeedNearTarget { target, tol }` | stall speed matches POH | stall scenarios (capability variant) |
+
+**Envelope-limit pattern** (aircraft is being pushed PAST its envelope):
+
+| Assertion | Use | Example |
+|-----------|-----|---------|
+| `EventuallyStalls` | aircraft must fail as expected | over-bank, zoom-climb-to-stall |
+| `MinAirspeedNearTarget { target: Vs, wide tol }` | stall at expected speed | stall-to-Vs (still a capability with wide tol) |
+
+**What envelope-limit scenarios must NOT assert:**
+
+- `AltitudeStableAtEnd` — descent is expected
+- `AirspeedAtEnd` matching a cruise speed — energy bleed is expected
+- `ClimbRateAtEnd` — aircraft likely losing altitude, not climbing
+- `NeverStalls` — the point is that it DOES stall
+
+If you find yourself writing these assertions on a limit scenario, you've mis-classified it. Promote it to capability OR demote your targets; don't both.
+
+**Pairing rule:** whenever you author a capability scenario at a corner of the envelope (max bank, max climb rate, max airspeed, max weight), ask "should there be a paired envelope-limit scenario that tests failure mode?" Often the answer is yes — regression guards against silent over-tuning.
+
 ## Isolation discipline (one assertion = one question)
 
 When authoring a new scenario, the assertion set must answer exactly what the scenario is testing. Common mistakes:

@@ -209,7 +209,7 @@ const CM_Q: f32 = -25.0;
 /// training-aircraft dihedral (-0.10+).
 const CL_DELTA_A: f32 = 0.075;
 const CL_P: f32 = -0.5;
-const CL_BETA: f32 = -0.08;
+const CL_BETA: f32 = -0.05;
 
 /// Yaw: weathervane stability (`Cn_β > 0`) yaws nose toward velocity when sideslip
 /// develops; rudder command (`Cn_δr > 0`) yaws nose right for positive pedal; damping
@@ -240,6 +240,18 @@ const CN_DELTA_A_ADVERSE: f32 = -0.012;
 // effective moment arm applied to the current thrust force × sin(α). Real prop-disc
 // math is complex; this arm is a tunable lumped parameter.
 const P_FACTOR_ARM_M: f32 = 10.0;
+
+// Spiraling slipstream: a right-rotating propeller imparts rotational swirl to its
+// wash. The swirl hits the vertical tail (typically on its left side for a top-mounted
+// prop), pushing the tail right and yawing the nose LEFT. Effect is strongest at
+// low V + high power (swirl velocity dominates over freestream); weakest at cruise.
+// This is DIFFERENT from P-factor and torque roll — it's the third classic "left-
+// turning tendency" that explains why Beaver pilots hold substantial right rudder
+// at takeoff / initial climb even after P-factor alone is accounted for.
+// Modeled as: moment = -arm · thrust · V_ref/(V_ref + V), so at V=0 full strength,
+// decays hyperbolically with airspeed.
+const SPIRAL_SLIPSTREAM_ARM_M: f32 = 2.0;
+const SPIRAL_SLIPSTREAM_V_REF: f32 = 20.0;
 
 // Torque roll: engine torque reacts against the airframe. Right-rotating prop rolls
 // the airframe LEFT. Magnitude scales with shaft power. At 335 kW max: ~500 N·m
@@ -902,11 +914,20 @@ pub fn compute_forces(
         thrust.dot(forward) * spec.map_or(1.0, |s| s.max_mass_wheels_kg.max(1.0));
     let p_factor_moment =
         -P_FACTOR_ARM_M * thrust_n_this_tick * alpha.sin() * coupling_airspeed_factor;
+    // Spiraling slipstream: nose-left yaw moment from prop-wash swirl hitting
+    // vertical tail. Scales with thrust, decays with airspeed. The third
+    // left-turning tendency (alongside P-factor + torque roll).
+    let spiral_slipstream_factor =
+        SPIRAL_SLIPSTREAM_V_REF / (SPIRAL_SLIPSTREAM_V_REF + speed.max(1.0));
+    let spiral_slipstream_moment = -SPIRAL_SLIPSTREAM_ARM_M
+        * thrust_n_this_tick
+        * spiral_slipstream_factor
+        * coupling_airspeed_factor;
     let yaw_moment = MomentBreakdown {
         control: q_dyn * wing_area_moments * WING_SPAN_M * CN_DELTA_R * state.controls.yaw,
         stability: q_dyn * wing_area_moments * WING_SPAN_M * CN_BETA * beta,
         damping: q_dyn * wing_area_moments * WING_SPAN_M * CN_R * yaw_damp_nd,
-        coupling: adverse_yaw_moment + p_factor_moment,
+        coupling: adverse_yaw_moment + p_factor_moment + spiral_slipstream_moment,
     };
 
     // Convert moments (physics convention) to body-frame angular acceleration. flowplan

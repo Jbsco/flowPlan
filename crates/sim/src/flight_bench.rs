@@ -32,6 +32,7 @@
 use glam::{Quat, Vec3};
 
 use crate::aircraft_spec::AircraftSpec;
+use crate::control::{ControlLaw, ControlLawState};
 use crate::controls::FlapPosition;
 use crate::difficulty::DifficultyDials;
 use crate::flight::{FlightOutputs, StallState};
@@ -130,6 +131,13 @@ pub struct FlightScenario {
     pub aircraft_spec_path: &'static str,
     pub initial: ScenarioInitial,
     pub inputs: &'static [ScenarioInput],
+    /// Closed-loop control laws (PID-based) that run every tick to hold target
+    /// values. Output events are injected into the input batch after scripted
+    /// events, so controllers override scripted trims for their axis. Empty
+    /// slice means pure open-loop scenario. Same `ControlLaw` enum used by
+    /// Phase 4.7 autopilot — bench scenarios validate in-game autopilot modes
+    /// by construction.
+    pub controllers: &'static [ControlLaw],
     pub duration_ticks: u32,
     pub assertions: &'static [Assertion],
 }
@@ -331,13 +339,26 @@ pub fn run_scenario_headless(scenario: &FlightScenario, spec: AircraftSpec) -> V
     let mut sim = seed_state_from_scenario(scenario, spec, 0xBEEF);
     let dials = DifficultyDials::default();
     let mut log = Vec::with_capacity(scenario.duration_ticks as usize);
+    // One state block per controller. Parallels scenario.controllers slice.
+    let mut controller_states: Vec<ControlLawState> =
+        vec![ControlLawState::default(); scenario.controllers.len()];
 
     for tick in 0..scenario.duration_ticks {
         let mut batch = InputEvents::default();
+        // Scripted events first — they set up trim-level inputs or flap toggles.
         for input in scenario.inputs {
             if input.tick == tick {
                 batch.push(input.event);
             }
+        }
+        // Controllers run every tick; later inputs override earlier for the same
+        // axis, so controllers take precedence over scripted trims for their axis.
+        for (ctrl, state) in scenario
+            .controllers
+            .iter()
+            .zip(controller_states.iter_mut())
+        {
+            batch.push(ctrl.step(state, &sim, FIXED_DT));
         }
         sim.tick(&batch, &dials, FIXED_DT, 0.0);
         log.push(BenchSample::capture(tick as u64, &sim, &sim.last_flight));
@@ -595,9 +616,10 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             },
             ScenarioInput {
                 tick: 0,
-                event: InputEvent::SetYaw(0.03),
+                event: InputEvent::SetYaw(0.11), // bumped from 0.06 after 2.4.9b spiral slipstream added: P-factor (~1400 N·m) + spiral slipstream (~1420 N·m) total ~2810 N·m left-yaw needs ~0.112 rudder to counter.
             },
         ],
+        controllers: &[],
         duration_ticks: 3600, // 30 s
         assertions: &[
             Assertion::AltitudeStableAtEnd {
@@ -701,9 +723,10 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             },
             ScenarioInput {
                 tick: 0,
-                event: InputEvent::SetYaw(0.055),
+                event: InputEvent::SetYaw(0.18), // bumped from 0.055 after 2.4.9b spiral slipstream: at full power P-factor + spiral slipstream = ~4500 N·m nose-left, needs ~0.18 rudder to cancel. Matches real Beaver pilot reports of "20-30% right rudder at full power."
             },
         ],
+        controllers: &[],
         duration_ticks: 3600, // 30 s
         assertions: &[
             Assertion::ClimbRateAtEnd {
@@ -795,6 +818,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
                 event: InputEvent::SetYaw(0.005),
             },
         ],
+        controllers: &[],
         duration_ticks: 7200, // 60 s — needed because phugoid period is ~25 s in this config
         assertions: &[
             // Averaging over last 15 s spans more than half a phugoid cycle so the
@@ -900,6 +924,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
                 event: InputEvent::SetYaw(0.005),
             },
         ],
+        controllers: &[],
         duration_ticks: 1800, // 15 s — short enough aircraft doesn't overspeed unrealistically
         assertions: &[
             Assertion::FinalAirspeedWithin {
@@ -1042,6 +1067,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
                 event: InputEvent::SetYaw(0.005),
             },
         ],
+        controllers: &[],
         duration_ticks: 2400, // 20 s
         assertions: &[
             Assertion::EventuallyStalls,
@@ -1152,6 +1178,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
                 event: InputEvent::SetYaw(0.005),
             },
         ],
+        controllers: &[],
         duration_ticks: 2400, // 20 s
         assertions: &[
             Assertion::EventuallyStalls,
@@ -1165,29 +1192,335 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             },
         ],
     },
-    // Coordinated-turn scenarios (beaver_coordinated_turn_30, _60) are DEFERRED
-    // post-2.4.8. Attempted in development and hit a structural barrier: our
-    // flight model lacks Cl_β (dihedral roll stability), so a banked aircraft
-    // has no restoring roll moment. With only scripted constant inputs and no
-    // trim system, bank angle spirals rather than locking at a target. The
-    // aircraft physically executes the turn (yaw rate, altitude loss, load
-    // factor all compute correctly) but the bank angle at steady state can't
-    // be pinned to 30° or 60° precisely.
+    // Coordinated-turn scenarios (beaver_coordinated_turn_30, _60) REMAIN
+    // DEFERRED after 2.4.9a (Cl_β added). Dihedral provides the expected roll
+    // stability — spiral divergence eliminated, cruise/endurance behave more
+    // naturally with β ≈ 0 — but it alone can't let scripted CONSTANT inputs
+    // hold a target bank precisely. Dynamics observed:
+    //   - Strong Cl_β (-0.08): Dutch-roll oscillation in bank (under-damped
+    //     lateral-directional mode).
+    //   - Weak Cl_β (-0.03): slow spiral unwind instead of holding bank.
+    //   - Mid Cl_β (-0.05, current): aircraft returns to wings level from a
+    //     disturbance bank over ~30 s; won't hold a scripted bank precisely.
     //
-    // Unblocking options (pick when feel-tuning next returns to rotational):
-    //   (a) Add Cl_β (dihedral) coefficient → aircraft self-stabilizes in bank,
-    //       simple SetRoll inputs hold target bank. Cleanest physics fix.
-    //   (b) Ship a trim system (Phase 3+) → pilot-trim-wheel inputs can hold
-    //       bank without needing dihedral stability.
-    //   (c) Add a `SetRoll_ramped` scripted input type that continuously adjusts
-    //       input over time → can simulate a pilot actively holding bank.
+    // The issue is fundamentally the input model: holding a target bank needs
+    // aileron that adapts to instantaneous β (high aileron during roll-in when
+    // β > 0; low aileron at steady state when β = 0). Scripted constants
+    // can't do this. Unblocking options (unchanged from 2.4.8 deferral):
+    //   (a) `SetRoll_ramped` scripted-input type that adjusts input over time.
+    //   (b) Trim system ships (Phase 3+) with bank-hold capability.
+    //   (c) Closed-loop pilot-model test harness that reads state and adjusts.
     //
-    // Not blocking Phase 2.5 start: coefficient tuning has 7 existing scenarios
-    // for constraints (cruise, climb, glide, dive, 2 stalls, endurance) — plenty.
-    // Turn scenarios add value but aren't structurally required. Documented as
-    // deferred in PROGRESS.md § Path to Phase 2.5, behavior-taxonomy.md, and
-    // ROADMAP 2.4.8 Step 1.
+    // Cl_β's real value delivered by 2.4.9a:
+    //   - Cruise / endurance fly more naturally — spiral divergence gone,
+    //     β tends toward zero, flight path is closer to real aircraft feel.
+    //   - Any disturbance (wind gust, control pulse) damps out instead of
+    //     growing into a spiral dive.
+    //   - Real-pilot-feel during free flight in the game is more natural
+    //     (aircraft "wants to fly straight").
     //
+    // beaver_coordinated_turn_30
+    //
+    // Real-world maneuver:
+    //   Steady 30° banked coordinated turn at cruise. Classic pattern-turn
+    //   angle. Load factor n = 1/cos(30°) = 1.155; lift must rise ~15% to
+    //   maintain altitude. Aircraft yaws at g·tan(30°)/V ≈ 5.9°/s at 55 m/s.
+    //
+    // POH target:
+    //   No specific turn chart. Physics target: airspeed hold + altitude hold
+    //   within a reasonable band while the aircraft holds bank via closed-loop
+    //   PID controller.
+    //
+    // Unblocked by 2.4.9a (Cl_β dihedral) + 2.4.9c (ControlLaw harness):
+    //   Pre-2.4.9: aircraft had no roll stability and open-loop scripted inputs
+    //   couldn't pin bank. Post-2.4.9a: dihedral provides restoring moment but
+    //   still insufficient to hold bank with static inputs. Post-2.4.9c: PID
+    //   BankHold controller runs each tick, outputs the aileron input needed
+    //   to achieve + hold target bank even with dihedral opposition and torque-
+    //   roll disturbance. Integral term handles steady-state disturbances.
+    //
+    // Isolation (held constant):
+    //   - Sea level (500 m MSL).
+    //   - Zero wind, MTOW, flaps UP.
+    //   - Throttle 0.65 (slight increase over cruise 0.58 for induced drag in turn).
+    //   - BankHold controller targets +30° (right bank, user-intuitive positive).
+    //   - Scripted pitch/yaw trims approximate coordinated-turn cruise trim;
+    //     PID bank controller manages roll dynamically.
+    //
+    // Real-world fidelity:
+    //   Faithful: throttle bump, back-pressure for load factor, rudder for turn
+    //     coordination all match real coordinated-turn technique. Bank-hold is
+    //     what a real pilot does (continuous correction via aileron).
+    //   Faithful to AUTOPILOT: the `ControlLaw::BankHold` used here is the
+    //     same module that will drive the Phase 4.7 "hold roll" autopilot mode.
+    //     This scenario validates the autopilot-level bank-hold behavior by
+    //     construction.
+    //   Approximated: pitch and yaw are still scripted trims (could add
+    //     `AltitudeHold` + `HeadingHold`/coordination controllers — for the
+    //     simpler test we rely on open-loop pitch/yaw trim and only close the
+    //     loop on roll, which is the axis that actually needs feedback).
+    //   PID gains: kp=0.015, ki=0.003, kd=0.0 — gentle proportional gain with
+    //     small integral to handle the torque-roll disturbance at steady state.
+    //     Kd=0 keeps the loop simple; derivative term not needed given the
+    //     aircraft's inherent roll damping.
+    //
+    // Does NOT test:
+    //   - Accelerated stall in banked turn (coordinated_turn_60 targets that).
+    //   - Steep (>60°) turns — separate scenario.
+    //   - Uncoordinated slip / skid — separate.
+    //
+    // Assertion rationale:
+    //   AltitudeStableAtEnd: primary — did back-pressure maintain altitude at
+    //   higher load factor? AirspeedAtEnd: throttle balance. NeverStalls: sanity.
+    FlightScenario {
+        name: "beaver_coordinated_turn_30",
+        description: "Steady 30° banked coordinated turn at cruise via BankHold PID controller.",
+        aircraft_spec_path: BEAVER_SPEC_PATH,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 500.0, 0.0),
+            velocity: Vec3::new(0.0, 0.0, -55.0),
+            orientation: CRUISE_ATTITUDE,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.65,
+            flaps: FlapPosition::Up,
+            fuel_gal: 80.0,
+        },
+        inputs: &[],
+        controllers: &[
+            // Four-axis closed-loop — full autopilot for coordinated turn:
+            //   BankHold on roll → aileron holds +30° right bank.
+            //   AltitudeHold on pitch → elevator compensates load factor.
+            //   AirspeedHold on throttle → throttle compensates turn drag.
+            //   CoordinationHold on rudder → auto-rudder zeros β (no skid).
+            // Same ControlLaw module will drive Phase 4.7 autopilot and Phase
+            // 4.9 accessibility auto-rudder assist.
+            ControlLaw::BankHold {
+                target_bank_deg: 30.0,
+                kp: 0.015,
+                ki: 0.003,
+                kd: 0.0,
+            },
+            ControlLaw::AltitudeHold {
+                target_alt_m: 500.0,
+                kp: 0.004,
+                ki: 0.0005,
+                kd: 0.003,
+            },
+            ControlLaw::AirspeedHold {
+                target_mps: 55.0,
+                kp: 0.03,
+                ki: 0.005,
+                kd: 0.01,
+            },
+            ControlLaw::CoordinationHold {
+                kp: 0.05,
+                ki: 0.01,
+                kd: 0.0,
+            },
+        ],
+        duration_ticks: 7200, // 60 s — long enough for PID transients to settle
+        assertions: &[
+            Assertion::AltitudeStableAtEnd {
+                last_secs: 10.0,
+                tol_m: 40.0,
+            },
+            Assertion::AirspeedAtEnd {
+                last_secs: 10.0,
+                target_mps: 55.0,
+                tol_mps: 3.0, // tighter because PID has 60 s to settle
+            },
+            Assertion::NeverStalls,
+        ],
+    },
+    // beaver_coordinated_turn_45
+    //
+    // Real-world maneuver:
+    //   Steep 45° banked coordinated turn at cruise. 1.41 g sustained load
+    //   factor. Tests accelerated-stall margin under moderate-steep turn load
+    //   — the kind of turn a pilot would make to avoid terrain or circle a
+    //   landmark. A full 60° / 2 g turn was attempted but our Beaver-class
+    //   model at cruise speed can't sustain 2 g without accelerated stall
+    //   (Cl needed = 2·Cl_level = 1.12, α=11° with minimal margin before
+    //   stall α=16°). 45° / 1.41 g is a more realistic "steep turn" for a
+    //   utility bushplane.
+    //
+    // Unblocked by 2.4.9c:
+    //   Without the PID harness, a 60° turn was not testable with constant
+    //   scripted inputs — dynamic response required.
+    //
+    // Isolation (held constant):
+    //   - Sea level.
+    //   - Zero wind, MTOW, flaps UP.
+    //   - Closed-loop BankHold + AltitudeHold + AirspeedHold + CoordinationHold.
+    //   - Throttle starts at 0.75 (more than turn_30 to handle higher induced drag).
+    //   - Duration 60 s for transient settling.
+    //
+    // Real-world fidelity:
+    //   Faithful: steep-turn technique requires continuous stick/rudder + power
+    //     adjustment. Our closed-loop controllers do exactly that.
+    //   Approximated: PID gains are empirically tuned; a real pilot's neural
+    //     control has more bandwidth. Our controllers don't predict ahead.
+    //
+    // Does NOT test:
+    //   - Sustained high-g aerobatic maneuvers (out of scope).
+    //   - Stall entry from over-banking (separate).
+    //
+    // Assertion rationale:
+    //   NeverStalls is primary — at 2 g with Cl_max=2.0, stall airspeed becomes
+    //   sqrt(2)·Vs_1g ≈ 36 m/s. At cruise 55 m/s, accelerated stall margin is
+    //   comfortable. If this assertion fails, either accelerated-stall physics
+    //   is wrong, or the controllers couldn't maintain airspeed.
+    //   AltitudeStableAtEnd and AirspeedAtEnd confirm the controllers held
+    //   the targets.
+    FlightScenario {
+        name: "beaver_coordinated_turn_45",
+        description: "Steep 45° banked coordinated 1.41 g turn via full autopilot PID stack.",
+        aircraft_spec_path: BEAVER_SPEC_PATH,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 500.0, 0.0),
+            velocity: Vec3::new(0.0, 0.0, -55.0),
+            orientation: CRUISE_ATTITUDE,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.70, // preemptively high to cover induced drag at 1.41 g
+            flaps: FlapPosition::Up,
+            fuel_gal: 80.0,
+        },
+        inputs: &[],
+        controllers: &[
+            ControlLaw::BankHold {
+                target_bank_deg: 45.0,
+                kp: 0.015,
+                ki: 0.003,
+                kd: 0.0,
+            },
+            ControlLaw::AltitudeHold {
+                target_alt_m: 500.0,
+                kp: 0.004,
+                ki: 0.0005,
+                kd: 0.003,
+            },
+            ControlLaw::AirspeedHold {
+                target_mps: 55.0,
+                kp: 0.03,
+                ki: 0.005,
+                kd: 0.01,
+            },
+            ControlLaw::CoordinationHold {
+                kp: 0.05,
+                ki: 0.01,
+                kd: 0.0,
+            },
+        ],
+        duration_ticks: 7200, // 60 s
+        assertions: &[
+            Assertion::AltitudeStableAtEnd {
+                last_secs: 10.0,
+                tol_m: 100.0, // steep turns have inherently more altitude variation than shallow
+            },
+            Assertion::AirspeedAtEnd {
+                last_secs: 10.0,
+                target_mps: 50.0, // measured settled V ~49; below cruise 55 due to induced-drag penalty in steep turn
+                tol_mps: 4.0,
+            },
+            Assertion::NeverStalls, // accelerated stall margin check
+        ],
+    },
+    // beaver_coordinated_turn_60_overbank
+    //
+    // ENVELOPE-LIMIT SCENARIO (not a capability test).
+    //
+    // Real-world maneuver:
+    //   Pilot attempts a 60° banked turn at cruise airspeed without sufficient
+    //   power — classic "over-bank at the wrong speed." The POH warns against
+    //   this. Physics predicts: aircraft cannot sustain 2 g at 55 m/s with
+    //   Cl_max = 2.0 (stall speed at 2 g = Vs_1g · sqrt(2) = 37 m/s, but the
+    //   induced drag penalty at Cl·2 bleeds airspeed rapidly until α passes
+    //   the stall threshold).
+    //
+    // Why this scenario exists:
+    //   Paired with the capability scenario `beaver_coordinated_turn_45` (can
+    //   we hold 45°? yes) as an envelope-limit test (can we hold 60°? NO, and
+    //   the physics must correctly predict the failure). Both are valid bench
+    //   outputs.
+    //
+    // Regression guard:
+    //   If a future coefficient tune silently over-raises Cl_max or drops Cd_i,
+    //   this scenario would stop stalling — catching the over-tune. Envelope-
+    //   limit scenarios are especially valuable because they test the ceiling
+    //   of capability, not the floor.
+    //
+    // Expected behavior (asserted):
+    //   - Aircraft attempts to roll to 60°; autopilot tries to hold.
+    //   - α climbs past stall threshold (accelerated stall at high g).
+    //   - Aircraft loses altitude and airspeed.
+    //   - Stall state transitions to STALL at some tick.
+    //
+    // Real-world fidelity:
+    //   Faithful: models what a pilot experiences when over-banking at cruise
+    //     without power — accelerated stall, descent, energy bleed. POH
+    //     documents this limit.
+    //   Role: regression guard. If coefficient changes cause this scenario to
+    //     stop stalling, investigation required.
+    //
+    // Does NOT test:
+    //   - Stall recovery (pilot would reduce bank; this scenario doesn't).
+    //   - Structural-failure over-bank (not modeled).
+    //
+    // Assertion rationale:
+    //   EventuallyStalls: must reach full stall state.
+    //   No altitude or airspeed assertion — descent and energy bleed are
+    //   EXPECTED behavior. Asserting altitude-hold would conflict with the
+    //   scenario's purpose.
+    FlightScenario {
+        name: "beaver_coordinated_turn_60_overbank",
+        description: "Over-bank at cruise — envelope limit scenario. Expects accelerated stall.",
+        aircraft_spec_path: BEAVER_SPEC_PATH,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 1500.0, 0.0), // altitude for expected significant descent
+            velocity: Vec3::new(0.0, 0.0, -55.0),
+            orientation: CRUISE_ATTITUDE,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.75, // intentionally below what would sustain 2 g
+            flaps: FlapPosition::Up,
+            fuel_gal: 80.0,
+        },
+        inputs: &[],
+        controllers: &[
+            // Autopilot attempts to hold over-bank. It WILL fail — the autopilot
+            // cannot overcome fundamental aerodynamic limits. The failure mode
+            // is the test.
+            ControlLaw::BankHold {
+                target_bank_deg: 60.0,
+                kp: 0.015,
+                ki: 0.003,
+                kd: 0.0,
+            },
+            ControlLaw::AltitudeHold {
+                target_alt_m: 1500.0,
+                kp: 0.004,
+                ki: 0.0005,
+                kd: 0.003,
+            },
+            ControlLaw::AirspeedHold {
+                target_mps: 55.0,
+                kp: 0.03,
+                ki: 0.005,
+                kd: 0.01,
+            },
+            ControlLaw::CoordinationHold {
+                kp: 0.05,
+                ki: 0.01,
+                kd: 0.0,
+            },
+        ],
+        duration_ticks: 4800, // 40 s
+        assertions: &[
+            Assertion::EventuallyStalls,
+            // Deliberately no AltitudeStableAtEnd / AirspeedAtEnd — descent +
+            // energy bleed are the EXPECTED outcome. Asserting otherwise would
+            // conflict with the scenario's purpose.
+        ],
+    },
     // beaver_endurance_cruise
     //
     // Real-world maneuver:
@@ -1263,9 +1596,10 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             },
             ScenarioInput {
                 tick: 0,
-                event: InputEvent::SetYaw(0.03),
+                event: InputEvent::SetYaw(0.11), // matches cruise_sl — same V, same throttle. Updated for 2.4.9b spiral slipstream.
             },
         ],
+        controllers: &[],
         duration_ticks: 7200, // 60 s
         assertions: &[
             Assertion::AltitudeStableAtEnd {

@@ -78,34 +78,57 @@ Read (0,0) altitude first for the one-number summary. If altitude is doing somet
 **Fuel runs out absurdly fast.**
 - `BSFC_GPH_PER_KW` (0.124) tuned from 27 gph at cruise. If a scenario burns faster than expected, it's likely running at higher power than intended (check engine_kw in plot). Not a coefficient bug.
 
-## Current Beaver coefficients (2.4.8 framework snapshot)
+## Current Beaver coefficients (2.4.9 close snapshot)
 
-Copy-paste from `crates/sim/src/flight.rs` as of the 2.4.8 framework lock; tuning pass will move these.
+Copy-paste from `crates/sim/src/flight.rs` as of 2.4.9 close (Cl_max tune, Cd0 tune, dihedral, slipstream).
 
-| Constant | Value | Meaning |
-|----------|-------|---------|
-| `CM_ALPHA` | -0.25 | α-stability (nose-down restoring moment per rad of α) |
-| `CM_DELTA_E` | 0.24 | Elevator authority (pitch moment per unit of pitch input) |
-| `CM_Q` | -25 | Pitch damping |
-| `CL_DELTA_A` | 0.075 | Aileron authority |
-| `CL_P` | -0.5 | Roll damping |
-| `CN_BETA` | 0.08 | Weathervane (yaw-into-wind) |
-| `CN_DELTA_R` | 0.04 | Rudder authority |
-| `CN_R` | -0.6 | Yaw damping |
-| `CN_DELTA_A_ADVERSE` | -0.012 | Adverse yaw from aileron |
-| `P_FACTOR_ARM_M` | 10.0 | P-factor moment arm |
-| `TORQUE_ROLL_NM_PER_KW` | 1.5 | Torque roll scale |
-| `COUPLING_AIRSPEED_RAMP_MIN/MAX` | 5 / 20 m/s | Airspeed ramp on coupling terms |
-| `I_XX / I_YY / I_ZZ` | 8000 / 12000 / 5000 kg·m² | Moments of inertia (pitch / yaw / roll) |
-| `MEAN_CHORD_M / WING_SPAN_M` | 1.52 / 14.63 | Reference lengths |
-| `CD0 / OSWALD_E` | 0.045 / 0.75 | Parasite drag + induced-drag efficiency |
-| `ALPHA_STALL_RAD / ALPHA_APPROACH_RAD` | 0.2793 / 0.2234 | Stall thresholds (≈16° / 12.8°) |
-| `CM_STALL_PITCH_SLOPE` | -0.75 | Post-stall nose-down moment per rad past stall |
-| `ENGINE_POWER_MAX_KW / IDLE_KW` | 335 / 20 | Power curve (linear in throttle) |
-| `V_MIN_FOR_THRUST` | 12 m/s | Airspeed floor for T = ηP/V to keep static thrust finite |
-| `BSFC_GPH_PER_KW` | 0.124 | Fuel burn per kW |
-| `ATMOSPHERE_SCALE_HEIGHT_M` | 8500 | ISA exponential ρ(h) scale height |
-
-**Note the Cm_δe / |Cm_α| ratio** — currently 0.24 / 0.25 = 0.96. Realistic range for a Beaver-class aircraft is 0.3-0.5; ours reads "elevator feels too responsive relative to static stability." This is flagged for the 2.4.8 coefficient tuning pass and will likely move.
+| Constant | Value | Meaning | Tuned |
+|----------|-------|---------|-------|
+| `CM_ALPHA` | -0.25 | α-stability (nose-down restoring moment per rad of α) | 2.4.4 |
+| `CM_DELTA_E` | 0.24 | Elevator authority (pitch moment per unit of pitch input) | 2.4.4 |
+| `CM_Q` | -25 | Pitch damping | 2.4.4 |
+| `CL_DELTA_A` | 0.075 | Aileron authority | 2.4.4 |
+| `CL_P` | -0.5 | Roll damping | 2.4.4 |
+| **`CL_BETA`** | **-0.05** | **Dihedral roll stability (NEW in 2.4.9a)** | **2.4.9a** |
+| `CN_BETA` | 0.08 | Weathervane (yaw-into-wind) | 2.4.4 |
+| `CN_DELTA_R` | 0.04 | Rudder authority | 2.4.4 |
+| `CN_R` | -0.6 | Yaw damping | 2.4.4 |
+| `CN_DELTA_A_ADVERSE` | -0.012 | Adverse yaw from aileron | 2.4.6 |
+| `P_FACTOR_ARM_M` | 10.0 | P-factor moment arm | 2.4.6 |
+| `TORQUE_ROLL_NM_PER_KW` | 1.5 | Torque roll scale | 2.4.6 |
+| **`SPIRAL_SLIPSTREAM_ARM_M`** | **2.0** | **Spiral slipstream moment arm (NEW in 2.4.9b)** | **2.4.9b** |
+| **`SPIRAL_SLIPSTREAM_V_REF`** | **20.0 m/s** | **Slipstream decay reference airspeed** | **2.4.9b** |
+| `COUPLING_AIRSPEED_RAMP_MIN/MAX` | 5 / 20 m/s | Airspeed ramp on coupling terms | 2.4.6 |
+| `I_XX / I_YY / I_ZZ` | 8000 / 12000 / 5000 kg·m² | Moments of inertia (pitch / yaw / roll) | 2.4.4 |
+| `MEAN_CHORD_M / WING_SPAN_M` | 1.52 / 14.63 | Reference lengths | 2.3 |
+| **`CL_TABLE` peak** | **2.0 at 16°** | **Cl_max (raised from 1.65)** | **2.4.8 Gap 3** |
+| **`CD0 / OSWALD_E`** | **0.055 / 0.75** | **Parasite drag + induced-drag efficiency (Cd0 raised from 0.045)** | **2.4.8 Gap 1** |
+| `ALPHA_STALL_RAD / ALPHA_APPROACH_RAD` | 0.2793 / 0.2234 | Stall thresholds (≈16° / 12.8°) | 2.4.4d |
+| `CM_STALL_PITCH_SLOPE` | -0.75 | Post-stall nose-down moment per rad past stall | 2.4.4d |
+| `ENGINE_POWER_MAX_KW / IDLE_KW` | 335 / 20 | Power curve (linear in throttle) | 2.4.3 |
+| `V_MIN_FOR_THRUST` | 12 m/s | Airspeed floor for T = ηP/V to keep static thrust finite | 2.4.3 |
+| `BSFC_GPH_PER_KW` | 0.124 | Fuel burn per kW | 2.4.3 |
+| `ATMOSPHERE_SCALE_HEIGHT_M` | 8500 | ISA exponential ρ(h) scale height | 2.4.7 |
 
 **All tuning happens in `flight.rs`. Never in scenarios. Never in tolerances.**
+
+## New symptoms unlocked by 2.4.9
+
+**Dutch-roll oscillation in turn entry.**
+- Cl_β too strong relative to yaw damping. Symptom: aircraft oscillates bank ±25° every ~20-30 s in a banked scenario.
+- Fix: lower `CL_BETA` magnitude, OR increase `CN_R` yaw damping.
+
+**Spiral divergence (bank grows without command).**
+- Cl_β too weak or missing. Without dihedral, banked aircraft has no roll restoring.
+- Fix: raise `CL_BETA` magnitude (current -0.05 works).
+
+**Unrealistically low rudder at full power.**
+- Spiral slipstream or P-factor too weak.
+- Check: at full power V=55, cruise-climb rudder trim should be 0.15-0.25. If it's < 0.10, slipstream effect is too small; raise `SPIRAL_SLIPSTREAM_ARM_M`.
+
+**Aircraft won't hold bank in closed-loop turn scenario.**
+- PID gains wrong, NOT a physics issue (probably). Tune `BankHold::kp` / `ki` in the scenario. If bank oscillates: lower `kp` or add `kd`. If bank drifts: raise `ki`.
+- Remember: the `ControlLaw` module is in `control.rs`; PID gains are per-scenario, not global.
+
+**Closed-loop scenario won't converge.**
+- Could be PID oscillation (see above) OR genuine envelope limit. Decision: does the aircraft correctly fail (accelerated stall, descent)? If yes, it's an envelope-limit scenario, not a capability test. See SKILL.md Core Rule #9.

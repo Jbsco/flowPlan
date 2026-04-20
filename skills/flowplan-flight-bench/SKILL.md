@@ -23,6 +23,24 @@ If you are picking flight coefficients out of thin air or eye-balling altitude t
 
 8. **A model gap discovered by the bench is a system-level event, not a scenario-level one.** When an assertion fails or a plot shows suspect behavior, *triage before touching anything*. The fix category (scenario / coefficient / missing physics / upstream) is not interchangeable. Coefficient changes require ripple-effect prediction against the full scenario suite and a regression check before commit. Never tune silently to hide a gap — the bench's value is that it catches inflated inputs and papered-over coefficients later. See [references/model-gap-triage.md](references/model-gap-triage.md) for the full protocol and current open gaps.
 
+9. **Scenarios come in two kinds: capability tests and envelope-limit tests. Don't force-fit between them.** A *capability* test says "aircraft can do X" and asserts altitude/airspeed/NeverStalls. An *envelope-limit* test says "aircraft correctly fails when pushed past X" and asserts `EventuallyStalls` / expected descent. **Both are valid; they belong to different scenarios.** Players will push the model past its realistic envelope in normal play — the bench must verify that out-of-envelope behavior stays realistic (stalls, descents, speed bleed) and doesn't degrade into nonsense when the model is fine-tuned for within-envelope performance.
+
+   **Force-fitting anti-patterns (never do these):**
+   - **Widening a tolerance** to make a capability scenario "pass" when the aircraft actually behaves as its envelope limit predicts. If the test says "hold altitude" and the aircraft is at 2g trying to sustain a 60° bank, the failure is SIGNAL — split into two scenarios (capability at 45°, limit at 60°) rather than widening tol.
+   - **Dodging failure by softening conditions** (reducing bank angle, lowering load factor, shortening duration) without preserving the original as a paired envelope-limit scenario. The original scenario's failure was load-bearing information.
+   - **Deleting a scenario** because "it fails." Check first: is it a bug, or is the aircraft correctly refusing to exceed physics? If the latter: keep the scenario with envelope-limit assertions.
+   - **Asserting capability on a limit scenario** (e.g., `AltitudeStableAtEnd` on `*_overbank`). Descent is the expected outcome there; asserting no-descent is self-contradictory.
+
+   **When a scenario fails, decision tree:**
+   1. Is the aircraft behaving *correctly* per real-world physics (stalling, diving, losing speed at high AOA)? → the SCENARIO is mis-classified. It's an envelope-limit test, not a capability test. Fix the assertions.
+   2. Is the aircraft behaving *unrealistically* (not stalling when it should, sustaining impossible flight)? → COEFFICIENT regression or scenario input error. Triage per `model-gap-triage.md`.
+   3. Did a nearby capability scenario also start failing? → likely a real regression; revert and investigate.
+
+   Pairs where both kinds are valuable:
+   - `coordinated_turn_45` (capability) + `coordinated_turn_60_overbank` (limit).
+   - `cruise_sl` (capability) + future `cruise_over_vne` (limit, if sim ever models Vne behavior).
+   - `stall_clean` (capability: correctly stalls at Vs) + `stall_recovery` (capability: recovers cleanly) vs. `stall_unrecovered_deep` (limit: held back-pressure, spin-like dive) in the future.
+
 ## Scenario Anatomy
 
 A `FlightScenario` has five parts. Each has a job:

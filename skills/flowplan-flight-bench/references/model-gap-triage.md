@@ -11,6 +11,17 @@ The bench's job is to surface gaps between the simulation and the real aircraft.
 When a scenario shows an anomaly (failing assertion, or passing-but-suspicious behavior on the plot):
 
 ```
+0. Is the aircraft behaving CORRECTLY per real-world physics, but the assertion
+   doesn't match? (e.g., aircraft stalls when banked past its capable envelope,
+   descends when over-banked at cruise, runs out of airspeed in a steep turn.)
+   YES → this is an ENVELOPE-LIMIT scenario mis-classified as a capability test.
+         Either split into two scenarios (capability + limit) or reclassify the
+         current scenario's assertions. Do NOT widen tolerances to hide valid
+         envelope failures — players will push the envelope in play, and silent
+         tolerance creep masks unrealistic out-of-envelope behavior that will
+         surface in bug reports later.
+   NO  → proceed to (1).
+
 1. Is the anomaly at scenario boundaries (initial transient / final transient)?
    YES → likely a seeding or duration issue → fix in the scenario.
    NO  → proceed to (2).
@@ -45,6 +56,7 @@ Every bench-identified gap maps to exactly one of these. If you can't pick one c
 
 | Category | What it looks like | Fix path |
 |----------|-------------------|----------|
+| **Scenario mis-class** | Aircraft is behaving correctly per physics but assertion doesn't match (capability asserted on a limit scenario, or vice versa) | Re-classify: split into capability + envelope-limit pair, or reshape assertions |
 | **Scenario** | Input shape, timing, initial state, or assertion doesn't match the intended behavior | Edit the scenario; re-run; tighten once stable |
 | **Coefficient** | Physics structure is right, a numeric constant is wrong | Coefficient change protocol (below) |
 | **Missing physics** | The model lacks an effect that materially changes the outcome | Roadmap item; document gap; scenario stays honest (wide tolerance + comment) |
@@ -170,6 +182,8 @@ The bench's value is specifically that it cannot be fooled by inflated inputs �
 3. **Don't inflate scripted inputs beyond what the model needs.** Real-pilot-experience values are a *target* for model tuning, not a scenario knob. The fidelity block in the scenario documents the gap; the coefficient eventually closes it.
 4. **Don't diagnose from a single scenario.** A gap visible in one scenario should be cross-checked against at least one other scenario that exercises the same physics. If the diagnosis only fits scenario A and doesn't predict behavior in scenario B, the diagnosis is probably wrong.
 5. **Don't bundle coefficient changes.** One per commit. Chained changes hide which one caused a regression.
+6. **Don't force-fit a capability assertion onto envelope-limit behavior.** If aircraft stalls when attempting 60° bank at cruise, that's correct physics — not a test failure. Re-classify as envelope-limit scenario (assert `EventuallyStalls`), do NOT widen altitude tol / lower bank angle / delete the scenario. Envelope-limit tests are load-bearing regression guards: they catch silent over-tuning of capability coefficients that would otherwise slip into unrealistic out-of-envelope behavior (which real players will hit in normal play).
+7. **Don't soften scenario conditions to dodge failure.** Reducing bank angle 60° → 45° or shortening duration to pre-empt a stall is force-fitting. If the original conditions represented a real envelope limit, preserve that scenario with envelope-limit assertions AND add a softer scenario for the capability test.
 
 ## Related
 

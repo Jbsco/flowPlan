@@ -11,6 +11,7 @@
 
 pub mod aircraft_spec;
 pub mod camera;
+pub mod control;
 pub mod controls;
 pub mod difficulty;
 pub mod flight;
@@ -23,6 +24,7 @@ pub mod vehicle;
 
 pub use aircraft_spec::{AircraftSpec, EngineSpec, SpeedsSpec};
 pub use camera::{Camera, ChaseConfig, ViewKind};
+pub use control::{ControlLaw, ControlLawState};
 pub use controls::{Controls, FlapPosition};
 pub use difficulty::DifficultyDials;
 pub use flight::{FlightOutputs, MomentBreakdown, StallState};

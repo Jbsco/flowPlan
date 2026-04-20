@@ -38,6 +38,7 @@ Every design and implementation decision must honor this one-liner. If you are w
 - **Tests alongside implementation, not after.** Phase gates are non-negotiable (see ROADMAP.md).
 - **Small, scoped commits.** Single logical change each. Imperative subject, capital letter, no end punctuation. Explain *why*, not *what*.
 - **No vibe coding.** Exploratory prototyping lives on a scratch branch and does not ship. Production code must trace to the design.
+- **Bench tests are dual-purpose.** The flight-test bench (`crates/sim/src/flight_bench.rs`) contains BOTH capability scenarios (aircraft correctly does X) AND envelope-limit scenarios (aircraft correctly fails when pushed past X). Players will push the model past realistic envelopes in normal play — the bench must verify that out-of-envelope behavior stays realistic. **Do not force-fit**: don't widen tolerances to mask envelope failures, don't soften scenario conditions to dodge failures, don't delete scenarios because "they fail." See `skills/flowplan-flight-bench/SKILL.md` Core Rule #9 and `skills/flowplan-flight-bench/references/model-gap-triage.md` for the discipline. When a bench scenario fails: first ask "is the aircraft behaving correctly per real-world physics?" If yes, the scenario needs re-classification (capability → envelope-limit), not a tolerance bump.
 
 ## Agent-specific
 

@@ -468,8 +468,10 @@ The plane has a voice (engine, wind, water, splash). Weather actively shapes fli
 - [ ] Full primary + secondary controls (aileron / elevator / rudder / throttle / flaps / trim / mixture)
 - [ ] Switches: parking brake, water rudder, retract, starter, magnetos, fuel selector, carb heat, pitot heat, tire pressure (ground only)
 - [ ] Prop feathering for constant-speed/feathering-equipped aircraft
-- [ ] Autopilot tiers (upgrade-gated): hold altitude, hold vertical speed, hold roll, hold turn, hold heading, hold all, full-auto to waypoint + circle
+- [ ] Autopilot tiers (upgrade-gated): hold altitude, hold vertical speed, hold roll, hold turn, hold heading, hold all, full-auto to waypoint + circle. **Control laws already shipped in `crates/sim/src/control.rs` as the `ControlLaw` enum (shared with the scenario bench — see Milestone 2.4.9c).** Phase 4.7 work is UI (mode select, engage/disengage, readouts), session state (which laws active), and authority limits (turbulence disengage). Bench scenarios validate law behavior by construction.
+- [ ] State for active AP laws lives in `SimState` so determinism hash covers them — AP behavior is replay-identical.
 - [ ] AP authority respects turbulence; graceful disengage with audio cue
+- [ ] Waypoint-nav law (full-auto) — new `ControlLaw` variant needed here.
 
 ### Milestone 4.7b: Control Bindings & Mapping
 

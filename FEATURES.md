@@ -316,15 +316,23 @@ Each biome contributes to the shared feature taxonomy below (surface types, weat
 
 **Autopilot / assist (toggle/cycle):**
 
-- **[sketch]** Hold altitude (AP captures current altitude).
-- **[sketch]** Hold vertical speed / climb rate (AP maintains current climb or set rate).
-- **[sketch]** Hold roll (wing-leveler; AP maintains 0 roll).
-- **[sketch]** Hold turn (AP maintains standard-rate turn).
-- **[sketch]** Hold heading (AP captures current heading).
-- **[sketch]** Hold all (altitude + heading + level -- "straight and level" autopilot).
-- **[sketch]** Full auto to destination and circle -- point at a hub/waypoint, AP flies there, circles on arrival until disengaged.
+Phase 2.4.9c shipped the `ControlLaw` module at `crates/sim/src/control.rs` — a shared PID-based control-law library used by both the scenario bench (closed-loop turn scenarios like `beaver_coordinated_turn_30`) AND the in-game autopilot below. Each AP mode maps to a `ControlLaw` variant already implemented. This means:
+- Bench scenarios validate the AP control laws by construction (if the bench's `BankHold` holds bank in a scenario, the AP's "hold roll" mode does too — same code path).
+- Phase 4.7 AP work is mostly UI + session-state plumbing, not new control laws.
+- Gain tuning that happens in bench scenarios carries directly to AP feel.
+
+- **[sketch]** Hold altitude — `ControlLaw::AltitudeHold` (shipped).
+- **[sketch]** Hold vertical speed / climb rate — `ControlLaw::VerticalSpeedHold` (shipped).
+- **[sketch]** Hold roll (wing-leveler) — `ControlLaw::BankHold { target: 0.0 }` (shipped).
+- **[sketch]** Hold turn (standard-rate) — `ControlLaw::BankHold { target: X }` with X from rate target (shipped).
+- **[sketch]** Hold heading — `ControlLaw::HeadingHold` (stub in place, implementation pending autopilot milestone).
+- **[sketch]** Hold all (straight and level) — compose `BankHold { 0 } + AltitudeHold + AirspeedHold` (all shipped).
+- **[sketch]** Full auto to destination and circle — waypoint nav law pending (new ControlLaw variant).
+- **[sketch]** Coordination assist (auto-rudder) — `ControlLaw::CoordinationHold` (shipped). Phase 4.9 accessibility assist uses this directly.
 - **[sketch]** AP assumes the upgrade slot is filled; early aircraft lack AP at all; later aircraft have full GPS-coupled AP.
 - **[sketch]** AP gracefully fails under severe turbulence (disengages with a cue) -- does not fight the aircraft past its authority.
+- **[sketch]** Gain scheduling / adaptive control — post-v1 refinement. Current PIDs use fixed gains tuned for cruise.
+- **[sketch]** State for AP laws lives in `SimState` so it's part of the determinism hash; PIDs persist integral / prev-error across ticks. Maintains replay-identical AP behavior.
 
 ---
 

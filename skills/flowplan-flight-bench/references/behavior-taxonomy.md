@@ -4,6 +4,19 @@ The space of real-world behaviors a flight-test-bench scenario is meant to isola
 
 Every category is gated on which flight-model features have landed. Authoring a scenario for a category whose prerequisites aren't in the sim produces noise, not signal -- the scenario either can't be expressed or asserts against a physics effect the model doesn't simulate.
 
+## Capability vs envelope-limit scenarios
+
+A single real-world behavior often deserves TWO scenarios:
+
+- **Capability test** — aircraft can do X. Assertions: altitude hold, airspeed match, `NeverStalls`.
+- **Envelope-limit test** — aircraft correctly fails when pushed past X. Assertions: `EventuallyStalls`, expected descent, no altitude assertion (descent is the point).
+
+Both are valid and BOTH should exist for significant envelope corners. The paired scenario `beaver_coordinated_turn_45` (capability: steep turn sustained) + `beaver_coordinated_turn_60_overbank` (limit: accelerated stall when over-banked at cruise) demonstrates this pattern. The limit test is especially valuable as a **regression guard**: if a future coefficient change silently extends the capability envelope, the limit test stops failing as expected — catching the over-tune.
+
+Limit scenarios require care with assertions: do NOT assert what the capability test asserts. `coordinated_turn_60_overbank` asserts `EventuallyStalls` and deliberately omits `AltitudeStableAtEnd` / `AirspeedAtEnd` because altitude loss and airspeed bleed are the EXPECTED outcome. Asserting altitude-hold there would conflict with the scenario's purpose.
+
+When adding a capability scenario that tests a limit corner, ask: "is there a natural paired envelope-limit case?" If yes, add both.
+
 Status legend:
 
 - **[shipped]** — scenario(s) of this type are in `BEAVER_SCENARIOS` now.
