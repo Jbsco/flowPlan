@@ -374,11 +374,82 @@ mod tests {
         );
     }
 
-    // NOTE: An integrated "float at rest settles to equilibrium" test belongs in 2.5a.2.
-    // Without vertical water drag the buoyancy-gravity oscillation is undamped; explicit
-    // Euler accumulates numerical error across the hard displacement-cap transition,
-    // which is not something 2.5a.1 claims to solve. 2.5a.1 validation is covered by the
-    // analytic buoyancy unit tests in `crate::buoyancy::tests` (force equals weight at
-    // analytic equilibrium draft, etc.). The full settle-to-equilibrium test lands in
-    // 2.5a.2 alongside the vertical-damping term.
+    #[test]
+    #[allow(clippy::expect_used, clippy::cast_precision_loss)]
+    fn float_at_rest_settles_to_equilibrium() {
+        // Phase 2.5a.2 acceptance (follows 2.5a.1 buoyancy + 2.5a.2 vertical damping):
+        // aircraft dropped at water surface with zero velocity should settle to
+        // equilibrium draft within a few simulated seconds. Analytic equilibrium for
+        // the Beaver (MTOW 2313 kg, Edo 4930 floats per buoyancy::BEAVER_PONTOONS):
+        // CG_y ≈ 0.66 m above water (see buoyancy.rs docs + unit tests).
+        let spec_ron = r#"(
+            name: "Northlander",
+            inspiration: "DHC-2 Beaver",
+            empty_mass_kg: 1315.5,
+            max_mass_wheels_kg: 2313.0,
+            max_mass_floats_kg: 2435.8,
+            wing_area_m2: 23.23,
+            aspect_ratio: 9.2,
+            airfoil_root: "NACA 64A416",
+            airfoil_tip: "NACA 64A412",
+            engine: (name: "R-985", power_hp: 450.0, cruise_fuel_gph: 27.0),
+            fuel_capacity_gal: 95.0,
+            speeds: (
+                vne_mps: 71.53, cruise_mps: 64.31,
+                vs_clean_mps: 23.25, vso_mps: 21.01,
+                vx_mps: 29.06, vy_mps: 37.99,
+            ),
+        )"#;
+        let spec = AircraftSpec::from_ron(spec_ron).expect("parse spec");
+
+        let mut s = SimState::new(1);
+        s.aircraft = Some(spec);
+        // Start slightly above analytic equilibrium with zero velocity; integration
+        // should settle downward to ~0.66 m under damped buoyancy-gravity dynamics.
+        s.vehicle.position = Vec3::new(0.0, 1.5, 0.0);
+        s.vehicle.velocity = Vec3::ZERO;
+        s.vehicle.orientation = Quat::IDENTITY;
+        s.vehicle.angular_velocity = Vec3::ZERO;
+        s.vehicle.controls.throttle = 0.0;
+        // Fuel = 0 cuts engine power to zero (flameout behavior), isolating the test
+        // from thrust-driven forward motion and the pitch coupling that it produces
+        // through below-CG float drag. Forward-motion cases get their own scenario
+        // (water-taxi) that asserts steady-state taxi speed under idle thrust.
+        s.vehicle.fuel_gal = 0.0;
+
+        let d = DifficultyDials::default();
+        // Low min_altitude so the clamp doesn't preempt buoyancy. Buoyancy + damping
+        // handle the water case; terrain clamp bounds against unexpected bugs.
+        let min_alt = -20.0_f32;
+
+        // Run 30 simulated seconds. With damping supercritical at full wet and
+        // subcritical at equilibrium wet, oscillation amplitude decays exponentially
+        // toward the analytic equilibrium. Sample position at multiple late-time
+        // points so the assertion isn't sensitive to the exact phase of the residual
+        // oscillation when sampled.
+        let mut late_y_samples = Vec::new();
+        for i in 0..3600 {
+            s.tick(&InputEvents::empty(), &d, FIXED_DT, min_alt);
+            if i >= 2400 && i % 120 == 0 {
+                late_y_samples.push(s.vehicle.position.y);
+            }
+        }
+
+        // Mean of the last ~10 seconds of samples averages out residual oscillation
+        // and wave-driven surface noise; the analytic equilibrium is the center of
+        // the oscillation envelope even if a single-tick sample happens to fall
+        // at a phase extreme.
+        let mean_y: f32 = late_y_samples.iter().sum::<f32>() / late_y_samples.len() as f32;
+
+        assert!(
+            (mean_y - 0.66).abs() < 0.15,
+            "expected mean-over-last-10s settle near 0.66 m (analytic equilibrium), got {mean_y:.3} m (samples: {late_y_samples:?})",
+        );
+        // Vertical velocity envelope should be bounded (residual oscillation only).
+        assert!(
+            s.vehicle.velocity.y.abs() < 1.0,
+            "expected bounded vertical velocity at 30 s, got {} m/s",
+            s.vehicle.velocity.y
+        );
+    }
 }

@@ -15,7 +15,7 @@ Last updated: **2026-04-20** (Phase 2 in progress; 2.1 / 2.6 / 2.2 core + 2.3 co
     - Milestone 2.3 (plane model + glTF loader + spec sheet): CORE SHIPPED; 2.3.4 back-face culling deferred pending chase-camera / cockpit work
     - Milestone 2.2 (water): CORE SHIPPED (flat quad, Gerstner waves, CPU height sampler, terrain amplitude tune, pre-2.5 ground clamp); 2.2.4 shoreline foam and 2.2.5b distant-water LOD pending
     - Milestone 2.4 (flight model): COMPLETE THROUGH 2.4.8. Shipped: 2.4.1-2.4.7 per-sub-milestone items (skeleton, airfoil forces, lift direction, telemetry, engine power curve + fuel, keyboard slew, moment-based angular dynamics + HUD, real stall physics, attitude indicator, flaps, secondary effects, density altitude), plus 2.4.8 full cycle: flight-test bench framework + 7 Beaver scenarios + 2×4 panel plot pipeline + `--scenario` CLI playback + model-gap triage process + coefficient tuning pass (Cl_max 1.65→2.0, Cd0 0.045→0.055) + reference plots committed to `docs/plots/beaver/` + final inheritance snapshot in PROGRESS.md. Milestone 2.4.9 (slipstream + Cl_β dihedral) documented as optional-before-2.5.
-    - Milestone 2.5 (ground + water contact physics): IN PROGRESS — 2.5a.1 SHIPPED, 2.5a.2–2.5a.7 queued. Entry order: 2.5a water → 2.5b ground → 2.5c invariants+tests. 2.5a decomposed into 7 dependency-ordered sub-milestones: per-pontoon buoyancy + `SimState.wave_time` deterministic wave clock (2.5a.1 — SHIPPED) → per-pontoon horizontal drag + vertical damping (2.5a.2) → step transition (2.5a.3) → porpoising (2.5a.4) → asymmetric / one-pontoon maneuver validation (2.5a.5) → water rudder + weather-vaning (2.5a.6) → chop-intensity Phase 3.2 hook (2.5a.7). Per-pontoon physics up front means asymmetric behavior (one-float-dipped, one-pontoon takeoff) emerges for free. Wake + spray + touchdown polish land before 2.5a gate. Non-global water heights (lakes, rivers, sandbars) remain Phase 3+ per FEATURES.md § Terrain & Static Landscape — `water_height(x, z, t)` API is position-conditioned so hydrology rebuild plugs in without breaking 2.5a. See ROADMAP.md § Milestone 2.5 for full breakdown.
+    - Milestone 2.5 (ground + water contact physics): IN PROGRESS — 2.5a.1 + 2.5a.2 SHIPPED, 2.5a.3–2.5a.7 queued. Entry order: 2.5a water → 2.5b ground → 2.5c invariants+tests. 2.5a decomposed into 7 dependency-ordered sub-milestones: per-pontoon buoyancy + `SimState.wave_time` deterministic wave clock (2.5a.1 — SHIPPED) → per-pontoon horizontal drag + vertical damping (2.5a.2 — SHIPPED) → multi-point float sampling + step transition + water-taxi bench scenario (2.5a.3) → porpoising (2.5a.4) → asymmetric / one-pontoon maneuver validation (2.5a.5) → water rudder + weather-vaning (2.5a.6) → chop-intensity Phase 3.2 hook (2.5a.7). Per-pontoon physics up front means asymmetric behavior (one-float-dipped, one-pontoon takeoff) emerges for free. Wake + spray + touchdown polish land before 2.5a gate. Non-global water heights (lakes, rivers, sandbars) remain Phase 3+ per FEATURES.md § Terrain & Static Landscape — `water_height(x, z, t)` API is position-conditioned so hydrology rebuild plugs in without breaking 2.5a. See ROADMAP.md § Milestone 2.5 for full breakdown.
 - Milestone order taken (deviates from ROADMAP's numeric order): **2.1 -> 2.6 -> 2.3 -> 2.2 -> 2.4 -> 2.5**. Sky landed before plane because it made visual tuning of the Beaver easier; water came before flight model because buoyancy (2.5) needs it. Within 2.4: 2.4.4 jumped ahead of 2.4.3 because the moment model fundamentally changes handling feel and was a prerequisite for sensible tuning against any thrust model.
 - Gate: green. `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `cargo bench --bench frame_budget -- --test`, and the hardware snapshot tests all pass.
 - Test count: **169 total** (the bench integration test counts as one `beaver_scenarios_all_pass` test but runs the full `BEAVER_SCENARIOS` array and validates every assertion inside — 3 scenarios × 2-3 assertions each = 7 POH-anchored assertions). Three hardware snapshots committed: `scene_minimal`, `beaver_preview`, `scene_extended` (1024x640; uses the real `Terrain::from_seed` so it reflects in-game terrain faithfully). Reference photos `ref1.png`, `ref2.png`, `ref3.png` in `crates/render/tests/snapshots/` as aesthetic targets (coastal Alaska / fjord floatplane photography).
@@ -482,6 +482,38 @@ Foundational buoyancy machinery. No game-visible behavior change yet — the `WA
 - `crates/sim/tests/flight_bench.rs` — added `use flowplan_world as _;` for unused-crate-dep lint
 
 **Deferred to 2.5a.2 (next):** vertical water drag (damps bobbing oscillation → enables settle-to-equilibrium), per-pontoon horizontal water drag, bench scenario for water-taxi reaching steady speed. Game-visible behavior over water begins at 2.5a.2 when the `game_app.rs` `min_altitude` calculation drops the `WATER_LEVEL` clamp in favor of buoyancy-managed settling.
+
+### Milestone 2.5a.2 — Per-pontoon horizontal drag + vertical damping (SHIPPED)
+
+Hydrodynamic forces on top of 2.5a.1 hydrostatics. First sub-milestone with game-visible behavior: the `WATER_LEVEL` clamp in `game_app.rs` is gone, so buoyancy + damping now actively settle the aircraft on water in normal play.
+
+**New constants in `crates/sim/src/buoyancy.rs`:**
+- `VERTICAL_DAMPING_N_PER_MPS = 30_000.0` — linear vertical damping per pontoon, scaled by wetted fraction. ~0.56 of critical at equilibrium wetted fraction (~0.29 wet); supercritical at full wet. Linear (not quadratic) for numerical stability near zero velocity.
+- `HORIZONTAL_DRAG_N_PER_MPS2 = 75.0` — quadratic horizontal water drag per pontoon, scaled by wetted fraction. Tuned so idle thrust produces ~4 m/s taxi at equilibrium draft (validated when 2.5a.3 multi-point sampling lands and water-taxi scenario can converge).
+
+**Force model (per pontoon, summed across both Edo 4930 floats):**
+- Hydrostatic (from 2.5a.1): `F_buoy = ρ_water · V_submerged · g` (world +Y).
+- Vertical damping (NEW): `F_v = -c_v · v_pontoon_y · wetted_frac` (linear).
+- Horizontal drag (NEW): `F_h = -c_h · |v_xz| · v_xz · wetted_frac` (quadratic).
+
+**Per-pontoon velocity** now includes angular contribution: `v_pontoon = v_cg + (orient · ω_body) × r_world`. Aircraft rotation rates couple naturally into pontoon drag, producing roll damping (asymmetric vertical velocities at port/starboard floats) and yaw damping (asymmetric horizontal velocities) without explicit angular-damping terms.
+
+**Orientation-aware float bottom (NEW):** previous 2.5a.1 implementation took `pontoon_bottom_y = world_center.y - height/2`, which assumed world-axis-aligned geometry. Now uses `world_center + orientation * Vec3::new(0, -height/2, 0)` so the wetted-area calculation correctly tracks aircraft pitch — when the plane noses down under drag-induced pitch moment, the body-Y axis tilts forward and the world-frame lowest point shifts. Eliminates a class of false-immersion / false-drag interactions that would have cascaded once an aircraft started pitching while in water contact.
+
+**Game-visible change in `crates/app/src/game_app.rs`:** `min_altitude` clamp dropped the `WATER_LEVEL = 0.0` floor (previously `floor.max(WATER_LEVEL) + float_offset + margin`). Now `terrain_here + float_offset + margin` only; over water (terrain is below sea level) the clamp drops with the terrain, and buoyancy + damping take over. Wave crests can clip floats briefly during transients but the per-pontoon force resolution settles the aircraft to its analytic equilibrium draft within ~30 s without intervention.
+
+**Tests added (6):** 5 new `buoyancy::tests` (vertical damping opposes downward motion, vertical damping opposes upward motion, horizontal drag opposes forward motion, drag scales with wetted fraction, above-water has zero drag) + 1 `state::tests` integration test (float dropped from 1.5 m mean-settles near 0.66 m analytic equilibrium over last 10 s of a 30 s run, ±0.15 m tolerance).
+
+**Workspace test count:** 186 passing (up from 180). Quality gate green (`cargo fmt --check` / `cargo clippy -D warnings` / `cargo test --workspace` / `cargo bench --bench frame_budget -- --test` / `cargo test -p flowplan-sim --test flight_bench --release`). All existing flight bench scenarios still pass: airborne aircraft sees zero buoyancy contribution (short-circuit when `immersion_depth ≤ 0`), so there's no scenario behavior change from this milestone.
+
+**Files changed:**
+- `PROGRESS.md` — this section + 2.5 status line
+- `ROADMAP.md` — marked 2.5a.2 shipped, scope-noted 2.5a.3 to include multi-point sampling + water-taxi scenario migration
+- `crates/sim/src/buoyancy.rs` — module docstring updated, two new coefficients, drag/damping force model in `compute_buoyancy`, orientation-aware float bottom, 5 new unit tests
+- `crates/sim/src/state.rs` — settle-to-equilibrium integration test
+- `crates/app/src/game_app.rs` — dropped `WATER_LEVEL` clamp from `min_altitude` calculation, replaced `WATER_LEVEL` constant with explanatory note about render-side mean-water contract
+
+**Deferred to 2.5a.3:** water-taxi bench scenario (needs multi-point fore/aft float sampling so longitudinal wetted-area asymmetry produces the natural pitch-restoring moment; single-point sampling alone produces unbounded nose-down pitch under drag). Step transition (plow → on-step regime shift). 2.5a.3 is now scoped to bundle multi-point sampling with the step transition since both depend on per-section pontoon geometry.
 
 ### Pre-Phase-2.5 gate — EVALUATED
 

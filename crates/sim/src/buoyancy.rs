@@ -1,10 +1,22 @@
-//! Per-pontoon buoyancy for float configuration.
+//! Per-pontoon hydrostatic (buoyancy) + hydrodynamic (drag, damping) forces for
+//! float configuration.
 //!
-//! Phase 2.5a.1: computes hydrostatic force + moment per pontoon based on the water
-//! surface sampled at each float's world position. Output is summed with aero forces
-//! in `state::tick_dynamics`. Per-pontoon physics up front means asymmetric behavior
-//! (one-float dipped, one-pontoon takeoff in 2.5a.5) emerges for free rather than
-//! requiring special-case code later.
+//! Phase 2.5a.1 (shipped): computes per-pontoon buoyancy force + moment from the
+//! water surface sampled at each float's world position.
+//!
+//! Phase 2.5a.2: extends with per-pontoon horizontal water drag (quadratic, for
+//! realistic plowing) and vertical water damping (linear, to stabilize the
+//! buoyancy-gravity oscillation into settling behavior). Both scale with the
+//! pontoon's wetted fraction — zero above water, full-strength when fully submerged.
+//!
+//! The function is still named `compute_buoyancy` because "buoyancy" is the public
+//! umbrella term for the water-contact force model in this codebase. Module rename
+//! to `hydrodynamics` / `water_contact` is a candidate follow-up once the step
+//! transition (2.5a.3) grows the module further.
+//!
+//! Per-pontoon physics up front means asymmetric behavior (one-float dipped,
+//! one-pontoon takeoff in 2.5a.5) emerges for free rather than requiring
+//! special-case code later.
 //!
 //! Beaver float constants (Edo 4930 analogue geometry) are hardcoded here as
 //! Beaver placeholders. They migrate to `AircraftSpec` when per-aircraft coefficient
@@ -26,6 +38,34 @@ use crate::vehicle::VehicleState;
 /// Fresh-water density (kg/m³). Salt water (~1025) slightly higher; not modeled until
 /// water-body classification lands in Phase 3+ hydrology.
 const WATER_DENSITY_KG_M3: f32 = 1000.0;
+
+/// Per-pontoon vertical water damping coefficient (N·s/m, linear in velocity), scaled
+/// by wetted fraction. Primary role is damping the buoyancy-gravity oscillation into
+/// settling behavior. Sized empirically so a Beaver dropped from 1.5 m converges to
+/// the 0.66 m analytic equilibrium within ~10 s.
+///
+/// Scaling by wetted fraction (range 0…1) means the effective damping coefficient
+/// at equilibrium draft (~0.29 wet) is roughly a third of full-wet. At full wet the
+/// two-pontoon system is supercritical (`c_total = 2·c_per_pontoon = 60 kN·s/m` vs.
+/// `c_crit = 2mω ≈ 30.9 kN·s/m`); at equilibrium wet it's ~0.56 of critical.
+///
+/// Linear (rather than quadratic) for numerical stability near zero velocity — the
+/// cost is unphysicality at high vertical speeds that real water drag would penalize
+/// quadratically. Revisit if high-speed vertical scenarios (hard touchdown, porpoise
+/// recovery) surface a feel gap.
+const VERTICAL_DAMPING_N_PER_MPS: f32 = 30_000.0;
+
+/// Per-pontoon horizontal water drag coefficient (N·s²/m², quadratic in velocity),
+/// scaled by wetted fraction. Produces plowing drag proportional to `v²`; tuned so
+/// the Beaver's idle thrust (~689 N at V<12 m/s with 0.413 prop efficiency) taxis
+/// the aircraft at ~4 m/s on water at equilibrium draft (0.29 wetted fraction).
+/// Quadratic drag self-stabilizes numerically without issue.
+///
+/// Step transition (2.5a.3) will modulate this by a planing factor — once the hull
+/// rises onto the step, wetted area drops sharply and `c_h_effective` falls, letting
+/// the aircraft accelerate out of plow mode. For 2.5a.2 the scaling is pure
+/// immersion fraction without the planing correction.
+const HORIZONTAL_DRAG_N_PER_MPS2: f32 = 75.0;
 
 /// Per-pontoon geometry. One entry per float.
 #[derive(Clone, Copy, Debug)]
@@ -79,13 +119,26 @@ pub struct BuoyancyOutputs {
     pub total_force_n: f32,
 }
 
-/// Compute per-pontoon buoyancy for the current vehicle state.
+/// Compute per-pontoon buoyancy + hydrodynamic drag for the current vehicle state.
 ///
 /// Pure function: no hidden state; determinism-safe given the determinism of `wave_time`
 /// and `water_height`. When no aircraft spec is loaded (pure-sim tests), returns zero
 /// — floats are an aircraft configuration concept, not applicable to the generic cube.
 ///
-/// Short-circuits cleanly when the aircraft is above water (no float submersion).
+/// Short-circuits cleanly when the aircraft is above water (no float submersion → no
+/// hydrostatic force, no hydrodynamic drag).
+///
+/// Per-pontoon force model (summed across `BEAVER_PONTOONS`):
+/// - Hydrostatic: `F_buoy = ρ_water · V_submerged · g` (world +Y).
+/// - Hydrodynamic vertical damping: `F_v = -c_v · v_pontoon_y · wetted_frac` (world +Y).
+/// - Hydrodynamic horizontal drag: `F_h = -c_h · |v_xz| · v_xz · wetted_frac`
+///   (world XZ plane; quadratic).
+///
+/// Per-pontoon velocity includes angular contribution:
+/// `v_pontoon = v_cg + (orient · ω_body) × r_world`, so angular rates couple into
+/// pontoon drag and produce the expected angular damping (roll damping from asymmetric
+/// vertical velocities at the port/starboard floats, yaw damping from asymmetric
+/// horizontal velocities).
 #[must_use]
 pub fn compute_buoyancy(
     v: &VehicleState,
@@ -100,6 +153,10 @@ pub fn compute_buoyancy(
     let mut total_force_world = Vec3::ZERO;
     let mut total_moment_body = Vec3::ZERO;
 
+    // World-frame angular velocity: rotate the body-frame ω by orientation so
+    // cross-product contributions to pontoon velocity are in the right frame.
+    let angular_velocity_world = v.orientation * v.angular_velocity;
+
     for pontoon in &BEAVER_PONTOONS {
         // Pontoon center in world frame: aircraft position + orientation * body_offset.
         let world_offset = v.orientation * pontoon.body_offset;
@@ -111,35 +168,58 @@ pub fn compute_buoyancy(
         // world::water_height).
         let water_y = water_height(world_center.x, world_center.z, wave_time);
 
-        // Pontoon bottom approximation: pontoon center minus half its vertical extent.
-        // Uses world-axis-aligned height, ignoring body tilt: acceptable for 2.5a.1
-        // where we're validating the symmetric case. Tilted-float wetted-area modeling
-        // is a 2.5a.3 (step transition) refinement.
-        let pontoon_bottom_y = world_center.y - pontoon.height_m * 0.5;
+        // Pontoon bottom in world frame: center plus orientation-rotated -Y half-height.
+        // Correctly accounts for aircraft pitch / roll — when the plane pitches nose-down
+        // the body-Y axis tilts forward, so the pontoon "bottom" along body-Y is no longer
+        // directly below the center in world frame. Full multi-point sampling along the
+        // pontoon length lands in 2.5a.3 (step transition); this is already better than
+        // the world-axis-aligned approximation in 2.5a.1.
+        let pontoon_bottom_world =
+            world_center + v.orientation * Vec3::new(0.0, -pontoon.height_m * 0.5, 0.0);
+        let pontoon_bottom_y = pontoon_bottom_world.y;
 
         // Immersion depth: negative means the pontoon bottom is above water → zero
-        // buoyancy. Positive → bottom is submerged by that much.
+        // buoyancy and zero drag. Positive → bottom is submerged by that much.
         let immersion_depth = (water_y - pontoon_bottom_y).max(0.0);
         let immersion_height = immersion_depth.min(pontoon.height_m);
 
-        // Box approximation wetted volume, capped at real displacement.
-        let box_volume = immersion_height * pontoon.length_m * pontoon.beam_m;
-        let v_submerged = box_volume.min(pontoon.max_displacement_m3);
-
-        if v_submerged <= 0.0 {
+        if immersion_height <= 0.0 {
             continue;
         }
 
-        // Archimedes' buoyancy force, world +Y direction.
-        let force_magnitude = WATER_DENSITY_KG_M3 * v_submerged * GRAVITY.length();
-        let pontoon_force_world = Vec3::new(0.0, force_magnitude, 0.0);
+        let wetted_fraction = immersion_height / pontoon.height_m;
+
+        // ── Hydrostatic: Archimedes' buoyancy ──────────────────────────────────
+        let box_volume = immersion_height * pontoon.length_m * pontoon.beam_m;
+        let v_submerged = box_volume.min(pontoon.max_displacement_m3);
+        let buoyancy_magnitude = WATER_DENSITY_KG_M3 * v_submerged * GRAVITY.length();
+        let buoyancy_force_world = Vec3::new(0.0, buoyancy_magnitude, 0.0);
+
+        // ── Hydrodynamic: drag + damping ───────────────────────────────────────
+        // Per-pontoon world-frame velocity accounts for aircraft rotation.
+        let v_pontoon_world = v.velocity + angular_velocity_world.cross(world_offset);
+
+        // Vertical damping (linear). Resists v_y; stabilizes buoyancy oscillation.
+        let v_damp_y = -VERTICAL_DAMPING_N_PER_MPS * v_pontoon_world.y * wetted_fraction;
+
+        // Horizontal drag (quadratic). Opposes pontoon's XZ motion.
+        let v_horizontal = Vec3::new(v_pontoon_world.x, 0.0, v_pontoon_world.z);
+        let v_h_speed = v_horizontal.length();
+        let horizontal_drag_world = if v_h_speed > 1e-4 {
+            let drag_magnitude =
+                HORIZONTAL_DRAG_N_PER_MPS2 * v_h_speed * v_h_speed * wetted_fraction;
+            -v_horizontal / v_h_speed * drag_magnitude
+        } else {
+            Vec3::ZERO
+        };
+
+        let pontoon_force_world = buoyancy_force_world
+            + Vec3::new(horizontal_drag_world.x, v_damp_y, horizontal_drag_world.z);
 
         // Moment in body frame: r × F_body. Rotate the world-frame force into body
         // frame via orientation.inverse() so the moment we accumulate is in the same
-        // frame as angular_velocity / angular_accel. Cross product follows the
-        // right-hand rule and produces a body-frame torque that, when divided by the
-        // principal-axis inertia, gives the body-frame angular acceleration
-        // contribution.
+        // frame as angular_velocity / angular_accel. Cross product produces a body-
+        // frame torque; divided by principal-axis inertia gives angular acceleration.
         let force_body = v.orientation.inverse() * pontoon_force_world;
         let moment_body = pontoon.body_offset.cross(force_body);
 
@@ -312,5 +392,104 @@ mod tests {
             out_t0.total_force_n,
             out_t1.total_force_n,
         );
+    }
+
+    // ── Phase 2.5a.2 tests: drag + damping ───────────────────────────────────
+
+    #[test]
+    fn vertical_damping_opposes_downward_motion() {
+        // Plane partly submerged, sinking. Vertical damping should produce an upward
+        // force on top of buoyancy — net linear_accel.y > buoyancy-alone.
+        let spec = beaver_spec();
+        let mut v = level_vehicle_at(0.58);
+        v.velocity = Vec3::new(0.0, -1.0, 0.0); // sinking at 1 m/s
+
+        let out = compute_buoyancy(&v, Some(&spec), 0.0);
+
+        // Baseline buoyancy at y=0.58 with zero velocity, for comparison.
+        let v_still = level_vehicle_at(0.58);
+        let baseline = compute_buoyancy(&v_still, Some(&spec), 0.0);
+
+        assert!(
+            out.linear_accel.y > baseline.linear_accel.y,
+            "damping should add upward accel when sinking; baseline={} with_drag={}",
+            baseline.linear_accel.y,
+            out.linear_accel.y,
+        );
+    }
+
+    #[test]
+    fn vertical_damping_opposes_upward_motion() {
+        // Symmetric case: plane rising. Vertical damping should reduce the upward
+        // acceleration.
+        let spec = beaver_spec();
+        let mut v = level_vehicle_at(0.58);
+        v.velocity = Vec3::new(0.0, 1.0, 0.0); // rising at 1 m/s
+
+        let out = compute_buoyancy(&v, Some(&spec), 0.0);
+        let v_still = level_vehicle_at(0.58);
+        let baseline = compute_buoyancy(&v_still, Some(&spec), 0.0);
+
+        assert!(
+            out.linear_accel.y < baseline.linear_accel.y,
+            "damping should subtract upward accel when rising; baseline={} with_drag={}",
+            baseline.linear_accel.y,
+            out.linear_accel.y,
+        );
+    }
+
+    #[test]
+    fn horizontal_drag_opposes_forward_motion() {
+        // Plane moving forward (-Z direction in body frame; velocity.z < 0 in world
+        // frame with identity orientation). Drag produces +Z force component
+        // (opposing motion).
+        let spec = beaver_spec();
+        let mut v = level_vehicle_at(0.58);
+        v.velocity = Vec3::new(0.0, 0.0, -5.0); // 5 m/s forward
+
+        let out = compute_buoyancy(&v, Some(&spec), 0.0);
+
+        // With quadratic drag at 5 m/s, partial wet (0.58 CG → ~0.37 wetted):
+        // F_drag per float = 75 × 25 × 0.37 = 694 N opposing motion.
+        // Total ~1388 N backward, accel = 1388 / 2313 = 0.60 m/s² positive Z.
+        assert!(
+            out.linear_accel.z > 0.3 && out.linear_accel.z < 1.5,
+            "expected drag accel ~0.6 m/s² in +Z (opposing -Z motion); got {}",
+            out.linear_accel.z,
+        );
+    }
+
+    #[test]
+    fn horizontal_drag_scales_with_wetted_fraction() {
+        // Compare drag at two different wetted fractions. Deeper submersion →
+        // more drag at the same velocity.
+        let spec = beaver_spec();
+        let mut v_shallow = level_vehicle_at(0.75);
+        v_shallow.velocity = Vec3::new(5.0, 0.0, 0.0);
+        let out_shallow = compute_buoyancy(&v_shallow, Some(&spec), 0.0);
+
+        let mut v_deep = level_vehicle_at(0.3);
+        v_deep.velocity = Vec3::new(5.0, 0.0, 0.0);
+        let out_deep = compute_buoyancy(&v_deep, Some(&spec), 0.0);
+
+        assert!(
+            out_deep.linear_accel.x.abs() > out_shallow.linear_accel.x.abs(),
+            "deeper submersion should produce more drag; shallow={} deep={}",
+            out_shallow.linear_accel.x,
+            out_deep.linear_accel.x,
+        );
+    }
+
+    #[test]
+    fn above_water_has_zero_drag() {
+        // Airborne aircraft moving fast: no water contact → zero drag contribution
+        // from buoyancy module. (Aero drag is handled separately in flight.rs.)
+        let spec = beaver_spec();
+        let mut v = level_vehicle_at(50.0);
+        v.velocity = Vec3::new(10.0, -5.0, -30.0);
+
+        let out = compute_buoyancy(&v, Some(&spec), 0.0);
+        assert!(out.linear_accel.length() < f32::EPSILON);
+        assert!(out.total_force_n.abs() < f32::EPSILON);
     }
 }

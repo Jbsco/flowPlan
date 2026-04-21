@@ -313,15 +313,21 @@ are in scope -- the Beaver is flown on both.
 - [x] Buoyancy force per pontoon = `ρ_water · V_submerged · g`, clamped by pontoon displacement volume (2.236 m³ per float). Box-approximation wetted volume sums to per-pontoon force; body-frame `r × F` produces moment that sums into `angular_accel` alongside aero.
 - [x] Symmetric case validated analytically: `equilibrium_draft_produces_weight_matching_force` unit test asserts buoyancy equals weight at CG_y = 0.66 m (analytic equilibrium for Beaver MTOW on Edo 4930 floats). Full tick-loop settle test deferred to 2.5a.2 — needs vertical water drag to damp the buoyancy-gravity oscillation (without it, undamped explicit Euler across the displacement cap is numerically unstable; this is the physics 2.5a.2 introduces).
 
-**2.5a.2 Per-pontoon horizontal water drag.**
-- [ ] Wetted-area approximation per pontoon, scaled by immersion depth
-- [ ] Horizontal drag force per pontoon, scaled by pontoon velocity, tuned for realistic plowing
-- [ ] Vertical damping to prevent bobbing oscillation at rest
-- [ ] Bench: water-taxi scenario reaches steady speed at idle thrust (not runaway, not stationary — per 2.5c property test pattern extended to water)
+**2.5a.2 Per-pontoon horizontal water drag + vertical damping. — SHIPPED**
+- [x] Wetted-area approximation per pontoon, scaled by immersion depth
+- [x] Horizontal drag force per pontoon, scaled by pontoon velocity (quadratic), tuned for realistic plowing (`HORIZONTAL_DRAG_N_PER_MPS2 = 75.0`)
+- [x] Vertical damping to prevent bobbing oscillation at rest (linear, for numerical stability near zero velocity; `VERTICAL_DAMPING_N_PER_MPS = 30_000.0`, ~0.56 of critical at equilibrium wetted fraction)
+- [x] Orientation-aware float-bottom calculation (rotate body-Y by orientation to get world-frame lowest point) — avoids wetted-area error when aircraft pitches from drag moment
+- [x] Per-pontoon velocity includes angular contribution (`v_pontoon = v_cg + ω_world × r_world`) so roll/yaw rates couple into drag → angular damping emerges naturally
+- [x] Integration test: float dropped from 1.5 m settles near analytic equilibrium draft (~0.66 m CG mean over last 10 s of a 30 s run, ±0.15 m tolerance)
+- [x] App `min_altitude` clamp drops the `WATER_LEVEL` floor — buoyancy now manages water contact in-game; terrain remains the only `min_altitude` source until 2.5b lands
+- [ ] Water-taxi scenario migrated to 2.5a.3 — single-point float sampling can't produce the fore/aft buoyancy restoring moment that real floats use to limit pitch-down under drag; 2.5a.3 multi-point sampling supplies it naturally. 2.5a.2 drag-in-isolation is validated by unit tests (vertical damping opposes motion, horizontal drag opposes motion, drag scales with wetted fraction).
 
 **2.5a.3 Step transition (plow → on-step).**
+- [ ] Multi-point float sampling (fore/mid/aft per float) so longitudinal wetted-area asymmetry produces the natural pitch-restoring moment under drag — decouples pitch dynamics from the single-point-centroid approximation
 - [ ] Drag regime shift when float velocity crosses hump speed
 - [ ] Pitch attitude reduction as aircraft rises onto planing surface
+- [ ] Bench: water-taxi scenario reaches steady speed at idle thrust (not runaway, not stationary — migrated from 2.5a.2 because it needs multi-point sampling to converge stably)
 - [ ] Bench: water-takeoff scenario reaches on-step phase; wetted area drops; acceleration increases visibly in telemetry
 - [ ] Feel moment: tactile transition audible in telemetry trace
 

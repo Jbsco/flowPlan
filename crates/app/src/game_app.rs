@@ -90,10 +90,10 @@ const WATER_HALF_EXTENT: f32 = 4000.0;
 /// cel shader.
 const WATER_COLOR: [f32; 4] = [0.18, 0.38, 0.58, 1.0];
 
-/// Mean water level in world-space Y. Gerstner waves oscillate around this; the passive
-/// ground clamp (pre-2.5) uses it as a static floor so the plane can't descend through
-/// mean sea level while buoyancy is still not modeled.
-const WATER_LEVEL: f32 = 0.0;
+// Mean water level (was `WATER_LEVEL = 0.0`) is no longer a min-altitude clamp source.
+// Phase 2.5a buoyancy + drag handles water contact directly. The water *render* still
+// uses y=0 as its mean surface (in `crates/render/src/water.wgsl` and the CPU sampler);
+// keeping that sim/render contract independent of the gameplay clamp.
 
 /// Small clearance added to the floor to avoid surface z-fighting between the vehicle
 /// and the terrain / water mesh.
@@ -629,10 +629,12 @@ impl Runtime {
                     batch.push(ev);
                 }
             }
-            // Min-altitude floor: highest of (terrain at vehicle's XZ, mean water level)
-            // plus float_offset plus a small margin to avoid surface z-fighting. Wave
-            // crests can still clip floats briefly -- resolved by the Phase 2.5
-            // buoyancy model, not this passive clamp.
+            // Min-altitude floor: terrain at vehicle's XZ, plus float_offset, plus a
+            // small margin. Over water (terrain below sea level), the clamp drops
+            // with the terrain — Phase 2.5a's buoyancy physics handles water contact
+            // directly, so the clamp no longer needs to hold the aircraft above mean
+            // water level (that was the pre-2.5 passive altitude clamp). 2.5b will
+            // replace the terrain portion with proper per-wheel ground contact.
             //
             // Scenario-playback mode: pass `min_altitude = 0.0` exactly, matching
             // `crates/sim/tests/flight_bench.rs`. This guarantees bench CSV and visual
@@ -643,8 +645,7 @@ impl Runtime {
             } else {
                 let pos = self.sim.vehicle.position;
                 let terrain_here = self.terrain.height(pos.x, pos.z);
-                let floor = terrain_here.max(WATER_LEVEL);
-                floor + self.vehicle_float_offset + SURFACE_MARGIN
+                terrain_here + self.vehicle_float_offset + SURFACE_MARGIN
             };
             self.sim
                 .tick(&batch, &self.difficulty, FIXED_DT, min_altitude);
