@@ -18,6 +18,8 @@ glam = { workspace = true }
 bytemuck = { workspace = true }
 serde = { workspace = true }
 ron = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+tempfile = "3"

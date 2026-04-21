@@ -20,6 +20,7 @@ pub fn state_hash(s: &SimState) -> u64 {
     fold_f32(&mut h, s.vehicle.controls.pitch);
     fold_f32(&mut h, s.vehicle.controls.yaw);
     fold_f32(&mut h, s.vehicle.controls.roll);
+    fold_u32(&mut h, s.vehicle.config.as_u32());
     fold_vec3(&mut h, s.camera.position);
     fold_quat(&mut h, s.camera.orientation);
     fold_f32(&mut h, s.camera.fov_y_radians);

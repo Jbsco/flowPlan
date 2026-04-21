@@ -428,6 +428,8 @@ mod tests {
                 vx_mps: 29.06,
                 vy_mps: 37.99,
             },
+            variants: Vec::new(),
+            default_variant: String::new(),
         }
     }
 

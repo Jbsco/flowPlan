@@ -42,4 +42,24 @@
         vx_mps: 29.06,
         vy_mps: 37.99,
     ),
+    // Flyable configurations. Mesh paths are workspace-relative; missing mesh
+    // falls back to the placeholder cube (same policy as pre-catalog behavior).
+    variants: [
+        (
+            id: "floats",
+            display_name: "Edo 4930 Straight Floats",
+            config: Floats,
+            mesh_path: "data/aircraft/northlander.glb",
+        ),
+        (
+            id: "wheels",
+            display_name: "Taildragger (Wheels)",
+            config: Wheels,
+            mesh_path: "data/aircraft/northlander_land.glb",
+        ),
+    ],
+    // Matches the MVP 2.5a water scenarios; wheels becomes default once
+    // 2.5b.2-.4 land the full ground physics stack and the wheeled bench
+    // scenarios are the primary exercise path.
+    default_variant: "floats",
 )

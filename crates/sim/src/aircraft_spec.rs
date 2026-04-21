@@ -8,10 +8,13 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::VehicleConfig;
+
 /// Top-level aircraft specification.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct AircraftSpec {
-    /// In-game aircraft name (sanitized; never a trademark).
+    /// In-game aircraft name (sanitized; never a trademark). Used as the display
+    /// label; the catalog lookup id comes from the RON filename.
     pub name: String,
     /// Real-world inspiration, for documentation only.
     pub inspiration: String,
@@ -35,6 +38,35 @@ pub struct AircraftSpec {
     pub fuel_capacity_gal: f32,
     /// Characteristic speeds, meters per second.
     pub speeds: SpeedsSpec,
+    /// Available configurations (floats, wheels, future skis / amphib). Each variant
+    /// declares its contact-physics config and the mesh path used when it is loaded.
+    /// Never empty — an aircraft with no flyable variant wouldn't appear in the catalog.
+    pub variants: Vec<AircraftVariant>,
+    /// Id of the variant selected when no explicit choice is made. Must match one
+    /// of the `variants[*].id`. Validated at catalog-scan time.
+    pub default_variant: String,
+}
+
+/// One configuration of an aircraft — floats vs wheels vs future skis/amphib.
+///
+/// Binds a `VehicleConfig` (which contact-physics model runs) to a mesh file and
+/// a stable id / display name for catalog selection and future GUI enumeration.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AircraftVariant {
+    /// Stable id for selector matching (`"floats"`, `"wheels"`, `"skis"`, …). Never
+    /// a user-facing string — that's `display_name`. Lowercase + underscore is the
+    /// convention, but nothing enforces it.
+    pub id: String,
+    /// Short user-facing label suitable for a menu row (e.g. `"Edo 4930 Floats"`,
+    /// `"Taildragger (wheels)"`). No length cap, but GUI will truncate on narrow
+    /// layouts.
+    pub display_name: String,
+    /// Which contact-physics model this variant activates.
+    pub config: VehicleConfig,
+    /// Workspace-relative path to the glTF/GLB file loaded when this variant is
+    /// selected. Missing file falls back to the placeholder cube (same policy as
+    /// pre-catalog behavior).
+    pub mesh_path: String,
 }
 
 /// Engine subset of an [`AircraftSpec`].
@@ -97,6 +129,21 @@ mod tests {
             vx_mps: 29.06,
             vy_mps: 37.99,
         ),
+        variants: [
+            (
+                id: "floats",
+                display_name: "Edo 4930 Straight Floats",
+                config: Floats,
+                mesh_path: "data/aircraft/northlander.glb",
+            ),
+            (
+                id: "wheels",
+                display_name: "Taildragger (Wheels)",
+                config: Wheels,
+                mesh_path: "data/aircraft/northlander_land.glb",
+            ),
+        ],
+        default_variant: "floats",
     )"#;
 
     #[test]
@@ -105,6 +152,18 @@ mod tests {
         assert_eq!(spec.name, "Northlander");
         assert!((spec.engine.power_hp - 450.0).abs() < f32::EPSILON);
         assert!((spec.speeds.cruise_mps - 64.31).abs() < 1e-3);
+        assert_eq!(spec.variants.len(), 2);
+        assert_eq!(spec.default_variant, "floats");
+        assert_eq!(spec.variants[0].id, "floats");
+        assert_eq!(
+            spec.variants[0].config,
+            crate::config::VehicleConfig::Floats
+        );
+        assert_eq!(spec.variants[1].id, "wheels");
+        assert_eq!(
+            spec.variants[1].config,
+            crate::config::VehicleConfig::Wheels
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@ use anyhow::{Context, Result};
 use tracing_subscriber::EnvFilter;
 
 /// Runtime options parsed from CLI flags. Simple flag parser -- `clap` would be
-/// overkill for three flags and adds a dependency we don't need yet.
+/// overkill for this many flags and adds a dependency we don't need yet.
 #[derive(Debug, Default, Clone)]
 pub struct CliOptions {
     /// `--scenario <name>`: play back a named `FlightScenario` (see
@@ -33,6 +33,18 @@ pub struct CliOptions {
     /// `--exit-on-scenario-end`: automatically exit once the scenario's duration
     /// elapses. Useful for shell-driven batch runs.
     pub exit_on_scenario_end: bool,
+    /// `--aircraft <id>`: select aircraft by stable catalog id (matches the RON
+    /// filename, e.g. `northlander` for `data/aircraft/northlander.ron`). Falls
+    /// back to `FLOWPLAN_AIRCRAFT` env var's `<id>` segment, then to the
+    /// catalog's first entry.
+    pub aircraft_id: Option<String>,
+    /// `--variant <id>`: select the variant within the chosen aircraft
+    /// (`floats` / `wheels` / future). Falls back to `FLOWPLAN_AIRCRAFT` env
+    /// var's `:variant` segment, then to the aircraft's `default_variant`.
+    pub variant_id: Option<String>,
+    /// `--list-aircraft`: print the catalog and exit. Useful for discovering
+    /// valid `--aircraft` / `--variant` ids without reading the RON files.
+    pub list_aircraft: bool,
 }
 
 fn main() -> Result<()> {
@@ -60,6 +72,21 @@ fn parse_cli() -> Result<CliOptions> {
             "--exit-on-scenario-end" => {
                 opts.exit_on_scenario_end = true;
             },
+            "--aircraft" => {
+                let id = args
+                    .next()
+                    .context("--aircraft requires an aircraft id argument")?;
+                opts.aircraft_id = Some(id);
+            },
+            "--variant" => {
+                let id = args
+                    .next()
+                    .context("--variant requires a variant id argument")?;
+                opts.variant_id = Some(id);
+            },
+            "--list-aircraft" => {
+                opts.list_aircraft = true;
+            },
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -67,6 +94,21 @@ fn parse_cli() -> Result<CliOptions> {
             other => {
                 anyhow::bail!("unknown argument: {other}. Run with --help for usage.");
             },
+        }
+    }
+    // Env var fallback: FLOWPLAN_AIRCRAFT=<aircraft_id>[:<variant_id>]. Only
+    // applied when the matching CLI flag is absent — CLI wins.
+    if opts.aircraft_id.is_none() || opts.variant_id.is_none() {
+        if let Ok(raw) = std::env::var("FLOWPLAN_AIRCRAFT") {
+            let (a, v) = raw
+                .split_once(':')
+                .map_or((raw.as_str(), ""), |(a, v)| (a, v));
+            if opts.aircraft_id.is_none() && !a.is_empty() {
+                opts.aircraft_id = Some(a.to_string());
+            }
+            if opts.variant_id.is_none() && !v.is_empty() {
+                opts.variant_id = Some(v.to_string());
+            }
         }
     }
     Ok(opts)
@@ -87,10 +129,21 @@ FLAGS:
                                  (used with --scenario).
     --exit-on-scenario-end       Close the window automatically when the scenario's
                                  duration elapses (useful in batch runs).
+    --aircraft <id>              Select aircraft by catalog id (e.g. 'northlander',
+                                 'catalina'). Defaults to the first entry in
+                                 data/aircraft/ sorted by id. Env fallback:
+                                 FLOWPLAN_AIRCRAFT=<id>[:<variant>].
+    --variant <id>               Select variant within the chosen aircraft
+                                 (e.g. 'floats', 'wheels'). Defaults to the
+                                 aircraft's declared default_variant.
+    --list-aircraft              Print the catalog and exit.
     -h, --help                   Print this message and exit.
 
 EXAMPLES:
     flowplan
+    flowplan --aircraft northlander --variant wheels
+    flowplan --list-aircraft
+    FLOWPLAN_AIRCRAFT=catalina:floats flowplan
     flowplan --scenario beaver_cruise_sl
     flowplan --scenario beaver_vy_climb --log-dir target/flight-bench --exit-on-scenario-end
 "

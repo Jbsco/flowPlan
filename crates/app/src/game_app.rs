@@ -57,17 +57,14 @@ const MAX_TICKS_PER_FRAME: u32 = 8;
 const TERRAIN_CELLS: u32 = 200;
 const TERRAIN_HALF_EXTENT: f32 = 2000.0;
 
-/// Cube size for the placeholder vehicle (meters). Used only when the glTF aircraft at
-/// `VEHICLE_GLB_PATH` is missing or malformed.
+/// Cube size for the placeholder vehicle (meters). Used when the selected variant's
+/// glTF mesh is missing or malformed.
 const CUBE_SIZE: f32 = 2.0;
 
-/// Workspace-relative path to the MVP aircraft glTF. See AIRCRAFT.md § MVP Reference.
-/// Populated by the author via Blender export; absent by default. Load failure is
-/// non-fatal -- we fall back to the placeholder cube so the app always runs.
-const VEHICLE_GLB_PATH: &str = "data/aircraft/northlander.glb";
-
-/// Workspace-relative path to the MVP aircraft spec sheet.
-const VEHICLE_SPEC_PATH: &str = "data/aircraft/northlander.ron";
+/// Workspace-relative directory that holds the aircraft catalog (one `.ron` per
+/// aircraft, matching `.glb` next to it). `AircraftCatalog::scan` walks this at
+/// startup.
+const AIRCRAFT_DIR: &str = "data/aircraft";
 
 /// Cel-shading presets for the Phase 1 placeholder scene. The terrain is a large, mostly
 /// diffuse surface: many bands (4), high ambient floor (0.5), low rim (0.08). The vehicle
@@ -109,6 +106,11 @@ const WATER_COLOR: [f32; 4] = [0.18, 0.38, 0.58, 1.0];
 const SURFACE_MARGIN: f32 = 0.05;
 
 pub fn run(opts: crate::CliOptions) -> Result<()> {
+    // --list-aircraft short-circuits window construction.
+    if opts.list_aircraft {
+        print_catalog_and_exit();
+    }
+
     // Resolve scenario from CLI flag before opening the window so we can fail fast
     // on typos.
     let scenario_opt = if let Some(name) = &opts.scenario_name {
@@ -479,13 +481,30 @@ impl Runtime {
         let terrain_mesh = CpuMesh::terrain_patch(TERRAIN_CELLS, TERRAIN_HALF_EXTENT, |x, z| {
             terrain.height(x, z)
         });
-        let vehicle_mesh = load_vehicle_mesh();
+        // Resolve aircraft selection from CLI/env/catalog before loading the mesh;
+        // mesh path + spec + config all come from the catalog entry.
+        let selected = resolve_aircraft_selection(opts);
+        let (vehicle_mesh, aircraft_spec, vehicle_config) = selected.as_ref().map_or_else(
+            || {
+                (
+                    placeholder_cube(),
+                    None,
+                    flowplan_sim::VehicleConfig::default(),
+                )
+            },
+            |sel| {
+                (
+                    load_vehicle_mesh(&sel.variant.mesh_path),
+                    Some(sel.spec.clone()),
+                    sel.variant.config,
+                )
+            },
+        );
         // Depth of the lowest mesh point below the origin (CG). Used below to lift the
         // spawn altitude so the floats clear terrain. Zero when the mesh sits at or
         // above y=0.
         let vehicle_float_offset = (-vehicle_mesh.bbox_min_y()).max(0.0);
         let water_mesh = CpuMesh::water_grid(WATER_CELLS, WATER_HALF_EXTENT, WATER_COLOR);
-        let aircraft_spec = load_aircraft_spec();
 
         let renderer = Renderer::new(
             &device,
@@ -508,6 +527,7 @@ impl Runtime {
         sim.aircraft = aircraft_spec;
         sim.vehicle = VehicleState::at_origin();
         sim.vehicle.fuel_gal = initial_fuel_gal;
+        sim.vehicle.config = vehicle_config;
 
         if let Some(s) = scenario.as_ref() {
             // Scenario playback: seed from the scenario's initial state. Aircraft
@@ -775,11 +795,118 @@ enum FrameError {
     Other(wgpu::SurfaceError),
 }
 
-/// Attempt to load the MVP aircraft mesh from `VEHICLE_GLB_PATH`; fall back to the
-/// placeholder cube on missing file or parse failure. Log the chosen path so startup is
-/// self-documenting.
-fn load_vehicle_mesh() -> CpuMesh {
-    match std::fs::read(VEHICLE_GLB_PATH) {
+/// The catalog entry + variant the app is running this session. Built once at
+/// startup from the CLI flags / env var / catalog defaults; held on `Runtime` so
+/// the HUD and future in-session menu can read what's loaded.
+#[derive(Clone, Debug)]
+pub struct SelectedAircraft {
+    /// Stable catalog id (`"northlander"`, `"catalina"`, …). Intentionally kept
+    /// even though no in-session path reads it yet — future menu UI (Phase 4)
+    /// and future save-load (Phase 5+) both reference aircraft by this id, and
+    /// keeping the field stable now means the settings UI doesn't force a
+    /// struct rev on the app crate when it lands.
+    #[allow(dead_code)]
+    pub aircraft_id: String,
+    /// Selected variant within that catalog entry. Owned so the `Runtime` isn't
+    /// pinned to the catalog lifetime.
+    pub variant: flowplan_sim::AircraftVariant,
+    /// Full spec — fed to `SimState.aircraft`.
+    pub spec: AircraftSpec,
+}
+
+/// Scan `data/aircraft/`, resolve the CLI + env selection against it, and return
+/// the chosen entry. Logs at each fallback so startup traces what's loaded and
+/// why.
+///
+/// Selection precedence (highest wins):
+/// 1. `--aircraft <id>` / `--variant <id>` CLI flags
+/// 2. `FLOWPLAN_AIRCRAFT=<id>[:<variant>]` env var (applied in `parse_cli`)
+/// 3. Catalog's first entry, id-sorted, for the aircraft; entry's
+///    `default_variant` for the variant
+///
+/// Returns `None` when the catalog is empty — caller falls back to the
+/// placeholder cube with a warning.
+fn resolve_aircraft_selection(opts: &crate::CliOptions) -> Option<SelectedAircraft> {
+    let dir = std::path::Path::new(AIRCRAFT_DIR);
+    let (catalog, errors) = flowplan_sim::AircraftCatalog::scan(dir);
+    for err in &errors {
+        tracing::warn!("catalog scan: {err}");
+    }
+    if catalog.is_empty() {
+        tracing::warn!("catalog empty; falling back to placeholder cube");
+        return None;
+    }
+
+    let entry = opts.aircraft_id.as_deref().map_or_else(
+        || catalog.default_entry(),
+        |id| {
+            catalog.find(id).or_else(|| {
+                tracing::warn!(
+                    "requested aircraft {id:?} not in catalog; falling back to default"
+                );
+                catalog.default_entry()
+            })
+        },
+    )?;
+
+    let variant = opts.variant_id.as_deref().map_or_else(
+        || entry.default_variant(),
+        |id| {
+            entry.find_variant(id).or_else(|| {
+                tracing::warn!(
+                    "requested variant {id:?} not in {:?}; falling back to default_variant",
+                    entry.id
+                );
+                entry.default_variant()
+            })
+        },
+    )?;
+
+    tracing::info!(
+        "selected aircraft: {} / {} ({} → {})",
+        entry.id,
+        variant.id,
+        variant.display_name,
+        variant.mesh_path,
+    );
+
+    Some(SelectedAircraft {
+        aircraft_id: entry.id.clone(),
+        variant: variant.clone(),
+        spec: entry.spec.clone(),
+    })
+}
+
+/// Print the catalog contents to stdout and exit. Used by `--list-aircraft`.
+pub fn print_catalog_and_exit() -> ! {
+    let dir = std::path::Path::new(AIRCRAFT_DIR);
+    let (catalog, errors) = flowplan_sim::AircraftCatalog::scan(dir);
+    for err in &errors {
+        eprintln!("catalog scan warning: {err}");
+    }
+    if catalog.is_empty() {
+        println!("(catalog empty — no parseable RON files in {AIRCRAFT_DIR})");
+    } else {
+        println!("Aircraft catalog ({} entries):", catalog.entries().len());
+        for entry in catalog.entries() {
+            println!("  {} — {}", entry.id, entry.spec.name);
+            for v in &entry.spec.variants {
+                let marker = if v.id == entry.spec.default_variant {
+                    " (default)"
+                } else {
+                    ""
+                };
+                println!("    {}: {}{}", v.id, v.display_name, marker);
+            }
+        }
+    }
+    std::process::exit(0)
+}
+
+/// Load the aircraft mesh at `path`; fall back to the placeholder cube on missing
+/// file or parse failure. Log the chosen path so startup is self-documenting.
+fn load_vehicle_mesh(path: &str) -> CpuMesh {
+    match std::fs::read(path) {
         Ok(bytes) => match flowplan_assets::load_mesh(&bytes) {
             Ok(mesh) => {
                 // The mesh is rendered at `vehicle.position` and rotated around it.
@@ -799,7 +926,7 @@ fn load_vehicle_mesh() -> CpuMesh {
                 tracing::info!(
                     "loaded aircraft mesh: {} ({} verts, {} tris) bbox \
                      x[{:+6.2}, {:+6.2}] y[{:+6.2}, {:+6.2}] z[{:+6.2}, {:+6.2}]",
-                    VEHICLE_GLB_PATH,
+                    path,
                     mesh.vertex_count(),
                     mesh.index_count() / 3,
                     mn[0],
@@ -812,16 +939,16 @@ fn load_vehicle_mesh() -> CpuMesh {
                 mesh
             },
             Err(e) => {
-                tracing::warn!("failed to parse {VEHICLE_GLB_PATH}: {e}; using placeholder cube");
+                tracing::warn!("failed to parse {path}: {e}; using placeholder cube");
                 placeholder_cube()
             },
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::info!("no {VEHICLE_GLB_PATH} on disk; using placeholder cube");
+            tracing::info!("no {path} on disk; using placeholder cube");
             placeholder_cube()
         },
         Err(e) => {
-            tracing::warn!("read {VEHICLE_GLB_PATH} failed: {e}; using placeholder cube");
+            tracing::warn!("read {path} failed: {e}; using placeholder cube");
             placeholder_cube()
         },
     }
@@ -829,41 +956,6 @@ fn load_vehicle_mesh() -> CpuMesh {
 
 fn placeholder_cube() -> CpuMesh {
     CpuMesh::cube(CUBE_SIZE, [1.0, 0.82, 0.28, 1.0])
-}
-
-/// Load the MVP aircraft spec sheet. Returns `None` if the file is absent or malformed;
-/// the sim keeps running in that case (spec feeds the Phase 2.4 flight model, not the
-/// Phase 1 placeholder dynamics).
-fn load_aircraft_spec() -> Option<AircraftSpec> {
-    match std::fs::read_to_string(VEHICLE_SPEC_PATH) {
-        Ok(s) => match AircraftSpec::from_ron(&s) {
-            Ok(spec) => {
-                tracing::info!(
-                    "loaded aircraft spec: {} ({}) MTOW {:.0} kg wheels / {:.0} kg floats, \
-                     {} @ {:.0} hp",
-                    spec.name,
-                    spec.inspiration,
-                    spec.max_mass_wheels_kg,
-                    spec.max_mass_floats_kg,
-                    spec.engine.name,
-                    spec.engine.power_hp,
-                );
-                Some(spec)
-            },
-            Err(e) => {
-                tracing::warn!("parse {VEHICLE_SPEC_PATH}: {e}");
-                None
-            },
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::info!("no {VEHICLE_SPEC_PATH}; aircraft spec unavailable");
-            None
-        },
-        Err(e) => {
-            tracing::warn!("read {VEHICLE_SPEC_PATH}: {e}");
-            None
-        },
-    }
 }
 
 /// Map an sRGB surface format to its linear counterpart for the egui HUD view. wgpu 22

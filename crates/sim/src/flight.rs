@@ -1086,6 +1086,7 @@ mod tests {
             angular_velocity: Vec3::ZERO,
             controls: crate::controls::Controls::default(),
             fuel_gal: 0.0,
+            config: crate::config::VehicleConfig::default(),
         }
     }
 
@@ -1189,6 +1190,8 @@ mod tests {
                 vx_mps: 29.0,
                 vy_mps: 38.0,
             },
+            variants: Vec::new(),
+            default_variant: String::new(),
         };
         let out = compute_forces(&s, Some(&spec), 1.0 / 120.0, 1000.0);
         assert!(out.lift.length() > 1.0, "lift should be non-trivial");
@@ -1428,6 +1431,8 @@ mod tests {
                 vx_mps: 29.0,
                 vy_mps: 38.0,
             },
+            variants: Vec::new(),
+            default_variant: String::new(),
         };
         let mut s = crate::state::SimState::new(1);
         s.aircraft = Some(spec);
@@ -1519,6 +1524,8 @@ mod tests {
                 vx_mps: 29.0,
                 vy_mps: 38.0,
             },
+            variants: Vec::new(),
+            default_variant: String::new(),
         };
         let mut s = zero_state();
         s.fuel_gal = 50.0;
@@ -1560,6 +1567,8 @@ mod tests {
                 vx_mps: 29.0,
                 vy_mps: 38.0,
             },
+            variants: Vec::new(),
+            default_variant: String::new(),
         };
         let mut s = zero_state();
         s.fuel_gal = 50.0;
@@ -1630,6 +1639,8 @@ mod tests {
                 vx_mps: 29.0,
                 vy_mps: 38.0,
             },
+            variants: Vec::new(),
+            default_variant: String::new(),
         };
         // At SL, full throttle, cruise airspeed.
         let mut s_sl = zero_state();
@@ -1687,6 +1698,8 @@ mod tests {
                 vx_mps: 29.0,
                 vy_mps: 38.0,
             },
+            variants: Vec::new(),
+            default_variant: String::new(),
         };
         let mut s_sl = zero_state();
         s_sl.fuel_gal = 50.0;
@@ -1734,6 +1747,8 @@ mod tests {
                 vx_mps: 29.0,
                 vy_mps: 38.0,
             },
+            variants: Vec::new(),
+            default_variant: String::new(),
         };
         let mut s = zero_state();
         s.fuel_gal = 50.0;
@@ -1796,6 +1811,8 @@ mod tests {
                 vx_mps: 29.0,
                 vy_mps: 38.0,
             },
+            variants: Vec::new(),
+            default_variant: String::new(),
         };
         let mut s = zero_state();
         s.velocity = Vec3::new(0.0, 0.0, -40.0);

@@ -1,0 +1,85 @@
+// flowPlan aircraft spec: Catalina analogue (Consolidated PBY-5A / PBY-6A).
+//
+// Sanitized homage of the WWII amphibious flying boat. Figures authored from
+// AIRCRAFT.md § Flying Boats — Hull, cross-referenced with published PBY-5A POH
+// excerpts and Flight International type data. Fields flagged `(verify)` track
+// the same tightening workflow as the Beaver spec.
+//
+// Catalina distinctives vs. the Beaver:
+// - Twin radial engines (2× R-1830). The v1 flight model treats this as a single
+//   effective powerplant sized for total thrust; per-engine asymmetry lands when
+//   the multi-engine feature ships (Phase 5+).
+// - Hull + retractable gear + retractable wingtip floats. For 2.5b the wingtip
+//   floats deploy on the water, so the Floats variant approximates hull + wingtip
+//   contact with the existing pontoon geometry (BEAVER_PONTOONS placeholder in
+//   `buoyancy.rs`). True hull hydrodynamics + retract-wheels sequencing lands
+//   when `VehicleConfig::Amphib` + per-aircraft contact geometry migration ship.
+// - Much heavier than the Beaver; v-speeds slower in absolute terms, longer
+//   takeoff rolls on both surfaces.
+(
+    name: "Catalina",
+    inspiration: "Consolidated PBY-5A / PBY-6A (1936-1945)",
+    // 17,500 lb empty (typical PBY-5A) -> 7938 kg (verify — varies by build)
+    empty_mass_kg: 7938.0,
+    // 35,420 lb MTOW -> 16066 kg. PBY has no distinct wheels-only MTOW; the
+    // retractable gear is a ground-handling / short-grass asset, not a weight
+    // delta. Same value for both until multi-variant MTOW lands.
+    max_mass_wheels_kg: 16066.0,
+    max_mass_floats_kg: 16066.0,
+    // 1,400 sq ft -> 130.06 m^2 (verify)
+    wing_area_m2: 130.06,
+    // wingspan 104 ft (31.7 m) -> AR ≈ 31.7² / 130.06 ≈ 7.72
+    aspect_ratio: 7.72,
+    // NACA 21 series cited in primary sources; root/tip pair is educated placeholder
+    // — confirm against the Consolidated type data sheet.
+    airfoil_root: "NACA 21020 (verify)",
+    airfoil_tip: "NACA 21012 (verify)",
+    // Modeled as a single effective powerplant = 2× 1,200 hp at sea level. This
+    // is the parameter the flight model reads; when multi-engine + asymmetry
+    // lands, this becomes the per-engine figure with a `count: 2` alongside.
+    engine: (
+        name: "Pratt & Whitney R-1830 Twin Wasp (2×, modeled as combined)",
+        power_hp: 2400.0,
+        // 2× ~85 gph cruise per engine at 55% power -> ~170 gph combined (verify)
+        cruise_fuel_gph: 170.0,
+    ),
+    // 1,750 US gal total (outer-wing tanks + hull) — typical PBY-5A figure.
+    fuel_capacity_gal: 1750.0,
+    // Speeds converted from POH figures:
+    //   Vne   ~170 kt -> 87.48 m/s
+    //   cruise ~115 kt -> 59.17 m/s
+    //   Vs     ~58 kt -> 29.84 m/s (clean) (verify)
+    //   Vso    ~55 kt -> 28.30 m/s (flaps/water) (verify)
+    //   Vx     ~70 kt -> 36.01 m/s (verify)
+    //   Vy     ~85 kt -> 43.73 m/s (verify)
+    speeds: (
+        vne_mps: 87.48,
+        cruise_mps: 59.17,
+        vs_clean_mps: 29.84,
+        vso_mps: 28.30,
+        vx_mps: 36.01,
+        vy_mps: 43.73,
+    ),
+    // v1 variants: hull (gear retracted) and land (gear deployed). Both reuse
+    // the shared 2.5b.1 BEAVER_GEAR / BEAVER_PONTOONS placeholder geometry
+    // until per-aircraft contact specs migrate. Floats variant approximates
+    // hull + wingtip-float water contact; Wheels variant approximates the
+    // retractable tricycle gear. A dedicated `VehicleConfig::Amphib` + per-
+    // aircraft contact geometry (hull + wingtips + retract wheels) lands in
+    // Phase 3+ when multi-surface contact is required for the amphib flow.
+    variants: [
+        (
+            id: "floats",
+            display_name: "Hull + Retractable Wingtip Floats (gear retracted)",
+            config: Floats,
+            mesh_path: "data/aircraft/catalina.glb",
+        ),
+        (
+            id: "wheels",
+            display_name: "Retractable Gear Deployed (amphib — ground ops)",
+            config: Wheels,
+            mesh_path: "data/aircraft/catalina_land.glb",
+        ),
+    ],
+    default_variant: "floats",
+)

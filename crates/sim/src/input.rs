@@ -40,6 +40,31 @@ pub enum InputEvent {
     SetWaterRudder(bool),
 }
 
+/// App-level commands that cross the GUI / menu → app boundary.
+///
+/// Distinct from [`InputEvent`]: `InputEvent` is the hot-path, bounded-size,
+/// `Copy` stream the sim ingests every tick; `AppCommand` carries variably-sized
+/// payloads (strings, future save slots) and is dispatched at app scope, not
+/// inside the sim tick. Future menu UI pushes these; the app handles them by
+/// tearing down / reconfiguring / saving / etc.
+///
+/// **None of these are currently bound to input devices.** They exist so the
+/// cross-boundary surface is stable before the Phase 4 settings / pause menu
+/// lands — adding commands here now means the UI code won't force enum revs on
+/// the sim crate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AppCommand {
+    /// Request a switch to a different aircraft + variant. Mid-session swap
+    /// requires rebuilding sim state (spec, mesh, config, equilibrium draft);
+    /// the app captures this command, tears down, and re-enters its main loop.
+    SelectAircraft {
+        /// Stable id of the catalog entry to load (e.g., `"northlander"`).
+        aircraft_id: String,
+        /// Stable id of the variant within that entry (e.g., `"wheels"`).
+        variant_id: String,
+    },
+}
+
 /// A per-tick batch of input events drained from the input queue.
 ///
 /// Constructed by the app layer each tick, passed by reference to `SimState::tick`.

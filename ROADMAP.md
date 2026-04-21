@@ -372,12 +372,44 @@ are in scope -- the Beaver is flown on both.
 **Non-global water heights (elevation lakes, rivers, sandbars for bush-pilot parking) are Phase 3+** per [FEATURES.md § Terrain & Static Landscape](FEATURES.md#terrain--static-landscape). The `world::water_height(x, z, t)` API is position-conditioned already, so the eventual hydrology rebuild plugs in without changing 2.5a's consumer contract. Sandbar parking specifically bridges 2.5a (water sampling near the bar) + 2.5b (soft-surface ground contact on the bar) + Phase 3+ shore classification.
 
 **2.5b Ground contact (wheels / taildragger):**
-- [ ] Per-contact-point normal force distributed across wheels + tailwheel (or ski pair in winter biome), resolving roll / pitch the CG clamp currently ignores
-- [ ] Rolling resistance + per-surface friction (paved / grass / gravel / sand / tundra), feeding both longitudinal drag and lateral grip for taxi steering
-- [ ] Brake input (`B` held when on ground → symmetric braking; asymmetric toe-brake support arrives with remap UI in Phase 4)
-- [ ] Tailwheel steering: locked above a threshold ground speed, castoring at taxi speeds (Beaver's actual behavior)
-- [ ] Pitch / roll attitude constrained when on surface: plane can rotate into nose-high (stall-taildown) or wingtip-scrape attitudes but the contact resolution pushes back with the appropriate torque
-- [ ] Prop strike, tail strike, wingtip strike detection -- damage consequences land in Phase 4+, but the detection events are raised from this milestone so the hooks exist
+
+Decomposed into 7 dependency-ordered sub-milestones mirroring 2.5a's structure. `VehicleConfig::Wheels` activates the entire stack; `Floats` short-circuits it. Geometry uses placeholder `BEAVER_GEAR` (3 contact points) anchored to DHC-2 real-world dimensions; mesh-alignment to `northlander_land.glb` bbox is a cross-cutting follow-up analogous to 2.5a.3's float realignment.
+
+**2.5b.1 Per-gear normal force (spring-damper) + config enum.** (SHIPPED)
+- [x] `VehicleConfig::{Floats, Wheels}` enum (default Floats preserves pre-2.5b behavior); `config: VehicleConfig` on `VehicleState`; folded into `state_hash`
+- [x] `ground_contact::compute_ground_contact(v, spec, ground_y) -> GroundContactOutputs` — 3-point gear set, per-gear spring (200 kN/m) + damper (10 kN·s/m) compression model, world +Y normal force, body-frame moments from `r × F`
+- [x] Short-circuits: no spec / `config != Wheels` / all gear above ground
+- [x] Buoyancy still runs for Floats config only (mutual exclusion by config, not by runtime branching in the caller)
+- [x] 8 unit tests: no-spec / Floats-config / airborne / at-rest weight-matching / symmetric no-roll-no-yaw / sinking adds damping / lifting never pulls / one-wheel-in-pit rolls restoring
+
+**2.5b.2 Rolling resistance + longitudinal drag.**
+- [ ] Per-gear rolling friction (paved baseline µ_r ≈ 0.02) applied along aircraft's body-X forward axis projected to ground
+- [ ] Ground drag couples into longitudinal deceleration at taxi speed → steady-state taxi under idle thrust (validates 2.5c property test)
+- [ ] Bench: `beaver_land_taxi` scenario — idle thrust reaches bounded taxi speed (analog to `beaver_water_taxi`)
+
+**2.5b.3 Lateral friction + tailwheel steering.**
+- [ ] Cornering force at each gear proportional to body-lateral slip velocity at the contact patch (linear tire model, capped at slip limit)
+- [ ] Tailwheel steering: full authority at taxi speeds, castoring (free-pivot) above a threshold ground speed (Beaver's actual behavior); steering input via existing `yaw` control channel when on ground
+- [ ] Bench: taxi-turn scenarios with/without tailwheel lock; heading response validated
+
+**2.5b.4 Brake input.**
+- [ ] `InputEvent::SetBrakes(bool)` + `Controls.brakes: bool` field; when held on ground, symmetric brake force applied to both main wheels (asymmetric toe-brakes deferred to Phase 4 remap UI)
+- [ ] Bench: `beaver_land_braked_stop` — decelerates from taxi speed to standstill within expected distance
+
+**2.5b.5 Attitude / strike detection.**
+- [ ] Pitch / roll attitude emerges from multi-point normal-force distribution (already baseline-supported by 2.5b.1's per-gear moment from `r × F`); validate that nose-high / wingtip-low attitudes reach stable equilibrium without oscillation
+- [ ] Prop strike, tail strike, wingtip strike detection points (body-frame offsets that, when below ground, raise an event) — damage consequences deferred to Phase 4+
+- [ ] Bench: `beaver_land_stall_taildown` and `beaver_land_wingtip_scrape` exercise the detection paths
+
+**2.5b.6 Per-surface friction table.**
+- [ ] Surface classification enum (`Paved | Grass | Gravel | Sand | Tundra`) — world-side sampler at `(x, z)` returns surface class, passed to `compute_ground_contact`
+- [ ] Per-surface µ_r (rolling) + µ_s (static / side) + compliance (soft surfaces deform → effectively softer spring)
+- [ ] Bench: paved-vs-grass taxi comparison and soft-field takeoff scenario
+
+**2.5b.7 App integration: config toggle + land-mesh selection.**
+- [ ] App reads a config selector (env var / RON field / CLI flag) and picks `northlander.glb` (Floats) or `northlander_land.glb` (Wheels) accordingly
+- [ ] `VEHICLE_GLB_PATH` becomes conditional; initial spawn position + `min_altitude` use the gear offset instead of float offset for wheels config
+- [ ] Playtest: can taxi, takeoff, land, park the wheeled Beaver — feel matches expectations for a taildragger
 
 **2.5c Invariants + tests:**
 - [ ] Determinism preserved: contact forces are a deterministic function of `(state, terrain/water sample, dt)`; no wall-clock in the contact path.

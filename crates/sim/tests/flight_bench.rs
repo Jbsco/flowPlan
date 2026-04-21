@@ -26,6 +26,8 @@ use glam as _;
 use proptest as _;
 use ron as _;
 use serde as _;
+use tempfile as _;
+use thiserror as _;
 
 use std::fs;
 use std::path::PathBuf;

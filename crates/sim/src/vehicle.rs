@@ -6,6 +6,7 @@
 
 use glam::{Quat, Vec3};
 
+use crate::config::VehicleConfig;
 use crate::controls::Controls;
 
 /// Minimal rigid-body state for the Phase 1 placeholder vehicle.
@@ -25,6 +26,9 @@ pub struct VehicleState {
     /// by the app; decremented each tick by the engine model (`flight.rs`). Zero fuel
     /// cuts engine power to zero regardless of throttle position.
     pub fuel_gal: f32,
+    /// Floats or wheels. Selects which contact-physics model runs this tick; see
+    /// [`VehicleConfig`]. Default `Floats` keeps pre-2.5b behavior unchanged.
+    pub config: VehicleConfig,
 }
 
 impl VehicleState {
@@ -42,6 +46,7 @@ impl VehicleState {
             angular_velocity: Vec3::ZERO,
             controls: Controls::default(),
             fuel_gal: 0.0,
+            config: VehicleConfig::default(),
         }
     }
 

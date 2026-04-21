@@ -13,6 +13,7 @@ use crate::buoyancy;
 use crate::camera::Camera;
 use crate::difficulty::DifficultyDials;
 use crate::flight;
+use crate::ground_contact;
 use crate::input::{InputEvent, InputEvents};
 use crate::vehicle::VehicleState;
 
@@ -203,19 +204,28 @@ fn tick_dynamics(
     let agl = (v.position.y - min_altitude).max(0.0);
     let forces = flight::compute_forces(v, spec, dt, agl);
 
-    // Per-pontoon buoyancy (Phase 2.5a.1). Short-circuits to zero above water or
-    // when no aircraft spec is loaded.
+    // Per-pontoon buoyancy (Phase 2.5a.1). Short-circuits to zero above water,
+    // when no aircraft spec is loaded, or when the aircraft is configured with
+    // wheels instead of floats.
     let buoy = buoyancy::compute_buoyancy(v, spec, wave_time, chop_intensity);
 
+    // Per-gear ground contact (Phase 2.5b.1). Short-circuits symmetrically:
+    // no spec / floats config / all gears above ground → zero. The two
+    // contact models are mutually exclusive by `VehicleConfig`, so in any given
+    // tick at most one of `buoy` / `gc` contributes force; summing both is
+    // equivalent to selecting the active one.
+    let gc = ground_contact::compute_ground_contact(v, spec, min_altitude);
+
     // Angular: Euler-integrate angular velocity from the summed aero-moment-derived
-    // and buoyancy-derived angular acceleration, then compose the resulting rotation
+    // and contact-derived angular acceleration, then compose the resulting rotation
     // onto orientation.
     //
-    // Per 2.4.4, aero `angular_accel` already has flowplan's sign convention baked in
-    // (physics-convention moments flipped on Y and Z inside `compute_forces`); buoyancy
-    // computes r × F directly in body frame and so naturally matches the same
-    // storage convention — no further flips needed when summing.
-    v.angular_velocity += (forces.angular_accel + buoy.angular_accel) * dt;
+    // Per 2.4.4, aero `angular_accel` already has flowplan's sign convention baked
+    // in (physics-convention moments flipped on Y and Z inside `compute_forces`);
+    // buoyancy and ground_contact both compute r × F directly in body frame and so
+    // naturally match the same storage convention — no further flips needed when
+    // summing.
+    v.angular_velocity += (forces.angular_accel + buoy.angular_accel + gc.angular_accel) * dt;
 
     // Residual rotational damping: a small airspeed-independent decay so angular
     // velocity bleeds off even at V=0 (where all q-based damping vanishes). Stands
@@ -230,7 +240,7 @@ fn tick_dynamics(
     v.orientation = (dq * v.orientation).normalize();
 
     // Linear: explicit Euler integration of velocity, then position.
-    v.velocity += (forces.linear_accel + buoy.linear_accel) * dt;
+    v.velocity += (forces.linear_accel + buoy.linear_accel + gc.linear_accel) * dt;
     v.position += v.velocity * dt;
 
     // Caller-supplied floor (terrain + float offset, or water + float offset, whichever
@@ -488,6 +498,10 @@ mod tests {
                 vs_clean_mps: 23.25, vso_mps: 21.01,
                 vx_mps: 29.06, vy_mps: 37.99,
             ),
+            variants: [
+                (id: "floats", display_name: "Floats", config: Floats, mesh_path: "x.glb"),
+            ],
+            default_variant: "floats",
         )"#;
         let spec = AircraftSpec::from_ron(spec_ron).expect("parse spec");
 
