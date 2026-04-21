@@ -82,6 +82,7 @@ Each entry follows this structure:
 - Modeling difficulty: moderate (radial engine is the main complexity)
 - Audio signature: 9-cyl radial rumble, distinctive exhaust pattern, strong low-RPM character, shrill prop note in climb
 - Real-world reference: DHC-2 POH, Viking Air turbine data, NACA TN-1945 (verify), Alaska/Canada operator accounts
+- Extracurricular suitability (bush-pilot maneuvers): NOT ideal for tail-up-balance / wheelie-standing (demanding and nose-over-prone at 2313 kg / 140 W/kg P/W; real bush pilots can do it but it's aggressive, not a demonstration). Better suited to the `cub` / `husky` / `carbon_cub` ladder when those airframes land in Phase 5.1. Good fit for steep turns, precision glide (L/Dmax), short-field soft-field taxi, water-landing technique variants. See [`skills/flowplan-flight-bench/references/behavior-taxonomy.md` §6b](../skills/flowplan-flight-bench/references/behavior-taxonomy.md) for the execution-quality variants matrix.
 - Notes: *The* iconic bush/floatplane. Full entry cross-linked from [FEATURES.md § MVP Reference Aircraft](FEATURES.md#mvp-reference-aircraft-dhc-2-beaver-analogue).
 
 ---

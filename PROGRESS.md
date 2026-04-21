@@ -793,6 +793,64 @@ Two framework changes landed together so each (aircraft, variant) combo has its 
 
 **Deferred to per-aircraft coefficient migration** (logged here so catalog authoring doesn't forget the blocker): every aerodynamic coefficient in `crates/sim/src/flight.rs` (`CL_MAX`, `CD0`, `I_XX`/`I_YY`/`I_ZZ`, slipstream factors, etc.) is Beaver-hardcoded. Catalina scenarios can be authored against the matrix framework today, but every assertion will fail until coefficients migrate from `flight.rs` consts to per-aircraft `AircraftSpec` fields. That migration is queued; Catalina scenarios land after it.
 
+### 2.5b.4 follow-up audit: contact-physics calibration findings
+
+While authoring the `beaver_land_tail_up_balance` bench scenario, diagnostic traces revealed a calibration gap in the gear-contact model. This section encodes the full investigation so 2.5b.5 (newly split off as a dedicated sub-milestone — see [ROADMAP § 2.5b.5 Contact-physics calibration](ROADMAP.md)) starts with context.
+
+**User-facing symptom:** `beaver_land_tail_up_balance` fails its ideal assertion (`target_mps: 0`). The aircraft starts at the 3-point rest attitude (CG=1.164 m, pitch=+6.5° nose-up), applies brakes + forward stick + gradual throttle ramp. Instead of the tail rotating up cleanly against planted mains, the aircraft lofts off its gear within ~2 s and coasts airborne at low airspeed. Assertion relaxed to `FinalAirspeedWithin(0, 10)` for v1.
+
+**Diagnostic path taken:**
+
+1. *Hypothesis A: elevator slipstream gate kills authority at V=0.* Verified — the original `slipstream_q_boost` was multiplied by `coupling_airspeed_factor` (0 at V=0). Split into `q_local_at_elevator` (ungated) vs `q_local_at_rudder` (gated). Taxi-turn scenarios preserved via the split. Free side-effect: fixed `beaver_coordinated_turn_60_overbank`. **Did not** fix tail-up — see below.
+
+2. *Hypothesis B: rigid step-input on throttle creates a gear shock.* Replaced single `SetThrottle(0.25)` with a 2.5 s scripted ramp from 0 → 0.25. Airspeed growth rate improved marginally (v=0.35 at t=0.49 vs 0.61 before) but scenario still ends airborne at ~7.9 m/s. **Did not** fix tail-up either.
+
+3. *Hypothesis C: moment sign inversion in ground_contact code path.* Added diagnostic tests. Key finding:
+   - At t=0, CG=1.164, pitch=+6.5°, zero inputs: `compute_ground_contact` returns `angular_accel = (-2.51, 0, 0)`. Negative body-X = nose-DOWN per flowplan convention. **Sign is correct** — matches analytical prediction (tail arm 4.5 m × force >> main arm 0.8 m × force, net nose-down moment).
+   - After tick 1: `ω_x = -0.009` (nose-down rate, as expected).
+   - After tick 11 (~0.09 s): `ω_x = +0.024` (nose-UP, sign flipped).
+   - From tick 11 onward: pitch climbs monotonically 6.5° → 11.6° over 2.5 s before rapid pitch-down to -0.5°.
+   - Simultaneously, CG position.y climbs 1.165 → 1.31 over 0.5 s (aircraft rising).
+
+4. *Root cause isolated:* the sign flip between tick 1 and 11 happens because:
+   - Gear moment at t=0 (equal compressions) is nose-down as predicted.
+   - Nose-down rotation lifts the tail (tail body offset has z=4.5 aft of CG, rotates up when pitch decreases).
+   - Tail compression drops to zero within a few ticks (much more sensitive to pitch than mains — longer arm).
+   - With tail out of ground contact, only mains contribute moments. Mains are forward of CG → **mains alone produce a nose-UP moment**. Sign flips.
+   - Meanwhile, as pitch approaches zero the main body-offset (y=-1.3) puts the main contact point much deeper — world y = CG_y - 1.3. For CG=1.164, main world y = -0.136, meaning compression 0.136 m × 2 mains × 200,000 N/m = **54,400 N**, roughly 2.4× weight. Mains lift the aircraft bodily.
+   - Once airborne, gear force = 0 for all gears, gravity decelerates ascent, but the aircraft is already off the ground with forward thrust → glides.
+
+**Summary:** three coupled calibration issues, no sign bugs.
+
+| Issue | Current | Correct | Effect |
+|---|---|---|---|
+| Gear geometry equilibrium | Equal compression pitch 6.5° ≠ moment equilibrium (tail arm dominates) | Mains-carry-85%-weight 3-point with unequal compressions | 3-point rest is unstable; aircraft wants to transition to mains-only |
+| Tire/float compliance | Linear Hookean spring `k·c` | Progressive `k·c + k_hard·max(0, c - c_soft)²` + asymmetric rebound damping | Hard impacts bounce elastically; real tires absorb |
+| Velocity-dependent damping | Constant `c = 25,000` | `c(v) = c_0 + c_2·v²` | Gentle settling feels right, hard impacts don't trampoline |
+
+**Aircraft-specific caveat (important for 2.5b.5 scoping):** the Beaver may not be an ideal airframe for demonstrating tail-up-balance even after calibration. Real-world data:
+
+| Aircraft | Mass | Power | P/W | Tail-up difficulty |
+|---|---|---|---|---|
+| Beaver (2313 kg / 450 hp) | heavy | strong | ~145 W/kg | demanding; nose-over-prone |
+| Super Cub (795 kg / 180 hp) | light | moderate | ~169 W/kg | routine at run-up |
+| Carbon Cub (540 kg / 180 hp) | very light | strong | ~250 W/kg | trivial; part of normal technique |
+
+Beaver bush pilots CAN hold tail-high attitudes but it's an aggressive maneuver, not a demonstration. If post-calibration the scenario still fails, the right move is to promote `beaver_land_tail_up_balance` to `[post-beaver]` status and re-author as `cub_land_tail_up_balance` once a lighter airframe ships (Phase 5.1 content milestone). The Beaver scenario captures a known-aspirational behavior; the lighter airframe captures the achievable version.
+
+**Related observation:** the `beaver_land_braked_stop` scenario also surfaces the same rigid-impact-model issue. Aircraft decelerates from 5 m/s to ~3.6 m/s, then the brake-induced pitch-down triggers a similar (smaller) bounce. Tightening that assertion to `target_mps: 0` is also 2.5b.5-gated.
+
+**Deferred work:** all four bullet points from the ROADMAP 2.5b.5 definition (gear geometry, compliance model, asymmetric + velocity-dependent damping, mesh-aligned auto-sourced offsets) plus the `wheels_at_rest_has_zero_drift` invariant test. Estimated ~1 week of focused calibration work.
+
+**What's green right now, as of 2.5b.4 close:**
+- All 42 bench scenarios pass (zero triaged).
+- All 146 sim lib unit tests pass.
+- 17 ground_contact unit tests (8 normal force + 5 lateral/steering + 3 brakes + 1 other) cover the physics surfaces.
+- Flat-land visual playback works for wheels-variant scenarios.
+- Catalog + CLI selector + scenario × variant matrix all green.
+
+The sim captures the **directional correctness** of ground contact physics. The **magnitude / equilibrium fidelity** for hard-transient scenarios (brake-induced pitch, hard landing, tail-up) is the 2.5b.5 target.
+
 ### Milestone 2.5b.4 — Brake input + elevator slipstream + player-extracurricular benches (SHIPPED)
 
 Closes pilot-technique directional-control: symmetric brakes with matching input plumbing, plus an elevator-slipstream addition that enables tail-up-balance maneuvers at zero airspeed. Two new bush-pilot scenario benches land alongside.

@@ -405,17 +405,30 @@ Decomposed into 7 dependency-ordered sub-milestones mirroring 2.5a's structure. 
 - [x] 3 new unit tests: brakes-off vs brakes-on decel ratio, brakes at v=0 produce no force.
 - [x] Free side-effect: elevator slipstream fixes the previously-triaged `beaver_coordinated_turn_60_overbank` scenario. All 42 bench runs now pass.
 
-**2.5b.5 Attitude / strike detection.**
+**2.5b.5 Contact-physics calibration.** (NEW — split from original 2.5b.5 after 2.5b.4 audit findings surfaced a gear-geometry + compliance-model issue that is prerequisite to the attitude/strike work below.)
+
+Auditing the `beaver_land_tail_up_balance` bench scenario during 2.5b.4 revealed three coupled calibration issues. None are sign bugs in the physics code — the integration and cross-products are correct. All three are parameter / model-shape choices that produce the right behavior under small-transient conditions (settled taxi, gentle turns) but break down under hard-transient loads (brake application, landing impact). See [PROGRESS.md § 2.5b.4 audit findings](../PROGRESS.md) for the full trace.
+
+- [ ] **Gear geometry — moment equilibrium at 3-point rest.** Current `BEAVER_GEAR` offsets (main `y=-1.3, z=-0.8`; tail `y=-0.7, z=4.5`) put the tail at the same world-Y as mains when pitched +6.5° — equal compression, not a moment equilibrium. Real Beaver has mains carrying ~85% of weight; tail ~15%. The 3-point equilibrium pitch needs mains + tail forces that balance around CG, not equal forces. Recalibrate offsets (likely: move tail closer to CG vertically and/or mains further forward) so the natural 3-point rest is stable. Validate via the invariant test below.
+- [ ] **Tire/float compliance — progressive spring rate.** Current linear Hookean spring (`k = 200,000 N/m`) combined with rebound-symmetric damping produces an elastic bounce: hard impact stores energy, full rebound returns it. Real tires absorb the first ~1-2 cm of compression softly in the rubber carcass before the oleo strut engages, then ramp up progressively. Model as `F = k · c + k_hard · max(0, c - c_soft)²`. Apply the same shape to pontoon buoyancy (hull + wingtip-float compliance + water splash energy loss).
+- [ ] **Asymmetric damping — rebound ≫ compression.** Real oleo struts bleed energy through a one-way orifice: compression damping is modest (absorb the impact) but rebound damping is much higher (keep the energy from bouncing back). Split `c_compress` vs `c_rebound` by velocity sign. Fixes the trampoline effect where hard-braking-induced pitch-down shock-loads the mains → mains bounce → aircraft lofts.
+- [ ] **Velocity-dependent damping.** `c(v) = c_0 + c_2 · v²` so gentle settling damps lightly (feels springy), hard landings damp aggressively (no second bounce).
+- [ ] **Invariant test: `wheels_at_rest_has_zero_drift`.** A wheels aircraft spawned at its declared rest state (whatever that resolves to) with zero velocity and zero inputs should drift no more than 0.5° in pitch and 5 cm in position over 2 s of sim time. Guards the geometry + compliance calibration. Would have caught the 2.5b.4-discovered issue at 2.5b.1 time.
+- [ ] **Mesh-aligned geometry.** Read `northlander_land.glb` bbox at load time and auto-derive gear offsets (mirror of the 2.5a.3 float realignment to `bbox_min_y = -2.62`). Eventual migration target: per-aircraft `AircraftSpec.gear_geometry` field with slots for each contact point, sourced from mesh attach points or spec data. Same applies to pontoons (`AircraftSpec.pontoon_geometry`).
+- [ ] **Tail-up-balance bench re-gate.** After calibration, `beaver_land_tail_up_balance` assertion tightens from `FinalAirspeedWithin(0, 10)` to `AirspeedAtEnd(0, 1)` AND a new `PitchAtEnd(0, ±5°)` assertion (pitch rotated from +6.5° rest toward level / below, validating the maneuver physically completed). **Caveat**: the Beaver specifically may not be a natural tail-up-balance airframe even with correctly-calibrated gear. At 2313 kg with a 450 hp R-985 (power-to-weight ~140 W/kg), it's a heavy aircraft vs a Carbon Cub (540 kg, 180 hp, ~250 W/kg). Bush pilots report the Beaver is *capable* of aggressive tail-high attitudes but the maneuver is demanding and nose-over-prone. If the scenario still fails after calibration, promote it to `[post-beaver]` and plan to first ship it on a lighter airframe — Super Cub / Carbon Cub / Husky — when those aircraft land in Phase 5.1.
+
+**2.5b.6 Attitude / strike detection.** (Was 2.5b.5.)
 - [ ] Pitch / roll attitude emerges from multi-point normal-force distribution (already baseline-supported by 2.5b.1's per-gear moment from `r × F`); validate that nose-high / wingtip-low attitudes reach stable equilibrium without oscillation
 - [ ] Prop strike, tail strike, wingtip strike detection points (body-frame offsets that, when below ground, raise an event) — damage consequences deferred to Phase 4+
 - [ ] Bench: `beaver_land_stall_taildown` and `beaver_land_wingtip_scrape` exercise the detection paths
+- [ ] Depends on 2.5b.5 calibration being complete — attitude-equilibrium tests need a stable-at-rest aircraft before they can validate non-rest attitudes reliably.
 
-**2.5b.6 Per-surface friction table.**
+**2.5b.7 Per-surface friction table.** (Was 2.5b.6.)
 - [ ] Surface classification enum (`Paved | Grass | Gravel | Sand | Tundra`) — world-side sampler at `(x, z)` returns surface class, passed to `compute_ground_contact`
-- [ ] Per-surface µ_r (rolling) + µ_s (static / side) + compliance (soft surfaces deform → effectively softer spring)
+- [ ] Per-surface µ_r (rolling) + µ_s (static / side) + compliance (soft surfaces deform → effectively softer spring; bush pilots literally use soft-field technique because tundra absorbs differently than pavement)
 - [ ] Bench: paved-vs-grass taxi comparison and soft-field takeoff scenario
 
-**2.5b.7 App integration: config toggle + land-mesh selection.**
+**2.5b.8 App integration: config toggle + land-mesh selection.** (Was 2.5b.7.)
 - [ ] App reads a config selector (env var / RON field / CLI flag) and picks `northlander.glb` (Floats) or `northlander_land.glb` (Wheels) accordingly
 - [ ] `VEHICLE_GLB_PATH` becomes conditional; initial spawn position + `min_altitude` use the gear offset instead of float offset for wheels config
 - [ ] Playtest: can taxi, takeoff, land, park the wheeled Beaver — feel matches expectations for a taildragger

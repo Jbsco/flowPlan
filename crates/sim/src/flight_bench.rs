@@ -3102,21 +3102,31 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
         duration_ticks: 1200, // 10 s — well past transient
         // The aspirational maneuver: brakes locked, power up, forward stick
         // → prop wash over elevator pitches the tail up while the aircraft
-        // stays planted on the mains. In v1 the gear-geometry calibration
-        // (main / tail body offsets + spring rate) isn't tight enough for a
-        // clean three-point rest, so brake + thrust at this config triggers
-        // a gear-bounce that lofts the aircraft off the mains before the
-        // elevator can complete the rotation. Airspeed grows to ~8 m/s as
-        // the aircraft coasts airborne.
+        // stays planted on the mains.
         //
-        // This bench is kept as an "aspirational extracurricular" scenario:
-        // the CSV captures the bounce behavior, giving a concrete visible
-        // regression target for 2.5b.5's attitude-constraint / strike-
-        // detection work (which is expected to include gear-calibration
-        // refinement — tail attach point, spring ramp at low compression,
-        // stronger-at-high-velocity damping). `FinalAirspeedWithin` keeps
-        // the bench green while the behavior is bounded; tightens to
-        // "target_mps: 0" once the bounce is fixed.
+        // v1 status: FAILS THE CLEAN FORM. Two coupled calibration issues,
+        // pending 2.5b.5 contact-physics calibration work:
+        //  1. Gear geometry: the 3-point rest pitch (6.5°) has mains + tail
+        //     at equal compression, which is NOT a moment equilibrium (tail
+        //     arm × force dominates). Aircraft pitches down at t=0, tail
+        //     lifts off, moment sign flips, pitch rebounds up.
+        //  2. Linear Hookean spring + symmetric damper: hard mains impact
+        //     (from pitch-down transient) stores energy elastically and
+        //     returns it on rebound. Real tires absorb softly in the carcass
+        //     before the strut engages. See
+        //     [PROGRESS.md § 2.5b.4 follow-up audit](../../../PROGRESS.md)
+        //     for the full trace.
+        //
+        // **Aircraft caveat**: even after calibration, the Beaver specifically
+        // may not do this maneuver cleanly. At 2313 kg / 450 hp, P/W is
+        // ~145 W/kg — workable but demanding. Smaller aircraft (Super Cub,
+        // Carbon Cub: 250 W/kg) handle it routinely. If post-calibration
+        // this scenario still fails, re-author as `cub_land_tail_up_balance`
+        // when a lighter airframe lands in Phase 5.1 content.
+        //
+        // Assertion `FinalAirspeedWithin(0, 10)` gates the v1 bench to
+        // "aircraft didn't runaway off the scope." Tightens to
+        // `AirspeedAtEnd(0, 1)` + `PitchAtEnd(0, ±5°)` post 2.5b.5.
         assertions: &[Assertion::FinalAirspeedWithin {
             min_mps: 0.0,
             max_mps: 10.0,
