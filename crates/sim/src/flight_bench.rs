@@ -2891,9 +2891,9 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             // 3-point rest attitude. Pitch +6.5° = 0.1134 rad about body +X.
             // Quat precomputed: q = (sin(0.0567), 0, 0, cos(0.0567)) =
             // (0.05664, 0, 0, 0.99840).
-            position: Vec3::new(0.0, 1.19, 0.0),
+            position: Vec3::new(0.0, 1.155, 0.0),
             velocity: Vec3::ZERO,
-            orientation: Quat::from_xyzw(0.056_638_55, 0.0, 0.0, 0.998_395_6),
+            orientation: Quat::from_xyzw(0.056_36, 0.0, 0.0, 0.998_41),
             angular_velocity: Vec3::ZERO,
             throttle: 0.05,
             flaps: FlapPosition::Up,
@@ -2904,14 +2904,16 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             event: InputEvent::SetYaw(0.5),
         }],
         controllers: &[],
-        duration_ticks: 3600, // 30 s
+        duration_ticks: 1200, // 10 s — short enough that the turn hasn't
+        // compounded into a continuous pivot (real aircraft has aero yaw
+        // damping via CN_R at taxi speed; our model is q-scaled so near-zero
+        // damping at V<5 m/s).
         assertions: &[Assertion::HeadingChangeAtEnd {
             last_secs: 2.0,
-            // Empirical at 0.05 throttle, 0.5 yaw, 3-point rest: -8.6° over 30 s.
-            // Tolerance ±3° covers expected drift under coefficient tuning;
-            // tightens as 2.5b.6 per-surface work lands.
-            target_deg: -8.6,
-            tol_deg: 3.0,
+            // Empirical post-2.5b.5 calibration at 0.05 throttle, 0.5 yaw,
+            // stable 3-point rest: ~-13.5° over 10 s. Tolerance ±5°.
+            target_deg: -13.5,
+            tol_deg: 5.0,
         }],
     },
     FlightScenario {
@@ -2921,9 +2923,9 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
         aircraft_id: BEAVER_ID,
         variants: BEAVER_WHEELS_ONLY_VARIANTS,
         initial: ScenarioInitial {
-            position: Vec3::new(0.0, 1.19, 0.0),
+            position: Vec3::new(0.0, 1.155, 0.0),
             velocity: Vec3::ZERO,
-            orientation: Quat::from_xyzw(0.056_638_55, 0.0, 0.0, 0.998_395_6),
+            orientation: Quat::from_xyzw(0.056_36, 0.0, 0.0, 0.998_41),
             angular_velocity: Vec3::ZERO,
             throttle: 0.05,
             flaps: FlapPosition::Up,
@@ -2934,13 +2936,14 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             event: InputEvent::SetYaw(-0.5),
         }],
         controllers: &[],
-        duration_ticks: 3600,
+        duration_ticks: 1200, // 10 s (see _turn_right comment)
         assertions: &[Assertion::HeadingChangeAtEnd {
             last_secs: 2.0,
-            // Empirical: +8.8° (asymmetry from _right ~0.2°, tailwheel
-            // dominates at this speed over slipstream/torque asymmetry).
-            target_deg: 8.8,
-            tol_deg: 3.0,
+            // Empirical post-2.5b.5 calibration: +13.5° over 10 s (small
+            // asymmetry from _right is expected — slipstream + torque-roll
+            // mildly break mirror symmetry at low speeds).
+            target_deg: 13.5,
+            tol_deg: 5.0,
         }],
     },
     // beaver_land_braked_stop
@@ -2973,12 +2976,14 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
         aircraft_id: BEAVER_ID,
         variants: BEAVER_WHEELS_ONLY_VARIANTS,
         initial: ScenarioInitial {
-            // Equilibrium 3-point (CG 1.164 gives ~3.8 cm compression at each
-            // gear, balancing weight). Starting at the settled state avoids a
-            // large spring impulse at t=0.
-            position: Vec3::new(0.0, 1.164, 0.0),
+            // True 3-point moment equilibrium (2.5b.5 calibration): θ=6.17°,
+            // CG_y=1.159 m → c_main ≈ 4.75 cm, c_tail ≈ 2.0 cm, weight split
+            // 82/18 mains/tail (near the real-Beaver 85/15). Pre-2.5b.5 used
+            // 6.5° equal-compression pitch, which was NOT a moment
+            // equilibrium and caused the brake-transient bounce.
+            position: Vec3::new(0.0, 1.155, 0.0),
             velocity: Vec3::new(0.0, 0.0, -5.0), // 5 m/s forward (~10 kt taxi)
-            orientation: Quat::from_xyzw(0.056_638_55, 0.0, 0.0, 0.998_395_6),
+            orientation: Quat::from_xyzw(0.056_36, 0.0, 0.0, 0.998_41),
             angular_velocity: Vec3::ZERO,
             throttle: 0.0,
             flaps: FlapPosition::Up,

@@ -42,19 +42,32 @@ use crate::vehicle::VehicleState;
 /// bounce / porpoise on landing — the damping constant is the more likely knob.
 const GEAR_SPRING_N_PER_M: f32 = 200_000.0;
 
-/// Per-gear vertical damping coefficient (N·s/m, linear in compression-rate).
-/// Combines with `GEAR_SPRING_N_PER_M` to form a near-critical spring-damper
-/// pair at the effective mass per gear (~770 kg main, ~350 kg tail). Damping
-/// ratio ~0.75 — firm but not overdamped; kills the second bounce on a normal
-/// landing and keeps hard-brake pitch transients from trampolining the
-/// aircraft off its mains.
+/// Per-gear vertical damping during COMPRESSION (gear sinking into ground,
+/// `v_gear_world.y < 0`). Combines with `GEAR_SPRING_N_PER_M` to absorb
+/// impact energy. Moderate — enough to catch a normal landing without a
+/// secondary bounce, but soft enough that gentle settling still feels
+/// springy.
+const GEAR_DAMPING_COMPRESSION_N_PER_MPS: f32 = 25_000.0;
+
+/// Per-gear vertical damping during REBOUND (gear lifting away from ground,
+/// `v_gear_world.y > 0`). Significantly HIGHER than compression damping —
+/// real oleo struts bleed compression energy through a one-way orifice so
+/// compression stores energy moderately and rebound dissipates the stored
+/// energy aggressively. The asymmetry is THE reason real landing gear
+/// doesn't trampoline on impact.
 ///
-/// Raised 10k → 25k in 2.5b.4 when the `beaver_land_braked_stop` and
-/// `beaver_land_tail_up_balance` scenarios revealed that 10k let the aircraft
-/// bounce onto its wings under brake-induced pitch-down. The higher value
-/// preserves the settle-to-equilibrium behavior of 2.5b.1 tests while
-/// suppressing the brake-pitch transient.
-const GEAR_DAMPING_N_PER_MPS: f32 = 25_000.0;
+/// 2.5b.5 calibration found that symmetric damping (the pre-2.5b.5 model
+/// with a single `GEAR_DAMPING_N_PER_MPS`) elastically returned hard-impact
+/// energy, lofting the aircraft off its gear during brake-induced pitch
+/// transients. Asymmetric damping at a 3:1 rebound:compression ratio fixes
+/// that without overdamping gentle settling.
+///
+/// **Not a friction model** — the tire/ground contact point itself has
+/// kinetic friction (handled by `ROLLING_FRICTION_COEFF`, `LATERAL_FRICTION_COEFF`).
+/// This is the strut's hydraulic damping between the contact patch and the
+/// airframe CG. Real oleo struts have this one-way-orifice behavior;
+/// leaf-spring or rubber-cord gear approximates with stiffer bushings.
+const GEAR_DAMPING_REBOUND_N_PER_MPS: f32 = 75_000.0;
 
 /// Rolling-friction coefficient on a paved surface (dimensionless, `µ_r`).
 ///
@@ -140,6 +153,26 @@ struct GearPoint {
     /// point (rigid-body approximation — strut compression is not modeled as a
     /// separate degree of freedom in v1).
     body_offset: Vec3,
+    /// Spring rate multiplier relative to `GEAR_SPRING_N_PER_M`. Mains use 1.0;
+    /// tailwheel uses a softer value (real tailwheel springs ARE softer because
+    /// they carry less weight and need to absorb lighter impacts — a Beaver
+    /// tailwheel is a coiled-leaf or rubber-cord spring, much less stiff than
+    /// the oleo mains).
+    ///
+    /// 2.5b.5 calibration fix: at the geometry-constrained 3-point pitch
+    /// (θ=6.46°, `main_world_y ≈ tail_world_y`), both gears have equal
+    /// compression `c_m = c_t`. With equal spring rates the forces would
+    /// also be equal, violating moment balance (2·N·0.942 ≠ N·4.39 →
+    /// large nose-down moment). With
+    /// `k_tail/k_main = 2·(1.3·sin+0.8·cos)/(4.5·cos-0.7·sin) ≈ 0.428` at
+    /// θ=6.46°, forces satisfy moment balance at equal compression: weight
+    /// split 82% mains / 18% tail (near the real-Beaver 85/15).
+    ///
+    /// This converts the previous metastable equilibrium (tail leaves
+    /// contact first on small perturbation → mains-only nose-up moment →
+    /// divergent rotation) into a stable one: both gears lose contact
+    /// simultaneously on upward perturbation.
+    spring_factor: f32,
     /// Steering authority (0.0 = fixed, 1.0 = full). Mains are fixed; tailwheel
     /// is 1.0 but its effective steering ramps down via the castor-threshold
     /// gate — this field only scales the *maximum* commanded deflection.
@@ -174,6 +207,7 @@ const BEAVER_GEAR: [GearPoint; 3] = [
     // braked — toe brakes on mains is standard Beaver arrangement).
     GearPoint {
         body_offset: Vec3::new(-1.65, -1.3, -0.8),
+        spring_factor: 1.0,
         steer_factor: 0.0,
         brake_factor: 1.0,
         label: "left_main",
@@ -181,14 +215,18 @@ const BEAVER_GEAR: [GearPoint; 3] = [
     // Right main wheel.
     GearPoint {
         body_offset: Vec3::new(1.65, -1.3, -0.8),
+        spring_factor: 1.0,
         steer_factor: 0.0,
         brake_factor: 1.0,
         label: "right_main",
     },
     // Tailwheel — steerable via yaw input at taxi speed; castors above.
     // No brake: classic taildragger has no tailwheel brake.
+    // Softer spring (factor 0.428): gives correct 82/18 weight distribution
+    // at the geometry-constrained 3-point pitch, stable equilibrium.
     GearPoint {
         body_offset: Vec3::new(0.0, -0.7, 4.5),
+        spring_factor: 0.428,
         steer_factor: 1.0,
         brake_factor: 0.0,
         label: "tailwheel",
@@ -275,12 +313,29 @@ pub fn compute_ground_contact(
         // Velocity at this gear (CG linear + angular cross-product).
         let v_gear_world = v.velocity + angular_velocity_world.cross(world_offset);
 
-        // Spring pushback + damping opposing downward motion at contact.
-        // Sign: positive compression pushes +Y; negative v_gear_y (sinking) adds
-        // to the pushback; positive v_gear_y (lifting) subtracts but never lets
-        // the normal force go negative (ground can't pull).
-        let spring_n = GEAR_SPRING_N_PER_M * compression;
-        let damper_n = -GEAR_DAMPING_N_PER_MPS * v_gear_world.y;
+        // Spring pushback + asymmetric damping.
+        //
+        // Sign: positive compression pushes world +Y. For v_gear_world.y:
+        //   < 0 (sinking into ground, compressing further) → damper adds to
+        //     spring pushback with `COMPRESSION` coefficient (moderate).
+        //   > 0 (lifting away from ground, rebounding) → damper subtracts
+        //     from spring pushback with `REBOUND` coefficient (stronger).
+        // The asymmetry mimics an oleo strut's one-way orifice — compression
+        // stores energy moderately, rebound bleeds it out aggressively.
+        // Without this, hard impacts would elastically return their energy,
+        // lofting the aircraft after brake-transient or landing loads.
+        //
+        // Clamped to non-negative: ground pushes up, never pulls. If rebound
+        // damping would drive the total negative (gear lifting faster than
+        // spring can push back), contact is effectively lost and the gear
+        // separates cleanly.
+        let spring_n = GEAR_SPRING_N_PER_M * gear.spring_factor * compression;
+        let damp_coeff = if v_gear_world.y < 0.0 {
+            GEAR_DAMPING_COMPRESSION_N_PER_MPS
+        } else {
+            GEAR_DAMPING_REBOUND_N_PER_MPS
+        };
+        let damper_n = -damp_coeff * v_gear_world.y;
         let normal_n = (spring_n + damper_n).max(0.0);
         if normal_n <= 0.0 {
             continue;
@@ -457,20 +512,30 @@ mod tests {
         v
     }
 
-    /// Wheels-configured aircraft pitched to the taildragger rest attitude so
-    /// all three gear points touch the ground. Main offset y=-1.3, tail
-    /// offset y=-0.7; the ~6.5° nose-up pitch (0.113 rad) puts both at the
-    /// same world-y when CG ≈ 1.19 m. This is the configuration required by
-    /// tests that exercise tailwheel physics (steering, castoring).
+    /// Wheels-configured aircraft at the stable 3-point rest equilibrium.
+    ///
+    /// Derivation (2.5b.5 calibration): the geometry constraint for 3-point
+    /// contact (both gears at same world-y) forces pitch
+    /// `θ = atan2(y_main - y_tail, z_tail - z_main) = atan2(0.6, 5.3) ≈ 6.46°`.
+    /// At that pitch, main and tail compressions are equal. Balance of weight
+    /// and moment at equal compression requires unequal spring rates — the
+    /// tail spring is softer by the factor `k_tail/k_main = 0.428` (encoded
+    /// in `BEAVER_GEAR[2].spring_factor`). Equal compression × softer tail
+    /// spring → correct 82/18 weight distribution mains/tail.
+    ///
+    /// `CG_y = z_m·cos(θ) - main.y·sin(θ) - compression`
+    /// `     = 1.3·cos(6.46°) - 0.8·sin(6.46°) - 0.0468`
+    /// `     ≈ 1.155 m`.
+    ///
+    /// **Stability**: with equal compressions, both gears lose contact
+    /// simultaneously on small upward perturbation — no metastable
+    /// "tail-lifts-first" cascade that the pre-2.5b.5 equal-spring
+    /// geometry produced.
     fn wheels_three_point_rest() -> VehicleState {
         let mut v = VehicleState::at_origin();
-        // Pitch nose-up so tailwheel contacts ground. 0.113 rad = 6.5° per
-        // geometric calc: atan((1.3-0.7)/5.3).
-        v.orientation = Quat::from_rotation_x(0.113);
-        // CG chosen so the tailwheel is roughly at ground level with modest
-        // compression on all three gears. Empirically: 1.19 m puts tail and
-        // main offsets at roughly the same world y.
-        v.position = Vec3::new(0.0, 1.19, 0.0);
+        // θ = atan2(0.6, 5.3) = 0.11279 rad = 6.462°.
+        v.orientation = Quat::from_rotation_x(0.112_79);
+        v.position = Vec3::new(0.0, 1.155, 0.0);
         v.velocity = Vec3::ZERO;
         v.angular_velocity = Vec3::ZERO;
         v.config = VehicleConfig::Wheels;
@@ -817,6 +882,60 @@ mod tests {
              (lock_factor scales µ_lat); taxi={}, fast={}",
             taxi.angular_accel.y,
             fast.angular_accel.y,
+        );
+    }
+
+    // ── Phase 2.5b.5: at-rest invariant ──────────────────────────────
+
+    #[test]
+    fn wheels_at_rest_has_zero_drift() {
+        // A wheels aircraft spawned at its declared 3-point rest state with
+        // zero velocity, zero inputs, and zero fuel (so engine produces no
+        // thrust — isolates the gear / buoyancy / aero-gravity loop from
+        // powerplant creep) must stay put. Before 2.5b.5 calibration, the
+        // equal-compression pitch wasn't a moment equilibrium AND buoyancy
+        // ran on wheels aircraft (phantom pontoons), producing divergent
+        // drift within 0.5 s. Guards gear equilibrium + buoyancy config
+        // short-circuit + damping asymmetry against future regression.
+        //
+        // A real Beaver at idle would creep forward slightly (idle thrust
+        // 250 N exceeds static-rolling-friction breakout on paved); that's
+        // realistic behavior and tested elsewhere via the brake scenarios.
+        use crate::difficulty::DifficultyDials;
+        use crate::input::InputEvents;
+        use crate::state::{SimState, FIXED_DT};
+        let spec = beaver_spec();
+        let mut sim = SimState::new(0xAB1E);
+        sim.aircraft = Some(spec);
+        sim.vehicle = wheels_three_point_rest();
+        sim.vehicle.fuel_gal = 0.0;
+
+        let (_, pitch0, _) = sim.vehicle.orientation.to_euler(glam::EulerRot::YXZ);
+        let pos0 = sim.vehicle.position;
+
+        let d = DifficultyDials::default();
+        let batch = InputEvents::empty();
+        // 240 ticks = 2.0 s at FIXED_DT=1/120.
+        for _ in 0..240 {
+            sim.tick(&batch, &d, FIXED_DT, 0.0);
+        }
+
+        let (_, pitch_final, _) = sim.vehicle.orientation.to_euler(glam::EulerRot::YXZ);
+        let pitch_drift_deg = (pitch_final - pitch0).to_degrees().abs();
+        let pos_drift = (sim.vehicle.position - pos0).length();
+
+        // Thresholds are loose enough that small damped-oscillation settle
+        // still passes, tight enough that the pre-2.5b.5 drift (0.69° in 0.5 s
+        // → >2° in 2 s + 5 cm position rise) is detected.
+        assert!(
+            pitch_drift_deg < 0.5,
+            "wheels-at-rest aircraft drifted {pitch_drift_deg:.3}° in pitch over \
+             2 s (limit 0.5°). Check gear geometry equilibrium + damping asymmetry.",
+        );
+        assert!(
+            pos_drift < 0.05,
+            "wheels-at-rest aircraft moved {pos_drift:.3} m in 2 s (limit 5 cm). \
+             Check moment balance at the declared rest state.",
         );
     }
 

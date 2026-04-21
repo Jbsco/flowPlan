@@ -232,6 +232,15 @@ pub fn compute_buoyancy(
     let Some(spec) = spec else {
         return BuoyancyOutputs::default();
     };
+    // Config check: a wheeled aircraft has no pontoons — buoyancy must not
+    // apply phantom float forces. This mirrors the `uses_ground_contact`
+    // short-circuit in `compute_ground_contact`. 2.5b.5 audit caught the
+    // missing check: pre-fix, a wheels-variant aircraft at CG ≈ 1.15 m got
+    // +19 m/s² "buoyancy" from pontoons that don't exist in its mesh or
+    // physics model, driving divergent at-rest drift.
+    if !v.config.uses_buoyancy() {
+        return BuoyancyOutputs::default();
+    }
     let mass_kg = spec.max_mass_wheels_kg;
 
     let mut total_force_world = Vec3::ZERO;
