@@ -43,12 +43,18 @@ use crate::vehicle::VehicleState;
 const GEAR_SPRING_N_PER_M: f32 = 200_000.0;
 
 /// Per-gear vertical damping coefficient (N·s/m, linear in compression-rate).
-/// Combines with `GEAR_SPRING_N_PER_M` to form an underdamped spring-damper pair
-/// at the effective mass per gear (~770 kg for main, ~350 kg for tail). Damping
-/// ratio ~0.25 — enough to kill the second bounce on a normal landing but soft
-/// enough to feel springy; hard landings bleed energy through the drag/pitch
-/// paths that 2.5b.2+ add, not through overstiffening this damper.
-const GEAR_DAMPING_N_PER_MPS: f32 = 10_000.0;
+/// Combines with `GEAR_SPRING_N_PER_M` to form a near-critical spring-damper
+/// pair at the effective mass per gear (~770 kg main, ~350 kg tail). Damping
+/// ratio ~0.75 — firm but not overdamped; kills the second bounce on a normal
+/// landing and keeps hard-brake pitch transients from trampolining the
+/// aircraft off its mains.
+///
+/// Raised 10k → 25k in 2.5b.4 when the `beaver_land_braked_stop` and
+/// `beaver_land_tail_up_balance` scenarios revealed that 10k let the aircraft
+/// bounce onto its wings under brake-induced pitch-down. The higher value
+/// preserves the settle-to-equilibrium behavior of 2.5b.1 tests while
+/// suppressing the brake-pitch transient.
+const GEAR_DAMPING_N_PER_MPS: f32 = 25_000.0;
 
 /// Rolling-friction coefficient on a paved surface (dimensionless, `µ_r`).
 ///
@@ -111,6 +117,20 @@ const V_CASTOR_FULL_MPS: f32 = 10.0;
 /// between 0 and `V_EPS` it scales linearly.
 const V_EPS: f32 = 0.1;
 
+/// Peak brake friction coefficient on paved surface.
+///
+/// When `Controls.brakes` is held, each brakable gear adds an additional
+/// forward drag `F_brake = -µ_brake · N · brake_factor` opposing the forward
+/// velocity component at that gear. `0.5` is a typical dry-paved brake µ for
+/// a well-maintained tire before lockup — enough for a Beaver at taxi speed
+/// to stop in a few meters. Skid / lockup dynamics (where lateral grip
+/// collapses) arrive with 2.5b.6's per-surface model; v1 assumes the pilot
+/// modulates to stay below lockup.
+///
+/// Real-world sanity: weight 22,700 N × 0.5 / 2313 kg = 4.9 m/s² decel ≈ 0.5 g.
+/// Aggressive but within aircraft brake design envelope.
+const BRAKE_FRICTION_COEFF: f32 = 0.5;
+
 /// Per-contact geometry. One entry per wheel / tailwheel.
 #[derive(Clone, Copy, Debug)]
 struct GearPoint {
@@ -124,6 +144,11 @@ struct GearPoint {
     /// is 1.0 but its effective steering ramps down via the castor-threshold
     /// gate — this field only scales the *maximum* commanded deflection.
     steer_factor: f32,
+    /// Brake authority (0.0 = unbraked, 1.0 = full). Classic taildragger has
+    /// toe-brakes on mains only; tailwheel doesn't brake. Trike configurations
+    /// (future) would set mains + nose wheel to 1.0 and mains alone may be 1.0
+    /// for trainers without nose-gear brakes.
+    brake_factor: f32,
     /// Label for diagnostics / plots. Not functional.
     #[allow(dead_code)]
     label: &'static str,
@@ -145,22 +170,27 @@ struct GearPoint {
 /// realign these to the actual mesh geometry, mirroring the 2.5a.3 float
 /// realignment. Same applies if an `AircraftSpec.gear_geometry` migration lands.
 const BEAVER_GEAR: [GearPoint; 3] = [
-    // Left main wheel (fixed — mains don't steer on a taildragger).
+    // Left main wheel (fixed — mains don't steer on a taildragger; fully
+    // braked — toe brakes on mains is standard Beaver arrangement).
     GearPoint {
         body_offset: Vec3::new(-1.65, -1.3, -0.8),
         steer_factor: 0.0,
+        brake_factor: 1.0,
         label: "left_main",
     },
     // Right main wheel.
     GearPoint {
         body_offset: Vec3::new(1.65, -1.3, -0.8),
         steer_factor: 0.0,
+        brake_factor: 1.0,
         label: "right_main",
     },
     // Tailwheel — steerable via yaw input at taxi speed; castors above.
+    // No brake: classic taildragger has no tailwheel brake.
     GearPoint {
         body_offset: Vec3::new(0.0, -0.7, 4.5),
         steer_factor: 1.0,
+        brake_factor: 0.0,
         label: "tailwheel",
     },
 ];
@@ -303,7 +333,16 @@ pub fn compute_ground_contact(
         let steer_angle_rad =
             v.controls.yaw * TAILWHEEL_MAX_STEER_RAD * gear.steer_factor * lock_factor;
         let wheel_forward_body = Quat::from_rotation_y(steer_angle_rad) * Vec3::NEG_Z;
-        let wheel_forward_world = v.orientation * wheel_forward_body;
+        let wheel_forward_world_raw = v.orientation * wheel_forward_body;
+        // Project onto the horizontal ground plane: tires roll flat, so the
+        // friction axes must be horizontal regardless of aircraft pitch.
+        // Without this projection a pitched aircraft (e.g., 3-point taildragger
+        // attitude) would get a spurious vertical component on the brake /
+        // rolling-friction force that erroneously compresses the gear and
+        // corrupts the decel calculation.
+        let wheel_forward_world =
+            Vec3::new(wheel_forward_world_raw.x, 0.0, wheel_forward_world_raw.z)
+                .normalize_or_zero();
         let wheel_lateral_world = wheel_forward_world.cross(Vec3::Y).normalize_or_zero();
 
         // Horizontal gear velocity and its wheel-frame components.
@@ -315,7 +354,23 @@ pub fn compute_ground_contact(
         // [-1, 1]. At |v| >= V_EPS the magnitude is the full µ·N; at v=0 it's
         // zero (no jitter). Continuous through zero avoids integrator
         // oscillation at a stopped aircraft.
-        let f_forward = -ROLLING_FRICTION_COEFF * normal_n * (v_forward / V_EPS).clamp(-1.0, 1.0);
+        let f_forward_roll =
+            -ROLLING_FRICTION_COEFF * normal_n * (v_forward / V_EPS).clamp(-1.0, 1.0);
+
+        // Brake force: an additional -forward drag at each brakable gear when
+        // the pilot is holding brakes. Same smoothing as rolling friction — no
+        // kick at zero velocity. Mains are brake_factor=1.0; tailwheel is 0.0
+        // so this term is gated on gear type naturally. Combined with rolling
+        // gives total -forward axis friction per gear.
+        let f_forward_brake = if v.controls.brakes && gear.brake_factor > 0.0 {
+            -BRAKE_FRICTION_COEFF
+                * normal_n
+                * gear.brake_factor
+                * (v_forward / V_EPS).clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+        let f_forward = f_forward_roll + f_forward_brake;
 
         // Tailwheel lateral coefficient scales with lock_factor: locked tailwheel
         // grips laterally (enables steering); castoring tailwheel free-pivots
@@ -762,6 +817,85 @@ mod tests {
              (lock_factor scales µ_lat); taxi={}, fast={}",
             taxi.angular_accel.y,
             fast.angular_accel.y,
+        );
+    }
+
+    // ── Phase 2.5b.4 tests: brakes ───────────────────────────────────
+
+    #[test]
+    fn brakes_off_produces_rolling_friction_only() {
+        // Baseline: brakes=false gives pure rolling friction. Used as the
+        // reference for brakes_on tests.
+        let spec = beaver_spec();
+        let weight_n = spec.max_mass_wheels_kg * GRAVITY.length();
+        let main_compression = weight_n / (2.0 * GEAR_SPRING_N_PER_M);
+        let cg_y = 1.3 - main_compression;
+
+        let mut v = wheels_vehicle_at(cg_y);
+        v.velocity = Vec3::new(0.0, 0.0, -5.0);
+        assert!(!v.controls.brakes, "default brakes should be off");
+        let out = compute_ground_contact(&v, Some(&spec), 0.0);
+        // Rolling-only decel: ~0.2 m/s² from `rolling_friction_opposes_forward_motion`.
+        assert!(
+            out.linear_accel.z > 0.05 && out.linear_accel.z < 0.5,
+            "brakes-off should give pure rolling decel ~0.2 m/s², got {}",
+            out.linear_accel.z,
+        );
+    }
+
+    #[test]
+    fn brakes_on_multiplies_deceleration() {
+        // Brakes applied: each main adds -µ_brake·N forward drag on top of
+        // rolling. Combined coefficient at the mains = µ_r + µ_brake = 0.62
+        // (vs 0.02 rolling alone). Expect ~31× larger decel magnitude.
+        let spec = beaver_spec();
+        let weight_n = spec.max_mass_wheels_kg * GRAVITY.length();
+        let main_compression = weight_n / (2.0 * GEAR_SPRING_N_PER_M);
+        let cg_y = 1.3 - main_compression;
+
+        let mut v_off = wheels_vehicle_at(cg_y);
+        v_off.velocity = Vec3::new(0.0, 0.0, -5.0);
+        let off = compute_ground_contact(&v_off, Some(&spec), 0.0);
+
+        let mut v_on = wheels_vehicle_at(cg_y);
+        v_on.velocity = Vec3::new(0.0, 0.0, -5.0);
+        v_on.controls.brakes = true;
+        let on = compute_ground_contact(&v_on, Some(&spec), 0.0);
+
+        assert!(
+            on.linear_accel.z > off.linear_accel.z * 10.0,
+            "brakes-on should produce >10× rolling-alone decel; \
+             off.z={}, on.z={}",
+            off.linear_accel.z,
+            on.linear_accel.z,
+        );
+        // Sanity: decel magnitude is in the 3-5 m/s² range for this setup.
+        assert!(
+            (3.0..=6.0).contains(&on.linear_accel.z),
+            "brakes decel should be ~0.4 g (3-6 m/s²); got {}",
+            on.linear_accel.z,
+        );
+    }
+
+    #[test]
+    fn brakes_at_zero_velocity_produce_no_force() {
+        // Brakes held but aircraft not moving → no friction. Brake is a
+        // kinetic drag (opposes motion), it can't accelerate a stopped
+        // vehicle backward. Verified by the V_EPS ramp through zero.
+        let spec = beaver_spec();
+        let weight_n = spec.max_mass_wheels_kg * GRAVITY.length();
+        let main_compression = weight_n / (2.0 * GEAR_SPRING_N_PER_M);
+        let cg_y = 1.3 - main_compression;
+
+        let mut v = wheels_vehicle_at(cg_y);
+        v.controls.brakes = true;
+        let out = compute_ground_contact(&v, Some(&spec), 0.0);
+
+        assert!(
+            out.linear_accel.x.abs() < 1e-3 && out.linear_accel.z.abs() < 1e-3,
+            "brakes at v=0 should produce no horizontal force; got ({}, _, {})",
+            out.linear_accel.x,
+            out.linear_accel.z,
         );
     }
 

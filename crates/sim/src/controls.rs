@@ -81,6 +81,13 @@ pub struct Controls {
     /// Must be retracted before takeoff (creates drag + unwanted yaw at speed).
     /// When retracted, aircraft weathervanes naturally via `CN_BETA` stability.
     pub water_rudder: bool,
+    /// Wheel brakes: held during landing rollout + aborted-takeoff / short-
+    /// field stops. Symmetric brake force applied to both main wheels when
+    /// true and any main is in ground contact; tailwheel does not brake
+    /// (classic taildragger toe-brake arrangement). Asymmetric toe-brakes —
+    /// independent left/right pedal inputs for differential steering during
+    /// slow taxi — are a Phase 4 remap-UI feature; v1 uses a single bool.
+    pub brakes: bool,
 }
 
 impl Controls {

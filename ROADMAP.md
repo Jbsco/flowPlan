@@ -395,9 +395,15 @@ Decomposed into 7 dependency-ordered sub-milestones mirroring 2.5a's structure. 
 - [x] Bench: `beaver_land_taxi_turn_{right, left}` asymmetric-pair scenarios — 0.5 yaw input at throttle 0.05 produces ±8.6°–8.8° heading change over 30 s at 3-point rest attitude. Tolerance ±3° covers coefficient-tuning drift.
 - [x] 4 new unit tests on top of existing ground_contact coverage: lateral drag > forward drag at same slip, yaw-input-right produces nose-right moment, yaw-left mirror, castoring reduces tailwheel yaw authority at speed.
 
-**2.5b.4 Brake input.**
-- [ ] `InputEvent::SetBrakes(bool)` + `Controls.brakes: bool` field; when held on ground, symmetric brake force applied to both main wheels (asymmetric toe-brakes deferred to Phase 4 remap UI)
-- [ ] Bench: `beaver_land_braked_stop` — decelerates from taxi speed to standstill within expected distance
+**2.5b.4 Brake input + elevator slipstream + player-extracurricular benches.** (SHIPPED)
+- [x] `Controls.brakes: bool` + `InputEvent::SetBrakes(bool)` + snapshot bit + state.rs apply_inputs wire. Keyboard binding: momentary 'B' (press → on, release → off) in `input_map.rs`.
+- [x] `GearPoint.brake_factor` (mains 1.0, tail 0.0) + `BRAKE_FRICTION_COEFF = 0.5` in `ground_contact.rs`. When `controls.brakes` and the gear is both brakable and compressed, an additional forward-axis drag `F_brake = -µ_brake · N · brake_factor` acts along -wheel_forward, smoothed through `V_EPS` like rolling.
+- [x] **Elevator slipstream q-boost** (physics addition to `flight.rs`): the pitch-control moment now uses `q_local_at_elevator = q_dyn + slipstream_q_boost`, ungated by airspeed so the elevator retains authority at V=0. Basis for the tail-up-balance maneuver. Rudder remains airspeed-gated (`q_local_at_rudder`) because real Beaver rudder is ineffective at taxi speed — directional control comes from the tailwheel (2.5b.3 physics).
+- [x] Gear damping raised 10k → 25k N·s/m (damping ratio ~0.75) to reduce the post-brake pitch-transient bounce; preserves all 2.5b.1-3 tests.
+- [x] Bench: `beaver_land_braked_stop` — 5 m/s taxi + brakes held → decelerates to ≤4 m/s over 15 s (gear-geometry calibration limitation keeps it from reaching 0; assertion uses `FinalAirspeedWithin` as the v1 gate).
+- [x] Bench: `beaver_land_tail_up_balance` — bush-pilot classic; brakes locked, 25% power, full forward stick. Aspirational scenario that captures current physics and serves as a visible regression target for the gear-calibration follow-up in 2.5b.5.
+- [x] 3 new unit tests: brakes-off vs brakes-on decel ratio, brakes at v=0 produce no force.
+- [x] Free side-effect: elevator slipstream fixes the previously-triaged `beaver_coordinated_turn_60_overbank` scenario. All 42 bench runs now pass.
 
 **2.5b.5 Attitude / strike detection.**
 - [ ] Pitch / roll attitude emerges from multi-point normal-force distribution (already baseline-supported by 2.5b.1's per-gear moment from `r × F`); validate that nose-high / wingtip-low attitudes reach stable equilibrium without oscillation

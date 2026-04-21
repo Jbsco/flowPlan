@@ -176,6 +176,7 @@ fn apply_inputs(v: &mut VehicleState, camera: &mut Camera, inputs: &InputEvents)
             InputEvent::ExtendFlaps => v.controls.flaps = v.controls.flaps.extended(),
             InputEvent::RetractFlaps => v.controls.flaps = v.controls.flaps.retracted(),
             InputEvent::SetWaterRudder(deployed) => v.controls.water_rudder = deployed,
+            InputEvent::SetBrakes(on) => v.controls.brakes = on,
         }
     }
     v.controls.clamp();

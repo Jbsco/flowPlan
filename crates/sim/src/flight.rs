@@ -899,16 +899,54 @@ pub fn compute_forces(
     let roll_damp_nd = roll_rate * WING_SPAN_M / (2.0 * v_damp);
     let yaw_damp_nd = yaw_rate * WING_SPAN_M / (2.0 * v_damp);
 
+    // Precursors shared between the pitch/yaw control-surface boosts AND the
+    // yaw/roll coupling terms (P-factor, spiral slipstream, torque roll).
+    // Computed here so both rudder AND elevator can apply the same slipstream-
+    // q-boost — real Beaver: both control surfaces sit in the prop wash and
+    // get accelerated air proportional to thrust loading.
+    let coupling_airspeed_factor = ((speed - COUPLING_AIRSPEED_RAMP_MIN)
+        / (COUPLING_AIRSPEED_RAMP_MAX - COUPLING_AIRSPEED_RAMP_MIN))
+        .clamp(0.0, 1.0);
+    let thrust_n_this_tick =
+        thrust.dot(forward) * spec.map_or(1.0, |s| s.max_mass_wheels_kg.max(1.0));
+    let spiral_slipstream_factor =
+        SPIRAL_SLIPSTREAM_V_REF / (SPIRAL_SLIPSTREAM_V_REF + speed.max(1.0));
+    // Slipstream q-boost: prop wash over a control surface. Empirically split
+    // between elevator and rudder:
+    // - `q_local_at_elevator`: NOT gated by airspeed. The tail-up-balance
+    //   maneuver (brakes locked, power up, forward stick) needs pitch
+    //   authority at V=0. Pilot reports confirm this works at zero airspeed.
+    //   Angular damping at V=0 comes from ground-contact lateral friction.
+    // - `q_local_at_rudder`: IS gated by `coupling_airspeed_factor`. Real
+    //   pilot reports describe rudder as "ineffective below 10 kt" on the
+    //   Beaver; ground-taxi directional control comes from the TAILWHEEL
+    //   (2.5b.3 physics), not the rudder. Without this gate the rudder
+    //   overrides tailwheel steering at taxi speeds.
+    let base_slipstream_q =
+        RUDDER_SLIPSTREAM_Q_PER_N * thrust_n_this_tick.max(0.0) * spiral_slipstream_factor;
+    let q_local_at_elevator = q_dyn + base_slipstream_q;
+    let q_local_at_rudder = q_dyn + base_slipstream_q * coupling_airspeed_factor;
+
     // Pitch: control (elevator) + α-stability (with post-stall nose-down and flap
     // pitching-moment contribution) + pitch-rate damping. Past α_stall, the center
     // of lift shifts aft, producing an additional nose-down moment that tries to
     // self-recover the aircraft. Flap deployment also produces a nose-down moment
     // (Cm_0 shift -- the lift increment acts aft of CG for positive-camber airfoils).
+    //
+    // Control uses `q_local_at_elevator` (freestream + ungated slipstream) so
+    // the elevator retains authority at zero airspeed when prop wash dominates
+    // — the physical basis for classic tail-up-balance / wheelie-standing
+    // maneuvers: brakes locked, throttle up, stick forward → prop wash over
+    // elevator pitches the tail up even with V=0.
     let stall_excess = (alpha.abs() - ALPHA_STALL_RAD).max(0.0);
     let stall_pitch_addend = CM_STALL_PITCH_SLOPE * stall_excess * alpha.signum();
     let flap_cm = flap_aero(state.controls.flaps).delta_cm;
     let pitch_moment = MomentBreakdown {
-        control: q_dyn * wing_area_moments * MEAN_CHORD_M * CM_DELTA_E * state.controls.pitch,
+        control: q_local_at_elevator
+            * wing_area_moments
+            * MEAN_CHORD_M
+            * CM_DELTA_E
+            * state.controls.pitch,
         stability: q_dyn
             * wing_area_moments
             * MEAN_CHORD_M
@@ -924,9 +962,7 @@ pub fn compute_forces(
     // destabilizing rolling moment past stall. Torque reaction is a LEFT-roll from
     // the right-rotating prop; scales linearly with shaft power AND by the
     // airspeed-ramp factor so it doesn't accumulate rotation at V=0.
-    let coupling_airspeed_factor = ((speed - COUPLING_AIRSPEED_RAMP_MIN)
-        / (COUPLING_AIRSPEED_RAMP_MAX - COUPLING_AIRSPEED_RAMP_MIN))
-        .clamp(0.0, 1.0);
+    // `coupling_airspeed_factor` already computed above (pitch-block precursor).
     let wing_drop_moment =
         wing_drop_roll_moment(alpha, roll_rate, v_damp, q_dyn, wing_area_moments);
     let torque_roll_moment =
@@ -957,37 +993,19 @@ pub fn compute_forces(
     // (high α, full power); negligible at cruise.
     let adverse_yaw_moment =
         q_dyn * wing_area_moments * WING_SPAN_M * CN_DELTA_A_ADVERSE * state.controls.roll;
-    // Approximate thrust this tick from accel (thrust_vec = forward × thrust/mass);
-    // we could also recover thrust_n by multiplying back, but the vector's component
-    // on `forward` is cleaner.
-    let thrust_n_this_tick =
-        thrust.dot(forward) * spec.map_or(1.0, |s| s.max_mass_wheels_kg.max(1.0));
     let p_factor_moment =
         -P_FACTOR_ARM_M * thrust_n_this_tick * alpha.sin() * coupling_airspeed_factor;
     // Spiraling slipstream: nose-left yaw moment from prop-wash swirl hitting
     // vertical tail. Scales with thrust, decays with airspeed. The third
     // left-turning tendency (alongside P-factor + torque roll).
-    let spiral_slipstream_factor =
-        SPIRAL_SLIPSTREAM_V_REF / (SPIRAL_SLIPSTREAM_V_REF + speed.max(1.0));
     let spiral_slipstream_moment = -SPIRAL_SLIPSTREAM_ARM_M
         * thrust_n_this_tick
         * spiral_slipstream_factor
         * coupling_airspeed_factor;
 
-    // Slipstream-augmented dynamic pressure at the rudder (and elevator). Real
-    // Beaver rudder + elevator sit in the prop wash, so their authority scales
-    // with thrust loading on top of freestream q. Without this term, rudder
-    // input cannot counter the spiraling-slipstream yaw moment at low V + high
-    // power (takeoff regime) — the slipstream produces a strong nose-left yaw
-    // but the rudder, computed only with freestream q, has weak authority at
-    // low V. With the boost, rudder authority grows with thrust on the same
-    // schedule as the slipstream itself, giving the pilot the right amount of
-    // control to counter prop-wash effects.
-    let slipstream_q_boost = RUDDER_SLIPSTREAM_Q_PER_N
-        * thrust_n_this_tick.max(0.0)
-        * spiral_slipstream_factor
-        * coupling_airspeed_factor;
-    let q_local_at_rudder = q_dyn + slipstream_q_boost;
+    // Rudder uses `q_local_at_rudder` (freestream + slipstream, gated by
+    // airspeed). At taxi speeds the rudder is physically ineffective;
+    // directional control comes from the tailwheel (2.5b.3 physics).
     let yaw_moment = MomentBreakdown {
         control: q_local_at_rudder
             * wing_area_moments

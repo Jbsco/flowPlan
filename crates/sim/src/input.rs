@@ -38,6 +38,10 @@ pub enum InputEvent {
     /// Deploy or retract the water rudder (float aircraft only). Deployed gives
     /// strong yaw authority at low water speed; must be retracted for takeoff.
     SetWaterRudder(bool),
+    /// Apply or release wheel brakes (wheels / taildragger aircraft only).
+    /// Momentary by convention — bound to a held key so release on keyup — but
+    /// the sim accepts the absolute state, letting UI pick momentary vs toggle.
+    SetBrakes(bool),
 }
 
 /// App-level commands that cross the GUI / menu → app boundary.

@@ -111,6 +111,12 @@ impl KeyState {
             KeyCode::KeyC if pressed && !ev.repeat => {
                 let _ = queue.push(InputEvent::RetractFlaps);
             },
+            // Momentary brakes: hold B = brakes applied; release = off. Ignore
+            // auto-repeat so the release edge isn't swallowed by repeated
+            // keydowns when the pilot holds through typematic delay.
+            KeyCode::KeyB if !ev.repeat => {
+                let _ = queue.push(InputEvent::SetBrakes(pressed));
+            },
             _ => {},
         }
     }
