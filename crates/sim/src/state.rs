@@ -80,6 +80,13 @@ pub struct SimState {
     /// `state_hash` because it's derivable from the other state and changes every
     /// tick; including it would just duplicate work.
     pub last_flight: crate::flight::FlightOutputs,
+    /// Last ground-contact strike flags (Phase 2.5b.6). Per-kind booleans for
+    /// prop / tail / wingtip contact. Re-evaluated each tick; zeroed for
+    /// floats-configured aircraft. Exposed so bench CSV + debug HUD + future
+    /// Phase 4 damage system can observe strikes without re-running the
+    /// contact check. Not folded into `state_hash` (derivable from position
+    /// + orientation).
+    pub last_strikes: crate::ground_contact::StrikeFlags,
 }
 
 impl SimState {
@@ -103,6 +110,7 @@ impl SimState {
             seed,
             aircraft: None,
             last_flight: crate::flight::FlightOutputs::default(),
+            last_strikes: crate::ground_contact::StrikeFlags::default(),
         }
     }
 
@@ -121,7 +129,7 @@ impl SimState {
         min_altitude: f32,
     ) {
         apply_inputs(&mut self.vehicle, &mut self.camera, inputs);
-        self.last_flight = tick_dynamics(
+        let (flight_out, strikes) = tick_dynamics(
             &mut self.vehicle,
             self.aircraft.as_ref(),
             dt,
@@ -129,6 +137,8 @@ impl SimState {
             self.wave_time,
             self.chop_intensity,
         );
+        self.last_flight = flight_out;
+        self.last_strikes = strikes;
         self.camera
             .follow(self.vehicle.position, self.vehicle.orientation, dt);
         self.time_of_day = (self.time_of_day + dt / DAY_LENGTH_SECONDS).rem_euclid(1.0);
@@ -195,7 +205,7 @@ fn tick_dynamics(
     min_altitude: f32,
     wave_time: f32,
     chop_intensity: f32,
-) -> flight::FlightOutputs {
+) -> (flight::FlightOutputs, ground_contact::StrikeFlags) {
     // AGL approximation for ground effect (2.4.6). `min_altitude` is the app-supplied
     // surface clamp that includes the float offset + a small margin; for ground
     // effect we want the wing's height above surface, which tracks CG height above
@@ -261,7 +271,7 @@ fn tick_dynamics(
         v.fuel_gal = (v.fuel_gal - used).max(0.0);
     }
 
-    forces
+    (forces, gc.strikes)
 }
 
 #[cfg(test)]

@@ -132,6 +132,20 @@ pub enum Assertion {
         target_deg: f32,
         tol_deg: f32,
     },
+
+    /// At least one tick in the log reported a tail strike. Phase 2.5b.6:
+    /// used by scenarios that over-rotate on takeoff (stall-taildown) to
+    /// verify the detection fires.
+    TailStrikeOccurs,
+
+    /// At least one tick reported a prop strike (nose-over, steep-slope
+    /// taxi). Damage consequences land in Phase 4.
+    PropStrikeOccurs,
+
+    /// At least one tick reported ANY wingtip strike (left or right).
+    /// Bank-direction-specific bench scenarios use this via the CSV
+    /// columns; the bench assertion is coarse "did it strike at all."
+    WingtipStrikeOccurs,
 }
 
 /// A `FlightScenario` is the top-level description of a test case.
@@ -233,6 +247,14 @@ pub struct BenchSample {
 
     // State flags (stored as ints for CSV compatibility: 0=Normal, 1=Approach, 2=Stall)
     pub stall_state: u32,
+
+    // Strike detection (Phase 2.5b.6). 1 if the named airframe point touched
+    // ground this tick, else 0. All 0 for floats-variant scenarios (strike
+    // points are wheeled-aircraft specific).
+    pub strike_prop: u8,
+    pub strike_tail: u8,
+    pub strike_wingtip_left: u8,
+    pub strike_wingtip_right: u8,
 }
 
 impl BenchSample {
@@ -284,6 +306,10 @@ impl BenchSample {
                 StallState::Approach => 1,
                 StallState::Stall => 2,
             },
+            strike_prop: u8::from(sim.last_strikes.prop),
+            strike_tail: u8::from(sim.last_strikes.tail),
+            strike_wingtip_left: u8::from(sim.last_strikes.wingtip_left),
+            strike_wingtip_right: u8::from(sim.last_strikes.wingtip_right),
         }
     }
 
@@ -294,7 +320,8 @@ impl BenchSample {
          alpha_deg,beta_deg,cl,cd,\
          throttle,pitch_in,roll_in,yaw_in,flap_deg,\
          engine_kw,prop_eff,fuel_gph,fuel_gal,\
-         pitch_M,roll_L,yaw_N,roll_L_coupling,yaw_N_coupling,stall_state"
+         pitch_M,roll_L,yaw_N,roll_L_coupling,yaw_N_coupling,stall_state,\
+         strike_prop,strike_tail,strike_wingtip_left,strike_wingtip_right"
     }
 
     pub fn write_csv_row(&self, out: &mut String) {
@@ -306,7 +333,8 @@ impl BenchSample {
              {:.3},{:.3},{:.4},{:.4},\
              {:.3},{:.3},{:.3},{:.3},{:.1},\
              {:.2},{:.3},{:.2},{:.2},\
-             {:.1},{:.1},{:.1},{:.1},{:.1},{}",
+             {:.1},{:.1},{:.1},{:.1},{:.1},{},\
+             {},{},{},{}",
             self.tick,
             self.time_s,
             self.position_x,
@@ -340,6 +368,10 @@ impl BenchSample {
             self.roll_coupling_nm,
             self.yaw_coupling_nm,
             self.stall_state,
+            self.strike_prop,
+            self.strike_tail,
+            self.strike_wingtip_left,
+            self.strike_wingtip_right,
         );
     }
 }
@@ -582,6 +614,44 @@ fn check_one(assertion: Assertion, log: &[BenchSample]) -> AssertionResult {
                 assertion,
                 passed: last >= min_gal && last <= max_gal,
                 message: format!("final fuel {last:.2} gal (range [{min_gal:.2}, {max_gal:.2}])"),
+            }
+        },
+        Assertion::TailStrikeOccurs => {
+            let hit = log.iter().any(|s| s.strike_tail == 1);
+            AssertionResult {
+                assertion,
+                passed: hit,
+                message: if hit {
+                    "tail strike detected in log".to_string()
+                } else {
+                    "no tail strike recorded in log".to_string()
+                },
+            }
+        },
+        Assertion::PropStrikeOccurs => {
+            let hit = log.iter().any(|s| s.strike_prop == 1);
+            AssertionResult {
+                assertion,
+                passed: hit,
+                message: if hit {
+                    "prop strike detected in log".to_string()
+                } else {
+                    "no prop strike recorded in log".to_string()
+                },
+            }
+        },
+        Assertion::WingtipStrikeOccurs => {
+            let hit = log
+                .iter()
+                .any(|s| s.strike_wingtip_left == 1 || s.strike_wingtip_right == 1);
+            AssertionResult {
+                assertion,
+                passed: hit,
+                message: if hit {
+                    "wingtip strike detected in log".to_string()
+                } else {
+                    "no wingtip strike recorded in log".to_string()
+                },
             }
         },
         Assertion::HeadingChangeAtEnd {
@@ -3136,5 +3206,106 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             min_mps: 0.0,
             max_mps: 10.0,
         }],
+    },
+    // beaver_land_stall_taildown
+    //
+    // Real-world maneuver:
+    //   Tail-first landing from a stalled approach: aircraft touches down
+    //   nose-high, excessive flare angle, tail cone contacts before the
+    //   main gear does. A CFI-condemned landing that betrays poor energy
+    //   management or a delayed flare break.
+    //
+    // 2.5b.6 scope:
+    //   Exercises the tail-strike detection path. Aircraft spawns
+    //   airborne just above the ground at a 15° nose-up attitude (well
+    //   past the 9° tail-strike threshold) with minimal forward velocity
+    //   and zero sink. Gravity pulls it down; the tail-strike point
+    //   reaches ground before the gear settles. Detection flag gets set;
+    //   `TailStrikeOccurs` passes.
+    //
+    //   Why not a static over-rotation with throttle alone? Because the
+    //   Beaver's gear-restoring moment at 6.46° rest is ~33,000 N·m
+    //   nose-down for each degree past rest — full elevator at full power
+    //   (~10,000 N·m nose-up) can't overcome it. Tail-strike happens in
+    //   the AIR (or during touchdown), not on the ground via stick alone.
+    //
+    // Does NOT test:
+    //   - Takeoff rotation dynamics (needs flight-model integration at
+    //     speed to produce the lift that separates mains from ground).
+    //   - Damage (Phase 4+).
+    FlightScenario {
+        name: "beaver_land_stall_taildown",
+        description: "Tail-first landing: aircraft descends from airborne \
+                      at 15° nose-up, tail-strike point contacts before \
+                      gear settles.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_WHEELS_ONLY_VARIANTS,
+        initial: ScenarioInitial {
+            // 15° nose-up = 0.2618 rad. Precomputed quat components:
+            //   sin(0.131) = 0.13053, cos(0.131) = 0.99144
+            // CG positioned so the tail strike point is already in
+            // contact at t=0: tail-strike threshold at 15° pitch is
+            // CG ≈ 1.71 m; start at 1.40 m so tail is 31 cm below
+            // ground (clearly triggering detection) without demanding
+            // anything from the subsequent dynamics.
+            position: Vec3::new(0.0, 1.40, 0.0),
+            velocity: Vec3::ZERO,
+            orientation: Quat::from_xyzw(0.130_53, 0.0, 0.0, 0.991_44),
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.0,
+            flaps: FlapPosition::Landing,
+            fuel_gal: 0.0,
+        },
+        inputs: &[],
+        controllers: &[],
+        duration_ticks: 120, // 1 s — strike detection fires immediately
+        assertions: &[Assertion::TailStrikeOccurs],
+    },
+    // beaver_land_wingtip_scrape
+    //
+    // Real-world maneuver:
+    //   Aircraft on ground with excessive bank — e.g., aborted takeoff
+    //   with one main losing contact, or crosswind landing with
+    //   unfortunate gust timing, or taxi over a steeply-crowned surface.
+    //   The low wingtip contacts the ground briefly.
+    //
+    // 2.5b.6 scope:
+    //   Exercises the wingtip-strike detection path. Aircraft spawns
+    //   already banked 15° (past the wingtip-strike threshold) and held
+    //   by strong gear-normal moment in that attitude. Over the run,
+    //   wingtip remains in contact with ground. `WingtipStrikeOccurs`
+    //   assertion passes if detection fires.
+    //
+    //   15° bank with wingtip_left at (-7.3, -1.0, 0): rotated y_world
+    //   at CG=1.155 pitch=6.46° roll=+15°: ≈ -0.60 → strike.
+    //
+    // Does NOT test:
+    //   - How the aircraft got into this attitude (pre-existing state).
+    //   - Damage / flight-model impact of wing on ground (Phase 4+).
+    FlightScenario {
+        name: "beaver_land_wingtip_scrape",
+        description: "Aircraft in excess-bank ground attitude; wingtip \
+                      contacts ground.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_WHEELS_ONLY_VARIANTS,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 1.155, 0.0),
+            velocity: Vec3::ZERO,
+            // Combined pitch 6.46° + left-bank 15° (positive Z rotation per
+            // flowplan convention). Precomputed quat:
+            //   pitch quat: (0.05636, 0, 0, 0.99841)
+            //   roll quat: (0, 0, sin(7.5°), cos(7.5°)) = (0, 0, 0.13053, 0.99144)
+            //   product (pitch × roll): (0.05588, 0.00735, 0.13036, 0.98985)
+            // (multiplication order: apply pitch first, then roll on top).
+            orientation: Quat::from_xyzw(0.055_88, 0.007_35, 0.130_36, 0.989_85),
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.0,
+            flaps: FlapPosition::Up,
+            fuel_gal: 0.0,
+        },
+        inputs: &[],
+        controllers: &[],
+        duration_ticks: 600, // 5 s
+        assertions: &[Assertion::WingtipStrikeOccurs],
     },
 ];

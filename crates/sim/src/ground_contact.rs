@@ -202,6 +202,87 @@ struct GearPoint {
 /// TODO(2.5b follow-up): read `northlander_land.glb` bbox at load time and
 /// realign these to the actual mesh geometry, mirroring the 2.5a.3 float
 /// realignment. Same applies if an `AircraftSpec.gear_geometry` migration lands.
+/// Airframe points that shouldn't normally contact the ground. When one of
+/// them drops below ground during unusual attitudes (tail-strike on over-
+/// rotation, wingtip-scrape during crosswind landing, prop-strike during
+/// nose-over), the strike is detected and flagged on `GroundContactOutputs`.
+/// No force or moment is applied — detection only. Damage consequences land
+/// with Phase 4 ([ROADMAP.md § Milestone 4.3 Damage](../../../ROADMAP.md#milestone-43-damage-and-wear)).
+///
+/// Body-frame offsets are placeholder DHC-2 Beaver dimensions, subject to
+/// mesh-alignment against `northlander_land.glb` in the same follow-up that
+/// tracks gear-geometry migration to `AircraftSpec.strike_geometry`.
+#[derive(Clone, Copy, Debug)]
+struct StrikePoint {
+    /// Body-frame offset from CG (m).
+    body_offset: Vec3,
+    /// Which kind of strike — lets the outputs struct expose individual flags
+    /// so a UI / damage system can map strikes to specific failure modes
+    /// (prop bent ≠ tail bulkhead torn ≠ wingtip scraped).
+    kind: StrikeKind,
+    /// Label for diagnostics / plots. Not functional.
+    #[allow(dead_code)]
+    label: &'static str,
+}
+
+/// Which airframe structure a strike point represents. Damage consequences
+/// in Phase 4 map per-kind to different failure modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StrikeKind {
+    /// Prop disk — forward of CG, low. Hits ground on hard nose-down pitch
+    /// or steep forward slopes.
+    Prop,
+    /// Tail cone / rear fuselage — aft of CG, low. Hits ground on excessive
+    /// nose-up rotation (stall on takeoff, over-flared landing).
+    Tail,
+    /// Left wingtip — lateral left, low. Hits ground on excessive right bank
+    /// during ground roll (crosswind landing gone wrong).
+    WingtipLeft,
+    /// Right wingtip — lateral right, mirror of `WingtipLeft`.
+    WingtipRight,
+}
+
+/// DHC-2 Beaver strike points (placeholder DHC-2 dimensions).
+///
+/// **Calibration constraint**: all strike points must have world-y > 0 at the
+/// 3-point rest attitude (θ=6.46°, CG=1.155 m) so they don't false-positive
+/// at rest. The tail offset `y = -0.3` (vs a naive "fuselage bottom ≈ main
+/// gear level" of `-0.8`) reflects that the rear fuselage underside sits
+/// ABOVE the tailwheel at rest — the tailwheel attach is the lowest point
+/// of the empennage. Over-rotation past ~9° nose-up brings the rear
+/// fuselage bottom to the ground.
+///
+/// - Prop: 3.0 m forward of CG, 1.0 m below (prop disk center; blade tips
+///   sweep to radius ~1.3 m, so actual blade-tip contact at nose-down
+///   attitude happens slightly before the disk-center crosses ground —
+///   approximation).
+/// - Tail: 5.5 m aft, 0.3 m below (rear fuselage underside, NOT the
+///   tailwheel contact — that's handled by `BEAVER_GEAR`).
+/// - Wingtips: ±7.3 m lateral (half of 14.6 m wingspan), 1.0 m below
+///   (wingtip hangs below CG at level attitude; bank pushes one tip down).
+const BEAVER_STRIKES: [StrikePoint; 4] = [
+    StrikePoint {
+        body_offset: Vec3::new(0.0, -1.0, -3.0),
+        kind: StrikeKind::Prop,
+        label: "prop",
+    },
+    StrikePoint {
+        body_offset: Vec3::new(0.0, -0.3, 5.5),
+        kind: StrikeKind::Tail,
+        label: "tail",
+    },
+    StrikePoint {
+        body_offset: Vec3::new(-7.3, -1.0, 0.0),
+        kind: StrikeKind::WingtipLeft,
+        label: "wingtip_left",
+    },
+    StrikePoint {
+        body_offset: Vec3::new(7.3, -1.0, 0.0),
+        kind: StrikeKind::WingtipRight,
+        label: "wingtip_right",
+    },
+];
+
 const BEAVER_GEAR: [GearPoint; 3] = [
     // Left main wheel (fixed — mains don't steer on a taildragger; fully
     // braked — toe brakes on mains is standard Beaver arrangement).
@@ -233,9 +314,48 @@ const BEAVER_GEAR: [GearPoint; 3] = [
     },
 ];
 
-/// Ground-contact outputs: linear + angular acceleration contributions and a
-/// diagnostic total-force magnitude. Mirrors `BuoyancyOutputs` field-for-field so
-/// `tick_dynamics` can sum them uniformly.
+/// Per-kind strike flags for the current tick.
+///
+/// Records when non-gear airframe points touch the ground. Cleared and
+/// recomputed each tick. Damage consequences land in Phase 4; for now these
+/// feed the bench CSV (for post-scenario analysis) and can be wired to
+/// audio / visual SFX without needing any new plumbing.
+///
+/// The struct-of-bools shape (vs a bitmask) is deliberate: this is not a
+/// hot-path memory layout (one per-tick copy per aircraft) and named fields
+/// make call sites `strikes.tail` instead of `strikes & STRIKE_TAIL`, which
+/// matches how Phase 4 damage handlers will dispatch per-kind.
+#[allow(clippy::struct_excessive_bools)] // per-kind enum-of-flags; see doc.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StrikeFlags {
+    /// Prop disk has descended below ground — typically nose-over or a
+    /// steep-forward taxi slope.
+    pub prop: bool,
+    /// Tail cone / empennage below ground — over-rotation on takeoff, or
+    /// an over-flared landing.
+    pub tail: bool,
+    /// Left wingtip touching ground — too much right-bank during ground roll.
+    pub wingtip_left: bool,
+    /// Right wingtip touching ground — mirror of `wingtip_left`.
+    pub wingtip_right: bool,
+}
+
+impl StrikeFlags {
+    /// True when ANY strike point hit the ground this tick. Useful for a
+    /// coarse "is something bad happening" signal.
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.prop || self.tail || self.wingtip_left || self.wingtip_right
+    }
+}
+
+/// Ground-contact outputs.
+///
+/// Linear + angular acceleration contributions, a diagnostic total-force
+/// magnitude, and strike-detection flags. Mirrors `BuoyancyOutputs`
+/// field-for-field on the physics side so `tick_dynamics` can sum them
+/// uniformly; strike flags are sim-side observations that don't affect
+/// physics.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GroundContactOutputs {
     /// Linear acceleration contribution in world frame (m/s²).
@@ -244,9 +364,13 @@ pub struct GroundContactOutputs {
     pub angular_accel: Vec3,
     /// Sum of gear normal-force magnitudes across all contacts (N). Diagnostic.
     pub total_force_n: f32,
+    /// Per-kind strike-detection flags for this tick. All-false at rest /
+    /// airborne / normal ground contact. Non-force: Phase 4 damage system
+    /// will map these to consequences.
+    pub strikes: StrikeFlags,
 }
 
-/// Compute per-gear normal force for the current vehicle state.
+/// Compute per-gear ground-contact forces + strike flags.
 ///
 /// Short-circuits to zero when:
 /// - No aircraft spec is loaded (pure-sim tests without a Beaver configuration).
@@ -282,6 +406,7 @@ pub struct GroundContactOutputs {
 /// from a direction-separated model; cornering scenarios in 2.5b.3 will
 /// introduce side-slip separately.
 #[must_use]
+#[allow(clippy::too_many_lines)] // multi-pass physics + strike detection
 pub fn compute_ground_contact(
     v: &VehicleState,
     spec: Option<&AircraftSpec>,
@@ -456,10 +581,30 @@ pub fn compute_ground_contact(
         total_moment_body.z / I_ZZ,
     );
 
+    // Strike detection: same world-y < ground test as gear compression, but
+    // applied to prop / tail / wingtip offsets. No force or moment is
+    // generated — detection only. Computed regardless of whether any gear
+    // is compressed (prop-strike can precede gear contact during a nose-
+    // over; wingtip-scrape happens during ground roll).
+    let mut strikes = StrikeFlags::default();
+    for point in &BEAVER_STRIKES {
+        let world_offset = v.orientation * point.body_offset;
+        let world_y = v.position.y + world_offset.y;
+        if world_y < ground_y {
+            match point.kind {
+                StrikeKind::Prop => strikes.prop = true,
+                StrikeKind::Tail => strikes.tail = true,
+                StrikeKind::WingtipLeft => strikes.wingtip_left = true,
+                StrikeKind::WingtipRight => strikes.wingtip_right = true,
+            }
+        }
+    }
+
     GroundContactOutputs {
         linear_accel,
         angular_accel,
         total_force_n: total_normal_magnitude,
+        strikes,
     }
 }
 
@@ -885,7 +1030,173 @@ mod tests {
         );
     }
 
+    // ── Phase 2.5b.6 tests: strike detection ─────────────────────────
+
+    #[test]
+    fn no_strikes_at_rest() {
+        let spec = beaver_spec();
+        let v = wheels_three_point_rest();
+        let out = compute_ground_contact(&v, Some(&spec), 0.0);
+        assert_eq!(out.strikes, StrikeFlags::default());
+        assert!(!out.strikes.any());
+    }
+
+    #[test]
+    fn floats_config_produces_no_strikes() {
+        // Strike detection is wheels-only. Floats-variant aircraft should
+        // never raise strike flags from this function (pontoon-specific
+        // strike geometry is a future concern).
+        let spec = beaver_spec();
+        let mut v = wheels_three_point_rest();
+        v.config = VehicleConfig::Floats;
+        // Put it in a pose that would strike if wheels config: over-rotated.
+        v.orientation = Quat::from_rotation_x(30.0_f32.to_radians());
+        let out = compute_ground_contact(&v, Some(&spec), 0.0);
+        assert_eq!(out.strikes, StrikeFlags::default());
+    }
+
+    #[test]
+    fn over_rotation_produces_tail_strike() {
+        // Over-rotate on takeoff: tail should dip below ground. Tail body
+        // offset (0, -0.8, 5.5). At pitch +θ (nose-up), tail world_y =
+        // CG_y + rotated offset. For pitch+15° about +X:
+        // y_rot = -0.8·cos(15°) - 5.5·sin(15°) = -0.773 - 1.424 = -2.197
+        // At CG=1.155, tail world y = 1.155 - 2.197 = -1.042 → strike.
+        let spec = beaver_spec();
+        let mut v = wheels_three_point_rest();
+        v.orientation = Quat::from_rotation_x(15.0_f32.to_radians());
+        let out = compute_ground_contact(&v, Some(&spec), 0.0);
+        assert!(
+            out.strikes.tail,
+            "over-rotated aircraft should raise tail strike; flags={:?}",
+            out.strikes,
+        );
+        assert!(!out.strikes.prop, "prop should not strike on nose-up pitch");
+        assert!(
+            !out.strikes.wingtip_left && !out.strikes.wingtip_right,
+            "wingtips should not strike on pure pitch",
+        );
+    }
+
+    #[test]
+    fn nose_down_produces_prop_strike() {
+        // Strong nose-down pitch pushes prop disk below ground. Prop body
+        // offset (0, -1.2, -3.0). At pitch -15° (nose-down):
+        // y_rot = -1.2·cos(15°) - (-3.0)·sin(15°) = -1.159 + 0.776 = -0.383
+        //         wait need to check sign. R_x(θ) applied:
+        //         y' = y·cos - z·sin = -1.2·cos(-15°) - (-3.0)·sin(-15°)
+        //            = -1.2·0.966 - (-3.0)·(-0.259) = -1.159 - 0.776 = -1.935
+        // At CG=1.155, prop world y = 1.155 - 1.935 = -0.78 → strike.
+        let spec = beaver_spec();
+        let mut v = wheels_three_point_rest();
+        v.orientation = Quat::from_rotation_x(-15.0_f32.to_radians());
+        let out = compute_ground_contact(&v, Some(&spec), 0.0);
+        assert!(
+            out.strikes.prop,
+            "nose-down pitch should raise prop strike; flags={:?}",
+            out.strikes,
+        );
+    }
+
+    #[test]
+    fn right_bank_produces_right_wingtip_strike() {
+        // Right-bank (right wing down) per flowplan convention:
+        // angular_velocity.z is STORED NEGATED from physics convention, so
+        // a body-frame rotation about +Z by positive angle actually rotates
+        // the top of the aircraft toward body +X (right wing UP = LEFT bank).
+        // To put the aircraft into right-bank attitude directly via a quat,
+        // rotate about +Z by NEGATIVE angle (equivalent to +Z by negative
+        // angle OR -Z by positive angle). Right wingtip at (7.3, -1.0, 0)
+        // rotates DOWN; world_y drops past zero.
+        let spec = beaver_spec();
+        let mut v = wheels_three_point_rest();
+        v.orientation *= Quat::from_rotation_z(-10.0_f32.to_radians());
+        let out = compute_ground_contact(&v, Some(&spec), 0.0);
+        assert!(
+            out.strikes.wingtip_right,
+            "right-banked aircraft should raise right wingtip strike; flags={:?}",
+            out.strikes,
+        );
+        assert!(
+            !out.strikes.wingtip_left,
+            "left wingtip shouldn't strike on right bank; flags={:?}",
+            out.strikes,
+        );
+    }
+
+    #[test]
+    fn left_bank_produces_left_wingtip_strike() {
+        // Mirror of the right-bank test. Left-bank = positive Z rotation
+        // in body frame (top tilts right toward +X = left wing drops).
+        let spec = beaver_spec();
+        let mut v = wheels_three_point_rest();
+        v.orientation *= Quat::from_rotation_z(10.0_f32.to_radians());
+        let out = compute_ground_contact(&v, Some(&spec), 0.0);
+        assert!(
+            out.strikes.wingtip_left,
+            "left-banked aircraft should raise left wingtip strike; flags={:?}",
+            out.strikes,
+        );
+        assert!(!out.strikes.wingtip_right);
+    }
+
+    #[test]
+    fn airborne_aircraft_has_no_strikes() {
+        // High-altitude aircraft at ANY attitude shouldn't register strikes.
+        let spec = beaver_spec();
+        let mut v = wheels_three_point_rest();
+        v.position.y = 50.0; // airborne
+        v.orientation = Quat::from_rotation_x(20.0_f32.to_radians());
+        let out = compute_ground_contact(&v, Some(&spec), 0.0);
+        assert_eq!(out.strikes, StrikeFlags::default());
+    }
+
     // ── Phase 2.5b.5: at-rest invariant ──────────────────────────────
+
+    #[test]
+    fn wheels_pitch_converges_to_rest_from_perturbation() {
+        // Spawn aircraft at +10° nose-up (above the 6.46° rest pitch) with zero
+        // velocity, zero inputs, zero fuel. Gear + gravity should rotate it
+        // back toward the rest attitude. Assert pitch is within 1° of the
+        // 6.46° equilibrium within 5 s, with no overshoot below 5°. Validates
+        // the "pitch attitude emerges from multi-point normal-force
+        // distribution" claim in the 2.5b.6 ROADMAP.
+        use crate::difficulty::DifficultyDials;
+        use crate::input::InputEvents;
+        use crate::state::{SimState, FIXED_DT};
+        let spec = beaver_spec();
+        let mut sim = SimState::new(0xC05A);
+        sim.aircraft = Some(spec);
+        sim.vehicle = wheels_three_point_rest();
+        sim.vehicle.fuel_gal = 0.0; // isolate gear dynamics from thrust
+        // Perturb: +10° pitch instead of the 6.46° rest attitude.
+        sim.vehicle.orientation = Quat::from_rotation_x(10.0_f32.to_radians());
+        sim.vehicle.position.y = 1.25; // slightly higher to avoid initial
+                                       // over-compression from steep pitch
+
+        let d = DifficultyDials::default();
+        let batch = InputEvents::empty();
+        let mut min_pitch_deg = f32::INFINITY;
+        // 5 s = 600 ticks at 120 Hz.
+        for _ in 0..600 {
+            sim.tick(&batch, &d, FIXED_DT, 0.0);
+            let (_, pitch, _) = sim.vehicle.orientation.to_euler(glam::EulerRot::YXZ);
+            min_pitch_deg = min_pitch_deg.min(pitch.to_degrees());
+        }
+        let (_, final_pitch, _) = sim.vehicle.orientation.to_euler(glam::EulerRot::YXZ);
+        let final_deg = final_pitch.to_degrees();
+
+        // Rest pitch is 6.46°. Acceptance: within 1° of rest at end; no overshoot
+        // below 5° (no bounce through the equilibrium by >1.5°).
+        assert!(
+            (final_deg - 6.46).abs() < 1.5,
+            "pitch should converge to rest 6.46°; final={final_deg:+.2}°",
+        );
+        assert!(
+            min_pitch_deg > 4.5,
+            "pitch shouldn't overshoot >2° past rest; min={min_pitch_deg:+.2}°",
+        );
+    }
 
     #[test]
     fn wheels_at_rest_has_zero_drift() {
