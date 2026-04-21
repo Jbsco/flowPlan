@@ -11,35 +11,81 @@
 
 # Shared determinism flags applied to every supported target:
 #
-#   -Ctarget-feature=-fma        — Disable FMA instruction generation on x86
-#                                  targets. ARMv8 mandates FMA so this has
-#                                  limited effect on aarch64; see fp-contract.
-#   -Cllvm-args=-fp-contract=off — Disable LLVM-level `a*b+c` → single-fused-op
-#                                  contraction. Critical for aarch64 where FMA
-#                                  can't be disabled at the ISA level. Also
-#                                  redundant-safe on x86_64.
+#   -Ctarget-feature=-fma             — Disable FMA instruction generation on
+#                                       x86 targets. ARMv8 mandates FMA so
+#                                       limited effect on aarch64; covered by
+#                                       fp-contract below.
+#   -Cllvm-args=-fp-contract=off      — Disable LLVM-level `a*b+c` →
+#                                       single-fused-op contraction at IR
+#                                       level. Redundant on Rust which already
+#                                       defaults to off, but kept for explicit
+#                                       documentation.
+#   -Cllvm-args=-vectorize-loops=false — Disable LLVM loop-vectorizer. Stops
+#                                       scalar loops being turned into SSE on
+#                                       x86_64 vs NEON on aarch64 with
+#                                       potentially different intermediate
+#                                       rounding across architectures.
+#   -Cllvm-args=-vectorize-slp=false  — Disable SLP (superword-level
+#                                       parallelism) vectorizer. Same rationale
+#                                       as loop-vectorize; also covers straight
+#                                       basic blocks not inside loops.
 #
-# Both needed together: `-fma` controls ISA-level FMA instruction availability;
-# `fp-contract=off` controls whether LLVM's IR optimizer fuses arithmetic
-# within a single expression. Without the LLVM flag, aarch64 still fuses.
+# Performance cost: auto-vectorization is a real perf win for some code; we
+# trade it for cross-platform bit-identity. Sim-tick is small + scalar-heavy
+# so the cost should be modest. Monitor the frame-budget bench.
 
 [target.x86_64-unknown-linux-gnu]
-rustflags = ["-Ctarget-feature=-fma", "-Cllvm-args=-fp-contract=off"]
+rustflags = [
+    "-Ctarget-feature=-fma",
+    "-Cllvm-args=-fp-contract=off",
+    "-Cllvm-args=-vectorize-loops=false",
+    "-Cllvm-args=-vectorize-slp=false",
+]
 
 [target.x86_64-unknown-linux-musl]
-rustflags = ["-Ctarget-feature=-fma", "-Cllvm-args=-fp-contract=off"]
+rustflags = [
+    "-Ctarget-feature=-fma",
+    "-Cllvm-args=-fp-contract=off",
+    "-Cllvm-args=-vectorize-loops=false",
+    "-Cllvm-args=-vectorize-slp=false",
+]
 
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-Ctarget-feature=-fma", "-Cllvm-args=-fp-contract=off"]
+rustflags = [
+    "-Ctarget-feature=-fma",
+    "-Cllvm-args=-fp-contract=off",
+    "-Cllvm-args=-vectorize-loops=false",
+    "-Cllvm-args=-vectorize-slp=false",
+]
 
 [target.x86_64-pc-windows-gnu]
-rustflags = ["-Ctarget-feature=-fma", "-Cllvm-args=-fp-contract=off"]
+rustflags = [
+    "-Ctarget-feature=-fma",
+    "-Cllvm-args=-fp-contract=off",
+    "-Cllvm-args=-vectorize-loops=false",
+    "-Cllvm-args=-vectorize-slp=false",
+]
 
 [target.x86_64-apple-darwin]
-rustflags = ["-Ctarget-feature=-fma", "-Cllvm-args=-fp-contract=off"]
+rustflags = [
+    "-Ctarget-feature=-fma",
+    "-Cllvm-args=-fp-contract=off",
+    "-Cllvm-args=-vectorize-loops=false",
+    "-Cllvm-args=-vectorize-slp=false",
+]
 
 [target.aarch64-apple-darwin]
-rustflags = ["-Ctarget-feature=-fma", "-Cllvm-args=-fp-contract=off"]
+rustflags = [
+    "-Ctarget-feature=-fma",
+    "-Cllvm-args=-fp-contract=off",
+    "-Cllvm-args=-vectorize-loops=false",
+    "-Cllvm-args=-vectorize-slp=false",
+]
 
 [target.aarch64-unknown-linux-gnu]
-rustflags = ["-Ctarget-feature=-fma", "-Cllvm-args=-fp-contract=off"]
+rustflags = [
+    "-Ctarget-feature=-fma",
+    "-Cllvm-args=-fp-contract=off",
+    "-Cllvm-args=-vectorize-loops=false",
+    "-Cllvm-args=-vectorize-slp=false",
+]
