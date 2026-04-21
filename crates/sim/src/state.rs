@@ -9,6 +9,7 @@ use flowplan_core::{Rng, TickCount};
 use glam::Quat;
 
 use crate::aircraft_spec::AircraftSpec;
+use crate::buoyancy;
 use crate::camera::Camera;
 use crate::controls::Controls;
 use crate::difficulty::DifficultyDials;
@@ -49,6 +50,14 @@ pub struct SimState {
     pub camera: Camera,
     /// Normalized time-of-day in `[0, 1)`: 0.0 = midnight, 0.5 = noon.
     pub time_of_day: f32,
+    /// Deterministic wave clock (seconds). Advances `dt` each tick, drives the
+    /// `world::water_height` sampler sim-side so buoyancy is bit-identical across
+    /// runs regardless of wall-clock. Render continues to use its own wall-clock
+    /// `SceneUniform.time.x` for visual waves; both consume the same `WAVES`
+    /// constants in `crates/world/src/water.rs` so the surface stays visually
+    /// aligned with the physics. Folded into `state_hash` so determinism covers
+    /// wave phase.
+    pub wave_time: f32,
     /// Per-sim RNG (for future spawn / weather; retained so `SimState` is seeded).
     pub rng: Rng,
     /// World seed for replay / state-hash purposes.
@@ -73,6 +82,10 @@ impl SimState {
             // 0.5 = noon. Matches the Phase 1 "sun high overhead" look roughly; the
             // actual sun angle lives in `world::sun_direction`.
             time_of_day: 0.5,
+            // 0.0 is the canonical reference phase for Gerstner waves: at (0, 0, 0)
+            // the sampled surface height is zero. Scenarios start from this clean
+            // state so bench CSVs are reproducible across runs.
+            wave_time: 0.0,
             rng: Rng::from_seed(seed),
             seed,
             aircraft: None,
@@ -95,11 +108,19 @@ impl SimState {
         min_altitude: f32,
     ) {
         apply_inputs(&mut self.vehicle.controls, &mut self.camera, inputs);
-        self.last_flight =
-            tick_dynamics(&mut self.vehicle, self.aircraft.as_ref(), dt, min_altitude);
+        self.last_flight = tick_dynamics(
+            &mut self.vehicle,
+            self.aircraft.as_ref(),
+            dt,
+            min_altitude,
+            self.wave_time,
+        );
         self.camera
             .follow(self.vehicle.position, self.vehicle.orientation, dt);
         self.time_of_day = (self.time_of_day + dt / DAY_LENGTH_SECONDS).rem_euclid(1.0);
+        // wave_time accumulates deterministically; no wrap for now. Precision-preserving
+        // wrap lands when buoyancy scenarios run long enough for f32 drift to matter.
+        self.wave_time += dt;
         self.tick = self.tick.next();
     }
 }
@@ -130,14 +151,17 @@ fn apply_inputs(controls: &mut Controls, camera: &mut Camera, inputs: &InputEven
 }
 
 /// Advance vehicle dynamics by `dt` given its current controls, the flight-model
-/// forces from `flight::compute_forces`, and the caller's min-altitude floor.
+/// forces from `flight::compute_forces`, the buoyancy contribution from
+/// `buoyancy::compute_buoyancy`, and the caller's min-altitude floor.
 ///
-/// Integration and ground-clamp live here; force computation is in `crate::flight`.
+/// Integration and ground-clamp live here; force computation is in `crate::flight`;
+/// hydrostatic force/moment from floats is in `crate::buoyancy`.
 fn tick_dynamics(
     v: &mut VehicleState,
     spec: Option<&AircraftSpec>,
     dt: f32,
     min_altitude: f32,
+    wave_time: f32,
 ) -> flight::FlightOutputs {
     // AGL approximation for ground effect (2.4.6). `min_altitude` is the app-supplied
     // surface clamp that includes the float offset + a small margin; for ground
@@ -148,13 +172,19 @@ fn tick_dynamics(
     let agl = (v.position.y - min_altitude).max(0.0);
     let forces = flight::compute_forces(v, spec, dt, agl);
 
-    // Angular: Euler-integrate angular velocity from the aero-moment-derived
-    // angular acceleration, then compose the resulting rotation onto orientation.
+    // Per-pontoon buoyancy (Phase 2.5a.1). Short-circuits to zero above water or
+    // when no aircraft spec is loaded.
+    let buoy = buoyancy::compute_buoyancy(v, spec, wave_time);
+
+    // Angular: Euler-integrate angular velocity from the summed aero-moment-derived
+    // and buoyancy-derived angular acceleration, then compose the resulting rotation
+    // onto orientation.
     //
-    // Per 2.4.4, `angular_accel` already has flowplan's sign convention baked in
-    // (physics-convention moments are flipped on Y and Z inside `compute_forces`),
-    // so we can simply integrate component-wise.
-    v.angular_velocity += forces.angular_accel * dt;
+    // Per 2.4.4, aero `angular_accel` already has flowplan's sign convention baked in
+    // (physics-convention moments flipped on Y and Z inside `compute_forces`); buoyancy
+    // computes r × F directly in body frame and so naturally matches the same
+    // storage convention — no further flips needed when summing.
+    v.angular_velocity += (forces.angular_accel + buoy.angular_accel) * dt;
 
     // Residual rotational damping: a small airspeed-independent decay so angular
     // velocity bleeds off even at V=0 (where all q-based damping vanishes). Stands
@@ -169,7 +199,7 @@ fn tick_dynamics(
     v.orientation = (dq * v.orientation).normalize();
 
     // Linear: explicit Euler integration of velocity, then position.
-    v.velocity += forces.linear_accel * dt;
+    v.velocity += (forces.linear_accel + buoy.linear_accel) * dt;
     v.position += v.velocity * dt;
 
     // Caller-supplied floor (terrain + float offset, or water + float offset, whichever
@@ -323,4 +353,32 @@ mod tests {
         s.tick(&inputs, &d, FIXED_DT, 0.5);
         assert_eq!(s.camera.view_kind, ViewKind::FirstPerson);
     }
+
+    #[test]
+    fn wave_time_advances_per_tick() {
+        let mut s = SimState::new(1);
+        assert!(s.wave_time.abs() < f32::EPSILON, "fresh state starts at 0");
+        let d = DifficultyDials::default();
+        s.tick(&InputEvents::empty(), &d, FIXED_DT, 0.5);
+        assert!(
+            (s.wave_time - FIXED_DT).abs() < f32::EPSILON,
+            "wave_time should advance by dt; got {}",
+            s.wave_time
+        );
+        // Second tick.
+        s.tick(&InputEvents::empty(), &d, FIXED_DT, 0.5);
+        assert!(
+            (s.wave_time - 2.0 * FIXED_DT).abs() < 1e-6,
+            "wave_time should accumulate; got {}",
+            s.wave_time
+        );
+    }
+
+    // NOTE: An integrated "float at rest settles to equilibrium" test belongs in 2.5a.2.
+    // Without vertical water drag the buoyancy-gravity oscillation is undamped; explicit
+    // Euler accumulates numerical error across the hard displacement-cap transition,
+    // which is not something 2.5a.1 claims to solve. 2.5a.1 validation is covered by the
+    // analytic buoyancy unit tests in `crate::buoyancy::tests` (force equals weight at
+    // analytic equilibrium draft, etc.). The full settle-to-equilibrium test lands in
+    // 2.5a.2 alongside the vertical-damping term.
 }

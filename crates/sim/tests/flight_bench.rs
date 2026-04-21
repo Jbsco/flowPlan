@@ -21,6 +21,7 @@
 // exercise (the bench uses only std + flowplan_sim's public API).
 use bytemuck as _;
 use flowplan_core as _;
+use flowplan_world as _;
 use glam as _;
 use proptest as _;
 use ron as _;

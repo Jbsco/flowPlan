@@ -15,7 +15,7 @@ Last updated: **2026-04-20** (Phase 2 in progress; 2.1 / 2.6 / 2.2 core + 2.3 co
     - Milestone 2.3 (plane model + glTF loader + spec sheet): CORE SHIPPED; 2.3.4 back-face culling deferred pending chase-camera / cockpit work
     - Milestone 2.2 (water): CORE SHIPPED (flat quad, Gerstner waves, CPU height sampler, terrain amplitude tune, pre-2.5 ground clamp); 2.2.4 shoreline foam and 2.2.5b distant-water LOD pending
     - Milestone 2.4 (flight model): COMPLETE THROUGH 2.4.8. Shipped: 2.4.1-2.4.7 per-sub-milestone items (skeleton, airfoil forces, lift direction, telemetry, engine power curve + fuel, keyboard slew, moment-based angular dynamics + HUD, real stall physics, attitude indicator, flaps, secondary effects, density altitude), plus 2.4.8 full cycle: flight-test bench framework + 7 Beaver scenarios + 2×4 panel plot pipeline + `--scenario` CLI playback + model-gap triage process + coefficient tuning pass (Cl_max 1.65→2.0, Cd0 0.045→0.055) + reference plots committed to `docs/plots/beaver/` + final inheritance snapshot in PROGRESS.md. Milestone 2.4.9 (slipstream + Cl_β dihedral) documented as optional-before-2.5.
-    - Milestone 2.5 (ground + water contact physics): QUEUED (needs 2.2 water height sampler for buoyancy; replaces the pre-2.5 passive altitude clamp with per-part normal force + hydrodynamic drag + wheel friction)
+    - Milestone 2.5 (ground + water contact physics): IN PROGRESS — 2.5a.1 SHIPPED, 2.5a.2–2.5a.7 queued. Entry order: 2.5a water → 2.5b ground → 2.5c invariants+tests. 2.5a decomposed into 7 dependency-ordered sub-milestones: per-pontoon buoyancy + `SimState.wave_time` deterministic wave clock (2.5a.1 — SHIPPED) → per-pontoon horizontal drag + vertical damping (2.5a.2) → step transition (2.5a.3) → porpoising (2.5a.4) → asymmetric / one-pontoon maneuver validation (2.5a.5) → water rudder + weather-vaning (2.5a.6) → chop-intensity Phase 3.2 hook (2.5a.7). Per-pontoon physics up front means asymmetric behavior (one-float-dipped, one-pontoon takeoff) emerges for free. Wake + spray + touchdown polish land before 2.5a gate. Non-global water heights (lakes, rivers, sandbars) remain Phase 3+ per FEATURES.md § Terrain & Static Landscape — `water_height(x, z, t)` API is position-conditioned so hydrology rebuild plugs in without breaking 2.5a. See ROADMAP.md § Milestone 2.5 for full breakdown.
 - Milestone order taken (deviates from ROADMAP's numeric order): **2.1 -> 2.6 -> 2.3 -> 2.2 -> 2.4 -> 2.5**. Sky landed before plane because it made visual tuning of the Beaver easier; water came before flight model because buoyancy (2.5) needs it. Within 2.4: 2.4.4 jumped ahead of 2.4.3 because the moment model fundamentally changes handling feel and was a prerequisite for sensible tuning against any thrust model.
 - Gate: green. `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `cargo bench --bench frame_budget -- --test`, and the hardware snapshot tests all pass.
 - Test count: **169 total** (the bench integration test counts as one `beaver_scenarios_all_pass` test but runs the full `BEAVER_SCENARIOS` array and validates every assertion inside — 3 scenarios × 2-3 assertions each = 7 POH-anchored assertions). Three hardware snapshots committed: `scene_minimal`, `beaver_preview`, `scene_extended` (1024x640; uses the real `Terrain::from_seed` so it reflects in-game terrain faithfully). Reference photos `ref1.png`, `ref2.png`, `ref3.png` in `crates/render/tests/snapshots/` as aesthetic targets (coastal Alaska / fjord floatplane photography).
@@ -450,6 +450,38 @@ Tolerance-narrowing after each coefficient lands: update per `skills/flowplan-fl
 2. Commit reference plots to `docs/plots/beaver/<scenario>.png` as versioned artifacts.
 3. Move resolved gaps to **Resolved** subsection above with final coefficient values. Gap 2 moves to a new **Deferred (slipstream physics)** subsection with target phase (post-Phase-2.4 flight-model work, or Phase 3 audio expansion if slipstream noise is scoped there).
 4. Write a "final 2.4.8 snapshot" subsection listing: final coefficient set, final scenario suite, final tolerance table, what Phase 2.5 inherits.
+
+### Milestone 2.5a.1 — Per-pontoon buoyancy + deterministic wave clock (SHIPPED)
+
+Foundational buoyancy machinery. No game-visible behavior change yet — the `WATER_LEVEL` clamp in `game_app.rs` preempts buoyancy until 2.5a.2 adds vertical damping to allow the aircraft to settle without bobbing indefinitely. Bench scenarios stay airborne so buoyancy force is zero throughout (no scenario assertion changes).
+
+**Architectural amendment:** `sim` now depends on `world` (documented in [DESIGN.md § Dependency Rules](DESIGN.md#dependency-rules), formerly forbidden in prose even though never enforced by the DAG test). Flips the documented sim/world direction to match the layered diagram: sim queries world's pure-primitive samplers (terrain height, water surface shape, sun direction) during physics integration. The previously-anticipated world → sim direction (weather rules advancing sim-level state) will be hosted inside `sim::tick` instead when weather lands in Phase 3.2.
+
+**New state:** `SimState.wave_time: f32`, advanced `dt` per tick, folded into `state_hash` for determinism. Drives `world::water_height(x, z, t)` sim-side. Render continues to use its own wall-clock `SceneUniform.time.x` for the visual water surface; both consume the shared `WAVES` constants in `crates/world/src/water.rs` so the surface stays visually aligned with the physics.
+
+**New module:** `crates/sim/src/buoyancy.rs` with `BuoyancyOutputs { linear_accel, angular_accel, total_force_n }` and `compute_buoyancy(&VehicleState, Option<&AircraftSpec>, wave_time)` pure function. Beaver float geometry (Edo 4930 analogue) as hardcoded placeholders: two pontoons, `body_offset` ±1.25 m lateral / -0.5 m vertical, length 6.9 m × beam 0.76 m × height 0.76 m, displacement cap 2.236 m³ per float. TODO(2.4.x): migrate to `AircraftSpec` alongside other per-aircraft coefficients.
+
+**Force model:** per-pontoon Archimedes buoyancy `F = ρ_water · V_submerged · g`, pointing world +Y. Box-approximation wetted volume capped at real displacement. Per-pontoon moment `r × F_body` in body frame; sums naturally into aero `angular_accel` because both are now in the same storage convention. No-spec path short-circuits to zero (the generic cube placeholder has no floats).
+
+**Integration:** `tick_dynamics` sums `forces.linear_accel + buoy.linear_accel` and `forces.angular_accel + buoy.angular_accel`. Above-water aircraft see zero buoyancy (short-circuit when `immersion_depth ≤ 0`).
+
+**Tests added (7):** 6 unit tests in `buoyancy::tests` (no-spec returns zero, airborne aircraft sees zero buoyancy, submerged aircraft sees capped buoyancy exceeding weight, equilibrium draft produces weight-matching force, symmetric rest produces no roll moment, wave time changes sampled surface in unsaturated regime) + 1 state test (`wave_time_advances_per_tick`). Full settle-to-equilibrium integration test deferred to 2.5a.2 because undamped buoyancy-gravity oscillation is numerically unstable on explicit Euler across the displacement-cap transition — vertical water drag in 2.5a.2 fixes this cleanly.
+
+**Workspace test count:** 180 passing (up from 173). Quality gate green (`cargo fmt --check` / `cargo clippy -D warnings` / `cargo test --workspace` / `cargo bench --bench frame_budget -- --test` / `cargo test -p flowplan-sim --test flight_bench --release`). Byte-identical bench runs preserved — `wave_time` advances deterministically; all existing scenarios stay airborne so buoyancy = 0 throughout.
+
+**Files changed:**
+- `DESIGN.md` — amended sim/world dependency rules (flipped direction)
+- `PROGRESS.md` — this section + 2.5 status line
+- `crates/sim/Cargo.toml` — added `flowplan-world` dependency
+- `crates/world/Cargo.toml` — updated stale comment about future sim-dep
+- `crates/sim/src/lib.rs` — added `pub mod buoyancy`
+- `crates/sim/src/flight.rs` — promoted `I_XX/I_YY/I_ZZ` to `pub(crate)` for shared-inertia access
+- `crates/sim/src/state.rs` — added `wave_time` field + advance in tick + `compute_buoyancy` call in `tick_dynamics`; extended `SimState::tick` docstring
+- `crates/sim/src/hash.rs` — folded `wave_time` into `state_hash`
+- `crates/sim/src/buoyancy.rs` — NEW (223 lines including tests)
+- `crates/sim/tests/flight_bench.rs` — added `use flowplan_world as _;` for unused-crate-dep lint
+
+**Deferred to 2.5a.2 (next):** vertical water drag (damps bobbing oscillation → enables settle-to-equilibrium), per-pontoon horizontal water drag, bench scenario for water-taxi reaching steady speed. Game-visible behavior over water begins at 2.5a.2 when the `game_app.rs` `min_altitude` calculation drops the `WATER_LEVEL` clamp in favor of buoyancy-managed settling.
 
 ### Pre-Phase-2.5 gate — EVALUATED
 

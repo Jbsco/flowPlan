@@ -14,5 +14,5 @@ workspace = true
 [dependencies]
 flowplan-core = { workspace = true }
 glam = { workspace = true }
-# flowplan-sim, tracing added alongside the state they need (sim needs terrain for
-# buoyancy in Phase 2).
+# world depends on core only. Sim queries world's pure samplers for buoyancy
+# (Phase 2.5a) and ground effect (Phase 2.4.6); that's the sim -> world direction.

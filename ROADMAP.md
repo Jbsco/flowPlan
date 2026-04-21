@@ -304,15 +304,53 @@ friction, or drag the plane in water) with proper contact physics. Both the floa
 (buoyancy + hydrodynamics) and wheeled (runway / soft-field contact) configurations
 are in scope -- the Beaver is flown on both.
 
-**2.5a Water contact (floats):**
-- [ ] Hydrodynamic model for Beaver-sized floats (Edo 4930 analogue geometry)
-- [ ] Per-pontoon water height sample + buoyancy force (uses `world::water_height` from 2.2)
-- [ ] Horizontal drag when in contact with water, tuned to produce realistic plowing and on-step behavior
-- [ ] Step transition ("on step") as a deliberate feel moment; porpoising risk modeled and avoidable with technique
-- [ ] Water rudder for low-speed taxi; weather-vaning when retracted
-- [ ] Wake spawn: particle + decal trail
-- [ ] Spray effects obstructing forward view at high speed or chop
-- [ ] Touchdown moment feels good in playtest (subjective, required)
+**2.5a Water contact (floats):** Dependency-ordered sub-milestones; each gated on its own bench scenarios landing. All share the invariant that contact forces are a deterministic function of `(state, water sample, dt)` — no wall-clock in the contact path. Per-pontoon physics up front means asymmetric behavior (one-float-dipped, one-pontoon takeoff) emerges for free rather than requiring special-case code later.
+
+**2.5a.1 Per-pontoon buoyancy + deterministic wave clock. — SHIPPED**
+- [x] Add `SimState.wave_time: f32`, advanced `dt` per tick, folded into `state_hash` so determinism covers wave phase
+- [x] Sim-side consumption of `world::water_height(x, z, t)` (API shipped 2.2); render continues using `SceneUniform.time.x` (wall-clock), both read the same `WAVES` constants so visuals stay aligned with physics. Architectural note: `sim → world` dependency now documented in DESIGN.md § Dependency Rules (flipped from the previously-anticipated `world → sim` direction so primitives live at the natural layer).
+- [x] Per-pontoon water-height sample at each float's attachment point (Edo 4930 analogue geometry — port / starboard body offsets ±1.25 m lateral, -0.5 m vertical)
+- [x] Buoyancy force per pontoon = `ρ_water · V_submerged · g`, clamped by pontoon displacement volume (2.236 m³ per float). Box-approximation wetted volume sums to per-pontoon force; body-frame `r × F` produces moment that sums into `angular_accel` alongside aero.
+- [x] Symmetric case validated analytically: `equilibrium_draft_produces_weight_matching_force` unit test asserts buoyancy equals weight at CG_y = 0.66 m (analytic equilibrium for Beaver MTOW on Edo 4930 floats). Full tick-loop settle test deferred to 2.5a.2 — needs vertical water drag to damp the buoyancy-gravity oscillation (without it, undamped explicit Euler across the displacement cap is numerically unstable; this is the physics 2.5a.2 introduces).
+
+**2.5a.2 Per-pontoon horizontal water drag.**
+- [ ] Wetted-area approximation per pontoon, scaled by immersion depth
+- [ ] Horizontal drag force per pontoon, scaled by pontoon velocity, tuned for realistic plowing
+- [ ] Vertical damping to prevent bobbing oscillation at rest
+- [ ] Bench: water-taxi scenario reaches steady speed at idle thrust (not runaway, not stationary — per 2.5c property test pattern extended to water)
+
+**2.5a.3 Step transition (plow → on-step).**
+- [ ] Drag regime shift when float velocity crosses hump speed
+- [ ] Pitch attitude reduction as aircraft rises onto planing surface
+- [ ] Bench: water-takeoff scenario reaches on-step phase; wetted area drops; acceleration increases visibly in telemetry
+- [ ] Feel moment: tactile transition audible in telemetry trace
+
+**2.5a.4 Porpoising.**
+- [ ] Pitch oscillation when elevator input mismatches step phase (classic pilot-induced oscillation)
+- [ ] Emerges from pitch-up / pitch-down coupling between wetted area and pitch trim
+- [ ] Bench: porpoise-setup scenario shows oscillation; recovery scenario shows technique resolves it
+
+**2.5a.5 Asymmetric / one-pontoon maneuvers (validation).**
+- [ ] Bench scenarios exercise the asymmetric physics already shipped in 2.5a.1 (no new physics here — validation)
+- [ ] One-pontoon-on-water takeoff scenario: bank reduces wetted area, takeoff distance shortens measurably
+- [ ] Left-pontoon-dipped vs right-pontoon-dipped asymmetry pair (per `skills/flowplan-flight-bench/SKILL.md` Core Rule #10 asymmetric-pair discipline — right-rotating prop means left/right are not mirror-symmetric)
+
+**2.5a.6 Water rudder + weather-vaning.**
+- [ ] Water rudder for low-speed directional control (on/off input event)
+- [ ] Weather-vaning when water rudder retracted (nose tracks wind at low speed — interacts with Phase 3.2 wind field when that lands; until then, zero-wind is the tested case)
+- [ ] Bench: low-speed-taxi scenario with/without water rudder; heading response validated
+
+**2.5a.7 Chop-intensity hook (Phase 3.2 integration point).**
+- [ ] `chop_intensity: f32` parameter (default 1.0) scales wave amplitude in `water_height(x, z, t)` sampling
+- [ ] Part of determinism state (hashed). Phase 3.2 later wires `ChopState` to drive it; until then, constant 1.0 is current behavior
+- [ ] Keeps 2.5a usable under future weather integration without breaking scenario reproducibility
+
+**2.5a.X Visual polish (before 2.5a close; not sub-milestone-gated).**
+- [ ] Wake spawn: particle + decal trail behind moving floats
+- [ ] Spray effects at high speed or in chop, obstructing forward view
+- [ ] Touchdown moment feels good in playtest (subjective, required before 2.5a gate)
+
+**Non-global water heights (elevation lakes, rivers, sandbars for bush-pilot parking) are Phase 3+** per [FEATURES.md § Terrain & Static Landscape](FEATURES.md#terrain--static-landscape). The `world::water_height(x, z, t)` API is position-conditioned already, so the eventual hydrology rebuild plugs in without changing 2.5a's consumer contract. Sandbar parking specifically bridges 2.5a (water sampling near the bar) + 2.5b (soft-surface ground contact on the bar) + Phase 3+ shore classification.
 
 **2.5b Ground contact (wheels / taildragger):**
 - [ ] Per-contact-point normal force distributed across wheels + tailwheel (or ski pair in winter biome), resolving roll / pitch the CG clamp currently ignores

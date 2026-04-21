@@ -162,10 +162,13 @@ const BSFC_GPH_PER_KW: f32 = 0.124;
 // conversion negates on those axes. See the conversion site in `compute_forces`.
 
 /// Moments of inertia about the three body axes (Beaver placeholder, kg·m²).
+/// `pub(crate)` so sibling modules (`buoyancy`) can use the same values without
+/// duplicating; migrates to `AircraftSpec` alongside the other per-aircraft
+/// coefficients in the planned 2.4.x follow-up.
 /// TODO(2.4.x): move to `AircraftSpec` so other aircraft tune independently.
-const I_XX: f32 = 8000.0; // pitch (rotation about right-wing axis)
-const I_YY: f32 = 12000.0; // yaw (rotation about up axis)
-const I_ZZ: f32 = 5000.0; // roll (rotation about nose axis)
+pub(crate) const I_XX: f32 = 8000.0; // pitch (rotation about right-wing axis)
+pub(crate) const I_YY: f32 = 12000.0; // yaw (rotation about up axis)
+pub(crate) const I_ZZ: f32 = 5000.0; // roll (rotation about nose axis)
 
 /// Reference lengths used in moment coefficients (Beaver placeholder, meters).
 /// TODO(2.4.x): pull from `AircraftSpec` alongside wing area.
