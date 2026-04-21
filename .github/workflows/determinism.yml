@@ -162,7 +162,12 @@ jobs:
                   echo "[OK]       $platform matches linux-x86_64"
               else
                   echo "[DIVERGED] $platform differs from linux-x86_64:"
-                  diff "$baseline" "$manifest" | head -40 | sed 's/^/    /'
+                  # `diff` returns 1 when files differ; under `set -eo pipefail`
+                  # (GitHub Actions default) that exits the script after the
+                  # first divergence. `|| true` swallows the non-zero so we
+                  # see every platform's verdict, not just the first failing
+                  # one.
+                  diff "$baseline" "$manifest" | head -40 | sed 's/^/    /' || true
                   divergence=1
               fi
           done
