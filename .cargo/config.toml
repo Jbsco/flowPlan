@@ -9,36 +9,37 @@
 [build]
 # No global overrides yet; target-scoped flags below.
 
-# x86_64 Linux — disable fused-multiply-add contraction so `a * b + c` does
-# not silently fuse into FMA with different intermediate rounding than the
-# sequential operations. Pinned regardless of CPU feature availability.
+# Shared determinism flags applied to every supported target:
+#
+#   -Ctarget-feature=-fma        — Disable FMA instruction generation on x86
+#                                  targets. ARMv8 mandates FMA so this has
+#                                  limited effect on aarch64; see fp-contract.
+#   -Cllvm-args=-fp-contract=off — Disable LLVM-level `a*b+c` → single-fused-op
+#                                  contraction. Critical for aarch64 where FMA
+#                                  can't be disabled at the ISA level. Also
+#                                  redundant-safe on x86_64.
+#
+# Both needed together: `-fma` controls ISA-level FMA instruction availability;
+# `fp-contract=off` controls whether LLVM's IR optimizer fuses arithmetic
+# within a single expression. Without the LLVM flag, aarch64 still fuses.
+
 [target.x86_64-unknown-linux-gnu]
-rustflags = ["-Ctarget-feature=-fma"]
+rustflags = ["-Ctarget-feature=-fma", "-Cllvm-args=-fp-contract=off"]
 
 [target.x86_64-unknown-linux-musl]
-rustflags = ["-Ctarget-feature=-fma"]
+rustflags = ["-Ctarget-feature=-fma", "-Cllvm-args=-fp-contract=off"]
 
-# x86_64 Windows — same discipline as Linux. MSVC toolchain or GNU both get it.
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-Ctarget-feature=-fma"]
+rustflags = ["-Ctarget-feature=-fma", "-Cllvm-args=-fp-contract=off"]
 
 [target.x86_64-pc-windows-gnu]
-rustflags = ["-Ctarget-feature=-fma"]
+rustflags = ["-Ctarget-feature=-fma", "-Cllvm-args=-fp-contract=off"]
 
-# x86_64 macOS — same discipline.
 [target.x86_64-apple-darwin]
-rustflags = ["-Ctarget-feature=-fma"]
+rustflags = ["-Ctarget-feature=-fma", "-Cllvm-args=-fp-contract=off"]
 
-# aarch64 macOS (Apple Silicon) — disable FMA (via -neon/FP feature flags).
-# NEON on ARM has its own IEEE 754 compliance story that we'll verify when
-# hardware access lands (see hardware_access_constraints memory). Using
-# `-Ctarget-feature=-fma` as the semantic intent; effective rustc behavior on
-# aarch64 may differ and is part of what Phase 6.1 cross-platform hardening
-# will verify.
 [target.aarch64-apple-darwin]
-rustflags = ["-Ctarget-feature=-fma"]
+rustflags = ["-Ctarget-feature=-fma", "-Cllvm-args=-fp-contract=off"]
 
-# aarch64 Linux (Steam Deck is x86_64, but aarch64 Linux covers some dev
-# boards + potential future platform expansion).
 [target.aarch64-unknown-linux-gnu]
-rustflags = ["-Ctarget-feature=-fma"]
+rustflags = ["-Ctarget-feature=-fma", "-Cllvm-args=-fp-contract=off"]
