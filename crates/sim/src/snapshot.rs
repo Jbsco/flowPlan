@@ -31,7 +31,10 @@ pub struct ControlsSnapshot {
     pub yaw: f32,
     pub roll: f32,
     pub flap_position: u32,
-    pad0: [f32; 3],
+    /// Water rudder deployed flag (0 = retracted, 1 = deployed). u32 to keep
+    /// the struct `Pod`/`Zeroable`.
+    pub water_rudder: u32,
+    pad0: [f32; 2],
 }
 
 impl ControlsSnapshot {
@@ -100,7 +103,8 @@ impl VehicleSnapshot {
                 yaw: v.controls.yaw,
                 roll: v.controls.roll,
                 flap_position: ControlsSnapshot::flap_position_to_u32(v.controls.flaps),
-                pad0: [0.0; 3],
+                water_rudder: u32::from(v.controls.water_rudder),
+                pad0: [0.0; 2],
             },
             fuel_gal: v.fuel_gal,
             pad3: [0.0; 3],

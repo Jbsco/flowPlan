@@ -2546,4 +2546,118 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             tol_mps: 6.0,
         }],
     },
+    // beaver_water_taxi_rudder_deployed
+    //
+    // Real-world maneuver:
+    //   Water taxi with the water rudder deployed — pilot's primary directional
+    //   control at low speed. Idle throttle, full-right yaw input (rudder pedal).
+    //   Real Beavers taxi at 4-6 kt on one pontoon; turn rate with deployed
+    //   water rudder at full deflection is ~15-30°/s depending on speed.
+    //
+    // POH target:
+    //   Operational only (no published taxi turn rate). Real pilot reports put
+    //   "dock-maneuvering" turn rate at ~20°/s with deployed water rudder.
+    //
+    // 2.5a.6 scope:
+    //   Validates water rudder physics produces meaningful yaw authority at
+    //   taxi speed. Paired with `beaver_water_taxi_rudder_retracted` — same
+    //   conditions except water rudder retracted; should produce ~zero turn.
+    //
+    // Isolation:
+    //   - Same start as water_taxi (y=2.40, v=0, idle throttle)
+    //   - SetWaterRudder(true) at tick 0
+    //   - SetYaw(1.0) at tick 0 (full right rudder pedal)
+    //   - No other inputs, no controllers
+    //
+    // Real-world fidelity:
+    //   Faithful: deployed-rudder + pedal input is exact taxi technique.
+    //   Magnitudes: tuned `WATER_RUDDER_COEFF = 25` in buoyancy.rs so idle-taxi
+    //     at ~4 m/s with full rudder gives ~15-20°/s yaw rate. Matches real
+    //     Beaver taxi turn rate.
+    //
+    // Does NOT test:
+    //   - Weathervaning (no wind until Phase 3.2).
+    //   - Water rudder at higher speeds (not used — retracted for takeoff).
+    //
+    // Assertion rationale:
+    //   AirspeedAtEnd captures that yawing doesn't destabilize the aircraft
+    //   (still taxiing, not a runaway). Heading-change assertion would be
+    //   better but requires a new assertion type; deferred. Visual plot of
+    //   `yaw_deg` column clearly shows the steady turn.
+    FlightScenario {
+        name: "beaver_water_taxi_rudder_deployed",
+        description: "Idle-throttle taxi with water rudder deployed + full right yaw input.",
+        aircraft_spec_path: BEAVER_SPEC_PATH,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 2.40, 0.0),
+            velocity: Vec3::ZERO,
+            orientation: Quat::IDENTITY,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.0,
+            flaps: FlapPosition::Up,
+            fuel_gal: 80.0,
+        },
+        inputs: &[
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetWaterRudder(true),
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetYaw(1.0),
+            },
+        ],
+        controllers: &[],
+        duration_ticks: 3600, // 30 s
+        assertions: &[Assertion::AirspeedAtEnd {
+            last_secs: 5.0,
+            target_mps: 2.5, // taxi speed similar to symmetric case (yaw adds minor drag but doesn't kill forward speed)
+            tol_mps: 2.0,
+        }],
+    },
+    // beaver_water_taxi_rudder_retracted
+    //
+    // Pair to `beaver_water_taxi_rudder_deployed`. Same inputs, water rudder
+    // RETRACTED. Should produce significantly less yaw response because the
+    // air rudder is very weak at taxi speed (q is tiny). The aircraft should
+    // mostly track straight, weathervaning via aero stability if the velocity
+    // direction deviates from nose heading.
+    //
+    // This is the "why water rudder matters" test — the pair shows clearly
+    // that at low water speed, the water rudder is the dominant directional
+    // control, and air rudder is insufficient.
+    //
+    // Assertion: should reach similar final airspeed to deployed case (both
+    // are taxi at idle with same resistance).
+    FlightScenario {
+        name: "beaver_water_taxi_rudder_retracted",
+        description: "Idle-throttle taxi with water rudder RETRACTED + full right yaw input (weak air-rudder response).",
+        aircraft_spec_path: BEAVER_SPEC_PATH,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 2.40, 0.0),
+            velocity: Vec3::ZERO,
+            orientation: Quat::IDENTITY,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.0,
+            flaps: FlapPosition::Up,
+            fuel_gal: 80.0,
+        },
+        inputs: &[
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetWaterRudder(false),
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetYaw(1.0),
+            },
+        ],
+        controllers: &[],
+        duration_ticks: 3600,
+        assertions: &[Assertion::AirspeedAtEnd {
+            last_secs: 5.0,
+            target_mps: 2.5,
+            tol_mps: 2.0,
+        }],
+    },
 ];

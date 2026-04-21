@@ -77,6 +77,10 @@ pub struct Controls {
     pub roll: f32,
     /// Current flap detent.
     pub flaps: FlapPosition,
+    /// Water rudder: deployed for low-speed water taxi directional control.
+    /// Must be retracted before takeoff (creates drag + unwanted yaw at speed).
+    /// When retracted, aircraft weathervanes naturally via `CN_BETA` stability.
+    pub water_rudder: bool,
 }
 
 impl Controls {

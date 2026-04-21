@@ -35,6 +35,9 @@ pub enum InputEvent {
     ExtendFlaps,
     /// Advance flap handle one detent toward UP. No-op if already at UP.
     RetractFlaps,
+    /// Deploy or retract the water rudder (float aircraft only). Deployed gives
+    /// strong yaw authority at low water speed; must be retracted for takeoff.
+    SetWaterRudder(bool),
 }
 
 /// A per-tick batch of input events drained from the input queue.

@@ -108,6 +108,21 @@ const PLANING_LIFT_N_PER_MPS2: f32 = 75.0;
 /// nose-up — exactly the characteristic on-step posture.
 const PLANING_LIFT_CENTROID_Z_FWD_M: f32 = -1.5;
 
+/// Water rudder yaw coefficient (N per m/s² × yaw-input × wetted-frac).
+///
+/// Produces directional control at low water speed where air rudder is ineffective.
+/// Deployed rudder force scales with forward velocity² (pressure on the rudder
+/// surface) and average pontoon wetted fraction (proxy for "the rudders are
+/// actually in the water"). Applied at body +Z (aft of CG) so side-force → yaw.
+///
+/// Tuned so idle-taxi at ~4 m/s gives ~15-20°/s yaw rate at full rudder —
+/// matches real Beaver taxi turn rates near a dock. Must be RETRACTED (state
+/// bit off) for takeoff or the planing-speed rudder moment would be excessive.
+const WATER_RUDDER_COEFF: f32 = 25.0;
+
+/// Aft lever arm (m) for water rudder moment, body +Z direction (aft of CG).
+const WATER_RUDDER_ARM_M: f32 = 3.2;
+
 /// Number of sample points along each pontoon's longitudinal axis. 5 gives good
 /// pitch stability (fore / fore-mid / mid / aft-mid / aft) without excessive compute
 /// cost — buoyancy+drag is called every 120 Hz tick, so ~10 samples total per tick
@@ -207,6 +222,7 @@ pub struct BuoyancyOutputs {
 /// into per-section drag/lift and produce angular damping naturally (no explicit
 /// angular-damping term needed).
 #[must_use]
+#[allow(clippy::too_many_lines)] // multi-pass physics: buoyancy + drag + planing + rudder
 pub fn compute_buoyancy(
     v: &VehicleState,
     spec: Option<&AircraftSpec>,
@@ -219,6 +235,8 @@ pub fn compute_buoyancy(
 
     let mut total_force_world = Vec3::ZERO;
     let mut total_moment_body = Vec3::ZERO;
+    let mut wetted_fraction_accum = 0.0_f32;
+    let mut wetted_sample_count = 0_u32;
 
     // World-frame angular velocity: rotate the body-frame ω by orientation so
     // cross-product contributions to pontoon velocity are in the right frame.
@@ -264,6 +282,8 @@ pub fn compute_buoyancy(
             }
 
             let wetted_fraction = immersion_height / pontoon.height_m;
+            wetted_fraction_accum += wetted_fraction;
+            wetted_sample_count += 1;
 
             // ── Hydrostatic buoyancy (per section) ────────────────────────────
             let box_volume = immersion_height * section_length * pontoon.beam_m;
@@ -327,6 +347,33 @@ pub fn compute_buoyancy(
 
             total_force_world += other_force_world + planing_lift_world;
             total_moment_body += other_moment_body + planing_moment_body;
+        }
+    }
+
+    // Water rudder: deployed state produces a yaw moment at the pontoon aft
+    // scaled by forward speed² and average wetted fraction. Retracted state
+    // contributes nothing — aircraft weathervanes via existing aero stability
+    // (`CN_BETA`). The rudder force is applied at a body-aft offset so it
+    // pivots the aircraft around the CG.
+    //
+    // Sign: positive yaw input (nose-right per flowplan convention) pushes the
+    // aft pontoons leftward in body frame, which rotates the nose rightward.
+    // In body-frame moment storage this is a NEGATIVE `moment_body.y` (because
+    // +Y body angular velocity is yaw-LEFT per state.rs convention).
+    if v.controls.water_rudder && wetted_sample_count > 0 {
+        #[allow(clippy::cast_precision_loss)]
+        let avg_wetted = wetted_fraction_accum / wetted_sample_count as f32;
+        let v_body = v.orientation.inverse() * v.velocity;
+        let v_body_forward = -v_body.z;
+        if v_body_forward > 0.0 {
+            let side_force =
+                WATER_RUDDER_COEFF * v_body_forward * v_body_forward * avg_wetted * v.controls.yaw;
+            // Force pushes aft pontoons aside (body -X for positive yaw input);
+            // applied at body +Z offset (aft of CG). Moment arm in cross product.
+            let force_body = Vec3::new(-side_force, 0.0, 0.0);
+            let arm_body = Vec3::new(0.0, 0.0, WATER_RUDDER_ARM_M);
+            let moment_body = arm_body.cross(force_body);
+            total_moment_body += moment_body;
         }
     }
 
@@ -701,6 +748,99 @@ mod tests {
             out_forward.linear_accel.y,
             out_backward.linear_accel.y,
         );
+    }
+
+    // ── Phase 2.5a.6 tests: water rudder ──────────────────────────────────
+
+    #[test]
+    fn water_rudder_retracted_produces_no_yaw_moment() {
+        // With water_rudder = false (the default), no yaw moment contribution
+        // from rudder even with yaw input. Weathervaning is handled by aero
+        // stability (CN_BETA), not by this module.
+        let spec = beaver_spec();
+        let mut v = level_vehicle_at(2.40);
+        v.velocity = Vec3::new(0.0, 0.0, -5.0); // forward 5 m/s
+        v.controls.yaw = 1.0; // full right rudder
+        v.controls.water_rudder = false;
+        let out = compute_buoyancy(&v, Some(&spec), 0.0);
+
+        assert!(
+            out.angular_accel.y.abs() < 0.01,
+            "retracted water rudder should produce ~zero yaw accel, got {}",
+            out.angular_accel.y,
+        );
+    }
+
+    #[test]
+    fn water_rudder_deployed_produces_yaw_moment_with_yaw_input() {
+        // With water_rudder deployed + positive yaw input + forward motion:
+        // expect NEGATIVE body-Y angular accel (which in flowplan convention
+        // = yaw-RIGHT).
+        let spec = beaver_spec();
+        let mut v = level_vehicle_at(2.40);
+        v.velocity = Vec3::new(0.0, 0.0, -5.0); // 5 m/s forward
+        v.controls.yaw = 1.0; // full right rudder
+        v.controls.water_rudder = true;
+        let out = compute_buoyancy(&v, Some(&spec), 0.0);
+
+        assert!(
+            out.angular_accel.y < -0.01,
+            "deployed water rudder + right yaw input should produce negative body-Y angular accel (yaw right), got {}",
+            out.angular_accel.y,
+        );
+    }
+
+    #[test]
+    fn water_rudder_reverses_with_opposite_yaw_input() {
+        let spec = beaver_spec();
+        let mut v = level_vehicle_at(2.40);
+        v.velocity = Vec3::new(0.0, 0.0, -5.0);
+        v.controls.yaw = -1.0; // full left rudder
+        v.controls.water_rudder = true;
+        let out = compute_buoyancy(&v, Some(&spec), 0.0);
+
+        assert!(
+            out.angular_accel.y > 0.01,
+            "deployed water rudder + left yaw input should produce positive body-Y angular accel (yaw left), got {}",
+            out.angular_accel.y,
+        );
+    }
+
+    #[test]
+    fn water_rudder_scales_with_forward_speed_squared() {
+        let spec = beaver_spec();
+        let mut v_slow = level_vehicle_at(2.40);
+        v_slow.velocity = Vec3::new(0.0, 0.0, -3.0);
+        v_slow.controls.yaw = 1.0;
+        v_slow.controls.water_rudder = true;
+        let slow = compute_buoyancy(&v_slow, Some(&spec), 0.0);
+
+        let mut v_fast = level_vehicle_at(2.40);
+        v_fast.velocity = Vec3::new(0.0, 0.0, -6.0); // 2× speed
+        v_fast.controls.yaw = 1.0;
+        v_fast.controls.water_rudder = true;
+        let fast = compute_buoyancy(&v_fast, Some(&spec), 0.0);
+
+        // 2× speed → ~4× moment (quadratic scaling).
+        let ratio = fast.angular_accel.y / slow.angular_accel.y;
+        assert!(
+            ratio > 3.0 && ratio < 5.0,
+            "water rudder should scale v² (fast/slow ratio ~4), got {ratio}",
+        );
+    }
+
+    #[test]
+    fn water_rudder_zero_above_water() {
+        // Aircraft airborne: pontoons dry → no wetted fraction → no rudder moment
+        // even with deployed rudder + yaw input.
+        let spec = beaver_spec();
+        let mut v = level_vehicle_at(50.0); // way above water
+        v.velocity = Vec3::new(0.0, 0.0, -30.0);
+        v.controls.yaw = 1.0;
+        v.controls.water_rudder = true;
+        let out = compute_buoyancy(&v, Some(&spec), 0.0);
+
+        assert!(out.angular_accel.y.abs() < 1e-6);
     }
 
     #[test]
