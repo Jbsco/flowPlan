@@ -32,6 +32,7 @@
 use glam::{Quat, Vec3};
 
 use crate::aircraft_spec::AircraftSpec;
+use crate::config::VehicleConfig;
 use crate::control::{ControlLaw, ControlLawState};
 use crate::controls::FlapPosition;
 use crate::difficulty::DifficultyDials;
@@ -122,13 +123,31 @@ pub enum Assertion {
 }
 
 /// A `FlightScenario` is the top-level description of a test case.
+///
+/// Scenarios declare their target `aircraft_id` (stable catalog id) and the
+/// `variants` they apply to. The bench harness iterates the (scenario × variant)
+/// matrix: a shared-flight scenario like `beaver_cruise_sl` that declares
+/// `variants: &["floats", "wheels"]` runs twice — once per variant — with
+/// independent telemetry CSVs. This mirrors the user invariant that **every
+/// aircraft and variant has its own version of every applicable test**.
+///
+/// A scenario SHOULD apply to all variants where its physics are meaningful:
+/// airborne scenarios (cruise, climb, stall, turns) are variant-agnostic and
+/// list every flyable variant; water-contact scenarios are floats-only; ground-
+/// contact scenarios (landing in 2.5b.2+) are wheels-only.
 #[derive(Clone, Copy, Debug)]
 pub struct FlightScenario {
     pub name: &'static str,
     pub description: &'static str,
-    /// Workspace-relative path to the aircraft spec RON, e.g.
-    /// `"data/aircraft/northlander.ron"`. The runner loads and verifies at startup.
-    pub aircraft_spec_path: &'static str,
+    /// Stable id of the catalog entry this scenario targets (e.g.,
+    /// `"northlander"`). Matches the RON filename under `data/aircraft/` and
+    /// the `CatalogEntry.id` field. Bench harness loads via the catalog.
+    pub aircraft_id: &'static str,
+    /// Variants this scenario applies to, by id (e.g., `&["floats", "wheels"]`).
+    /// Iterated by the bench harness; non-empty by construction — a scenario
+    /// with zero variants wouldn't run. Airborne-only scenarios list every
+    /// flyable variant; contact-physics scenarios narrow to the applicable one.
+    pub variants: &'static [&'static str],
     pub initial: ScenarioInitial,
     pub inputs: &'static [ScenarioInput],
     /// Closed-loop control laws (PID-based) that run every tick to hold target
@@ -322,11 +341,29 @@ pub struct AssertionResult {
 }
 
 /// Seed a `SimState` from a scenario's initial conditions + aircraft spec.
+///
+/// Uses `VehicleConfig::default()` (floats) for the vehicle config. Callers that
+/// need a different variant should use [`seed_state_from_scenario_cfg`].
 #[must_use]
 pub fn seed_state_from_scenario(
     scenario: &FlightScenario,
     spec: AircraftSpec,
     seed: u64,
+) -> SimState {
+    seed_state_from_scenario_cfg(scenario, spec, seed, VehicleConfig::default())
+}
+
+/// Seed a `SimState` from scenario initial conditions + spec + explicit config.
+///
+/// The bench harness calls this variant while iterating the (scenario ×
+/// variant) matrix so the sim's contact-physics path matches the variant being
+/// tested.
+#[must_use]
+pub fn seed_state_from_scenario_cfg(
+    scenario: &FlightScenario,
+    spec: AircraftSpec,
+    seed: u64,
+    config: VehicleConfig,
 ) -> SimState {
     let mut sim = SimState::new(seed);
     sim.vehicle = VehicleState::at_origin();
@@ -337,18 +374,35 @@ pub fn seed_state_from_scenario(
     sim.vehicle.controls.throttle = scenario.initial.throttle;
     sim.vehicle.controls.flaps = scenario.initial.flaps;
     sim.vehicle.fuel_gal = scenario.initial.fuel_gal;
+    sim.vehicle.config = config;
     sim.aircraft = Some(spec);
     sim
 }
 
-/// Run a scenario headlessly at fixed `min_altitude = 0.0` (sea level). Returns the
-/// per-tick bench-sample log.
+/// Run a scenario headlessly at sea level (`min_altitude = 0.0`).
+///
+/// Returns the per-tick bench-sample log. Uses `VehicleConfig::default()`
+/// (floats) — the matrix-aware [`run_scenario_headless_cfg`] is the right
+/// entry point for variant-specific runs.
 ///
 /// The scenario's `inputs` are injected into the tick's `InputEvents` at the
 /// matching tick. Tests should then call `check_assertions()` to validate.
 #[must_use]
 pub fn run_scenario_headless(scenario: &FlightScenario, spec: AircraftSpec) -> Vec<BenchSample> {
-    let mut sim = seed_state_from_scenario(scenario, spec, 0xBEEF);
+    run_scenario_headless_cfg(scenario, spec, VehicleConfig::default())
+}
+
+/// Run a scenario headlessly with an explicit vehicle configuration.
+///
+/// Called by the integration bench once per declared variant of each scenario
+/// so the (aircraft, variant, scenario) triple produces its own telemetry log.
+#[must_use]
+pub fn run_scenario_headless_cfg(
+    scenario: &FlightScenario,
+    spec: AircraftSpec,
+    config: VehicleConfig,
+) -> Vec<BenchSample> {
+    let mut sim = seed_state_from_scenario_cfg(scenario, spec, 0xBEEF, config);
     let dials = DifficultyDials::default();
     let mut log = Vec::with_capacity(scenario.duration_ticks as usize);
     // One state block per controller. Parallels scenario.controllers slice.
@@ -538,8 +592,19 @@ pub fn log_to_csv(log: &[BenchSample]) -> String {
 // new tolerances to lock.
 // ================================================================================
 
-/// Path to the Beaver spec, relative to workspace root.
-pub const BEAVER_SPEC_PATH: &str = "data/aircraft/northlander.ron";
+/// Stable catalog id of the Beaver analogue. Scenarios reference this rather
+/// than a filesystem path so tests route through the catalog loader and stay
+/// consistent with the app's selection mechanism.
+pub const BEAVER_ID: &str = "northlander";
+
+/// Shared-flight variant list for airborne scenarios (cruise, climb, stall,
+/// turns, Vne, endurance). These scenarios don't touch water or ground, so
+/// they apply to every flyable variant of the aircraft.
+pub const BEAVER_SHARED_FLIGHT_VARIANTS: &[&str] = &["floats", "wheels"];
+
+/// Float-configuration variant list for water-contact scenarios (taxi, takeoff,
+/// landing, porpoise, one-pontoon, water rudder).
+pub const BEAVER_FLOATS_ONLY_VARIANTS: &[&str] = &["floats"];
 
 /// A small nose-up initial orientation aligning roughly with cruise α. Helps
 /// scenarios start near trim rather than transient.
@@ -602,7 +667,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_cruise_sl",
         description: "Level cruise at SL, trimmed hands-off wings-level coordinated flight.",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_SHARED_FLIGHT_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 500.0, 0.0),
             velocity: Vec3::new(0.0, 0.0, -55.0),
@@ -714,7 +780,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_cruise_climb",
         description: "Full-throttle climb at cruise airspeed. Tests quasi-steady ROC.",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_SHARED_FLIGHT_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 500.0, 0.0),
             velocity: Vec3::new(0.0, 0.0, -55.0),
@@ -806,7 +873,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_ldmax_glide",
         description: "Power-off glide at L/D_max. Tests drag polar minimum + steady glide.",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_SHARED_FLIGHT_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 1500.0, 0.0),
             velocity: Vec3::new(0.0, 0.0, -40.0),
@@ -901,7 +969,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_vne_dive",
         description: "Idle-throttle nose-down dive. Tests high-speed drag envelope + Vne behavior.",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_SHARED_FLIGHT_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 2500.0, 0.0),
             velocity: Vec3::new(0.0, 0.0, -55.0),
@@ -1017,7 +1086,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_stall_clean",
         description: "Power-off decel-to-stall from cruise, clean config. Min speed near Vs.",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_SHARED_FLIGHT_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 1000.0, 0.0),
             velocity: Vec3::new(0.0, 0.0, -55.0),
@@ -1140,7 +1210,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_stall_flaps_landing",
         description: "Power-off stall with LANDING flaps. Min speed near Vso = 21.01 m/s.",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_SHARED_FLIGHT_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 1000.0, 0.0),
             velocity: Vec3::new(0.0, 0.0, -45.0), // slower start since landing approach is slower
@@ -1287,7 +1358,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_coordinated_turn_30",
         description: "Steady 30° banked coordinated turn at cruise via BankHold PID controller.",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_SHARED_FLIGHT_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 500.0, 0.0),
             velocity: Vec3::new(0.0, 0.0, -55.0),
@@ -1383,7 +1455,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
         // delta is the whole point of asymmetry testing.
         name: "beaver_coordinated_turn_30_left",
         description: "Steady 30° LEFT banked coordinated turn. Asymmetry-test mirror of turn_30.",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_SHARED_FLIGHT_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 500.0, 0.0),
             velocity: Vec3::new(0.0, 0.0, -55.0),
@@ -1481,7 +1554,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_coordinated_turn_45",
         description: "Steep 45° banked coordinated 1.41 g turn via full autopilot PID stack.",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_SHARED_FLIGHT_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 500.0, 0.0),
             velocity: Vec3::new(0.0, 0.0, -55.0),
@@ -1540,7 +1614,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_coordinated_turn_45_left",
         description: "Steep 45° LEFT banked 1.41 g turn. Asymmetry-test mirror of turn_45.",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_SHARED_FLIGHT_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 500.0, 0.0),
             velocity: Vec3::new(0.0, 0.0, -55.0),
@@ -1639,7 +1714,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_coordinated_turn_60_overbank",
         description: "Over-bank at cruise — envelope limit scenario. Expects accelerated stall.",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_SHARED_FLIGHT_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 1500.0, 0.0), // altitude for expected significant descent
             velocity: Vec3::new(0.0, 0.0, -55.0),
@@ -1739,7 +1815,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_endurance_cruise",
         description: "Extended cruise segment. Tests fuel burn rate + long-term trim stability.",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_SHARED_FLIGHT_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 500.0, 0.0),
             velocity: Vec3::new(0.0, 0.0, -55.0),
@@ -1840,7 +1917,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_water_taxi",
         description: "Idle-throttle taxi on water. Tests bounded speed under plow drag.",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 2.40, 0.0),
             velocity: Vec3::ZERO,
@@ -1919,7 +1997,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_water_takeoff",
         description: "Full-throttle water acceleration with auto-rudder coordination.",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 2.40, 0.0),
             velocity: Vec3::ZERO,
@@ -2005,7 +2084,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_water_takeoff_rotation",
         description: "Full-throttle water takeoff with progressive back-stick rotation (pre-liftoff-tune baseline).",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 2.40, 0.0),
             velocity: Vec3::ZERO,
@@ -2080,7 +2160,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_water_landing_approach",
         description: "Idle-power descent to water touchdown with landing flaps.",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 100.0, 0.0),
             velocity: Vec3::new(0.0, 0.0, -30.0),
@@ -2151,7 +2232,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_water_porpoise_emerge",
         description: "Inappropriate sustained back-pitch input during takeoff drives porpoise oscillation.",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 2.40, 0.0),
             velocity: Vec3::ZERO,
@@ -2230,7 +2312,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_water_right_bank_accel",
         description: "Full-throttle water acceleration with right-bank initial + sustained right aileron.",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 2.40, 0.0),
             velocity: Vec3::ZERO,
@@ -2273,7 +2356,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_water_left_bank_accel",
         description: "Full-throttle water acceleration with left-bank initial + sustained left aileron (mirror of right-bank scenario).",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 2.40, 0.0),
             velocity: Vec3::ZERO,
@@ -2355,7 +2439,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_water_takeoff_one_pontoon_right",
         description: "Water takeoff with right-bank transition to one pontoon, then level before liftoff.",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 2.40, 0.0),
             velocity: Vec3::ZERO,
@@ -2397,7 +2482,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_water_takeoff_one_pontoon_left",
         description: "Water takeoff with left-bank transition to one pontoon, then level before liftoff.",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 2.40, 0.0),
             velocity: Vec3::ZERO,
@@ -2483,7 +2569,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_water_landing_one_pontoon_right",
         description: "Water landing with right-bank starboard-pontoon-first touchdown, transition to level.",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 100.0, 0.0),
             velocity: Vec3::new(0.0, 0.0, -30.0),
@@ -2518,7 +2605,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_water_landing_one_pontoon_left",
         description: "Water landing with left-bank port-pontoon-first touchdown, transition to level.",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 100.0, 0.0),
             velocity: Vec3::new(0.0, 0.0, -30.0),
@@ -2587,7 +2675,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_water_taxi_rudder_deployed",
         description: "Idle-throttle taxi with water rudder deployed + full right yaw input.",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 2.40, 0.0),
             velocity: Vec3::ZERO,
@@ -2632,7 +2721,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     FlightScenario {
         name: "beaver_water_taxi_rudder_retracted",
         description: "Idle-throttle taxi with water rudder RETRACTED + full right yaw input (weak air-rudder response).",
-        aircraft_spec_path: BEAVER_SPEC_PATH,
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 2.40, 0.0),
             velocity: Vec3::ZERO,

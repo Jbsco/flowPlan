@@ -758,6 +758,27 @@ Before opening Phase 2.5 contact physics work, six criteria. All evidence curren
 - **Graphics settings UI**: Milestone 4.8.5.
 - **Slipstream-over-rudder physics** (resolving Gap 2 properly): deferred to post-Phase-2.4 flight-model refinement window (tentative) or rolled into Phase 3 audio expansion (where engine sound already reads RPM/airspeed for prop wash).
 
+### Aircraft catalog + (scenario × variant) test matrix (SHIPPED)
+
+Two framework changes landed together so each (aircraft, variant) combo has its own test coverage and its own deterministic selection path:
+
+**Catalog & selector (`crates/sim/src/catalog.rs`, CLI + env var in `game_app.rs`):**
+- `AircraftCatalog::scan(data/aircraft/)` auto-discovers `*.ron` specs at startup and validates each one. Invalid RONs are surfaced as `CatalogError` (I/O, parse, validation) without aborting the scan.
+- `AircraftSpec` gained `variants: Vec<AircraftVariant>` (each variant carries `id`, `display_name`, `config`, `mesh_path`) + `default_variant: String`.
+- App CLI: `--aircraft <id>` / `--variant <id>` / `--list-aircraft`; env fallback `FLOWPLAN_AIRCRAFT=<id>[:<variant>]`; catalog default when unspecified.
+- `AppCommand::SelectAircraft` enum added (unbound) for Phase 4 menu UI — keeps the cross-boundary type stable so the settings UI doesn't force an input-layer rev.
+
+**(Scenario × variant) test matrix (`crates/sim/src/flight_bench.rs`, `crates/sim/tests/flight_bench.rs`):**
+- `FlightScenario` gained `aircraft_id: &'static str` + `variants: &'static [&'static str]`. Scenarios declare which (aircraft, variant) combos they apply to — shared-flight scenarios (cruise, climb, stall, turns, etc.) list every variant; contact-physics scenarios narrow to the applicable one (water → floats; ground → wheels).
+- Classification of the 25 existing Beaver scenarios: **12 shared-flight** (`&["floats", "wheels"]`) and **13 floats-only** (`&["floats"]`); no wheels-only scenarios today — they arrive with 2.5b.2+ ground physics.
+- Bench harness renamed `beaver_scenarios_all_pass` → `flight_bench_all_pass`. Iterates the `(scenario, variant)` matrix; CSV output lands at `target/flight-bench/<aircraft>/<variant>/<scenario>.csv` (was flat `<scenario>.csv`).
+- App `--scenario NAME` now auto-infers `--aircraft` + `--variant` from the scenario's metadata; if the user passes an inconsistent combo, a clean error is raised (won't silently ignore the user's choice).
+- New helpers: `run_scenario_headless_cfg(scenario, spec, config)` and `seed_state_from_scenario_cfg(scenario, spec, seed, config)` bridge the `VehicleConfig` parameter through for variant-specific runs; backward-compatible wrappers preserve the pre-matrix API.
+
+**Bench run count: 37** (12 shared-flight × 2 variants + 13 floats-only × 1 = 24 + 13). 35 passing, 2 failures — the pre-existing triaged `beaver_coordinated_turn_60_overbank` scenario now surfaces in both floats + wheels variants (expected and correct: matrix faithfully reports per-variant failures of shared-flight scenarios).
+
+**Deferred to per-aircraft coefficient migration** (logged here so catalog authoring doesn't forget the blocker): every aerodynamic coefficient in `crates/sim/src/flight.rs` (`CL_MAX`, `CD0`, `I_XX`/`I_YY`/`I_ZZ`, slipstream factors, etc.) is Beaver-hardcoded. Catalina scenarios can be authored against the matrix framework today, but every assertion will fail until coefficients migrate from `flight.rs` consts to per-aircraft `AircraftSpec` fields. That migration is queued; Catalina scenarios land after it.
+
 ### Milestone 2.5b.1 — Per-gear normal force + VehicleConfig enum (SHIPPED)
 
 Opens the 2.5b ground-contact work with the smallest viable increment: pure normal-force (spring-damper) physics + the configuration toggle that selects between floats and wheels. The `northlander_land.glb` mesh landed as a prep asset (236 KB, two-day-old sibling of the 129 KB floats `northlander.glb`); app-side toggle lands in 2.5b.7.

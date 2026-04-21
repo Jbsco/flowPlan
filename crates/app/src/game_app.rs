@@ -105,14 +105,17 @@ const WATER_COLOR: [f32; 4] = [0.18, 0.38, 0.58, 1.0];
 /// and the terrain / water mesh.
 const SURFACE_MARGIN: f32 = 0.05;
 
-pub fn run(opts: crate::CliOptions) -> Result<()> {
+pub fn run(mut opts: crate::CliOptions) -> Result<()> {
     // --list-aircraft short-circuits window construction.
     if opts.list_aircraft {
         print_catalog_and_exit();
     }
 
-    // Resolve scenario from CLI flag before opening the window so we can fail fast
-    // on typos.
+    // Resolve scenario from CLI flag before opening the window so we can fail
+    // fast on typos. When --scenario is supplied, the scenario's own aircraft_id
+    // + variants drive the catalog selection (unless the user ALSO passed
+    // --aircraft / --variant, in which case their choices win — but must be
+    // consistent with the scenario or we error).
     let scenario_opt = if let Some(name) = &opts.scenario_name {
         let scenario = flowplan_sim::flight_bench::BEAVER_SCENARIOS
             .iter()
@@ -124,9 +127,46 @@ pub fn run(opts: crate::CliOptions) -> Result<()> {
                     .collect();
                 anyhow::anyhow!("unknown scenario '{name}'. Known: {known:?}")
             })?;
+
+        // If --aircraft wasn't set, default to the scenario's aircraft. If it
+        // WAS set, it must match — running a Beaver scenario with a Catalina
+        // selected is nonsense.
+        match &opts.aircraft_id {
+            None => opts.aircraft_id = Some(scenario.aircraft_id.to_string()),
+            Some(id) if id != scenario.aircraft_id => {
+                anyhow::bail!(
+                    "scenario {:?} targets aircraft {:?} but --aircraft is {:?}",
+                    scenario.name,
+                    scenario.aircraft_id,
+                    id,
+                );
+            },
+            Some(_) => {},
+        }
+
+        // Likewise for --variant: default to the first declared variant if
+        // unset, else verify the user's choice is one of the scenario's
+        // applicable variants.
+        match &opts.variant_id {
+            None => {
+                opts.variant_id = scenario.variants.first().map(ToString::to_string);
+            },
+            Some(v) if !scenario.variants.contains(&v.as_str()) => {
+                anyhow::bail!(
+                    "scenario {:?} applies to variants {:?} but --variant is {:?}",
+                    scenario.name,
+                    scenario.variants,
+                    v,
+                );
+            },
+            Some(_) => {},
+        }
+
         tracing::info!(
-            "scenario playback: {} ({} ticks, {} inputs, {} assertions)",
+            "scenario playback: {} [{}/{}] ({} ticks, {} inputs, {} assertions)",
             scenario.name,
+            opts.aircraft_id.as_deref().unwrap_or("?"),
+            opts.variant_id.as_deref().unwrap_or("?"),
             scenario.duration_ticks,
             scenario.inputs.len(),
             scenario.assertions.len(),
@@ -841,9 +881,7 @@ fn resolve_aircraft_selection(opts: &crate::CliOptions) -> Option<SelectedAircra
         || catalog.default_entry(),
         |id| {
             catalog.find(id).or_else(|| {
-                tracing::warn!(
-                    "requested aircraft {id:?} not in catalog; falling back to default"
-                );
+                tracing::warn!("requested aircraft {id:?} not in catalog; falling back to default");
                 catalog.default_entry()
             })
         },
