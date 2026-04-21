@@ -72,17 +72,20 @@ For an agent starting from "please add the Super Cub":
 4. **Using the real aircraft's trademark name.** "DHC-2 Beaver" is the real aircraft; "Northlander" is ours. Never ship "Beaver" in anything user-visible.
 5. **Adding `AircraftSpec` fields without an amendment.** The schema is narrow on purpose. New fields (moment coefficients, flap tables) are gated behind the per-aircraft migration that hasn't landed.
 6. **Skipping the catalog.** AIRCRAFT.md isn't a summary of what's implemented — it's the design surface. An aircraft that's in the simulator but not in the catalog is a spec violation, even if the code works.
+7. **Committing placeholder-mesh-specific flight-model tuning.** Meshes from free third-party sources are placeholders that swap to project-owner-authored originals before v1 release (see [AIRCRAFT.md § Attribution / licensing](../../AIRCRAFT.md)). Don't commit assumptions about placeholder-mesh vertex counts, submesh IDs, material-slot names, or bounding-box specifics without a `TODO(pre-v1-asset-swap)` marker. The filename and catalog entry are stable; the mesh under them is not.
 
 ## Configuration Variants
 
-Each aircraft can ship in multiple configurations (wheels, floats, amphibs, skis). Today the sim does not distinguish these at the `AircraftSpec` level — the Beaver's `max_mass_wheels_kg` and `max_mass_floats_kg` are separate fields, but the active mass used by the flight model is `max_mass_wheels_kg` (Phase 2.4 assumption).
+Each aircraft ships in multiple configurations (wheels, floats, amphibs, skis). **As of Phase 2.5b.1, `VehicleConfig::{Floats, Wheels}` is a first-class enum on `VehicleState`, and `AircraftSpec.variants: Vec<AircraftVariant>` declares the variant catalog (each with `id`, `display_name`, `config`, `mesh_path`).** The `AircraftCatalog::scan` at startup walks `data/aircraft/*.ron`, validating each spec. CLI: `--aircraft <id> --variant <id>`; env fallback `FLOWPLAN_AIRCRAFT=<id>[:<variant>]`.
 
-When per-variant configuration support lands (expected with Milestone 2.5 contact physics), the pattern will be:
+Pattern for authoring a new aircraft's variants:
 
-- One spec file per aircraft, one configuration enum, game selects the variant at flight start.
-- Variant affects mass (floats add ~120 kg for the Beaver), drag (floats add ~8% Cd0), and stall speed (Vso vs Vs).
+- One spec `.ron` file per aircraft, containing `variants: [..]` with each config present.
+- One `.glb` mesh per variant (e.g. `northlander.glb` floats + `northlander_land.glb` wheels) referenced via `variants[].mesh_path`.
+- Variant affects `sim.vehicle.config` at spawn, drives gear vs buoyancy physics selection, and feeds the (scenario × variant) bench matrix.
+- Scenario authoring: `FlightScenario.variants: &'static [&'static str]` declares which variants a scenario applies to. Shared-flight scenarios list both `&["floats", "wheels"]`; contact-physics scenarios narrow to the applicable one.
 
-Until then, scenarios that want to test a floats-config (`beaver_vso_floats`) simply spawn with `max_mass_floats_kg` and a flap-down Vso target.
+Variant-specific tuning (floats add ~120 kg, ~8% Cd0, different Vso) is currently represented by the separate `max_mass_{wheels,floats}_kg` fields; deeper per-variant coefficient migration is still the pending 2.4.x follow-up.
 
 ## Quick Commands
 

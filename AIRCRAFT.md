@@ -7,6 +7,18 @@ Living catalog of aircraft considered for flowPlan. Each entry is a design-model
 
 **All specs below should be verified against the real-world aircraft's POH / type certificate / public reference before implementation.** Figures here are the author's best recollection and are tagged `(verify)` where uncertainty is higher than baseline. Data in the spec should faithfully model the real aircraft; *presentation* in-game uses a sanitized name, neutral livery, and low-poly cel-shaded model to avoid licensing exposure.
 
+## Attribution / licensing (HARD PRE-RELEASE GATE)
+
+flowPlan is currently in a **placeholder-asset phase**. The project owner sources free third-party 3D models (CC-licensed / permissive Blender community sources) as development placeholders for `data/aircraft/*.glb` meshes during Phase 2–3 while gameplay systems iterate. This is a deliberate trade: iterate on sim / flight model / world systems without gating on art authoring.
+
+**Every placeholder mesh is replaced with original work authored by the project owner before v1 ships.** A game release has to be tight and correct concerning attribution and licensing — there is no path where third-party placeholder assets ship in the v1 binary.
+
+Implications:
+- The `data/aircraft/<name>.glb` filename and catalog entry (via `AircraftCatalog::scan`) are **stable across the placeholder-→-original swap**; only the mesh file changes. Rigging, CG, float/gear offsets should be re-verified at swap time but the data-path is unchanged.
+- Do not commit flight-model tuning or mesh-topology assumptions that are placeholder-mesh-specific (e.g. vertex counts, submesh IDs, material-slot names) without an explicit `TODO(pre-v1-asset-swap)` marker.
+- A formal **asset-attribution reckoning milestone** lands in Phase 5 (or as a dedicated pre-release pass). Every committed mesh must be either (a) project-owner-authored or (b) cleared with a permissive license that allows commercial redistribution with compatible attribution requirements.
+- Placeholders present today are tracked in this file's entries; new placeholders added to the backlog should note the source and license so the audit is trivially enumerable at swap time.
+
 ## Status legend
 
 - **[mvp]** -- Phase 2-4 reference aircraft (currently DHC-2 Beaver only).

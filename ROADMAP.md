@@ -510,6 +510,32 @@ A plane can be flown, landed on water, taxied, taken off again. Cel-shaded look 
 - [ ] Weather affects flight: wind on ground track, gust attitude perturbation, density altitude effect on performance, icing probability at cold+moist conditions
 - [ ] Weather forecast at hubs with accuracy decay by range and time
 
+### Milestone 3.2b: Chop wiring + water scenario family
+
+Consumes the 2.5a.7 chop hook (`SimState.chop_intensity`) and the 3.2 wind state. Produces the water scenario variants blocked on 3.2 weather landing.
+
+- [ ] Wire `WorldState.ChopState` (per water body, driven by wind fetch + duration from 3.2) → `SimState.chop_intensity` scalar each tick. Deterministic by design; `chop_intensity` is already in `state_hash`.
+- [ ] Wire `SceneParams.chop_intensity` → water shader so visual chop tracks physics chop (prevents dial-driven desync when weather varies chop away from 1.0).
+- [ ] Author glassy-water takeoff scenario (`beaver_water_takeoff_glassy`, `chop_intensity = 0.0`) — harder than nominal because no wave pattern breaks float suction.
+- [ ] Author rough-water takeoff scenario (`beaver_water_takeoff_rough`, `chop_intensity = 2.0+`) — envelope-limit; floats pound on crests; documents model behavior under heavy chop.
+- [ ] Author crosswind / headwind / tailwind takeoff + landing pairs once 3.2 wind state is plumbed into the aero surfaces — the wind deferrals enumerated in 2.5a follow-ups close here.
+- [ ] Re-baseline `beaver_preview` / `scene_extended` visual snapshots post-chop-wiring (pending `cargo insta accept`).
+
+### Milestone 3.2x: Weather visuals & particle system
+
+Parallel to 3.2 (state) and 3.2b (chop). Weather **state** is one problem; weather **visuals** are another, and flowPlan has no particle system yet. This milestone builds the visual/particle layer that the rest of Phase 3+ will reuse.
+
+- [ ] **Particle system architecture:** preallocated pool, arena-backed per-frame instances, LOD + distance culling, lifecycle (spawn / update / despawn) on the render side. No allocations in the render hot path.
+- [ ] **Volumetric clouds** — target volumetric rendering from the start. 2D billboards are out of the target art direction (see PLAN.md amendment in the same phase). Banded alpha + hard-edge thresholding retains cel-shading compatibility. Sized to sit within the frame budget — reference-tier 240 Hz cap of 60% GPU utilization is the ceiling; per-pass budget target ≤ 0.6 ms at reference.
+- [ ] **Rain / snow particles** — world-space streaks (far) + screen-space on-windshield overlay (near-camera). Density scales with precipitation regime from 3.2.
+- [ ] **Layer fog render** — horizontal fog plane at altitude (huge atmosphere win over valleys; the `ground_mist | wingtip_mist | layer_fog | dense_fog` state ladder's visual layer).
+- [ ] **Wingtip mist effect** — the signature mood beat from PLAN.md. Thin-column particle emitter at wingtip positions under humidity + low-altitude + water-takeoff conditions.
+- [ ] **Wake + spray particles (water)** — closes the 2.5a.X visual polish deferrals (wake spawn behind floats, spray at high-speed water operations, touchdown moment).
+- [ ] **Wind debris particles** — leaves in autumn, dust in dry biomes, blowing snow in winter. Deterministic per-chunk spawn from weather-RNG stream so replay works.
+- [ ] **Flag flutter at hubs** — small geometry-driven (not particle) but grouped here because it's the same wind-state consumer.
+
+Storm visuals, atmospheric optics (halos, sun-dogs, rainbows, crepuscular rays), and lightning flashes slip to Phase 5.5 polish unless a compelling bench scenario pulls them forward.
+
 ### Milestone 3.3: Sim worker thread
 
 - [ ] Move `sim.tick()` from main thread to a dedicated `std::thread`
@@ -531,6 +557,10 @@ ocean simulation. Triggered by Phase 3.2 weather landing — FFT ocean naturally
 parameterizes by wind speed + direction (Phillips or JONSWAP spectrum → IFFT →
 height field), so wind-driven sea state becomes physically motivated rather than
 a separate layer on top of fixed-parameter sinusoids.
+
+**Infrastructure dividend:** the compute-pipeline support added here (storage buffers, compute-shader bind groups, dispatch lifecycle) is reusable by later-roadmap items — 3.2x volumetric clouds, 3.6 hydrology-bake pass, post-v1 erosion passes, Phase 5.6 aurora shader. Design the compute-pipeline abstraction with those consumers in mind rather than FFT-ocean-only. The FFT ocean is the first compute-using milestone; the others follow naturally once the boundary is in place.
+
+**Visual target (from 2.5a iteration):** water is the star of flowPlan's visual identity. Near/small scale (floats in chop, spray, wake, touchdown) AND large scale (horizon-far sea state, wind-swept waves, swell patterns) must read well. Slope-based shading tricks along the lines of Sea of Thieves — normal-map variation driven by wave slope, not just height — are a good reference. FFT ocean supports this naturally since the spectrum yields both height AND slope per frame.
 
 **Motivation (from 2.5a iteration):**
 
@@ -662,11 +692,54 @@ All of the following, verified on reference hardware:
 - [ ] Landing / takeoff musical flourishes at milestones
 - [ ] No pre-recorded music stems
 
+### Milestone 3.6: Terrain rebuild + hydrology
+
+Replaces the Phase 2.2 sum-of-sines heightfield with a proper procedural terrain + hydrology system. Closes the Phase 2 known limitations (no real hydrology, no shore classification, no independent amplitude/gradient control) enumerated in [PROGRESS.md § Phase 2 known limitations](PROGRESS.md#known-remaining-issues-in-phase-2-deferred-to-25-or-later) and unblocks the `SurfaceClass` sampler that gates [Milestone 2.5b.7 per-surface friction](#2.5b.7-per-surface-friction-table). Detailed design in [MAPGEN.md](MAPGEN.md).
+
+Scoped large (this is arguably a phase of its own — candidate for splitting if it grows). Reuses the compute-pipeline infrastructure introduced in 3.5b.
+
+**3.6a Heightfield rebuild (biome-parameterized procedural terrain).**
+- [ ] New `world::terrain` module replacing sum-of-sines. Ridged multifractal + domain warping with per-biome amplitude / frequency profiles. Independent amplitude and gradient tuning (closes the Phase 2 limitation).
+- [ ] Chunk model selected (square vs hex — see MAPGEN.md [Chunk model](MAPGEN.md#chunk-model) open question).
+- [ ] Preallocated chunk pool + background generation thread (honors DESIGN.md no-alloc hot-path rule).
+- [ ] LOD tiers: ~16 m distant, ~4 m mid, ~1 m near-aircraft. Seamless boundary stitching.
+- [ ] `Terrain::flat()` / `Terrain::flat_land()` remain for bench scenarios; procedural path is gated by world-scope + scenario flags.
+
+**3.6b Hydrology sub-system.**
+- [ ] World-bake pass at session load: coarse global heightfield → D8 drainage network → river edges + lake footprints + coastlines. Deterministic from master seed. Bit-identical across platforms (per MAPGEN.md cross-platform discipline).
+- [ ] River-continuity invariants at chunk boundaries: inbound flow-matched outbound; rivers-grow-into-lakes; no arbitrary truncation.
+- [ ] Lake / sea / small-water-body classification (`lake_small | lake_large | river | protected_bay | open_coastal | open_ocean | alpine_tarn | glacial`).
+- [ ] Waterfalls, sandbars, creeks, inland ocean crossings as features emerging from graph + shore classification.
+- [ ] Per-water-body surface parameters (chop modulation, color palette, flora fringe).
+
+**3.6c Biome + shore classification + feature placement.**
+- [ ] `world::biome` module: climate-field-driven biome classification with adjacency rule enforcement (no snow→desert, no snow→tropical — see MAPGEN.md [Biome system](MAPGEN.md#biome-system)).
+- [ ] Biome catalog per MAPGEN.md / FEATURES.md: high desert (Grand Mesa / Flatirons / Arches flavor), Alaska/Canada baseline, Mediterranean archipelago, PNW, Rocky alpine, subarctic, tropical.
+- [ ] Shore classification sampler (`sand_beach | gravel | rock | cliff | mudflat | delta | ice_edge`) from `(slope, biome, climate)`. Exposes `world::surface_at(x, z) -> SurfaceClass` — unblocks 2.5b.7.
+- [ ] Placed landmarks (lighthouses, wrecks, bridges, waterfalls) via deterministic poisson-disk; per-biome density.
+
+**3.6d Flora, decoration, seasonal overlay.**
+- [ ] Flora representation (billboards / instanced meshes); per-biome density + species tables.
+- [ ] Rocks, boulders, snags, driftwood — placed procedurally.
+- [ ] Snow overlay per season (altitude-gated; driven by 3.2 weather / season state).
+
+**Gate (3.6):** the world-scope decision lands before this milestone closes (it's a forcing function). `Terrain::flat*` regression tests still pass (bench scenarios unchanged). New procedural world passes visual snapshot at a canonical frame. Hydrology graph produces byte-identical output across Linux / Windows / Steam Deck given the same master seed. Frame budget holds with the new terrain + flora at reference tier.
+
 ### Deliverable
 
-The plane has a voice (engine, wind, water, splash). Weather actively shapes flight. CI runs on every push.
+The plane has a voice (engine, wind, water, splash). Weather actively shapes flight. The world is properly generated with coherent hydrology. CI runs on every push.
 
-> **Gate:** Phase 3 is complete when the quality gate passes in CI, determinism test passes with the sim worker thread active, and the audio callback passes the no-alloc/no-log verification.
+> **Gate:** Phase 3 is complete when the quality gate passes in CI, determinism test passes with the sim worker thread active, the audio callback passes the no-alloc/no-log verification, and the terrain rebuild delivers MAPGEN.md's acceptance criteria (hydrology coherency, biome adjacency, shore classification).
+
+---
+
+### Pre-Phase-4 design-doc commitments
+
+Phase 4 implementation work requires several design decisions that can be frozen earlier. These are **design doc deliverables**, not code — authored in Phase 3 (or earlier) so Phase 4 milestones have a concrete spec to build from.
+
+- [ ] **[MAPGEN.md](MAPGEN.md)** — map generation / chunk model / hydrology / biomes. **DRAFT SHIPPED** (initial version authored during Phase 2.5 close-out stock-take).
+- [ ] **UI_ARCHITECTURE.md** — UI framework decision (egui for settings/menus vs hand-rolled vs hybrid), navigation model, prompt system, toggle-able debug overlay. Target: vector/math/shader-drawn UI with minimal bitmap assets (see [FEATURES.md § UI Direction](FEATURES.md#ui-direction)). Unblocks Milestones 4.8 / 4.8.5 / 4.9.
+- [ ] **LIVERY.md** (or expanded FEATURES.md § Livery & Customization) — paint-editor representation choice (UV-space / decal projection / hybrid), brush types, layer model, undo-history scope, save format. Unblocks save-format lock in 4.10 and Paint Shop in 5.3.
 
 ---
 

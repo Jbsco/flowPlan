@@ -44,7 +44,7 @@ Deliberately **not** using: Bevy, Unreal, Unity. Engines hide the frame. The app
 
 - **Water** — Gerstner waves in the vertex stage for real geometry displacement on landing zones; simpler normal-map water at distance. Foam from depth difference against shoreline. This is where the budget goes.
 - **Sky** — procedural (Preetham or Hosek-Wilkie). Free parallax, free time-of-day, no skybox textures.
-- **Clouds** — 2D billboards near camera, optional volumetric only in cutscenes/special weather. Don't burn the frame on clouds.
+- **Clouds** — target **volumetric in-game** (the 2D-billboards entry that lived here was an early placeholder and was never audited as scope came into focus). Banded alpha + hard-edge thresholding on volumetric sampling preserves cel-shading compatibility. Sized within the DESIGN.md frame budget (60% GPU utilization cap at 240 Hz reference tier; per-pass target ≤ 0.6 ms on reference). Volumetric is the right call here because it's what the emergent-weather loop (thunderheads, squall walls, gust fronts, layer fog, wingtip mist) actually needs to look alive — and atmospheric optics (halos, sun dogs, rainbows, crepuscular rays) come cheaply once the system is volumetric. Phase 3.2x delivers.
 - **Haze/fog** — exponential height fog with sun-direction tint. Huge atmosphere payoff for ~nothing.
 - **Propeller** — disc shader with radial motion blur. Tiny effect, big tactile payoff.
 - **Pontoon splash/wake** — particle + decal trail.

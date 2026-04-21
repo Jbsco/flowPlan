@@ -3,7 +3,41 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
-Last updated: **2026-04-20** (Phase 2 in progress; 2.1 / 2.6 / 2.2 core + 2.3 core shipped; Milestone 2.4 flight model **COMPLETE through 2.4.9** -- 2.4.1-2.4.7 shipped, 2.4.8 shipped (bench + tuning Gaps 1+3), 2.4.9 shipped (Cl_β dihedral + spiral slipstream + closed-loop ControlLaw harness + turn scenarios + envelope-limit pattern). 10 bench scenarios (9 capability + 1 envelope-limit). ControlLaw module shared between bench and Phase 4.7 autopilot. Pre-Phase-2.5 gate green. 2.5 contact physics is the last pre-Phase-3 milestone.).
+Last updated: **2026-04-21** (Phase 2.5 **SHIPPED**; stock-take session committed to docs — see 2026-04-21 design-decisions log below).
+
+## 2026-04-21 — Pre-Phase-3 stock-take design decisions
+
+Session-captured design decisions made during the Phase 2.5 close-out stock-take. These flow into doc amendments (ROADMAP / FEATURES / PLAN / AIRCRAFT / CLAUDE / MAPGEN.md) and are reproduced here for context on why the amendments exist.
+
+### Phase 3 adds (accepted)
+
+- **Milestone 3.2b: Chop wiring + water scenario family** — consume 2.5a.7's `SimState.chop_intensity` hook and 3.2 wind state; land glassy / rough / crosswind / headwind / tailwind takeoff + landing scenarios.
+- **Milestone 3.2x: Weather visuals + particle system (volumetric clouds)** — parallel to 3.2 state. Builds the particle system flowPlan has been missing. Volumetric clouds are the explicit target, not 2D billboards.
+- **Milestone 3.5b FFT ocean** — gains notes on: (a) reusable compute-pipeline infrastructure (3.2x / 3.6 / post-v1 erosion / 5.6 aurora all share), (b) slope-based shading tricks (Sea of Thieves reference) for near + far scale.
+- **Milestone 3.6: Terrain rebuild + hydrology** — new milestone (3.6a heightfield / 3.6b hydrology / 3.6c biome + shore + features / 3.6d flora + seasonal). Delivers the `world::surface_at(x, z)` sampler that unblocks 2.5b.7.
+
+### Pre-Phase-4 design-doc commitments
+
+- **[MAPGEN.md](MAPGEN.md) — DRAFT SHIPPED** this session. Covers chunk model (circular vs hex vs square open question), seed topology, layered generation, hydrology as first-class sub-system, biome adjacency rule, flight-log memory. Consult before Phase 3.6 terrain work or Phase 4 world-scope decision.
+- **UI_ARCHITECTURE.md** — pending. Pre-Phase-4.8 deliverable.
+- **LIVERY.md** (or expanded FEATURES.md § Livery) — pending. Pre-Phase-4.10 deliverable.
+
+### Decisions recorded in doc amendments
+
+- **PLAN.md cloud target:** volumetric in-game; 2D-billboards entry was out of date.
+- **FEATURES.md § UI Direction (new section):** target vector / math / shader-drawn UI; no bitmap asset files in the path where avoidable. Current debug HUD + orientation widget + attitude indicator are the reference examples. Debug overlay stays toggle-able in-game indefinitely.
+- **FEATURES.md § Regional Biomes:** explicit real-world references — High Desert (Grand Mesa / Flatirons / Arches), Alaska/Canada baseline, Mediterranean archipelago + inland seas. Structural biome-adjacency rule: no forbidden transitions (snow → desert, etc.).
+- **FEATURES.md § Flight Model (rudder slipstream):** noted right-rudder-feels-underpowered observation; may match real DHC-2 (right-rotating prop yields nose-left moments); revisit with targeted slipstream-over-rudder investigation in 3.2 / 3.5 coefficient-tune pass.
+- **FEATURES.md § Weather (volumetric target):** PLAN.md amendment reflected; atmospheric optics (halos / sun dogs / rainbows / crepuscular rays) in scope once volumetric clouds land.
+- **FEATURES.md § Livery & Customization:** v1 initial scope = single bitmap layer + brush tools + HSV color picker + session-scoped undo; extended scope = multi-layer + flatten + perspective-based decal projection. Click to place shape; drag to brush. Undo discarded on exit.
+- **AIRCRAFT.md attribution / licensing gate (new section at top):** placeholder third-party meshes are development-phase only; every mesh replaces with project-owner-authored original before v1 ships. Hard pre-release gate.
+- **CLAUDE.md:** MAPGEN.md + UI_ARCHITECTURE.md + LIVERY.md referenced in a new "Deeper design documents" block.
+
+### Pulled from stale / completed: Task #97 removed
+
+Task #97 ("2.5b.5 scope: tire/float compliance + asymmetric damping") was deleted — asymmetric damping shipped in 2.5b.5 (compression 25k N·s/m / rebound 75k N·s/m). Progressive spring rate + velocity-dependent damping remain deferred as feel-polish, documented in the 2.5b.5 close-out section below.
+
+---
 
 ## Current status
 

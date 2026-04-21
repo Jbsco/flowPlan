@@ -45,6 +45,7 @@ Granular feature bullets for later expansion. Every idea captured here is intent
 - [Vendors & Progression](#vendors--progression)
 - [Livery & Customization](#livery--customization)
 - [Audio / Soundtrack](#audio--soundtrack)
+- [UI Direction](#ui-direction)
 - [Display & Graphics Settings](#display--graphics-settings)
 - [Difficulty & Accessibility](#difficulty--accessibility)
 - [Flight Log & Save Format](#flight-log--save-format)
@@ -60,7 +61,7 @@ Decisions recorded from the feature discussion. Items marked *amend* have been a
 1. **World scope** -- *undecided*. Two candidates preserved in [World Scope & Map Layout](#world-scope--map-layout): **(A)** one large single map with diverse regional locales, **(B)** ~4 separate regional maps. Procedural generation is a sub-option of both, gated on the cost of retaining flown/discovered state. Do not amend DESIGN.md until this is resolved.
 2. **Flight model fidelity** -- *amend, direction (A) confirmed*. Amend [DESIGN.md § Non-Goals](DESIGN.md#non-goals): "Not a full flight sim (no CFD, no engine-management minigames). Aerodynamics are tabulated per-aircraft and faithful; systems are simplified to meaningful toggles. Sim-realism is selectively deep where it affects feel." Liberties for fun are permitted. Player-adjustable dial for wind, shear, hydrodynamics, storms, air temp/humidity, changeable at any time during gameplay.
 3. **Missions** -- *amend, direction (A) confirmed*. Amend [DESIGN.md § Non-Goals](DESIGN.md#non-goals) and [PLAN.md § Design Pillars](PLAN.md#design-pillars): "Missions are template-driven and parameterized by world state. Sequential progression increases template difficulty/complexity over time. No authored dialog trees, no branching quest lines. Emergence remains preferred for moment-to-moment situations; missions provide legible scaffolding."
-4. **On-foot / character** -- *amend, direction (A) confirmed*. Add a `character/` subsystem to [DESIGN.md § Subsystems](DESIGN.md#subsystems). Minimal character creator (cel-shaded style, not Minecraft blocky; modest personalization). Scope: menu-driven interactions with NPCs/vendors, campfire, disembarked inspection. Gate to Phase 4/5. Tied to wildlife reward unlocks.
+4. **On-foot / character** -- *amend, direction (A) confirmed*. Add a `character/` subsystem to [DESIGN.md § Subsystems](DESIGN.md#subsystems). Minimal character creator authored in Blender by the project owner — Metal Slug-inspired cartoon simplicity rendered in the same cel-shaded + blended volumetric style as the rest of the world; modest personalization. Scope: menu-driven interactions with NPCs/vendors, campfire, disembarked inspection. Gate to Phase 4/5. Tied to wildlife reward unlocks. Detail in [On-Foot / Character](#on-foot--character).
 5. **Damage / economy / inventory** -- *amend, confirmed*. Add `damage/`, `economy/`, `inventory/` subsystems to [DESIGN.md § Subsystems](DESIGN.md#subsystems). Damage localized to zones, reduces component performance (including airfoil). Economy leans on a persistent Alaskan wilderness community frame.
 6. **Weather expansion** -- *amend, confirmed*. Amend [DESIGN.md § Simulation Architecture](DESIGN.md#simulation-architecture) to enumerate expanded weather state: precipitation regime, storm state, visibility, temperature, humidity, wind shear, water chop, season overlay. Update cadence per tick.
 7. **Deterministic seeded soundtrack** -- *ready*, no amendment required. Promote to ROADMAP Phase 3 milestone (Audio). See [Audio / Soundtrack](#audio--soundtrack).
@@ -149,18 +150,35 @@ Decisions recorded from the feature discussion. Items marked *amend* have been a
 
 ## Regional Biomes
 
-Each biome is a bundle of `{palette, flora, fauna, surface types, weather profile, hub archetypes, wildlife, soundtrack flavor}`. Specifically planned:
+Each biome is a bundle of `{palette, flora, fauna, surface types, weather profile, hub archetypes, wildlife, soundtrack flavor}`. Specifically planned, with explicit real-world references where the user has authored a locale target:
 
-- **Coastal Alaska (tundra + forested coast + interior bush)**: tundra tires on gravel strips, ski/float swaps seasonally, grizzly/moose wildlife, cold-start effects, long twilights, salmon-run motif.
+- **Coastal Alaska / Canadian boreal** (**baseline** — most of flowPlan evokes this): tundra + forested coast + interior bush + mountainous plains. Tundra tires on gravel strips, ski/float swaps seasonally, grizzly / moose / caribou / wolf wildlife, cold-start effects, long twilights, salmon-run motif. **Stunning alpine lakes, cliff regions, tons of remote recreational landing options** — the bush-pilot ideal.
 - **Boreal lake country (Canadian shield / Finnish lakes analogue)**: innumerable small lakes, pine forests, low-density hubs, long shoreline docks, aurora seasonally (visual treat).
-- **Mediterranean archipelago**: turquoise water, white/terracotta ports, dense island clusters, limited hub services between majors, clear visibility baseline punctuated by mistral-like wind events.
+- **Mediterranean archipelago + inland seas**: turquoise water, white/terracotta ports, dense island clusters, large coasts, inland ocean crossings, limited hub services between majors, clear visibility baseline punctuated by mistral-like wind events. Blends naturally with coastal Alaska.
 - **Pacific Northwest**: dense fog, low cloud, heavy rain, fjords, logging camps, lumber mill docks, salmon-smoking canneries.
 - **Rocky / Alpine**: density-altitude, short lake windows, narrow valley flying, fire-hopping, water-bomber drops, glacier-dammed lakes.
 - **Subarctic / North Atlantic**: basalt coasts, stormy sea, heavy fog, reindeer/puffin wildlife, geothermal steam plumes, midnight sun in summer.
 - **Tropical island chain**: reefs (visual, flight-height awareness), squalls, trade winds, coconut-palm atolls, protected lagoons as easy landings.
-- **High Desert / Plateau**: dust devils, heat shimmer, dry-lake landings, thunderstorm anvils on horizon, leaf/dust debris events.
+- **High Desert / Plateau** (*currently favored Region 4 candidate; author personal affinity — reference locales on hand*): think **Grand Mesa** (isolated flat-top massif rising from the plateau), **Flatirons** (tilted sedimentary slabs against a grassland front), **Arches** (red-rock formations, natural stone spans), scrubby plains, rattlesnake canyons, rivers cutting through rock, **railroads** (iconic industrial signature), rolling dunes / hills, dust devils, heat shimmer, dry-lake landings, thunderstorm anvils on horizon, leaf/dust debris events, **dark-sky observing sites** (ties into astrophotography night-sky feature).
 
 Each biome contributes to the shared feature taxonomy below (surface types, weather regimes, wildlife spawns, hub archetypes).
+
+### Biome adjacency rule (structural — enforced by the generator)
+
+Biome transitions must be **climate-gradient coherent**. Two biomes can be adjacent iff there's a plausible climate gradient between them.
+
+**Forbidden transitions:**
+- snow / tundra ↔ dry desert
+- snow / tundra ↔ tropical archipelago
+- high desert ↔ temperate archipelago without a buffer biome
+- any "Category A ↔ Category C" without a Category B buffer between them
+
+**Acceptable transitions:**
+- alpine → tundra → boreal forest → temperate forest → plains
+- coastal boreal → coastal temperate → Mediterranean coastal
+- Rocky alpine → high-desert plateau (geographically real in many mountain-basin interfaces)
+
+This is a generator-level constraint, not aesthetic polish. Encoded as a biome-adjacency graph; biome placement rejects forbidden-pair adjacencies at bake time. Detail in [MAPGEN.md § Biome system](MAPGEN.md#biome-system).
 
 ---
 
@@ -189,39 +207,116 @@ Each biome contributes to the shared feature taxonomy below (surface types, weat
 - **No shore classification.** Beach, cliff, rocky headland, estuary, delta all look the same (whatever height+color the sum-of-sines produces). Hub placement can't distinguish safe float landing zones from surf-prone exposed coasts.
 - **Repetitive look at distance.** 4 km patch tiled procedurally reveals the sinusoidal basis when flown over for long.
 
-### Future terrain design (Phase 3+ target)
+### Future terrain design (Phase 3.6 target)
 
-- **[sketch]** Proper terrain representation that decouples amplitude and gradient -- e.g., ridged noise plus domain warping, or a hand-authored heightmap with procedural detail overlaid. Enables genuine beach flats adjacent to mountain backdrops.
-- **[sketch]** Hydrological realism: elevation lakes (ice-dammed, alpine tarns, oxbow lakes), rivers carved along gradient lines, drainage basins, deltas and alluvial fans at river mouths, waterfalls at elevation jumps. Each water body has its own surface level, chop behavior, and palette.
-- **[sketch]** Shore classification: `sand_beach | gravel_beach | rock | cliff | mudflat | delta | ice_edge`, driving hub placement, landing feasibility, spray / foam / splash behavior, and wildlife spawn tables.
-- **[sketch]** Heightmap base with vector overlays for rivers, lakes, coastlines, ridges, tree-line, field/forest polygons (original sketch, still the likely baseline representation).
-- **[sketch]** Build-time baking of all static meshes; runtime streaming only for distant LOD swap.
-- **[sketch]** Placed landmarks for dead-reckoning: mountains, towers, lighthouses, wrecks, bridges, unusual rock formations, logged cut-blocks, river bends, waterfalls.
-- **[sketch]** Biome-specific flora density and palette that feed cel shading.
-- **[sketch]** Erosion-shaped terrain features near water (alluvial fans, river deltas, sandbars) supporting bush landings on suitable sandy surfaces.
-- **[sketch]** Water-body classification: `lake_small | lake_large | river | protected_bay | open_coastal | open_ocean | alpine_tarn | glacial`. Drives chop behavior, temperature, visual palette, and wildlife spawns.
-- **[sketch]** Snow-covered terrain variants per season for applicable biomes.
-- **[sketch]** Caves, gorges, canyons -- limited, for low-pass exploration and mission routing.
+Phase 3.6 Terrain rebuild + hydrology is the target milestone. Full design detail is in [MAPGEN.md](MAPGEN.md). Summary of what lands there:
+
+- **[ready: Phase 3.6a]** Proper terrain representation that decouples amplitude and gradient — ridged noise plus domain warping, biome-parameterized. Enables genuine beach flats adjacent to mountain backdrops.
+- **[ready: Phase 3.6b]** Hydrological realism via a world-bake hydrology graph: rivers carved along drainage-network gradients, lake basins at local minima, coastlines at sea level, river-continuity invariants at chunk boundaries, rivers grow into lakes. Waterfalls at elevation jumps. Each water body has its own surface level, chop behavior, palette.
+- **[ready: Phase 3.6c]** Shore classification: `sand_beach | gravel_beach | rock | cliff | mudflat | delta | ice_edge`, driving hub placement, landing feasibility, spray / foam / splash behavior, and wildlife spawn tables. Exposes `world::surface_at(x, z) -> SurfaceClass` which **unblocks [Milestone 2.5b.7 per-surface friction](ROADMAP.md#milestone-25-ground--water-contact-physics)**.
+- **[ready: Phase 3.6c]** Heightmap base with vector overlays for rivers, lakes, coastlines, ridges (per MAPGEN.md baseline representation).
+- **[ready: Phase 3.6c]** Placed landmarks for dead-reckoning: mountains, towers, lighthouses, wrecks, bridges, unusual rock formations (**arches, mesas, flatirons** for high-desert per biome-specific references), logged cut-blocks, river bends, waterfalls.
+- **[ready: Phase 3.6d]** Biome-specific flora density and palette that feed cel shading.
+- **[ready: Phase 3.6b]** Erosion-shaped terrain features near water (alluvial fans, river deltas, sandbars) supporting bush landings on suitable sandy surfaces. Large sandbar / sand-beach coastline aesthetics explicitly in scope.
+- **[ready: Phase 3.6b]** Water-body classification: `lake_small | lake_large | river | protected_bay | open_coastal | open_ocean | alpine_tarn | glacial`. Drives chop behavior, temperature, visual palette, and wildlife spawns. Small aesthetic water features (creeks, streams, waterfalls, sandbars, inland ocean crossings) emerge from graph + shore classification as feature types.
+- **[ready: Phase 3.6d]** Snow-covered terrain variants per season for applicable biomes (altitude-gated; respects biome adjacency rule so transitions stay climate-gradient coherent).
+- **[sketch]** Caves, gorges, canyons — limited, for low-pass exploration and mission routing. Mesh vs heightfield-hole representation TBD.
+- **[sketch]** Build-time baking of all static meshes; runtime streaming only for distant LOD swap. Chunk model (square vs hex vs Voronoi) is an [open question in MAPGEN.md](MAPGEN.md#chunk-model).
+
+Each sub-feature is potentially a considerable undertaking at its own time; Phase 3.6 is sized accordingly (candidate for splitting if it grows).
 
 ---
 
 ## Hubs & Landing Areas
 
-- **[sketch]** Unified hub feature model: each hub declares `{surfaces, services, vendors, mission sources, wildlife nearby, population tier}` as data.
-- **[sketch]** Population tiers: `major | regional | local | remote | isolated`. Tier drives available services.
-- **[sketch]** Surface types per hub: `grass_field | gravel_strip | paved_runway | dock | beach | lake_ramp | amphib_combo | snow_strip | ice_runway | floating_platform`.
-- **[sketch]** Service types: `refuel | repair_minor | repair_major | resupply_basic | resupply_specialty | upgrade_vendor | hangar | mission_board | avionics | paint_shop | barn_find_trailer | cartographer`.
-- **[sketch]** Full-service airfield -- paved/gravel strip, hangar, repair, refuel, upgrade vendor, mission board, paint shop, cartographer.
-- **[sketch]** Full-service seaplane base -- docks, wet hangar, repair, refuel, upgrade vendor, mission board, mooring buoys.
-- **[sketch]** Mixed amphibious hub -- both surfaces, supports amphibs and swap configurations.
-- **[sketch]** Minor resupply hubs -- bush gas station (taildragger on the taxiway of a dirt road), dock near a baitshop (floatplane for tackle), farm strip next to a barn (grass with a sock), general store on the waterfront.
-- **[sketch]** Remote hubs (mission-only) -- clearing with a radio tower, ranger cabin, research station, fish cannery, logging camp, fire-fighter forward operating point.
-- **[sketch]** Isolated hubs -- unmarked on maps until discovered, may be abandoned, may have special mission reward.
-- **[sketch]** Fire-hopping forward bases -- short strip near active fires with water/retardant refill (Colorado-analogue region).
-- **[sketch]** Dock variants: private, commercial, municipal, marina, fishing camp, research dock.
-- **[sketch]** Discoverability: many remote hubs are uncharted until flown over or referenced by a mission; cartographer upgrade can annotate known hubs on the map.
-- **[sketch]** Hub-specific markets: prices for fuel, supplies, repairs vary by tier and remoteness.
-- **[sketch]** Inter-hub relationships: supply contracts between major and remote hubs generate persistent delivery demand.
+Hubs are the narrative and economic anchors of the world. flowPlan uses a **5-tier population model** that drives every other property: layout, runway count + length, hangar capacity, mission count, available aircraft for trade, amenities, and whether the hub supports hangout / multiplayer-chat / emote interactions. Each tier has a distinctive **feel** that the player learns to read at a glance.
+
+### Unified data model
+
+- **[sketch]** Each hub declares `{tier, surfaces, services, vendors, mission sources, wildlife nearby, runways, aircraft parking slots, biome, water-adjacency}` as data-driven RON.
+- **[sketch]** **Population tiers:** `major | regional | local | remote | isolated`. Tier drives available services and layout.
+- **[sketch]** **Surface types:** `grass_field | gravel_strip | paved_runway | dirt_road | dock | beach | lake_ramp | amphib_combo | snow_strip | ice_runway | floating_platform`.
+- **[sketch]** **Service types:** `refuel | repair_minor | repair_major | resupply_basic | resupply_specialty | upgrade_vendor | hangar | mission_board | avionics | paint_shop | barn_find_trailer | cartographer | mooring_manual`.
+- **[sketch]** **Runway naming convention:** runways use **real-world degree/360 numbering** (e.g. runway **09/27** aligns with magnetic heading 090°/270°; runway **36** is due north). Parallel runways are suffixed `L` / `R` / `C` (e.g. `18L` / `18R`). **No fictional numbering — this is pilot-facing data and must be authentic.** Runway orientation stored as magnetic heading in degrees; the display digit pair derives from it. Any hub-generator or authoring tool rejects runway data whose numbering doesn't match its heading.
+- **[sketch]** **Water/land duality rule:** any hub adjacent to a usable water body (lake, inland sea, river wide enough to land) **must provide water-entry/exit conversion services** — dockside refuel for floatplanes, a ramp or beach for amphibs to transition gear, mooring options for temporary tie-up. The inverse holds: hubs with runways that are also near water expose both surfaces as first-class landing options. The data model prevents the "seaplane base with no way to leave the water" degenerate case.
+- **[sketch]** **Hangout / chat / emote support** scales with tier (see per-tier details below). Target: v1 ships single-player hangout affordances (emote at a campfire, sit at a dock, park-and-look-around); live-chat / multiplayer lobby belongs to [Multiplayer stretch phase](#multiplayer-stretch-goal-post-v1).
+- **[sketch]** **Mission count** scales with tier: 7–15 (major) → 5–10 (regional) → 3–7 (local) → 1 (remote) → rare-and-special (isolated). Each mission is procedurally parameterized from world state (weather, cargo, season, reputation, time-of-day) per [Missions & Tasks](#missions--tasks). Mix includes `destination | round-trip | one-way | supply-chain-leg`; larger hubs tend toward heavier loads and longer distances.
+- **[sketch]** **Aircraft parking slots** are hub features: each has a `{position, size_class, type_constraint, rarity}` — and the slot state (which aircraft currently sits there, or empty) is deterministic per seed + day-of-year + RNG roll. Larger hubs host more diverse + larger aircraft; remote hubs may have nothing parked at all; isolated hubs occasionally hide a barn-find.
+
+### Tier 1 — Major hubs (large, multi-function, social)
+
+- **[sketch]** **Layout:** structured but variable. Baseline: two large square/rectangular hangars, an office building, a medium/small control tower (still remote locale — flowPlan does not ship international airports), ancillary structures (maintenance shed, fuel farm, weather station).
+- **[sketch]** **Runways:** 2–3 of varying length. Longest accommodates the largest aircraft in the catalog (flying boats, Twin Otter, Caravan, Pilatus PC-12, water bombers). Mix of paved and gravel / grass for character variety. Parallel runway option (suffixed L/R) when airspace / terrain allows.
+- **[sketch]** **Water access:** typically large lake or inland sea adjacent, depending on biome. Full seaplane base tier (docks, wet hangar, mooring buoys, beach / ramp for amphibs).
+- **[sketch]** **Services:** full — refuel, repair_minor, repair_major, resupply_basic, resupply_specialty, upgrade_vendor, hangar (owned-aircraft storage, home-hub designation), mission_board, avionics, paint_shop, barn_find_trailer, cartographer.
+- **[sketch]** **Aircraft parked / available:** RNG-gated each day. **Always** 2–3 small aircraft present (sometimes for trade, sometimes just as ambient detail). **Rarely** 2 medium aircraft. **Very rarely** 1 large aircraft. Parking slots can be blank depending on RNG roll — the world feels alive because the fleet moves.
+- **[sketch]** **Missions:** 7–15 available, refreshing on a slow cadence. Supports larger distances and heavier loads. Supply-contract legs (major ↔ remote) originate here. Wildlife-mission category integrated into the board with iconography + filter.
+- **[sketch]** **Hangout / social:** the tier with the most social affordances — seating areas near the office, a fuel-pump waiting bench, walkable taxiway edges, dockside. In single-player this enables pause-and-enjoy vignettes; in the Phase 6 multiplayer stretch-goal this is where the text-chat lobby + callsign-overlay experience is richest.
+- **[sketch]** **Vendors:** all types present. Paint shop anchored here (see [Livery & Customization](#livery--customization)). Cartographer sells regional chart packs.
+
+### Tier 2 — Regional hubs (medium, working, character-rich)
+
+- **[sketch]** **Layout:** 2–3 quonset-hut hangars (iconic curved-roof bush-pilot architecture), office with antenna / radio tower but **no control tower** (the tier's distinctive feature). Firewatch tower optional where biome calls for it (forested regions, fire-season Rocky).
+- **[sketch]** **Runways:** one runway, sometimes dirt; maybe two when parallel geometry works. Length accommodates small and most medium aircraft but not the largest cargo.
+- **[sketch]** **Water access:** often adjacent to rivers or large / medium lakes. Dock + float refuel where applicable. Ramp for amphib gear-up/down.
+- **[sketch]** **Services:** most services present except `repair_major` (field-repair tier only), `avionics` (have to fly to a major for glass-panel install), `paint_shop` (not here), `barn_find_trailer` (only majors arrange trailer transport).
+- **[sketch]** **Aircraft parked / available:** **1–2 small aircraft typically**, 2–3 small occasionally. **Rarely** 1 medium aircraft. No large aircraft. Blank slots acceptable on RNG roll.
+- **[sketch]** **Missions:** 5–10 available. Mix leans toward local delivery + regional supply + passenger transfer. Some wildlife runs origin here.
+- **[sketch]** **Hangout / social:** less structured than major hubs but still supported — sit near the office, inspect the firewatch tower, dock-side bench.
+
+### Tier 3 — Local hubs (small, rural, approachable)
+
+- **[sketch]** **Layout:** no hangar building; one or two tie-down spots, a small shed / office combo, a fuel pump, sometimes a wind sock and nothing else. Usually adjacent to a dirt road wide and flat enough for small / medium geared aircraft takeoff (the road IS part of the takeoff surface in some designs — classic Alaska / Canadian bush pattern).
+- **[sketch]** **Runways:** dirt / grass / gravel primary. Often shares ground with the adjacent road.
+- **[sketch]** **Water access:** adjacent to small or medium lakes, rivers. Seaplane operations supported where geometry allows.
+- **[sketch]** **Services:** basic — refuel, resupply_basic, mission_board, mooring_manual. No hangar storage, no specialty services.
+- **[sketch]** **Aircraft parked / available:** usually **1–2 small aircraft** available for trade or purchase. Very rarely medium. Slots can be blank.
+- **[sketch]** **Missions:** 3–7 available. Mostly short-haul delivery, message/mail, livestock / supply drops, occasional rescue.
+- **[sketch]** **Hangout / social:** minimal infrastructure but a chair or two near the office; the dirt-road-as-runway gives a distinctive low-ceremony feel.
+
+### Tier 4 — Remote hubs (scenic, exploration-forward, mostly bush/float)
+
+- **[sketch]** **Layout:** single structure or cluster (bait shop lakeside, campground, ranger cabin, fishing camp, logging camp, research station, fire-fighter forward operating point, small cannery). No hangars, no formal runway markings. The **place itself** is the hub.
+- **[sketch]** **Landing surface:** clearing, beach, short grass strip, lake, river. Typically bushplane-specific or floatplane-specific. No paved anything.
+- **[sketch]** **Water access:** often the primary surface. Manual mooring (dockside or shoreline tie-down) rather than a formal seaplane base.
+- **[sketch]** **Services:** none formal. At most a small supply cache (food / water / fuel can) or nothing at all. `mooring_manual` is the hub's defining affordance.
+- **[sketch]** **Aircraft parked / available:** **occasionally (rarely)** 1 aircraft moored or parked for trade/purchase. Most days, nothing. The rare aircraft when it appears is often unusual (bushplane variant, vintage airframe).
+- **[sketch]** **Missions:** exactly **1 task or mission** available — exploration-driven. Often wildlife-runs (commune with bears at a natural clearing, log an orca pod from a cove, photograph a rookery at dawn), or delivery to the remote camp's occupants.
+- **[sketch]** **Discoverability:** **many remote hubs are uncharted** until flown over, referenced by a radio transmission, or unlocked by a mission hint. Cartographer upgrade reveals known remote hubs on the map.
+- **[sketch]** **Hangout / social:** **the gameplay point of these destinations.** Must be **scenic** — an interesting reason to fly there. Campground benches, dockside fishing spots, natural clearings with wildlife, lookouts over a fjord, hot springs, abandoned lighthouse. Player lands, manually moors / ties down / taxis to a sensible park spot, disembarks, sits / emotes / explores on foot. In Phase 6 multiplayer, small groups can choose to meet here for the atmospheric payoff.
+- **[sketch]** **Wildlife angle:** remote tier has the most concentrated wildlife spawns. Bears at a fishing camp, moose near a salt lick, eagles at a rookery, whales past a headland. Wildlife-run category often culminates at remote hubs.
+
+### Tier 5 — Isolated hubs (uncharted, barn-find territory)
+
+- **[sketch]** **Layout:** nothing formal. Abandoned airstrip overgrown with grass, a derelict fishing cabin, a forgotten logging-road clearing, a pristine cove with no human presence, a high-alpine tarn only reachable in calm weather.
+- **[sketch]** **Landing surface:** whatever geometry permits. Often bushplane-only; sometimes float-only; sometimes requires a specific aircraft configuration (STOL, tundra tires, amphib).
+- **[sketch]** **Water access:** typically yes — these hubs exist because a remote lake / cove / river segment is usable. Float / amphib is the common access method.
+- **[sketch]** **Services:** none.
+- **[sketch]** **Aircraft parked / available:** **barn-find tier.** Rare antique / abandoned aircraft may be present — only discoverable by landing here, and sometimes only reachable *by* a specific aircraft (e.g. a Super Cub can reach an alpine tarn that a Beaver cannot). Discovery triggers a barn-find mission: arrange trailer transport (from a complex hub via `barn_find_trailer` service) back to a hangar for restoration.
+- **[sketch]** **Missions:** no formal board. The hub itself is the reward — logbook "moment," cosmetic unlock, cartography annotation, rare-aircraft discovery.
+- **[sketch]** **Discoverability:** always uncharted until discovered. No radio hint, no mission reference. Pure exploration payoff. May be referenced in rare message-in-a-bottle catches (see [Fishing](#fishing)) or wildlife-mission dialog fragments.
+- **[sketch]** **Hangout / social:** pristine environments. The whole tier is a "found this, it's mine now" feeling. Multiplayer sessions visiting an isolated hub create shared-discovery logbook entries.
+
+### Cross-tier conventions
+
+- **[sketch]** **Fire-hopping forward bases** (Rocky / Colorado biome) are tier-3-or-4 in layout but with a specialized `water_retardant_refill` service. Short strip near active fires; used during fire season community events.
+- **[sketch]** **Dock variants at tiers 1–4:** private, commercial, municipal, marina, fishing camp, research dock — visual + narrative flavor, not mechanical difference.
+- **[sketch]** **Hub-specific markets:** prices for fuel, supplies, repairs vary by tier and remoteness. Tier 1 = lowest fuel prices (volume discount); tier 5 = no market at all; tier 4 may have a single overpriced fuel jerry can.
+- **[sketch]** **Inter-hub relationships:** supply contracts between major and remote hubs generate persistent delivery demand. Completing these shifts the community state (grocery stocked, clinic supplied, fire-watch tower reopened).
+- **[sketch]** **Home-hub designation:** player picks one tier-1 or tier-2 hub as "home" — free hangar, free livery edits, loyalty bonus, social affordances unlocked first here.
+- **[sketch]** **Tier doesn't imply location fixedness under procedural generation.** Tier + biome + hydrology context determine where a hub of a given tier *can* spawn (a tier-1 major requires water adjacency + flat ground for the long runway + population nearby). The generator places hubs at terrain-plausible coordinates; the tier specifies what goes *at* those coordinates.
+- **[sketch]** **Hub content authoring vs procedural:** tier-1 and tier-2 hubs are strong candidates for **authored layouts with procedural neighbors** (per MAPGEN.md Option 2–3). Tier-3 and tier-4 hubs are mostly procedural with authored structure libraries (pick a quonset hangar + pick an office + place a firewatch tower). Tier-5 isolated hubs are purely emergent — the hydrology graph + terrain + discovery rules produce them.
+
+### Runway authoring rules (reminder)
+
+Runway numbering is **pilot-facing** data. These rules are non-negotiable:
+
+- Heading stored as magnetic bearing in degrees (0–359).
+- Display number = round(heading / 10) with `0` → `36`. E.g. heading 91° → runway `09`; heading 270° → runway `27`.
+- Both-ends numbering = heading + 180° (modulo 360) → opposite display. Runway `09/27` is the same physical strip; which display the pilot uses depends on approach direction.
+- Parallel runway suffixes `L/R/C` (e.g. `18L` / `18R`) only when parallel runways actually exist.
+- Hub RON authoring tool validates that display numbering matches heading. Mismatches are authoring bugs.
+- Magnetic variation is biome-dependent at world-bake time (more accurate over vast procedural worlds). Held deterministic per master seed.
 
 ---
 
@@ -466,6 +561,8 @@ v1 ships with fully-working keyboard and gamepad profiles plus the mapping UI. H
 - **[sketch]** Ground effect near surface (reduced induced drag within ~1 wingspan of ground/water).
 - **[sketch]** P-factor, torque, adverse yaw, gyroscopic effect -- tunable per aircraft, dampen for accessibility modes.
 - **[sketch]** Slipstream / prop wash over rudder and elevator at high power + low airspeed: their authority exceeds what freestream airspeed suggests.
+    - **[partially shipped: Phase 2.5a / 2.5b.4]** Elevator slipstream q-boost (`q_local_at_elevator = q_dyn + slipstream_q_boost`, ungated) and rudder slipstream q-boost (`RUDDER_SLIPSTREAM_Q_PER_N = 0.15`, airspeed-gated to match real Beaver rudder ineffectiveness at taxi speed) shipped with 2.5a / 2.5b.4. Delivers the pilot-reported real effect at full power + low airspeed.
+    - **[open]** Rudder asymmetry: testing reports that **right rudder in particular feels underpowered** relative to left. This may match the real DHC-2 Beaver (right-rotating prop produces left-yawing moments that the rudder normally offsets — hence right rudder "does less work" in straight flight). Continued dynamics work may want to apply additional slipstream/propwash authority to rudder on the side where prop-induced yaw demands it, similar to the elevator boost. Worth a targeted investigation when Phase 3.2 weather / 3.5 coefficient-tune pass revisits rudder balance.
 - **[sketch]** Cross-controls / slip / skid: intentional slip for short-field approaches; unintentional skid in uncoordinated turns as a classic stall-spin setup.
 - **[sketch]** CG shift: fuel burn and cargo movement shift CG over time, affecting pitch trim and stall characteristics.
 - **[sketch]** Wind response: gusts perturb attitude; crosswind demands rudder/aileron coordination on landing; wind shear near terrain and thunderstorm gust fronts.
@@ -597,6 +694,13 @@ Weather is a first-class emergent systems driver. It influences feel, ambience, 
 - **[sketch]** Pleasant-weather beats: morning mist curling off wingtips, sun breaking after rain, alpenglow, aurora (subarctic), heat shimmer on desert runway, golden-hour landings.
 - **[sketch]** Adverse-weather beats: approaching storm wall, gust-front rotor on short-final, whiteout on snow takeoff, icing buildup, unexpected wind shift.
 - **[sketch]** Weather patches are spatial and move: pilot can fly around a squall, over a low layer, or under a ceiling.
+
+### Visual target — volumetric, not billboarded
+
+- **[amend]** Clouds target **volumetric in-game**, not 2D billboards. The [PLAN.md](PLAN.md) entry about "2D billboards near camera, optional volumetric only in cutscenes" is out of date / was never audited in detail. Phase 3.2x delivers the volumetric implementation. Cel-shading compatibility via banded alpha steps + hard-edge thresholding on volumetric sampling — the art direction is a constraint, not a reason to fall back to billboards.
+- **[sketch]** Storm visuals (cumulonimbus anvils, squall-line walls, gust-front rolls, lightning flashes, distant rain curtains) benefit directly from volumetric cloud primitives. Layered cloud regimes (low stratus below higher cumulus) are natural in a volumetric system.
+- **[sketch]** Atmospheric optics in scope: sun halos, sun dogs, rainbows, crepuscular rays through broken decks. These are inexpensive when the cloud system is volumetric; expensive bolt-ons when it isn't.
+- **[sketch]** Performance discipline: cloud rendering sits inside the DESIGN.md frame-budget ceiling (60% GPU utilization at 240 Hz reference tier). Forward-thinking constraint on render-cost per pass: ≤ 0.6 ms on reference at target quality.
 
 ---
 
@@ -813,12 +917,58 @@ Light side-activities that add texture without becoming mini-games in the negati
 
 ## On-Foot / Character
 
-- **[sketch]** Minimal character creator:
-    - Cel-shaded style, avoiding Minecraft-blocky or early-3D shapes.
-    - Modest personalization: body type (a few options), skin tone, hair, face, clothing palette.
-    - One or two outfit sets (bush pilot, coastal, winter).
-    - Gender-inclusive, non-committal defaults.
-- **[sketch]** Third-person default camera; first-person optional.
+### Art direction — Metal Slug-inspired, integrated with the cel-shaded world
+
+- **[sketch]** **Art target: Metal Slug-level cartoon simplicity.** Appeal comes from **simple shapes and style**. The character lives inside the same visual language as the rest of flowPlan — cel-shaded with banded diffuse, bold outlines, flat colors, and the advanced blended / volumetric atmospheric style the scene uses. Outfits, face features, and body silhouettes all render under the same shader family as aircraft and world geometry, so the pilot reads as part of the world, not pasted onto it.
+- **[sketch]** Character art is **authored by the project owner in Blender**. Rigging + base mesh + outfit modeling are art-role deliverables; implementation work supports the rig rather than specifying it in code. Art-direction iteration belongs to the project owner; the systems support whatever aesthetic the art lands on.
+
+### Character creator — body sliders
+
+- **[sketch]** **Height slider** — overall character height within a reasonable player-pilot range.
+- **[sketch]** **Body shape sliders — independent, non-mutually-exclusive axes** (so the creator is **gender-agnostic** by construction rather than by opt-out):
+    - Muscle tone / boxy-figure slider (lean → bulky frame).
+    - Slender / curvaceous slider (reed-thin → fuller shape).
+    - These two axes coexist — any combination is valid. There is **no male↔female axis**; the sliders operate independently and collectively describe the character's silhouette.
+- **[sketch]** **Per-region shape sliders** (2–3 per area) — shoulders / torso / hips / arms / legs can each be nudged for fine-tuning within the Metal-Slug-simple register. Not anatomically detailed; style-preserving.
+- **[sketch]** **Face sliders** — simple face shape (round / long / square), simple eye shape (the Metal-Slug-simple register — dots, crescents, slight variations), skin tone, hair option (small library of cel-shaded hair cards).
+- **[sketch]** **Skin palette** — a small library of tones rather than a full color picker; each tone is cel-shade-compatible with pre-authored shading bands.
+
+### Outfit system
+
+#### Slot taxonomy
+
+Outfits are modular across eight slots. Each slot carries its own mesh, rig-attachment, primary color, optional secondary color, and unlock status.
+
+- **[sketch]** **Hat** — bush-pilot cap, beanie, ushanka, straw hat, earmuffs, headband, bare-head (none).
+- **[sketch]** **Goggles / eyes** — aviator goggles, sunglasses, prescription glasses, eyepatch (bonus), clear (none). Sits on top of face features.
+- **[sketch]** **Lowerface / mouth** — dust scarf, balaclava, moustache, beard, neckerchief pulled up, bare (none).
+- **[sketch]** **Shoulders / neck** — shoulder holster (cosmetic only — no weapons), suspenders, scarf drape, cape (bonus / remote-unlock), plain (none).
+- **[sketch]** **Torso** — flight jacket, vest, shirt, parka, polo, tank, cargo vest. This is the primary color-coordination slot.
+- **[sketch]** **Gloves / arms** — fingerless gloves, thick leather gloves, bracers, sleeve variants, bare (none).
+- **[sketch]** **Pants / shorts** — cargo pants, jeans, cargo shorts, work pants, slacks, snow pants.
+- **[sketch]** **Shoes / boots** — bush boots, sneakers, waders, mukluks, sandals (bonus / tropical).
+
+#### Color system
+
+- **[sketch]** **Primary color per item: overlaid on the item's shading map.** This is the color-coordination-friendly default. Each outfit item has an authored cel-shaded band set; the primary color tints the band palette while preserving contrast and readability. Easy for the player to get a cohesive look.
+- **[sketch]** **Secondary color per item (optional):** available where the item's authoring exposes a secondary region (e.g. stripe on a jacket, cuff on a glove, band on a hat). Not every item has a secondary region — that's authoring-intentional.
+- **[sketch]** **Color picker:** the same HSV dial + recent-colors tray used in the [paint shop](#livery--customization). Consistent UI tool across livery + character color work.
+- **[sketch]** **Color coordination hint:** the customizer surfaces suggested complementary colors when the player picks a primary, nudging toward cel-compatible palettes. Not a hard constraint — player can choose anything — but default suggestions keep the average result harmonious.
+
+#### Rig + animation requirements (underlying systems support)
+
+- **[sketch]** **Outfit meshes are rigged to the character's base rig** so they follow body deformation correctly during:
+    - Walk cycles (locomotion on foot).
+    - Jog / idle animations (standing around, looking around).
+    - Emote animations (wave, sit, point, stretch, shrug, tip-hat, thumbs-up, looking-at-watch, lean-on-aircraft).
+    - State transitions (disembark, climb-into-cockpit, crouch-to-inspect).
+- **[sketch]** **Outfit scaling under body sliders:** when the player dials up muscle tone or torso breadth, equipped outfit meshes must scale / stretch sensibly with the body. Blend-shape or rig-driven morphs are the likely mechanism; the exact technique is a Blender-rigging decision owned by the project owner.
+- **[sketch]** **No clipping in normal ranges:** the customizer's slider ranges are authoring-bounded to prevent outfits from clipping through the body at extremes. Extreme combinations are either clamped or silently smooth out.
+- **[sketch]** Implementation side: the character / outfit system must accept a rigged base mesh + a collection of rigged outfit slot meshes, with per-slot primary/secondary color uniforms. No per-slot custom shader logic; one shared character shader with color-overlay inputs.
+
+### On-foot mechanics
+
+- **[sketch]** Third-person default camera; first-person optional. Consistent switching paradigm with in-aircraft views (see [Camera & Views](#camera--views)).
 - **[sketch]** Walking / jogging movement; no sprint, no combat.
 - **[sketch]** Interaction targets:
     - Parked aircraft (open door, inspect damage, manual load/unload, preflight walk-around).
@@ -826,12 +976,30 @@ Light side-activities that add texture without becoming mini-games in the negati
     - Campfire site (collect wood, light fire, sit, "camp until morning").
     - Fishing spots (if fishing pole upgrade unlocked).
     - Vendor kiosks / shop fronts.
-- **[sketch]** Hub walkability: major hubs have a small walkable footprint; remote hubs may allow circling the aircraft and interacting with one or two NPCs / structures.
+    - Hub hangout benches / docks / lookouts — sit, emote, observe (ties into Phase 6 multiplayer hangout affordances).
+- **[sketch]** Hub walkability scales with tier (see [Hubs & Landing Areas](#hubs--landing-areas)): major hubs have a small walkable footprint with multiple interaction points; remote hubs allow circling the aircraft and interacting with one or two NPCs / structures.
 - **[sketch]** Minimal NPC animation budget: static poses, idle loops, one-arm acknowledgment gesture. Dialog is menu/card based.
 - **[sketch]** Disembark / embark state machine: `in_flight | taxi | parked_cockpit | parked_walkaround | on_foot_free`. Each state enables a distinct control set.
 - **[sketch]** Camera transitions between states smoothed.
-- **[sketch]** Wildlife rewards tie into character customization (new clothing items, accessories).
-- **[sketch]** Pets (deferred, optional): small companion at a home hub? (kicked to open questions).
+
+### Progression integration — cosmetics as reward
+
+- **[sketch]** **Player opt-in cosmetic reward:** when completing a delivery / mission, the reward screen offers a choice — take financial reward (credits) or take a rare/special cosmetic outfit piece or accessory instead. Not both. Player decides per mission. The "non-financial wildlife-run reward" category from PLAN.md generalizes here to all mission types.
+- **[sketch]** **Rarity scales with remoteness + difficulty:**
+    - Tier-1 major-hub missions → common cosmetic options (baseline outfit pieces, stock color swatches).
+    - Tier-2 regional missions → uncommon (distinctive items, minor unique shapes).
+    - Tier-3 local missions → rare (bush-pilot-specific kit, region-flavored items).
+    - Tier-4 remote missions → very rare (one-of-a-few cosmetic items, hub-themed accessories — the fishing-camp operator's distinctive hat, the fire-watch-tower ranger's jacket).
+    - Tier-5 isolated-hub discoveries → vanishingly rare cosmetics (antique pilot kit, heirloom accessories matching a found barn-find aircraft). Exploration-earned.
+- **[sketch]** **Wildlife-run cosmetics** remain the protected non-financial-progression tier (bear-country jacket, orca-sighting pin, aurora-chaser scarf). These stack additively on the general cosmetic reward pool.
+- **[sketch]** **Unique pre-designed outfits** (wildlife / exploration / seasonal-event-unlocked) are apply-only, not editable. Players can apply without color-picking — the authored palette is the reward. Editable outfits come from the general slot system.
+- **[sketch]** **Seasonal / event cosmetics:** community events (salmon run, fire season, winter freeze-up, festival) unlock themed items during their active window. Preserved permanently once earned.
+
+### Open questions for the customization system
+
+- **[sketch]** Character customization anchor point — at the home hub only, at any hub with a mirror / camp, or anywhere at rest? Leaning: home hub + any camp.
+- **[sketch]** Outfit save slots — how many named presets (morning-run set, stormy-day set, formal set)?
+- **[sketch]** Pets (deferred, optional): small companion at a home hub? (kicked to open questions.) If pursued, pets get their own minimal slot taxonomy (collar color, posture variant) subordinate to the character system.
 
 ---
 
@@ -876,15 +1044,45 @@ Light side-activities that add texture without becoming mini-games in the negati
 
 ## Livery & Customization
 
-- **[sketch]** Livery editor at paint-shop vendors:
-    - Rotate aircraft, paint on currently viewable texture (2D brush onto visible surface).
-    - Layer system: base color + pattern / stripe / spot decals + logos.
-    - Few bitmap texture options preloaded (rivets, canvas, polished, weathered).
-    - Save named schemes; share via screenshot/code export.
+### Initial scope (v1 target — Phase 5.3 Paint Shop)
+
+Simple but satisfying. Get painting feel + decal placement working; defer advanced compositing.
+
+- **[sketch]** Rotate aircraft in the paint-shop view (orbit / pitch / yaw controls) to expose the surface the player wants to paint.
+- **[sketch]** **Brush tools:** size-scalable brush shapes (round, square, star, stripe, custom — seeded catalog), all parameterizable by size and rotation. Click to place a shape at the cursor location; mouse-drag to apply as a brush stroke. Raycast from camera through cursor to the front-facing surface hit (non-culled surfaces only).
+- **[sketch]** **Color picker:** HSV dial + saturation / value sliders (vector-drawable, no bitmap picker assets) + hex input for precise color. Small recently-used-colors tray.
+- **[sketch]** **Layer model (v1):** single bitmap layer per aircraft in the simplest shipping version. Each brush / shape stroke rasterizes into that layer. This is the minimum that lets the player "spend time creating complex or simple arrangements of decals" without any compositing complexity.
+- **[sketch]** **Undo history:** per edit session. Undo / redo stack maintained while the paint-shop screen is open; **discarded** when the player exits and returns. Keeps per-aircraft save metadata small — the saved livery is the rasterized output, not the edit history.
+- **[sketch]** **Preloaded bitmap texture options:** small set of stylized overlays (rivets, canvas weave, polished metal, weathered finish) that apply as an additive layer. Cel-shade-compatible — banded alpha, hard thresholds.
+- **[sketch]** **Save:** named livery slot per aircraft; swap between saved liveries at any paint shop.
+- **[sketch]** **Share:** screenshot + human-readable paint code export (color + stroke list for regeneration on import). Post-v1 livery marketplace hook preserved by making the code format stable.
+
+### Extended scope (post-v1 / progression tier — hybrid layers)
+
+Once v1 ships and the initial paint workflow is in play, expand toward a richer compositor without breaking back-compat.
+
+- **[sketch]** **Multi-layer model:** base color + procedural-texture slot (one of the bitmap overlays) + decal layer for stripes/logos/shapes placed with the brush tools. The decal layer handles the "perspective-based shape placement on non-culled visible surfaces" — each decal is raycast from camera + projected onto surface normal at the hit point.
+- **[sketch]** **Layer operations:** flatten layers down to the base bitmap (saves on storage space when the player is done composing). Must preserve the ability to **return to edit with layers intact** — at the cost of slightly larger per-aircraft save payload for work-in-progress liveries. Flattened liveries are smaller and final; editable liveries are larger and resumable.
+- **[sketch]** **Session-scoped undo persists across the multi-layer session** (same rule as v1 — discarded on exit).
+- **[sketch]** **Symmetry / mirror toggle** for simultaneous left/right application.
+- **[sketch]** **Snap-to-edge / parallel-to-surface-feature** helper for stripes.
+
+### Cel-shading compatibility
+
 - **[sketch]** Cel-shaded compatibility: banded base + bold accent stripes read well; intricate detail is discouraged by the aesthetic but not forbidden.
+- **[sketch]** Anti-aliasing in UV paint must avoid blurring the banded look — paint rasterizes with hard edges.
+- **[sketch]** Decal projection uses crisp alpha thresholds compatible with the banded-diffuse shader.
+
+### Unlockable liveries
+
 - **[sketch]** Iconic homage liveries: player-recreations of real or iconic media liveries encouraged, not bundled by default (to avoid licensing).
 - **[sketch]** Livery persists per aircraft (lives in its save slot); can be restored after repaint.
 - **[sketch]** Liveries earned via wildlife / exploration are unique (pre-designed) -- can be applied but not modified.
+
+### Data format & save-format implications
+
+- **[sketch]** Per-aircraft livery save: rasterized PNG (for flattened v1-style) OR PNG + layer metadata (for extended work-in-progress). Bounded size; commits to the save-file budget in [Flight Log & Save Format](#flight-log--save-format).
+- **[sketch]** Detailed representation decision (UV-space vs decal projection vs hybrid) is pending formal design doc (candidate: `LIVERY.md` or expanded section here). Pre-Phase-4.10 lock so save-format plumbing knows what it's persisting.
 
 ---
 
@@ -905,6 +1103,39 @@ Light side-activities that add texture without becoming mini-games in the negati
 - **[sketch]** Shared musical key per biome -- maintaining tonal cohesion across zones.
 - **[sketch]** No pre-recorded music stems; everything is generative.
 - **[sketch]** Soundtrack stems unlock as cosmetic progression (new layer textures, new biome motifs).
+
+---
+
+## UI Direction
+
+flowPlan's UI is intentionally thin right now. The current debug overlay (dynamics HUD, orientation widget, attitude indicator, all drawn via `DebugLinesRenderer` and cel-shaded screen-space widgets in `crates/render/`) is the reference example of the target style. Proper UI lands in Phase 4+ — but the aesthetic and implementation direction is captured here so the implementing milestones build from a shared target rather than inventing one.
+
+### Principles
+
+- **[sketch]** **Prefer vector / math / shader-drawn UI over bitmap assets.** The current debug widgets demonstrate what's possible without loading PNG/BMP/texture files: signed-distance fields, outlined polygons, procedural gradients, banded alpha. "**It would be impressive if the whole UI didn't require any persistent files in the path to maintain.**" This is the explicit aesthetic target.
+- **[sketch]** Bitmap assets are permitted only when genuinely necessary (paint-shop preloaded overlays for rivets / canvas / polished / weathered; aircraft exterior textures; logos the player imports for liveries). Bitmap use is a decision, not a default.
+- **[sketch]** Cel-shading compatibility: banded fills, bold outlines, hard edges. Fine serif typography and soft gradients are anti-patterns.
+- **[sketch]** Determinism-neutrality: UI renders at display rate from telemetry + game state. Never writes back into sim.
+
+### Debug overlay preservation
+
+- **[sketch]** The current debug HUD stays in the codebase indefinitely. **Toggle-able in-game** so development + iteration on sim / flight-model work remains accessible even after proper player-facing UI lands. Bind key TBD at the Phase 4 UI work; today it's always on.
+- **[sketch]** The debug overlay is developer-facing; it has no localization, accessibility, or polish requirement. Player-facing UI is separate code path.
+
+### UI framework (PENDING)
+
+- **[sketch]** Framework decision is open. `egui` is banned outside debug overlays per [DESIGN.md § Non-Goals](DESIGN.md#non-goals). Candidates for the settings / menus / dialog / vendor / mission-board UI:
+    - Hand-rolled immediate-mode renderer using the existing `DebugLinesRenderer` / `TriangleList` pipeline. Maximum consistency with debug overlay; maximum effort per screen.
+    - `egui` behind a feature flag for non-debug menus specifically (requires DESIGN.md amendment).
+    - Hybrid: hand-rolled for in-world HUD + instruments, `egui` for flat settings/menu screens.
+- **[sketch]** Decision target: the `UI_ARCHITECTURE.md` design doc, pre-Phase-4.8.
+
+### Scope (by phase)
+
+- **Phase 2 (shipped):** debug HUD (egui top-right/top-left), orientation widget, attitude indicator (both vector-drawn).
+- **Phase 3 (sketched):** additional debug readouts as weather / autopilot / engine systems land — all via the same debug channel.
+- **Phase 4:** player-facing HUD (Milestone 4.8), graphics panel (4.8.5), difficulty panel (4.9), control bindings (4.7b), save/load (4.10). Plus: main menu, pause menu, settings shell, aircraft selector UI, NPC dialog cards, hub walk-around prompts, logbook viewer, 2D map view, preflight walk-around UI — **each of these is a latent gap identified during the Phase 2.5 close-out stock-take**.
+- **Phase 5:** paint shop (5.3), polished visuals, platform verification.
 
 ---
 
