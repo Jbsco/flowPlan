@@ -215,20 +215,27 @@ Any deterministic subsystem (sim tick, flight bench, world-gen bake, cloud densi
 1. **Use the `libm` crate for transcendentals in sim hot paths + world-gen paths.** Pure Rust, platform-independent implementations of `sin`, `cos`, `atan2`, `exp`, `log`, `sqrt` (for `fast_sqrt`), etc. Slower than stdlib by a few percent; worth it for bit-identical cross-platform output.
 
     ```rust
-    use libm::{cos, sin, atan2};  // not std::f32::{sin, cos, atan2}
+    libm::sinf(x)   // not x.sin() on f32
+    libm::atan2f(y, x)  // not y.atan2(x)
     ```
 
-2. **Disable FMA contraction.** Set `-Ctarget-feature=-fma` in `.cargo/config.toml` target flags, or equivalent per-target. Prevents the compiler from fusing `a * b + c` into a single FMA instruction that rounds differently than the sequential operations.
+2. **glam `libm` + `scalar-math` features together (both required).** Our direct `libm::` use above covers flowPlan's own calls, but glam's internals (`Vec3::normalize`, `Quat::from_rotation_x`, `.to_euler()`, etc.) also use transcendentals. Both features are needed:
+    - **`scalar-math`** disables SIMD fallback paths (SSE on x86, NEON on ARM), forcing scalar math throughout. Removes SIMD-architecture variance.
+    - **`libm`** routes scalar-path transcendentals through the libm crate. Removes stdlib variance.
+    - **Alone, neither is sufficient:** `libm` without `scalar-math` still hits SIMD intrinsics; `scalar-math` without `libm` still calls platform stdlib transcendentals. Use **both**.
+    - Flowplan's Cargo.toml: `glam = { features = ["bytemuck", "serde", "libm", "scalar-math"] }`.
 
-3. **Pin `codegen-units = 1` + `lto = "thin"` in `[profile.release]`** (already done in flowPlan's Cargo.toml). Prevents cross-unit optimization variation between builds.
+3. **Disable FMA contraction.** Set `-Ctarget-feature=-fma` in `.cargo/config.toml` target flags, or equivalent per-target. Prevents the compiler from fusing `a * b + c` into a single FMA instruction that rounds differently than the sequential operations.
 
-4. **CPU-GPU shared samplers must use identical math both sides.** Where a world-gen sampler (e.g. `world::cloud_density`) is consumed on both CPU (sim) and GPU (shader), the WGSL implementation must match the Rust implementation bit-for-bit. Use the same noise formulas, same constants, same transcendentals (libm on CPU; hand-rolled WGSL equivalent on GPU — WGSL's built-in trig is not guaranteed bit-identical across drivers).
+4. **Pin `codegen-units = 1` + `lto = "thin"` in `[profile.release]`** (already done in flowPlan's Cargo.toml). Prevents cross-unit optimization variation between builds.
 
-5. **No wall-clock reads in sim or world-gen hot paths.** Use `SimState.wave_time` / `SimState.tick` / explicit function parameters. No `Instant::now()`, `SystemTime::now()`, or thread-local timing. (Presentation-side smoothing in render or HUD is fine — just not in deterministic paths.)
+5. **CPU-GPU shared samplers must use identical math both sides.** Where a world-gen sampler (e.g. `world::cloud_density`) is consumed on both CPU (sim) and GPU (shader), the WGSL implementation must match the Rust implementation bit-for-bit. Use the same noise formulas, same constants, same transcendentals (libm on CPU; hand-rolled WGSL equivalent on GPU — WGSL's built-in trig is not guaranteed bit-identical across drivers).
 
-6. **Seeded RNG only.** PCG or xorshift via flowPlan's `core::rng`; seed derivation via `hash(master_seed, subsystem_name)`. No `thread_rng()`, no `rand::random()`, no OS entropy.
+6. **No wall-clock reads in sim or world-gen hot paths.** Use `SimState.wave_time` / `SimState.tick` / explicit function parameters. No `Instant::now()`, `SystemTime::now()`, or thread-local timing. (Presentation-side smoothing in render or HUD is fine — just not in deterministic paths.)
 
-7. **Hashing function for seed derivation must be platform-independent.** `SipHash` or `wyhash`; reject anything using the Rust stdlib `DefaultHasher` (not portable across stdlib versions).
+7. **Seeded RNG only.** PCG or xorshift via flowPlan's `core::rng`; seed derivation via `hash(master_seed, subsystem_name)`. No `thread_rng()`, no `rand::random()`, no OS entropy.
+
+8. **Hashing function for seed derivation must be platform-independent.** `SipHash` or `wyhash`; reject anything using the Rust stdlib `DefaultHasher` (not portable across stdlib versions).
 
 ### Verification
 

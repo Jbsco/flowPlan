@@ -32,11 +32,14 @@ flowplan-render = { path = "crates/render" }
 flowplan-audio = { path = "crates/audio" }
 
 # Math and POD casts
-# glam's `libm` feature routes internal transcendentals (sqrt, trig via Vec3/Quat
-# ops) through the `libm` crate for cross-platform determinism — matches our
-# direct `libm` use for flowPlan hot-path math. See CODING_RULES.md §
+# glam's `scalar-math` feature disables SIMD fallback paths (SSE / NEON),
+# forcing scalar math. Combined with our direct `libm` use and the glam
+# `libm` dep (which takes effect in scalar paths), this removes both
+# SIMD-architecture variance (SSE vs NEON) AND compiler-auto-vectorization
+# variance from the determinism surface. `libm` alone wasn't sufficient —
+# glam still used SIMD intrinsics by default. See CODING_RULES.md §
 # Determinism Discipline.
-glam = { version = "0.29", features = ["bytemuck", "serde", "libm"] }
+glam = { version = "0.29", features = ["bytemuck", "serde", "libm", "scalar-math"] }
 bytemuck = { version = "1.19", features = ["derive"] }
 
 # Platform-independent transcendentals (sin/cos/atan2/exp/ln/powf) for
