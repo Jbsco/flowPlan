@@ -81,10 +81,19 @@ const VEHICLE_SHADING: ShadingParams = ShadingParams::new(3.0, 0.35, 0.35, 3.0);
 /// reads as lit even in shadow), and a low rim (sun sparkle arrives with Gerstner waves).
 const WATER_SHADING: ShadingParams = ShadingParams::new(3.0, 0.55, 0.12, 3.5);
 
-/// Water tessellation. 64 cells across 4000 m half-extent matches the terrain patch so
-/// the two meet cleanly. Milestone 2.2.2 uses the existing vertices as Gerstner anchors.
-const WATER_CELLS: u32 = 64;
-const WATER_HALF_EXTENT: f32 = 4000.0;
+/// Water tessellation. Each vertex is a Gerstner anchor — wavelet visibility requires
+/// vertex spacing ≤ wavelength/Nyquist. With chop wavelengths down to 2.5 m, vertex
+/// spacing should be < 1.5 m for clean wavelet rendering. The previous 64×64 over
+/// 8 km (= 125 m/vertex) made chop completely under-sampled (visible only as a
+/// barely-perceptible noise texture). Current 512×512 over 2 km (= ~4 m/vertex)
+/// resolves chop at 5 m wavelengths cleanly, with the 2.5 m fine-chop near Nyquist
+/// (visible as a finer surface tremor). Far-field water is fog-faded, so the
+/// reduced extent (was 4 km half) doesn't visibly cap the horizon.
+///
+/// Vertex count: 263 169 (513² grid). Static mesh, uploaded once at startup; only
+/// the shader displaces them per-frame — minimal CPU cost.
+const WATER_CELLS: u32 = 512;
+const WATER_HALF_EXTENT: f32 = 1000.0;
 
 /// Deep cel-water tint. Cooler than the sky so the horizon reads. Alpha is unused by the
 /// cel shader.

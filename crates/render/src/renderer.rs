@@ -160,6 +160,12 @@ impl Default for SceneParams {
     }
 }
 
+/// Camera-follow snap pitch for the water mesh, meters. The water mesh's XZ origin
+/// snaps to multiples of this so vertex positions stay phase-stable frame-to-frame
+/// (avoids sub-meter shimmer). Picked smaller than typical wave wavelengths so the
+/// snap is invisible.
+const WATER_FOLLOW_SNAP_M: f32 = 4.0;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct SceneUniform {
@@ -714,6 +720,28 @@ impl Renderer {
             &self.vehicle.uniform_buf,
             0,
             bytemuck::bytes_of(&vehicle_uniform),
+        );
+
+        // Water mesh follows the camera in XZ so the limited-extent high-tessellation
+        // mesh stays around the aircraft (otherwise the aircraft would fly out of the
+        // visible water area in seconds at cruise speed). Y stays at 0 (mean water
+        // level). The wave shader samples the post-translation world position to
+        // compute Gerstner displacement, so waves remain spatially anchored — they
+        // don't visually slide with the camera. Snap to a few-meter pitch so vertices
+        // align across consecutive frames and waves don't shimmer.
+        let snap_x = (cam_pos.x / WATER_FOLLOW_SNAP_M).round() * WATER_FOLLOW_SNAP_M;
+        let snap_z = (cam_pos.z / WATER_FOLLOW_SNAP_M).round() * WATER_FOLLOW_SNAP_M;
+        let water_model = Mat4::from_translation(Vec3::new(snap_x, 0.0, snap_z));
+        let water_uniform = ModelUniform {
+            model: water_model.to_cols_array_2d(),
+            normal_mat: Mat4::IDENTITY.to_cols_array_2d(),
+            tint: self.water.tint,
+            shading: self.water.shading,
+        };
+        queue.write_buffer(
+            &self.water.uniform_buf,
+            0,
+            bytemuck::bytes_of(&water_uniform),
         );
 
         // Outline params: viewport size + tunables, written every frame so a resize is

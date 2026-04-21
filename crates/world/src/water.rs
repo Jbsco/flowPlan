@@ -39,30 +39,66 @@ struct Wave {
 /// this up at runtime once Phase 3.2 weather + 2.5a.7 chop-intensity hook lands.
 ///
 /// Wave hierarchy:
-/// - Long swell (40 m wavelength): low-frequency rocking, barely perceptible.
-/// - Medium chop (5 m wavelength): visible texture, gentle aircraft rocking.
+/// - Long swell (40 m wavelength): minimal amplitude — provides slow large-scale
+///   rocking but cannot trigger foam alone, eliminating the long swathe pattern
+///   that previously dominated foam appearance.
+/// - Medium chop (5 m wavelength): primary surface texture and primary foam source.
 /// - Fine chop (2.5 m wavelength): granular surface detail.
 ///
-/// Total max amplitude 0.145 m — a reduction from the original 0.45 m that was
-/// dominating water-takeoff dynamics and producing visually-sweeping foam patches.
-const WAVES: [Wave; 3] = [
+/// Wave hierarchy (7 components): two long swells, three chop, two fine chop. More
+/// components break the plaid pattern that 3 waves produce (3 directions = 3 ridge
+/// systems intersecting in regular grids); 7 waves with varied directions,
+/// wavelengths, and slow speeds create the natural-looking interference patterns
+/// of a real water surface.
+///
+/// Total max amplitude 0.220 m — still well below the 0.45 m original that was
+/// disruptive. Swells slowed for more leisurely visual motion (and reduced
+/// pontoon impact in light winds).
+const WAVES: [Wave; 7] = [
+    // Long swells — the rollers
     Wave {
-        dir: (1.00, 0.20),
-        wavelength_m: 40.0,
-        amplitude_m: 0.08,
-        speed_mps: 4.0,
+        dir: (1.00, 0.30),
+        wavelength_m: 50.0,
+        amplitude_m: 0.040,
+        speed_mps: 3.5,
     },
     Wave {
-        dir: (0.30, 1.00),
-        wavelength_m: 5.0,
-        amplitude_m: 0.04,
+        dir: (0.70, 1.00),
+        wavelength_m: 35.0,
+        amplitude_m: 0.030,
+        speed_mps: 2.8,
+    },
+    // Chop — primary surface texture
+    Wave {
+        dir: (0.40, 1.00),
+        wavelength_m: 6.0,
+        amplitude_m: 0.045,
         speed_mps: 2.0,
     },
     Wave {
-        dir: (-0.60, 0.70),
-        wavelength_m: 2.5,
-        amplitude_m: 0.025,
+        dir: (-0.80, 0.50),
+        wavelength_m: 4.0,
+        amplitude_m: 0.045,
+        speed_mps: 1.7,
+    },
+    Wave {
+        dir: (1.00, -0.40),
+        wavelength_m: 3.0,
+        amplitude_m: 0.040,
         speed_mps: 1.4,
+    },
+    // Fine chop — high-frequency surface detail
+    Wave {
+        dir: (-0.30, 1.00),
+        wavelength_m: 2.0,
+        amplitude_m: 0.035,
+        speed_mps: 1.1,
+    },
+    Wave {
+        dir: (0.50, 0.85),
+        wavelength_m: 1.4,
+        amplitude_m: 0.025,
+        speed_mps: 0.85,
     },
 ];
 
@@ -143,7 +179,8 @@ mod tests {
 
     #[test]
     fn max_amplitude_matches_sum() {
-        // Post 2.5a wave-set retune: 0.080 + 0.040 + 0.025 = 0.145
-        assert!((max_amplitude() - 0.145).abs() < 1e-6);
+        // Post 2.5a 7-wave expansion (anti-plaid):
+        // 0.040 + 0.030 + 0.045 + 0.045 + 0.040 + 0.035 + 0.025 = 0.260
+        assert!((max_amplitude() - 0.260).abs() < 1e-6);
     }
 }

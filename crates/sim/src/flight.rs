@@ -285,6 +285,24 @@ const RUDDER_SLIPSTREAM_Q_PER_N: f32 = 0.15;
 // the airframe LEFT. Magnitude scales with shaft power. At 335 kW max: ~500 N·m
 // rolling-left moment → ~0.1 rad/s² roll accel on I_zz=5000. Noticeable on power
 // changes, easy to counter with slight right aileron.
+//
+// Real-world dependencies (status):
+// - Throttle: YES — `engine_power_kw_out` already scales linearly with throttle
+//   (idle 20 kW at 0.0 → max 335 kW at 1.0). Torque scales 1:1 with this.
+// - Density altitude: YES — `engine_power_kw_out = engine_power_sl × rho_ratio`
+//   so torque automatically derates at altitude (2.4.7 density model).
+// - Prop pitch / feathering: NOT YET. Current model uses a fixed-pitch prop
+//   efficiency curve. When the constant-speed prop and feathering controls land
+//   (post-2.4 / Phase 4 cockpit milestone), torque will need a feather check:
+//   `if feathered { 0.0 } else { -K · power }`. Feathered prop blades go to ~90°
+//   pitch, dramatically unloading the engine — torque on the airframe drops to
+//   near zero (engine RPM races up, airframe stops feeling the reaction).
+// - Coupling airspeed gating: torque-roll is multiplied by `coupling_airspeed_factor`
+//   (ramp 5→20 m/s) which is non-physical (torque is engine reaction, not aero)
+//   but practical: at V=0 with full power, ungated torque produces a 0.1 rad/s²
+//   roll spin with no aero damping. Buoyancy fights it on water; ground physics
+//   (Phase 2.5b) will provide wheel-friction roll restoring on land. Once 2.5b
+//   lands the gating can be relaxed or removed.
 const TORQUE_ROLL_NM_PER_KW: f32 = 1.5;
 
 /// Airspeed ramp for rotational-coupling effects (P-factor + torque roll). Below

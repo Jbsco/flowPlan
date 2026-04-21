@@ -192,6 +192,14 @@ pub struct BenchSample {
     pub roll_moment_nm: f32,
     pub yaw_moment_nm: f32,
 
+    // Per-axis coupling components — broken out so torque-roll, P-factor, spiral
+    // slipstream, adverse-yaw, ground-effect-on-pitch can be diagnosed in plots
+    // without parsing the full FlightOutputs. Roll-coupling is dominated by torque
+    // roll; yaw-coupling sums adverse-yaw + P-factor + spiral-slipstream; pitch-
+    // coupling is generally near zero.
+    pub roll_coupling_nm: f32,
+    pub yaw_coupling_nm: f32,
+
     // State flags (stored as ints for CSV compatibility: 0=Normal, 1=Approach, 2=Stall)
     pub stall_state: u32,
 }
@@ -238,6 +246,8 @@ impl BenchSample {
             pitch_moment_nm: flight.pitch_moment.total(),
             roll_moment_nm: flight.roll_moment.total(),
             yaw_moment_nm: flight.yaw_moment.total(),
+            roll_coupling_nm: flight.roll_moment.coupling,
+            yaw_coupling_nm: flight.yaw_moment.coupling,
             stall_state: match flight.stall_state {
                 StallState::Normal => 0,
                 StallState::Approach => 1,
@@ -253,7 +263,7 @@ impl BenchSample {
          alpha_deg,beta_deg,cl,cd,\
          throttle,pitch_in,roll_in,yaw_in,flap_deg,\
          engine_kw,prop_eff,fuel_gph,fuel_gal,\
-         pitch_M,roll_L,yaw_N,stall_state"
+         pitch_M,roll_L,yaw_N,roll_L_coupling,yaw_N_coupling,stall_state"
     }
 
     pub fn write_csv_row(&self, out: &mut String) {
@@ -265,7 +275,7 @@ impl BenchSample {
              {:.3},{:.3},{:.4},{:.4},\
              {:.3},{:.3},{:.3},{:.3},{:.1},\
              {:.2},{:.3},{:.2},{:.2},\
-             {:.1},{:.1},{:.1},{}",
+             {:.1},{:.1},{:.1},{:.1},{:.1},{}",
             self.tick,
             self.time_s,
             self.position_x,
@@ -296,6 +306,8 @@ impl BenchSample {
             self.pitch_moment_nm,
             self.roll_moment_nm,
             self.yaw_moment_nm,
+            self.roll_coupling_nm,
+            self.yaw_coupling_nm,
             self.stall_state,
         );
     }

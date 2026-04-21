@@ -173,6 +173,96 @@ Not about the flight model -- about the bench itself.
 | Same scenario, two runs, identical logs | — | Asserted implicitly by integration test seed. |
 | Dial change mid-scenario produces deterministic fork | **[ready]** | Requires `DialChange` scripted input; validates dial-state is part of determinism hash. |
 
+## Real-world effect coverage matrix
+
+Per-effect coverage of the discrete physical phenomena the model implements. Distinct from the scenario taxonomy above (which groups by maneuver). This matrix tracks **whether a given physics effect is exercised by at least one scenario AND visible in plot output** — the "do we know it works and stays working?" check.
+
+Column meanings:
+- **Modeled**: implementation exists in `crates/sim/src/{flight,buoyancy}.rs`.
+- **Scenario**: at least one bench scenario produces non-trivial readings of this effect.
+- **Plot column**: column in the bench CSV / 2×4 panel plot where the effect is visible.
+- **Notes**: how to read the effect, current calibration status, known gaps.
+
+### Aerodynamic forces
+| Effect | Modeled | Scenario | Plot column | Notes |
+|--------|---------|----------|-------------|-------|
+| Lift (Cl(α) lookup) | yes | every aerial scenario | `cl`, `vs_mps` | Cl_max=2.0; cruise α≈3°→Cl≈0.4 |
+| Induced drag (Cl²) | yes | every aerial | `cd` | Oswald e=0.75 |
+| Parasite drag (Cd0) | yes | every aerial | `cd` | Cd0=0.055 |
+| Stall (Cl drop past α_stall) | yes | `*_stall_*` | `alpha_deg` past 16°, `stall_state` | Hard stall at 16° |
+| Post-stall pitching moment | yes | `*_stall_*` | `pitch_M` | -0.75 slope past stall |
+| Wing-drop differential | yes | `*_stall_*` | `roll_L` | Quarter-span Cl sampling |
+| Ground effect | yes | none yet (needs low-AGL scenario) | n/a | Phillips factor; tested via unit test |
+| Density altitude | yes | aerial scenarios show no climb degradation w/in altitude budget | `engine_kw` over altitude | exp(-h/8500) |
+
+### Aero couplings (cross-axis)
+| Effect | Modeled | Scenario | Plot column | Notes |
+|--------|---------|----------|-------------|-------|
+| α-stability (Cm_α restoring) | yes | every cruise | `pitch_M` near 0 at trim | Cm_α=-0.25 |
+| Pitch damping (Cm_q) | yes | implicit in steady cruise | `pitch_M` damping when q changes | Cm_q=-25 |
+| Aileron→roll (Cl_δa) | yes | turn scenarios | `roll_L` during entry | Cl_δa=0.075 |
+| Roll damping (Cl_p) | yes | turn scenarios stable bank | `roll_L` damping | Cl_p=-0.5 |
+| Dihedral (Cl_β) | yes | turn scenarios self-stabilize | `roll_L` from β | Cl_β=-0.05 (2.4.9a) |
+| Rudder→yaw (Cn_δr) | yes | every scenario w/ trim | `yaw_N` from yaw input | Cn_δr=0.04 |
+| Weathervane (Cn_β) | yes | `vne_dive`, turn entries | `yaw_N` from β | Cn_β=0.08 |
+| Yaw damping (Cn_r) | yes | turns | `yaw_N` damping | Cn_r=-0.6 |
+| Adverse yaw (Cn_δa) | yes | turn entries | `yaw_N_coupling` | -0.012 |
+| P-factor | yes | `cruise_climb` (high α + thrust) | `yaw_N_coupling` | arm=10m, gated below V=5 |
+| Spiral slipstream | yes | `cruise_climb`, takeoff scenarios | `yaw_N_coupling` | arm=2m, V_ref=20m/s (2.4.9b) |
+| Slipstream q-boost on rudder | yes | takeoff scenarios | rudder authority visible in `yaw_input` vs `yaw_N` | K=0.15 (2.5a follow-up) |
+| Torque roll | yes | every full-power scenario | `roll_L_coupling` | 1.5 N·m/kW; throttle ✓ density ✓ feathering ✗ (no prop control yet); airspeed-gated 5-20 m/s as numerical-stability stand-in until 2.5b ground contact |
+
+### Engine + fuel
+| Effect | Modeled | Scenario | Plot column | Notes |
+|--------|---------|----------|-------------|-------|
+| Power curve (linear in throttle) | yes | every scenario | `engine_kw` | 20-335 kW |
+| Prop efficiency curve | yes | varies w/ V | `prop_eff` | 0.30 static→0.82 cruise |
+| Fuel burn (BSFC) | yes | `endurance_cruise` | `fuel_gph`, `fuel_gal` | 0.124 gph/kW |
+| Density-altitude derate | yes | high-altitude scenarios | `engine_kw` falls w/ h | exp(-h/8500) |
+| Flameout at zero fuel | yes | unit test | `engine_kw → 0` when `fuel_gal == 0` | Tested in flight.rs |
+| V_min thrust clamp | yes | water scenarios at low V | `engine_kw` finite at V=0 | V_MIN_FOR_THRUST=12 |
+
+### Water contact (Phase 2.5a)
+| Effect | Modeled | Scenario | Plot column | Notes |
+|--------|---------|----------|-------------|-------|
+| Per-pontoon buoyancy | yes (2.5a.1) | `water_*` scenarios | `pos_y` settled at ~2.40 m | Multi-point sampling (5/pontoon) |
+| Vertical water damping | yes (2.5a.2) | water settle behavior | `vy` at low speeds bounded | Linear, distributed |
+| Horizontal water drag | yes (2.5a.2) | `water_taxi` | drag visible in `airspeed` plateauing | Quadratic, distributed |
+| Multi-point pitch restoring | yes (2.5a.3) | `water_takeoff` pitch bounded | `pitch_deg` ±0.8° on takeoff | Buoyancy fore/aft asymmetry |
+| Planing lift | yes (2.5a.3) | `water_takeoff` rises onto step | `pos_y` rises 2.40→2.55 | Quadratic in V_forward |
+| Planing pitch-up moment | yes (2.5a.3c) | bounded pitch on step | `pitch_deg` settles small | -1.5m fwd offset of CoP |
+| Wave clock determinism | yes (2.5a.1) | repeat runs byte-identical | n/a (state hash) | `wave_time` folded into state |
+
+### Controls + autopilot
+| Effect | Modeled | Scenario | Plot column | Notes |
+|--------|---------|----------|-------------|-------|
+| Slew-rate keyboard ramp | yes (2.4.4a) | n/a (bench uses scripted SetX) | n/a | 1.5/s, keyboard only |
+| Closed-loop bank hold | yes (2.4.9c) | turn scenarios | `roll_deg` tracks target | PID, also Phase 4.7 AP |
+| Closed-loop altitude hold | yes (2.4.9c) | turn scenarios | `pos_y` bounded | PID |
+| Closed-loop airspeed hold | yes (2.4.9c) | turn scenarios | `airspeed_mps` bounded | PID |
+| Closed-loop coordination | yes (2.4.9c) | turns + takeoff | `yaw_deg` drift killed | PID |
+| Vertical speed hold | yes (2.4.9c) | climb scenarios available | `vs_mps` | PID |
+| Heading hold | yes (2.4.9c) | n/a yet | n/a | PID |
+
+### Known unmodeled / partially-modeled effects
+| Effect | Status | Blocker |
+|--------|--------|---------|
+| Wind / gusts / shear | not modeled | Phase 3.2 weather |
+| Crosswind on landing | not modeled | Phase 3.2 weather |
+| Ground rolling friction | not modeled | Phase 2.5b ground |
+| Brake force | not modeled | Phase 2.5b |
+| Tailwheel steering | not modeled | Phase 2.5b |
+| Per-aircraft coefficients | hardcoded Beaver only | Phase 5.1 spec migration |
+| Asymmetric flap failure | not modeled | post-v1 |
+| Spin dynamics (autorotation, PARE) | not modeled | post-2.4 |
+| Carb ice | not modeled | post-MVP |
+| Pitch-dependent Cl_planing | not modeled | 2.5a.3b deferred (rotation tuning) |
+| Multi-point step geometry | simple wetted-fraction approx | 2.5a.3 limit; works for v1 |
+| Wake spawn (visual particles) | not modeled | 2.5a polish |
+| Spray effects | not modeled | 2.5a polish |
+
+When a new physics effect lands or a scenario starts exercising a new combination, **update this matrix** so coverage stays explicit. A scenario without a corresponding effect entry doesn't earn a coverage claim.
+
 ## How to propose a new category
 
 If a real-world behavior doesn't fit any row above:

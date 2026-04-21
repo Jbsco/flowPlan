@@ -109,16 +109,38 @@ def plot_scenario(csv_path: Path, out_dir: Path) -> Path:
 
     # (1,1) Moment breakdown (N·m). pitch_M, roll_L, yaw_N are the TOTAL per-axis
     # aerodynamic moments after all contributions (control / stability / damping /
-    # coupling). Useful to see which axis is uncancelled in trimmed flight.
+    # coupling). The dashed lines show the COUPLING component of roll and yaw —
+    # roll-coupling is dominated by torque-roll (engine reaction); yaw-coupling
+    # sums adverse-yaw + P-factor + spiral-slipstream. Plotting them lets you see
+    # at a glance whether the aircraft is fighting torque vs. slipstream vs. aero
+    # restoring moments.
     ax = axes[1, 1]
     ax.plot(t, df["pitch_M"], label="pitch M", color="tab:red", alpha=0.8)
-    ax.plot(t, df["roll_L"], label="roll L", color="tab:green", alpha=0.8)
-    ax.plot(t, df["yaw_N"], label="yaw N", color="tab:blue", alpha=0.8)
+    ax.plot(t, df["roll_L"], label="roll L (total)", color="tab:green", alpha=0.8)
+    ax.plot(t, df["yaw_N"], label="yaw N (total)", color="tab:blue", alpha=0.8)
+    if "roll_L_coupling" in df.columns:
+        ax.plot(
+            t,
+            df["roll_L_coupling"],
+            label="roll coupling (torque)",
+            color="tab:green",
+            alpha=0.5,
+            linestyle="--",
+        )
+    if "yaw_N_coupling" in df.columns:
+        ax.plot(
+            t,
+            df["yaw_N_coupling"],
+            label="yaw coupling (P-factor + slipstream)",
+            color="tab:blue",
+            alpha=0.5,
+            linestyle="--",
+        )
     ax.axhline(0, color="grey", linewidth=0.5)
     ax.set_ylabel("moment (N·m)")
     ax.set_xlabel("time (s)")
-    ax.set_title("moments (total per axis)")
-    ax.legend(loc="best", fontsize=8)
+    ax.set_title("moments (totals + coupling components)")
+    ax.legend(loc="best", fontsize=7)
     ax.grid(True, alpha=0.3)
 
     # (1,2) Controls

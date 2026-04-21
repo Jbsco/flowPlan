@@ -39,14 +39,19 @@ struct SceneUniform {
 // MUST match `WAVES` in `crates/world/src/water.rs` for sim/render consistency.
 // Tuning rationale (gentle lake / float-friendly): see the world-side comment.
 
-const WAVE_COUNT: u32 = 3u;
+const WAVE_COUNT: u32 = 7u;
+const SWELL_COUNT: u32 = 2u; // first 2 waves are long swells; rest is chop
 
 fn wave_dir_and_params(i: u32) -> vec4<f32> {
     // Separate function avoids the array<vec4> const init that some wgsl backends
-    // rejected at Phase 2.2 test. Explicit branching is equally fast at 3 waves.
-    if (i == 0u) { return vec4<f32>( 1.00,  0.20, 40.0, 0.080); } // long swell
-    if (i == 1u) { return vec4<f32>( 0.30,  1.00,  5.0, 0.040); } // medium chop
-    return             vec4<f32>(-0.60,  0.70,  2.5, 0.025);     // fine chop
+    // rejected at Phase 2.2 test. Explicit branching is fast even at 7 waves.
+    if (i == 0u) { return vec4<f32>( 1.00,  0.30, 50.0, 0.040); } // long swell A
+    if (i == 1u) { return vec4<f32>( 0.70,  1.00, 35.0, 0.030); } // long swell B
+    if (i == 2u) { return vec4<f32>( 0.40,  1.00,  6.0, 0.045); } // chop
+    if (i == 3u) { return vec4<f32>(-0.80,  0.50,  4.0, 0.045); } // chop
+    if (i == 4u) { return vec4<f32>( 1.00, -0.40,  3.0, 0.040); } // chop
+    if (i == 5u) { return vec4<f32>(-0.30,  1.00,  2.0, 0.035); } // fine chop
+    return             vec4<f32>( 0.50,  0.85,  1.4, 0.025);     // fine chop
 }
 
 // 2D value noise: hash at integer grid corners, smooth bilinear interpolation. Gives
@@ -68,9 +73,13 @@ fn value_noise2(p: vec2<f32>) -> f32 {
 }
 
 fn wave_speed_and_steep(i: u32) -> vec2<f32> {
-    if (i == 0u) { return vec2<f32>(4.0, 0.5); } // long swell — slight trochoidal
-    if (i == 1u) { return vec2<f32>(2.0, 0.3); } // medium chop
-    return             vec2<f32>(1.4, 0.2);     // fine chop — minimal trochoidal
+    if (i == 0u) { return vec2<f32>(3.5, 0.40); } // long swell A — slow + slight trochoidal
+    if (i == 1u) { return vec2<f32>(2.8, 0.40); } // long swell B
+    if (i == 2u) { return vec2<f32>(2.0, 0.35); } // chop
+    if (i == 3u) { return vec2<f32>(1.7, 0.35); } // chop
+    if (i == 4u) { return vec2<f32>(1.4, 0.30); } // chop
+    if (i == 5u) { return vec2<f32>(1.1, 0.25); } // fine chop
+    return             vec2<f32>(0.85, 0.20);    // fine chop — minimal trochoidal
 }
 
 struct VsIn {
@@ -85,6 +94,13 @@ struct VsOut {
     @location(0)       world_pos:   vec3<f32>,
     @location(1)       world_normal:vec3<f32>,
     @location(2)       vert_color:  vec4<f32>,
+    // Per-component wave height ratios in [-1, +1]. Index 0 = long swell, 1 = chop
+    // (sum of wave 1 + wave 2). Lets the fragment shader read foam + color
+    // independently per scale: foam appears at LOCAL maxima of either component
+    // (chop tip OR swell crest), and color tinting is depth-cued per component
+    // so wavelets visually "extrude" out of swell troughs even when the absolute
+    // height is still negative.
+    @location(3)       wave_t:      vec2<f32>,
 };
 
 const TAU: f32 = 6.283185307179586;
@@ -98,6 +114,13 @@ fn vs_water(in: VsIn) -> VsOut {
     // Normal accumulator per GPU Gems 2 Ch. 1 simplification:
     //   N = normalize(-sum(Dx * k * A * cos), 1 - sum(Q * k * A * sin), -sum(Dz * k * A * cos))
     var n_acc = vec3<f32>(0.0, 1.0, 0.0);
+
+    // Per-component height accumulators (for foam + color masking in fragment).
+    // wave 0 = long swell; waves 1+2 = chop.
+    var swell_y: f32 = 0.0;
+    var swell_amp_max: f32 = 0.0;
+    var chop_y: f32 = 0.0;
+    var chop_amp_max: f32 = 0.0;
 
     for (var i: u32 = 0u; i < WAVE_COUNT; i = i + 1u) {
         let dp = wave_dir_and_params(i);
@@ -121,6 +144,17 @@ fn vs_water(in: VsIn) -> VsOut {
         n_acc.x = n_acc.x - dir.x * wa * c;
         n_acc.z = n_acc.z - dir.y * wa * c;
         n_acc.y = n_acc.y - steep * wa * s;
+
+        // Split height per component class. First SWELL_COUNT waves are swells;
+        // remaining are chop. Lets fragment shader weight foam + color tinting
+        // independently per scale.
+        if (i < SWELL_COUNT) {
+            swell_y = swell_y + amp * s;
+            swell_amp_max = swell_amp_max + amp;
+        } else {
+            chop_y = chop_y + amp * s;
+            chop_amp_max = chop_amp_max + amp;
+        }
     }
 
     let displaced = world0 + offset;
@@ -131,6 +165,10 @@ fn vs_water(in: VsIn) -> VsOut {
     out.world_pos = displaced;
     out.world_normal = n;
     out.vert_color = in.color * model.tint;
+    out.wave_t = vec2<f32>(
+        swell_y / max(swell_amp_max, 0.001),
+        chop_y / max(chop_amp_max, 0.001),
+    );
     return out;
 }
 
@@ -154,28 +192,71 @@ fn fs_water(in: VsOut) -> @location(0) vec4<f32> {
     let spec_align = max(dot(view_reflect, sun_dir), 0.0);
     let spec = pow(spec_align, 64.0) * 0.35;
 
-    // Whitecap foam: tops of the largest combined wave crests, masked by value
-    // noise with spatial coherence so foam clusters read as patches (not per-pixel
-    // static). Two noise scales combined -- the larger places patch clusters,
-    // the smaller adds within-patch detail. Pattern sampled on displaced world_pos
-    // so it moves with the waves.
+    // Multi-scale water shading inspired by stylized open-water games (Sea of
+    // Thieves' water as visual reference, not direct port). Three blended
+    // techniques:
     //
-    // Tuning targets a "frequent small foam" look — short scattered patches across
-    // visible water rather than sparse sweeping bands. Crest threshold lowered so
-    // chop crests (max ~0.065 m combined) pass without depending on the long swell
-    // for elevation; eliminates the 40-m-spaced sweeping band pattern that came
-    // from foam appearing only on swell tops.
-    let crest = smoothstep(0.02, 0.05, in.world_pos.y);
+    //   1. Slope-driven foam — foam follows wave FACES (steep regions about to
+    //      break) rather than narrow crest lines. Produces broad foam patches
+    //      that move with the wave shape rather than streaks at peaks.
+    //   2. Per-component height awareness — `wave_t.x` (swell) and `wave_t.y`
+    //      (chop) drive color tinting independently so wavelets visually
+    //      "extrude" from swell troughs even when absolute height is still
+    //      negative. Multi-scale feel.
+    //   3. Subsurface-scattering glow — chop crests near sun get a translucent
+    //      warm glow as if light passed through the wave; reads as the curling
+    //      glow on the back side of small waves.
+    let swell_t = in.wave_t.x;
+    let chop_t = in.wave_t.y;
+
+    // Slope = wave-face steepness, derived from the normal's deviation from
+    // straight-up. Flat water → 0; steep wave face → larger. Drives foam over
+    // a broad region rather than just at the peak.
+    let slope = clamp(1.0 - n.y, 0.0, 1.0);
+
+    // Foam contributions: slope (broad), chop near-peak (sharp tips), swell
+    // crest (subtle on long rollers).
+    let foam_slope = smoothstep(0.06, 0.22, slope);
+    let foam_chop_peak = smoothstep(0.55, 0.95, chop_t);
+    let foam_swell_peak = smoothstep(0.40, 0.90, swell_t);
+    let foam_intensity = clamp(
+        foam_slope * 0.7 + foam_chop_peak * 0.5 + foam_swell_peak * 0.25,
+        0.0,
+        1.0,
+    );
+
     let noise_large = value_noise2(in.world_pos.xz * 0.40);   // ~2.5 m patch
     let noise_detail = value_noise2(in.world_pos.xz * 1.20);  // ~0.8 m detail
     let foam_field = noise_large * 0.55 + noise_detail * 0.45;
-    let foam_mask = smoothstep(0.30, 0.58, foam_field);
+    let foam_mask = smoothstep(0.25, 0.60, foam_field);
     let foam_color = vec3<f32>(0.94, 0.96, 0.98);
 
-    let base_lit = in.vert_color.rgb * diffuse * scene.sun_color.rgb
+    // Depth-cued tinting: greener-darker at swell troughs, bluer at chop crests.
+    // Two-layer mix so wavelets are visually distinct from the swell rocking.
+    let swell_depth = smoothstep(-1.0, 0.5, swell_t);   // 0 at swell trough → 1 at mean+
+    let chop_lift = smoothstep(-0.4, 0.8, chop_t);      // 0 at chop trough → 1 at near-peak
+    let trough_tint = vec3<f32>(0.55, 0.85, 0.62);      // saturated dark green for deep look
+    let crest_tint = vec3<f32>(1.10, 1.08, 1.05);       // brighter, slight cool→neutral push
+    let depth_tinted = in.vert_color.rgb * mix(
+        mix(trough_tint, vec3<f32>(1.0, 1.0, 1.0), swell_depth),
+        crest_tint,
+        chop_lift * 0.55,
+    );
+
+    // Subsurface-scattering proxy: when looking roughly toward the sun across a
+    // chop crest, the wave appears to "glow" translucent (light passing through
+    // the thin water at the crest). Adds warm tint that scales with chop_lift +
+    // sun-back-lighting alignment.
+    let view_to_pixel_h = normalize(in.world_pos - camera.view_pos.xyz);
+    let sun_back_align = clamp(dot(view_to_pixel_h, sun_dir), 0.0, 1.0);
+    let sss_glow = chop_lift * sun_back_align * 0.35;
+    let sss_color = vec3<f32>(0.95, 1.00, 0.85);
+
+    let base_lit = depth_tinted * diffuse * scene.sun_color.rgb
         + rim
-        + scene.sun_color.rgb * spec;
-    let lit = mix(base_lit, foam_color, crest * foam_mask * 0.85);
+        + scene.sun_color.rgb * spec
+        + sss_color * sss_glow;
+    let lit = mix(base_lit, foam_color, foam_intensity * foam_mask * 0.90);
 
     // Matching scene fog so water fades at the same horizon as terrain.
     let dist = length(camera.view_pos.xyz - in.world_pos);
