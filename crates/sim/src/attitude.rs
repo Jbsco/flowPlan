@@ -119,7 +119,10 @@ mod tests {
         // slightly upward: expect positive y, still mostly -z.
         let q = pitch_up(10_f32.to_radians());
         let fwd = q * Vec3::NEG_Z;
-        assert!(fwd.y > 0.0, "nose-up pitch should raise forward-y; got {fwd:?}");
+        assert!(
+            fwd.y > 0.0,
+            "nose-up pitch should raise forward-y; got {fwd:?}"
+        );
         assert!(fwd.z < -0.9, "forward still mostly -Z; got {fwd:?}");
     }
 

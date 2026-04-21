@@ -331,7 +331,7 @@ pub fn ground_effect_induced_drag_factor(agl_m: f32, wingspan_m: f32) -> f32 {
         return 1.0;
     }
     let h_over_b = (agl_m / wingspan_m).max(0.0);
-    let k = 33.0 * h_over_b.powf(1.5);
+    let k = 33.0 * libm::powf(h_over_b, 1.5);
     k / (1.0 + k)
 }
 
@@ -469,7 +469,7 @@ const ATMOSPHERE_SCALE_HEIGHT_M: f32 = 8500.0;
 #[must_use]
 pub fn air_density(h_msl_m: f32) -> f32 {
     let h = h_msl_m.max(0.0);
-    AIR_DENSITY_SEA_LEVEL * (-h / ATMOSPHERE_SCALE_HEIGHT_M).exp()
+    AIR_DENSITY_SEA_LEVEL * libm::expf(-h / ATMOSPHERE_SCALE_HEIGHT_M)
 }
 
 /// Ratio of air density at altitude to sea-level density.
@@ -994,7 +994,7 @@ pub fn compute_forces(
     let adverse_yaw_moment =
         q_dyn * wing_area_moments * WING_SPAN_M * CN_DELTA_A_ADVERSE * state.controls.roll;
     let p_factor_moment =
-        -P_FACTOR_ARM_M * thrust_n_this_tick * alpha.sin() * coupling_airspeed_factor;
+        -P_FACTOR_ARM_M * thrust_n_this_tick * libm::sinf(alpha) * coupling_airspeed_factor;
     // Spiraling slipstream: nose-left yaw moment from prop-wash swirl hitting
     // vertical tail. Scales with thrust, decays with airspeed. The third
     // left-turning tendency (alongside P-factor + torque roll).

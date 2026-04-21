@@ -183,8 +183,8 @@ impl HeightSampler for Terrain {
     fn height(&self, x: f32, z: f32) -> f32 {
         let raw = self.octaves.iter().fold(0.0, |acc, o| {
             acc + o.amplitude
-                * ((x * o.frequency + o.phase_x).sin())
-                * ((z * o.frequency + o.phase_z).cos())
+                * libm::sinf(x * o.frequency + o.phase_x)
+                * libm::cosf(z * o.frequency + o.phase_z)
         }) * self.base_amplitude;
         beach_flatten(raw, BEACH_WIDTH_M) + self.base_height
     }

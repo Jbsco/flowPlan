@@ -387,7 +387,8 @@ Deliberately conservative. New dependencies require an amendment to this doc and
 | Language   | Rust (stable)         | Rolling stable; MSRV documented                  | No GC, strong types, Cargo, matches Glicol.                               |
 | Graphics   | `wgpu`                | Pin exact; migrate deliberately every ~6 months  | Modern GPU access, Vulkan/Metal/DX12.                                     |
 | Windowing  | `winit`               | Pin with wgpu                                    | Standard pairing.                                                         |
-| Math       | `glam`                | `^0.X` with periodic review                      | SIMD-friendly gamedev math.                                               |
+| Math       | `glam`                | `^0.X` with periodic review; `libm` feature enabled | SIMD-friendly gamedev math. `libm` feature engages platform-independent transcendentals for cross-platform determinism. |
+| Determinism math | `libm`          | Pin                                              | Platform-independent `sin`/`cos`/`atan2`/`exp`/`ln`/`powf` for deterministic sim + world-gen paths. Replaces platform-varying stdlib transcendentals. See [CODING_RULES.md § Determinism Discipline](CODING_RULES.md#determinism-discipline). |
 | Audio DSP  | `glicol_synth`        | Pin; fallback plan documented                    | Native Rust sound design language.                                        |
 | Audio I/O  | `cpal`                | Pin                                              | Cross-platform audio device abstraction.                                  |
 | Asset import | `gltf`              | Pin                                              | Standard 3D format.                                                       |

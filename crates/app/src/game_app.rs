@@ -738,7 +738,7 @@ impl Runtime {
                     // samples negative compression through terrain.
                     flowplan_sim::VehicleConfig::Floats => {
                         terrain_here + self.vehicle_float_offset + SURFACE_MARGIN
-                    }
+                    },
                     // Wheels: ground-contact physics handles gear spring +
                     // damping directly. `min_altitude` is passed to
                     // `compute_ground_contact` as `ground_y`, so it must be

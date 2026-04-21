@@ -23,7 +23,7 @@ pub fn sun_direction(time_of_day: f32) -> Vec3 {
     let t = time_of_day.rem_euclid(1.0);
     // Phase so that noon (0.5) maps to azimuth 90 deg, putting the sun at (0, 1, tilt).
     let phi = TAU * (t - 0.25);
-    let v = Vec3::new(phi.cos(), phi.sin(), SOLAR_TILT_Z);
+    let v = Vec3::new(libm::cosf(phi), libm::sinf(phi), SOLAR_TILT_Z);
     v.try_normalize().unwrap_or(Vec3::Y)
 }
 

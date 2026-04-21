@@ -1,0 +1,44 @@
+# Cross-platform determinism discipline for flowPlan.
+#
+# See CODING_RULES.md § Determinism Discipline for rationale. These flags pin
+# the build to IEEE 754-strict floating-point behavior so bit-identical output
+# is achievable across Linux / Windows / (future) macOS + Steam Deck.
+#
+# Any change here should be proposed as a CODING_RULES.md amendment first.
+
+[build]
+# No global overrides yet; target-scoped flags below.
+
+# x86_64 Linux — disable fused-multiply-add contraction so `a * b + c` does
+# not silently fuse into FMA with different intermediate rounding than the
+# sequential operations. Pinned regardless of CPU feature availability.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-Ctarget-feature=-fma"]
+
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-Ctarget-feature=-fma"]
+
+# x86_64 Windows — same discipline as Linux. MSVC toolchain or GNU both get it.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-Ctarget-feature=-fma"]
+
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-Ctarget-feature=-fma"]
+
+# x86_64 macOS — same discipline.
+[target.x86_64-apple-darwin]
+rustflags = ["-Ctarget-feature=-fma"]
+
+# aarch64 macOS (Apple Silicon) — disable FMA (via -neon/FP feature flags).
+# NEON on ARM has its own IEEE 754 compliance story that we'll verify when
+# hardware access lands (see hardware_access_constraints memory). Using
+# `-Ctarget-feature=-fma` as the semantic intent; effective rustc behavior on
+# aarch64 may differ and is part of what Phase 6.1 cross-platform hardening
+# will verify.
+[target.aarch64-apple-darwin]
+rustflags = ["-Ctarget-feature=-fma"]
+
+# aarch64 Linux (Steam Deck is x86_64, but aarch64 Linux covers some dev
+# boards + potential future platform expansion).
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-Ctarget-feature=-fma"]

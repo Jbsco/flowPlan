@@ -4,7 +4,13 @@
 *.pdb
 
 # Cargo registry / state
-.cargo/
+# NOTE: .cargo/config.toml IS committed (determinism discipline build flags
+# per CODING_RULES.md § Determinism Discipline must apply to every checkout).
+# Ignore specific cache / credential files inside .cargo/, not the whole dir.
+/.cargo/credentials
+/.cargo/credentials.toml
+/.cargo/registry/
+/.cargo/git/
 # Cargo.lock is committed for the binary / app; do not ignore.
 
 # Profiling captures
@@ -33,7 +39,6 @@ desktop.ini
 
 # Coverage
 /coverage/
-/.cargo/
 tarpaulin-report.*
 
 # Personal scratch (not committed)

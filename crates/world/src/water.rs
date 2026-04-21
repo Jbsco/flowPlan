@@ -110,12 +110,12 @@ pub fn water_height(x: f32, z: f32, t: f32) -> f32 {
     let mut y = 0.0_f32;
     for w in &WAVES {
         let (dx, dz) = w.dir;
-        let inv_len = dx.hypot(dz).recip();
+        let inv_len = libm::hypotf(dx, dz).recip();
         let (nx, nz) = (dx * inv_len, dz * inv_len);
         let k = TAU / w.wavelength_m;
         let omega = k * w.speed_mps;
         let phase = k * (nx * x + nz * z) + omega * t;
-        y += w.amplitude_m * phase.sin();
+        y += w.amplitude_m * libm::sinf(phase);
     }
     y
 }

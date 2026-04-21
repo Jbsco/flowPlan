@@ -16,6 +16,7 @@ flowplan-core = { workspace = true }
 flowplan-world = { workspace = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
+libm = { workspace = true }
 serde = { workspace = true }
 ron = { workspace = true }
 thiserror = { workspace = true }

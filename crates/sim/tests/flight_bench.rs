@@ -29,6 +29,7 @@ use bytemuck as _;
 use flowplan_core as _;
 use flowplan_world as _;
 use glam as _;
+use libm as _;
 use proptest as _;
 use ron as _;
 use serde as _;

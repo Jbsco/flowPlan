@@ -14,5 +14,6 @@ workspace = true
 [dependencies]
 flowplan-core = { workspace = true }
 glam = { workspace = true }
+libm = { workspace = true }
 # world depends on core only. Sim queries world's pure samplers for buoyancy
 # (Phase 2.5a) and ground effect (Phase 2.4.6); that's the sim -> world direction.

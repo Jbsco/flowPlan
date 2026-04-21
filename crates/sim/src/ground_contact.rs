@@ -1164,7 +1164,7 @@ mod tests {
         sim.aircraft = Some(spec);
         sim.vehicle = wheels_three_point_rest();
         sim.vehicle.fuel_gal = 0.0; // isolate gear dynamics from thrust
-        // Perturb: +10° pitch instead of the 6.46° rest attitude.
+                                    // Perturb: +10° pitch instead of the 6.46° rest attitude.
         sim.vehicle.orientation = Quat::from_rotation_x(10.0_f32.to_radians());
         sim.vehicle.position.y = 1.25; // slightly higher to avoid initial
                                        // over-compression from steep pitch

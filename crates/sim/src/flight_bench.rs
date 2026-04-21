@@ -261,11 +261,11 @@ impl BenchSample {
     #[must_use]
     pub fn capture(tick: u64, sim: &SimState, flight: &FlightOutputs) -> Self {
         let (yaw, pitch, roll) = sim.vehicle.orientation.to_euler(glam::EulerRot::YXZ);
-        let horiz = sim.vehicle.velocity.x.hypot(sim.vehicle.velocity.z);
+        let horiz = libm::hypotf(sim.vehicle.velocity.x, sim.vehicle.velocity.z);
         let fpa_rad = if horiz < 1e-3 && sim.vehicle.velocity.y.abs() < 1e-3 {
             0.0
         } else {
-            sim.vehicle.velocity.y.atan2(horiz)
+            libm::atan2f(sim.vehicle.velocity.y, horiz)
         };
         Self {
             tick,
