@@ -7,18 +7,47 @@ Last updated: **2026-04-21** (Phase 2.5 **SHIPPED**; stock-take session committe
 
 ## 2026-04-21 — Pre-Phase-3 stock-take design decisions
 
-Session-captured design decisions made during the Phase 2.5 close-out stock-take. These flow into doc amendments (ROADMAP / FEATURES / PLAN / AIRCRAFT / CLAUDE / MAPGEN.md) and are reproduced here for context on why the amendments exist.
+Session-captured design decisions made during the Phase 2.5 close-out stock-take. Covers structural roadmap reshuffling, multiple new pinned architectural directions, and pre-phase design-doc commitments. These flow into doc amendments (ROADMAP / FEATURES / PLAN / AIRCRAFT / CLAUDE / MAPGEN.md) and the agent-memory store.
 
-### Phase 3 adds (accepted)
+### Structural — Phase 3 restructure and 3.6 promotion
 
 - **Milestone 3.2b: Chop wiring + water scenario family** — consume 2.5a.7's `SimState.chop_intensity` hook and 3.2 wind state; land glassy / rough / crosswind / headwind / tailwind takeoff + landing scenarios.
 - **Milestone 3.2x: Weather visuals + particle system (volumetric clouds)** — parallel to 3.2 state. Builds the particle system flowPlan has been missing. Volumetric clouds are the explicit target, not 2D billboards.
-- **Milestone 3.5b FFT ocean** — gains notes on: (a) reusable compute-pipeline infrastructure (3.2x / 3.6 / post-v1 erosion / 5.6 aurora all share), (b) slope-based shading tricks (Sea of Thieves reference) for near + far scale.
-- **Milestone 3.6: Terrain rebuild + hydrology** — new milestone (3.6a heightfield / 3.6b hydrology / 3.6c biome + shore + features / 3.6d flora + seasonal). Delivers the `world::surface_at(x, z)` sampler that unblocks 2.5b.7.
+- **Milestone 3.5b FFT ocean** — gains notes on (a) reusable compute-pipeline infrastructure (3.2x / 3.6 / post-v1 erosion / 5.6 aurora all share), (b) slope-based shading tricks (Sea of Thieves reference) for near + far scale.
+- **Phase 3.6: World Foundations** — **promoted from a Phase 3 milestone to its own phase** (H2 `## Phase 3.6: World Foundations`) because its scope + gate deserve phase-tier treatment. Four milestones: 3.6.1 (Layer 1 topographic base) / 3.6.2 (Layer 2 Voronoi partition) / 3.6.3 (Layer 3 feature-delta heightfield + shore classification) / 3.6.4 (flora + seasonal overlay). Delivers the `world::surface_at(x, z)` sampler that unblocks 2.5b.7.
+
+### Structural — Pre-Phase-3 prerequisites (new block)
+
+- **World-scope prototype** (formalized as pre-Phase-3 task): scratch-branch prototype of Candidates C (fresh-per-session) + D (hybrid persistent hubs + procedural), validating the Voronoi-chunk + sub-biome-feature + fuzz+resolve-hub architecture before Phase 3.6 implementation. Measures bake time, persistence footprint, frame-budget impact, subjective appeal.
+- Phase 3 (audio / weather / thread / CI) can start without the prototype complete. **Phase 3.6 cannot open until the prototype lands.**
+
+### Pinned architectural directions (this session)
+
+These are **primary hypotheses to validate in the world-scope prototype** and baseline architecture for Phase 3.6 implementation. If the prototype surfaces performance or aesthetic walls, they bend — but these are the directions to try first.
+
+1. **Voronoi-chunk + sub-biome-feature-library architecture.** Decoupled streaming shape (hex / circular disk) vs chunk shape (Voronoi cells sized by RNG over biome sub-feature libraries at ~2 km average seed spacing). Blue-noise seeds, Fortune's sweep triangulation. Sub-biome features = first-class Voronoi cells (lake clusters, alpine valleys, mesa tops, arches, dune fields, etc.).
+2. **Sub-biome feature overlap with palette adaptation.** A feature from biome A (e.g. lake cluster, home=Alaska-boreal) can appear in a neighboring biome B (e.g. sheltered high-desert valley) with its palette **shifted to match the host** — gradual natural transitions rather than hard biome boundaries. Each feature declares `{home_palette, adaptation_rules_per_host_biome}`.
+3. **Three-layer world composition (PINNED).** Topography × Voronoi × Feature-deltas as **independent composable layers**. Layer 1 (Topographic base — heightfield + biome + hydrology + hub catalog) ships playable on its own in Phase 3.6.1. Layer 2 (Voronoi partition + feature tags) adds semantics in 3.6.2. Layer 3 (feature-delta heightfield additive modifications + shore classification) adds geometry in 3.6.3. Enables incremental development; each layer independently testable via the flight-bench pattern generalized to world-gen. **Hydrology-graph continuity is immutable across layers** — L3 deltas cannot violate the L1 hydrology graph.
+4. **Hub late-binding (fuzz + resolve).** Hubs have stable IDs + approximate coords committed at world-bake time (~50–80K hubs in a 1000 × 1000 km world, ~15 MB catalog). Mission routing + 2D hub map work on the catalog directly without waiting for Voronoi cells to be generated. When a Voronoi cell generates that contains (or is near) a hub's approximate coords, the hub snaps to the nearest compatible feature within the cell. Pattern generalizes to wildlife zones, mission anchors, barn-finds.
+5. **Real-world-possible gate.** "Is this possible in the real world? If not, we've allowed too much." Applied to terrain altitude first: per-biome altitude envelope with soft-clamp smoothstep bounds; world-wide bounds −100 m to 4,500 m (matches Death Valley and Mt Rainier / Mauna Kea); each biome declares `(min, typical_min, typical_max, max)` anchored in real locales. Generalizes to weather, wildlife, hubs, any generative system.
+6. **Streaming-disk tier-adjusted defaults + user slider.** Medium preset: 5 km inner / 8 km mid / 10 km outer / 13 km hysteresis (matches Phase 2 observed visibility). Low / High / Ultra / Custom exposed as a graphics-quality slider (3 km → 30 km outer). Memory + count budgets calculated — Ultra (22 km) stays within DESIGN.md's 1 GB RAM ceiling.
+7. **Utility-varying upgrade tiers + grayed-mission UX.** Upgrades are **branching optimizations**, not linear rungs. Five categories (Gear / Cargo / Aero / Powerplant / Electronics), three tiers each; tier 3 is not "better than" tier 1 in a different branch. Missions declare capability requirements; mission-board UI displays green / yellow / grayed with specific failure reason + fleet-swap hint + upgrade hint. Grayed-with-reason beats hidden — players learn the world's capability ladder organically.
+
+### 2D hub map (unified Phase 4.8 line item)
+
+Hotkey-toggled overlay (`M`), vector-drawn per UI direction (no bitmap map-tile assets). Reads from pre-baked hub catalog + hydrology graph + biome mask — works world-wide without streaming-cell dependency. Tier-iconography, cartographer-unlock progression, mission waypoints + route line + fuel-range ring, biome shading, pan/zoom. Mission capability overlay shows destination hubs green / yellow / grayed per aircraft capability check.
+
+### Hub tier system — 5-tier mosaic
+
+Expanded FEATURES.md § Hubs & Landing Areas with the explicit 5-tier taxonomy (major / regional / local / remote / isolated) with per-tier layout conventions, runway count + counts, hangar types, aircraft parking RNG, mission counts (7–15 / 5–10 / 3–7 / 1 / barn-find-rare), social affordances. **Runway numbering follows real magnetic-heading convention** (degree/360); parallel suffix L/R/C; magnetic variation is biome-conditioned at world-bake time.
+
+### Character customization system
+
+Expanded FEATURES.md § On-Foot / Character with Metal Slug-inspired art direction, eight outfit slots (hat / goggles / lowerface / shoulders-neck / torso / gloves-arms / pants-shorts / shoes-boots), primary + optional secondary color overlay, independent body sliders (height + muscle/boxy + slender/curvaceous — gender-agnostic by construction), rig-scales-outfits-during-anims requirement, cosmetic rewards as opt-in alternative to financial mission reward (rarer at remote hubs).
 
 ### Pre-Phase-4 design-doc commitments
 
-- **[MAPGEN.md](MAPGEN.md) — DRAFT SHIPPED** this session. Covers chunk model (circular vs hex vs square open question), seed topology, layered generation, hydrology as first-class sub-system, biome adjacency rule, flight-log memory. Consult before Phase 3.6 terrain work or Phase 4 world-scope decision.
+- **[MAPGEN.md](MAPGEN.md) — DRAFT SHIPPED** this session. Covers chunk model (decoupled streaming + Voronoi), seed topology, three-layer composition, hydrology sub-system, biome system with sub-biome features + palette adaptation, landscape features, hub persistence + late-binding, flight-log memory, open questions, altitude envelope + real-world-possible gate.
 - **UI_ARCHITECTURE.md** — pending. Pre-Phase-4.8 deliverable.
 - **LIVERY.md** (or expanded FEATURES.md § Livery) — pending. Pre-Phase-4.10 deliverable.
 
@@ -26,12 +55,22 @@ Session-captured design decisions made during the Phase 2.5 close-out stock-take
 
 - **PLAN.md cloud target:** volumetric in-game; 2D-billboards entry was out of date.
 - **FEATURES.md § UI Direction (new section):** target vector / math / shader-drawn UI; no bitmap asset files in the path where avoidable. Current debug HUD + orientation widget + attitude indicator are the reference examples. Debug overlay stays toggle-able in-game indefinitely.
-- **FEATURES.md § Regional Biomes:** explicit real-world references — High Desert (Grand Mesa / Flatirons / Arches), Alaska/Canada baseline, Mediterranean archipelago + inland seas. Structural biome-adjacency rule: no forbidden transitions (snow → desert, etc.).
+- **FEATURES.md § Regional Biomes:** explicit real-world references — High Desert (Grand Mesa / Flatirons / Arches), Alaska/Canada baseline, Mediterranean archipelago + inland seas. Structural biome-adjacency rule: no forbidden transitions (snow → desert, etc.). Sub-biome feature libraries per biome declared as core authoring surface of Phase 3.6.2.
 - **FEATURES.md § Flight Model (rudder slipstream):** noted right-rudder-feels-underpowered observation; may match real DHC-2 (right-rotating prop yields nose-left moments); revisit with targeted slipstream-over-rudder investigation in 3.2 / 3.5 coefficient-tune pass.
 - **FEATURES.md § Weather (volumetric target):** PLAN.md amendment reflected; atmospheric optics (halos / sun dogs / rainbows / crepuscular rays) in scope once volumetric clouds land.
 - **FEATURES.md § Livery & Customization:** v1 initial scope = single bitmap layer + brush tools + HSV color picker + session-scoped undo; extended scope = multi-layer + flatten + perspective-based decal projection. Click to place shape; drag to brush. Undo discarded on exit.
+- **FEATURES.md § Aircraft Configuration & Upgrades** restructured with the five-category three-tier utility-varying model.
+- **FEATURES.md § Missions & Tasks** gains mission capability requirements + grayed-out display pattern with specific failure reason + fleet-swap hint + upgrade hint.
 - **AIRCRAFT.md attribution / licensing gate (new section at top):** placeholder third-party meshes are development-phase only; every mesh replaces with project-owner-authored original before v1 ships. Hard pre-release gate.
 - **CLAUDE.md:** MAPGEN.md + UI_ARCHITECTURE.md + LIVERY.md referenced in a new "Deeper design documents" block.
+
+### Agent-memory snapshot added this session
+
+Persistent memories (agent-side; re-loaded in future sessions): `ui_no_bitmap_preference`, `volumetric_clouds_target`, `aircraft_attribution_gate`, `biome_real_world_references`, `hydrology_chunk_continuity`, `character_art_direction`, `user_professional_context`, `voronoi_subbiome_architecture`, `hub_fuzz_resolve_pattern`, `three_layer_world_composition`, `real_world_possible_gate`, `utility_varying_upgrades`.
+
+### Checkbox audit
+
+ROADMAP.md checkboxes audited; 27 flips to [x] for Phase 1 (complete), Phase 2.3 variants shipped, 2.4.8 coefficient tuning + close-out, 2.4.9a/b turn + slipstream work, 2.5a.2 scenario migration, MAPGEN.md draft-shipped. Deferred items (2.2.5b distant water, 2.3.4 back-face culling, 2.5a.X visual polish, 2.5b.7 per-surface friction, pending design docs) correctly remain unchecked.
 
 ### Pulled from stale / completed: Task #97 removed
 

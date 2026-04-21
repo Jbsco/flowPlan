@@ -481,6 +481,33 @@ A plane can be flown, landed on water, taxied, taken off again. Cel-shaded look 
 
 ---
 
+## Pre-Phase-3 prerequisites
+
+A small set of design / prototype tasks that land **between Phase 2.5 close-out and Phase 3 opening**. None of these individually are phase-sized, but they resolve decisions that would otherwise block later work if deferred. They can run in parallel while Phase 3 implementation work starts — they're prerequisites for *later* Phase 3 / 3.6 milestones, not for Phase 3's start.
+
+### World-scope prototype (unblocks Phase 3.6 + Phase 4)
+
+- [ ] **Scratch-branch prototype of Candidate C (fresh-per-session, no persistence) and Candidate D (hybrid persistent hubs + procedural surroundings)** per [FEATURES.md § World Scope & Map Layout](FEATURES.md#world-scope--map-layout). Two short iterations, not a polished implementation.
+- [ ] **Primary architectural hypothesis to validate:** the **Voronoi-chunk + sub-biome-feature + fuzz+resolve-hub** architecture pinned in MAPGEN.md. Specifically:
+    - Decoupled streaming disk (10 km outer at Medium preset, slider-exposed to Low/Medium/High/Ultra/Custom per [FEATURES.md § Display & Graphics Settings](FEATURES.md#display--graphics-settings)) vs Voronoi chunk shape.
+    - Blue-noise seed distribution at ~2 km average spacing; cell size varies by sub-biome feature type.
+    - Sub-biome feature overlap into neighboring biomes with palette adaptation.
+    - World-bake hub catalog (~50–80K hubs for a 1000 × 1000 km world) with approximate-coord fuzz + streaming-time resolve to nearest compatible Voronoi cell.
+    - If the prototype surfaces a performance wall or aesthetic problem, the architecture bends or falls back to hex/square lattice — but Voronoi is the hypothesis to test first.
+- [ ] Measure: world-bake time (hydrology graph + biome mask + Voronoi partition + hub catalog), persistence footprint per play-hour (Candidate D deltas only), frame-budget impact at the 10-km streaming outer radius, subjective replay appeal after 2–3 fresh sessions on each candidate.
+- [ ] **Deterministic / telemetric validation** (generalize the flight-bench pattern to world-gen): deterministic chunk output given `(master_seed, chunk_coords)`; bit-identical across platforms; bench-tier assertions on hub-catalog byte-identical reproduction across platforms and on hub-resolve outcomes given the same approach path.
+- [ ] Output: amendment PR to FEATURES.md § World Scope + MAPGEN.md § Chunk model + MAPGEN.md § Hub late-binding. Decision locked. If a completely different architecture wins, the amendment documents that instead.
+
+### Design-doc closures (pre-Phase-4 commitments)
+
+Tracked under [Pre-Phase-4 design-doc commitments](#pre-phase-4-design-doc-commitments) at the end of Phase 3.6. Flagged here because they can start before Phase 3 if the author has bandwidth — the world-scope prototype is the only hard pre-Phase-3 gate; the other design docs land opportunistically.
+
+### Gate
+
+> **Gate (Pre-Phase-3):** Phase 3 implementation work can start without these complete — the only hard block is that **Phase 3.6 cannot open until the world-scope prototype lands and its amendment PR merges.** This gives Phase 3 audio / weather / thread / CI work a runway while the prototype happens on scratch branches.
+
+---
+
 ## Phase 3: Systems
 
 **Goal:** audio spine, weather state, dedicated sim thread, CI pipeline. The game becomes a living system.
@@ -692,50 +719,85 @@ All of the following, verified on reference hardware:
 - [ ] Landing / takeoff musical flourishes at milestones
 - [ ] No pre-recorded music stems
 
-### Milestone 3.6: Terrain rebuild + hydrology
+### Deliverable
 
-Replaces the Phase 2.2 sum-of-sines heightfield with a proper procedural terrain + hydrology system. Closes the Phase 2 known limitations (no real hydrology, no shore classification, no independent amplitude/gradient control) enumerated in [PROGRESS.md § Phase 2 known limitations](PROGRESS.md#known-remaining-issues-in-phase-2-deferred-to-25-or-later) and unblocks the `SurfaceClass` sampler that gates [Milestone 2.5b.7 per-surface friction](#2.5b.7-per-surface-friction-table). Detailed design in [MAPGEN.md](MAPGEN.md).
+The plane has a voice (engine, wind, water, splash). Weather actively shapes flight. Sim runs on its own thread. CI runs on every push.
 
-Scoped large (this is arguably a phase of its own — candidate for splitting if it grows). Reuses the compute-pipeline infrastructure introduced in 3.5b.
+> **Gate:** Phase 3 is complete when the quality gate passes in CI, the determinism test passes with the sim worker thread active, the audio callback passes the no-alloc/no-log verification, and the Phase 3 scene benches hold within the frame budget on reference hardware.
 
-**3.6a Heightfield rebuild (biome-parameterized procedural terrain).**
-- [ ] New `world::terrain` module replacing sum-of-sines. Ridged multifractal + domain warping with per-biome amplitude / frequency profiles. Independent amplitude and gradient tuning (closes the Phase 2 limitation).
-- [ ] Chunk model selected (square vs hex — see MAPGEN.md [Chunk model](MAPGEN.md#chunk-model) open question).
-- [ ] Preallocated chunk pool + background generation thread (honors DESIGN.md no-alloc hot-path rule).
-- [ ] LOD tiers: ~16 m distant, ~4 m mid, ~1 m near-aircraft. Seamless boundary stitching.
-- [ ] `Terrain::flat()` / `Terrain::flat_land()` remain for bench scenarios; procedural path is gated by world-scope + scenario flags.
+---
 
-**3.6b Hydrology sub-system.**
-- [ ] World-bake pass at session load: coarse global heightfield → D8 drainage network → river edges + lake footprints + coastlines. Deterministic from master seed. Bit-identical across platforms (per MAPGEN.md cross-platform discipline).
-- [ ] River-continuity invariants at chunk boundaries: inbound flow-matched outbound; rivers-grow-into-lakes; no arbitrary truncation.
-- [ ] Lake / sea / small-water-body classification (`lake_small | lake_large | river | protected_bay | open_coastal | open_ocean | alpine_tarn | glacial`).
-- [ ] Waterfalls, sandbars, creeks, inland ocean crossings as features emerging from graph + shore classification.
-- [ ] Per-water-body surface parameters (chop modulation, color palette, flora fringe).
+## Phase 3.6: World Foundations
 
-**3.6c Biome + shore classification + feature placement.**
-- [ ] `world::biome` module: climate-field-driven biome classification with adjacency rule enforcement (no snow→desert, no snow→tropical — see MAPGEN.md [Biome system](MAPGEN.md#biome-system)).
-- [ ] Biome catalog per MAPGEN.md / FEATURES.md: high desert (Grand Mesa / Flatirons / Arches flavor), Alaska/Canada baseline, Mediterranean archipelago, PNW, Rocky alpine, subarctic, tropical.
-- [ ] Shore classification sampler (`sand_beach | gravel | rock | cliff | mudflat | delta | ice_edge`) from `(slope, biome, climate)`. Exposes `world::surface_at(x, z) -> SurfaceClass` — unblocks 2.5b.7.
-- [ ] Placed landmarks (lighthouses, wrecks, bridges, waterfalls) via deterministic poisson-disk; per-biome density.
+**Goal:** replace the Phase 2.2 sum-of-sines heightfield with a proper procedural terrain + hydrology + biome system. This is where the world becomes a **world** rather than a placeholder — coherent rivers, biome-appropriate landscape, shore classification, flora, hub placement infrastructure. Stands as its own phase rather than a Phase 3 milestone because its scope, dependencies, and gate all deserve phase-tier treatment.
 
-**3.6d Flora, decoration, seasonal overlay.**
-- [ ] Flora representation (billboards / instanced meshes); per-biome density + species tables.
+**Scope drivers:**
+- Closes the Phase 2 known limitations (no real hydrology, no shore classification, no independent amplitude/gradient control) enumerated in [PROGRESS.md § Phase 2 known limitations](PROGRESS.md#known-remaining-issues-in-phase-2-deferred-to-25-or-later).
+- **Unblocks [Milestone 2.5b.7 per-surface friction](#milestone-25-ground--water-contact-physics)** by shipping the `world::surface_at(x, z) -> SurfaceClass` sampler.
+- **Unblocks Phase 4 Delivery Loop** — hubs + routes + cargo + missions all need real terrain + biomes + hydrology underneath them.
+- Reuses the compute-pipeline infrastructure introduced in [Milestone 3.5b FFT ocean](#milestone-35b-fft-based-ocean-water-tessendorf-method). That's part of why 3.6 follows Phase 3: the infra boundary is in place.
+
+**Detailed design:** [MAPGEN.md](MAPGEN.md).
+
+**Prerequisite (gated):** the **world-scope prototype** (pre-Phase-3 prerequisite, see [Pre-Phase-3 prerequisites](#pre-phase-3-prerequisites)) must be complete before Phase 3.6 starts. The prototype's outputs — world-scope decision + chunk-shape decision + persistence footprint measurement — drive this phase's implementation path.
+
+Each milestone below corresponds to **one layer** of the three-layer composition (see [MAPGEN.md § Layered generation](MAPGEN.md#layered-generation--three-layer-composition-pinned)): Layer 1 = Topographic base; Layer 2 = Voronoi partition; Layer 3 = Feature-delta heightfield modifications + flora. Each layer ships playable on its own.
+
+### Milestone 3.6.1: Layer 1 — Topographic base + hydrology
+
+**Ships Layer 1 in full. Playable world with real biome-coherent terrain and hydrology after this milestone, even with no Voronoi partition or features yet.**
+
+- [ ] New `world::terrain` module replacing sum-of-sines. Ridged multifractal + domain warping with per-biome amplitude / frequency / gradient profiles. Independent amplitude and gradient tuning (closes the Phase 2 limitation).
+- [ ] **Hydrology sub-system:** world-bake pass at session load — coarse global heightfield → D8 drainage network → river edges + lake footprints + coastlines. Deterministic from master seed. Bit-identical across platforms (per MAPGEN.md cross-platform discipline). River-continuity invariant baked in (inbound flow-matched outbound; rivers-grow-into-lakes; no arbitrary truncation). Lake / sea / small-water-body classification (`lake_small | lake_large | river | protected_bay | open_coastal | open_ocean | alpine_tarn | glacial`). Per-water-body surface parameters (chop modulation, color palette).
+- [ ] **Biome climate fields** (temperature / humidity / elevation / latitude proxy) → biome classification with adjacency rule enforcement (no snow→desert, no snow→tropical — see MAPGEN.md [Biome system](MAPGEN.md#biome-system)). Biome catalog per FEATURES.md: high desert, Alaska/Canada baseline, Mediterranean archipelago, PNW, Rocky alpine, subarctic, tropical.
+- [ ] **Magnetic variation field** (biome-dependent at world-bake time, deterministic).
+- [ ] **Hub catalog bake** (~50–80K entries for a 1000 × 1000 km world) per [MAPGEN.md § Hub late-binding (fuzz + resolve)](MAPGEN.md#hub-late-binding-fuzz--resolve). Each entry: `{HubId, approx_world_pos, tier, parent_biome, required_surfaces, display_name, region_id}`. Lives at Layer 1 because it consults global topography for placement. Persisted alongside hydrology graph.
+- [ ] `Terrain::flat()` / `Terrain::flat_land()` remain for bench scenarios; procedural path gated by world-scope + scenario flags. **All existing Phase 2 / 2.5 flight-bench + water-bench scenarios must continue to pass unchanged.**
+- [ ] **Deterministic / telemetric validation:** extend the bench harness with a "world-gen" scenario class — assert hydrology-graph byte-identical output across platforms; assert flow-continuity at chunk boundaries; assert lake-volume / watershed-area bounds; assert hub catalog byte-identical across platforms.
+
+### Milestone 3.6.2: Layer 2 — Voronoi partition + sub-biome feature assignment
+
+**Ships Layer 2 semantics only — Voronoi partition + feature-type tags. Heightfield unchanged from Layer 1; features are semantic, not yet visual.** Playable state: real Layer 1 terrain with semantic feature tags on Voronoi cells; useful for telemetry, debug visualization, and validating the partition + placement logic without risking terrain correctness.
+
+- [ ] Voronoi partition at world-bake time: blue-noise seed distribution (~2 km average spacing per [MAPGEN.md § Voronoi partition](MAPGEN.md#voronoi-partition-the-semantic-layer)); Fortune's sweep triangulation; spatial grid hash for streaming queries.
+- [ ] **Sub-biome feature libraries** per parent biome (see [FEATURES.md § Sub-biome feature libraries](FEATURES.md#sub-biome-feature-libraries-pinned-architecture)). Each library entry declares placement constraints (slope/roughness/altitude/water-adjacency tolerance — scaled by remoteness: major-hub runway 0.5° slope vs remote bush strip 4°), palette + adaptation rules, flora/fauna compatibility, hub-placement rules. The core authoring surface of this milestone.
+- [ ] RNG feature-type assignment per Voronoi seed. Placement constraints evaluated against Layer 1 coarse topography; incompatible features re-roll.
+- [ ] **Sub-biome palette adaptation:** sub-biome features overlapping into non-home biomes interpolate palette toward the host (see [FEATURES.md § Sub-biome feature overlap with palette adaptation](FEATURES.md#sub-biome-feature-overlap-with-palette-adaptation)).
+- [ ] **Hub streaming-time resolution:** Voronoi cells query the Layer 1 hub catalog during generation; compatible cells snap hubs to best-fit placement (runway-end, dock point, beach landing). Fuzz+resolve pattern also available for wildlife zones, mission anchors, barn-finds.
+- [ ] Preallocated chunk pool + background generation thread (honors DESIGN.md no-alloc hot-path rule). Streaming disk budget + tier-adjusted defaults per MAPGEN.md § Streaming disk.
+- [ ] Debug visualization: Voronoi-cell overlay in debug HUD (cell edges drawn, feature-type labels at centroids). Reuses the existing `DebugLinesRenderer` pipeline.
+- [ ] **Deterministic / telemetric validation:** assert Voronoi partition byte-identical across platforms; assert feature-type assignment reproducible given same master seed; assert biome-adjacency graph rejects forbidden pairs; assert hub resolution outcome stable given same streaming approach.
+
+### Milestone 3.6.3: Layer 3 — Feature-delta heightfield + shore classification
+
+**Ships Layer 3 — feature deltas become visible in the heightfield + shore classification + landmark placement. This is where features go from labels to geometry.**
+
+- [ ] **Per-feature-type delta functions** per [MAPGEN.md § Layer 3](MAPGEN.md#layer-3--feature-delta-heightfield-modifications): lakes carve basins, runways flatten strips with skirts, mesas raise plateaus with cliff edges, arches add rock geometry, dune fields add noise undulation, floodplains trough along rivers, etc. Additive composition on top of Layer 1: `final_height = base + Σ feature_deltas`.
+- [ ] **Boundary falloff invariant:** each delta smoothly to zero at Voronoi cell edges (bump-function / cosine falloff). Continuous terrain across Voronoi edges by construction.
+- [ ] **Hydrology continuity invariant:** deltas cannot violate the Layer 1 hydrology graph — cannot elevate a river channel, cannot fill a lake basin, cannot dam a drainage network. Mesa / ridgeline / elevation-raising features reject placement where the hydrology graph routes water through the cell.
+- [ ] **Shore classification sampler** (`sand_beach | gravel | rock | cliff | mudflat | delta | ice_edge`) from final heightfield + hydrology graph + biome. Exposes `world::surface_at(x, z) -> SurfaceClass` — **unblocks 2.5b.7**.
+- [ ] Placed landmarks (lighthouses, wrecks, bridges, waterfalls, mesas, arches) via deterministic poisson-disk; per-biome density.
+- [ ] **Feature groups** (cross-cell features): ridgelines spanning multiple cells, salmon-run rivers threading through cells, logging-road systems — coordinated delta functions across a group of adjacent Voronoi cells.
+- [ ] Tier-1 / tier-2 **authored hub chunk** infrastructure: authored chunk format + seam-blending; actual hub authored *content* lands in Phase 4.1. Phase 3.6.3 ships the infrastructure.
+- [ ] **Deterministic / telemetric validation:** assert final heightfield byte-identical across platforms given same master seed + Voronoi partition; assert boundary-falloff continuity between neighboring cells; assert hydrology-graph-violation rejection; assert `surface_at` returns coherent classes along sample transects.
+
+### Milestone 3.6.4: Flora, decoration, seasonal overlay
+
+- [ ] Flora representation (billboards / instanced meshes); per-biome density + species tables. **Consider splitting:** if 3.6.1-3.6.3 grow, 3.6.4 can slip to Phase 5 polish without blocking Phase 4.
 - [ ] Rocks, boulders, snags, driftwood — placed procedurally.
 - [ ] Snow overlay per season (altitude-gated; driven by 3.2 weather / season state).
 
-**Gate (3.6):** the world-scope decision lands before this milestone closes (it's a forcing function). `Terrain::flat*` regression tests still pass (bench scenarios unchanged). New procedural world passes visual snapshot at a canonical frame. Hydrology graph produces byte-identical output across Linux / Windows / Steam Deck given the same master seed. Frame budget holds with the new terrain + flora at reference tier.
+### Deliverable (Phase 3.6)
 
-### Deliverable
+The world is properly generated: coherent hydrology (rivers flow downhill, lakes form at minima, coastlines trace sea level), biomes are climate-gradient-coherent with real-world-inspired aesthetics, shore classification is available for 2.5b.7 and hub placement, flora populates each biome. `Terrain::flat*` regression tests still pass. All existing Phase 2 / 2.5 bench scenarios still pass unchanged.
 
-The plane has a voice (engine, wind, water, splash). Weather actively shapes flight. The world is properly generated with coherent hydrology. CI runs on every push.
-
-> **Gate:** Phase 3 is complete when the quality gate passes in CI, determinism test passes with the sim worker thread active, the audio callback passes the no-alloc/no-log verification, and the terrain rebuild delivers MAPGEN.md's acceptance criteria (hydrology coherency, biome adjacency, shore classification).
+> **Gate (Phase 3.6):** the quality gate passes in CI. World-bake hydrology graph produces byte-identical output across Linux / Windows / Steam Deck given the same master seed (proves cross-platform determinism for world-gen, not just sim). All Phase 2 / 2.5 bench scenarios pass unchanged. New procedural world passes visual snapshot at a canonical frame. Frame budget holds with the new terrain + flora at reference tier. `world::surface_at` sampler available, unblocking 2.5b.7.
 
 ---
 
 ### Pre-Phase-4 design-doc commitments
 
-Phase 4 implementation work requires several design decisions that can be frozen earlier. These are **design doc deliverables**, not code — authored in Phase 3 (or earlier) so Phase 4 milestones have a concrete spec to build from.
+Phase 4 implementation work requires several design decisions that can be frozen earlier. These are **design doc deliverables**, not code — authored in Phase 3 / 3.6 (or earlier) so Phase 4 milestones have a concrete spec to build from.
 
 - [x] **[MAPGEN.md](MAPGEN.md)** — map generation / chunk model / hydrology / biomes. **DRAFT SHIPPED** (initial version authored during Phase 2.5 close-out stock-take).
 - [ ] **UI_ARCHITECTURE.md** — UI framework decision (egui for settings/menus vs hand-rolled vs hybrid), navigation model, prompt system, toggle-able debug overlay. Target: vector/math/shader-drawn UI with minimal bitmap assets (see [FEATURES.md § UI Direction](FEATURES.md#ui-direction)). Unblocks Milestones 4.8 / 4.8.5 / 4.9.
@@ -747,7 +809,7 @@ Phase 4 implementation work requires several design decisions that can be frozen
 
 **Goal:** a complete playable loop. Hub -> destination -> return, with cargo affecting flight, damage persisting, economy and reputation progressing, and discovery unlocking content. No polish yet.
 
-**Prerequisite (world-scope decision):** resolve the world-scope open question (see [FEATURES.md § World Scope & Map Layout](FEATURES.md#world-scope--map-layout)) *before* Phase 4 begins. Phase 4 content depends on it. Prototyping may happen in a Phase 1-2 scratch branch.
+**Prerequisite (world-scope decision):** resolved during the [Pre-Phase-3 world-scope prototype](#world-scope-prototype-unblocks-phase-36--phase-4) and then implemented in [Phase 3.6 World Foundations](#phase-36-world-foundations). By the time Phase 4 opens, the world-scope decision is locked, hydrology + biomes are generated coherently, and `world::surface_at` is available.
 
 ### Milestone 4.1: Hubs and routes
 
@@ -799,8 +861,10 @@ Depends on 2.5b physics + 4.3 damage detection hooks. Authors the full comprehen
 
 - [ ] Mission templates: delivery, passenger, survey, supply drop, mail, SAR, medevac, scientific, fire support, cartography, photo
 - [ ] Template parameterization from world state (weather, cargo supply, season, time, reputation)
+- [ ] **Capability-requirements record per mission** (see [FEATURES.md § Mission capability requirements](FEATURES.md#mission-capability-requirements)): `service_ceiling_m`, `range_nm_required`, `required_gear`, `cargo_capacity_kg`, `electronics_min`, `aircraft_class_hint`. Requirements computed at mission-generation time from source + destination hubs + heightfield maxima + cargo specs.
+- [ ] **Capability check against player's current aircraft + loadout** (five-category capability vector per [FEATURES.md § Aircraft Configuration & Upgrades](FEATURES.md#aircraft-configuration--upgrades)). Result: green / yellow / grayed status per mission.
 - [ ] Sequential progression: completing a template unlocks a harder variant (load, distance, multi-stop, time pressure, adverse weather)
-- [ ] Mission board at hub (and radio-board for remote hubs)
+- [ ] Mission board at hub (and radio-board for remote hubs). **Grayed-mission display** with specific failure reason + fleet-swap hint + upgrade hint per [FEATURES.md § Grayed-mission capability display](FEATURES.md#grayed-mission-capability-display).
 - [ ] Mission log with waypoints and optional objectives
 - [ ] Wildlife runs as a distinct non-financial category; rewards: liveries, LUTs, map annotations, logbook moments, paint textures, soundtrack stems
 
@@ -845,8 +909,13 @@ Depends on 2.5b physics + 4.3 damage detection hooks. Authors the full comprehen
 - [ ] Minimal HUD: altitude, airspeed, heading, fuel, wind indicator, stall warning, terrain proximity
 - [ ] Hand-rolled per [DESIGN.md § Non-Goals](DESIGN.md#non-goals)
 - [ ] Cel-shading-compatible palette; colorblind modes
-- [ ] Hand-drawn cel-shaded map view (fog-of-war / flight-log memory)
-- [ ] Logbook view summarizing flights
+- [ ] **2D hub map** (hotkey-toggled, typical `M`) per [FEATURES.md § 2D hub map](FEATURES.md#2d-hub-map-hotkey-accessible-navigation-overlay). Reads from the world-bake hub catalog + flight-log-memory discovery flags + cartographer unlocks — works world-wide, not limited to streaming disk. Cel-shaded hand-drawn aesthetic; **vector-drawn with zero bitmap map-tile assets** per [FEATURES.md § UI Direction](FEATURES.md#ui-direction).
+    - Tier-differentiated hub iconography; undiscovered hubs hidden or hinted per cartographer progression.
+    - Current aircraft position + heading overlay; mission-destination route line; fuel-range ring; pinned waypoints; pan/zoom; snap-to-aircraft hotkey.
+    - Biome shading + hydrology-graph overlay (rivers / lakes / coastlines) at low zoom; terrain contour hints at high zoom — all drawn from pre-baked world data.
+    - **Mission capability overlay:** when a mission is selected on the map, destination hubs render green / yellow / grayed per the capability check — matches the mission-board display (Milestone 4.5).
+    - Frame-cost target: ≤ 1 ms at reference tier when map open.
+- [ ] Logbook view summarizing flights; cross-linked to the 2D hub map (hover a discovered hub → that hub's logbook entries).
 
 ### Milestone 4.8.5: Graphics & display settings
 

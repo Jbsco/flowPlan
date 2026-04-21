@@ -163,6 +163,30 @@ Each biome is a bundle of `{palette, flora, fauna, surface types, weather profil
 
 Each biome contributes to the shared feature taxonomy below (surface types, weather regimes, wildlife spawns, hub archetypes).
 
+### Sub-biome feature libraries (pinned architecture)
+
+Biomes are not monolithic. Each parent biome declares a **sub-biome feature library** — specific micro-character feature types that fill the biome's territory as mosaic cells:
+
+- **Coastal Alaska / Canadian boreal** sub-biomes: `lake_cluster | alpine_valley | dense_spruce_forest | rocky_ridge | tundra_patch | river_floodplain | bush_strip_clearing | glacier_tongue | fjord_entrance | salmon_run_river | cliff_coast`.
+- **High Desert / Plateau** sub-biomes: `mesa_top | arch_formation | slickrock_canyon | sagebrush_plain | dry_wash | dune_field | dry_lake_bed | rail_corridor | scrub_valley | juniper_stand | slot_canyon`.
+- **Mediterranean archipelago** sub-biomes: `protected_cove | rocky_islet | terracotta_port | pine_headland | sandy_beach | small_harbor | island_strait | coastal_plain`.
+- **Pacific Northwest** sub-biomes: `rainforest_valley | clear_cut_hillside | logging_camp | fjord | river_delta | old_growth_stand | salmon_cannery_waterfront`.
+- **Rocky / Alpine** sub-biomes: `alpine_tarn | ridge_traverse | cirque | narrow_valley | talus_slope | glacier_dammed_lake | fire_burn_area | avalanche_chute`.
+- **Subarctic / North Atlantic** sub-biomes: `basalt_coast | geothermal_steam | stormy_headland | reindeer_plain | puffin_rookery | northern_lights_corridor`.
+- **Tropical island chain** sub-biomes: `reef_lagoon | coconut_atoll | sandbar_chain | coral_rim | protected_bay | volcanic_cone`.
+
+Each sub-biome feature is a first-class Voronoi-cell unit (see [MAPGEN.md § Chunk model](MAPGEN.md#chunk-model) pinned architecture). It carries its own geometry rules, palette, flora, fauna tables, hub-placement compatibility, and inter-biome adaptation rules. Authoring these libraries is the core design work of Phase 3.6.3.
+
+### Sub-biome feature overlap with palette adaptation
+
+Sub-biome features can **overlap into neighboring parent biomes** — producing organic, natural-feeling transitions without hard biome boundaries:
+
+- A lake-cluster sub-biome (home: Alaskan boreal) might appear in a sheltered high-desert valley with a microclimate water source. Its palette **shifts toward the host biome's atmosphere** — the water stays turquoise but reads against warm red-rock rather than cool evergreen.
+- A pine-headland sub-biome (home: Mediterranean) could appear at the dry edge of a Pacific Northwest region with its palette desaturated and greys shifted warm to match.
+- A fjord-entrance sub-biome (home: subarctic) could appear in a cold-biased Alaskan region with nearly-home palette (the two biomes are close in climate-gradient space, so adaptation is mild).
+
+**Adaptation mechanism:** each sub-biome feature declares `{home_palette, adaptation_rules_per_host_biome}`. When placed in a host biome, the palette interpolates between home and host-adapted values, weighted by climate-gradient distance from the feature's origin biome. The result is **gradual natural shift** rather than a hard boundary. Detail in [MAPGEN.md § Biome system](MAPGEN.md#biome-system).
+
 ### Biome adjacency rule (structural — enforced by the generator)
 
 Biome transitions must be **climate-gradient coherent**. Two biomes can be adjacent iff there's a plausible climate gradient between them.
@@ -184,13 +208,32 @@ This is a generator-level constraint, not aesthetic polish. Encoded as a biome-a
 
 ## Map Memory / Cartography
 
+Rendering + data for the map overlay live in [Hubs & Landing Areas § 2D hub map](#2d-hub-map-hotkey-accessible-navigation-overlay). This section covers the **progression + memory + discovery** side — what's visible and when.
+
 - **[sketch]** Flight log: every flight recorded as seed + input trace + events. Enables replay, deterministic "highlight reel" playback, and shareable-route artifacts.
-- **[sketch]** Exploration map: regions/hubs/landmarks the player has personally seen are drawn; unexplored regions are fogged or sketchy.
-- **[sketch]** Map reveal markers: unlocks via debt-funded upgrades (GPS, cartographer contract), mission rewards, wildlife encounters.
-- **[sketch]** Hand-drawn cel-shaded map aesthetic: matches the art direction, not a UI satellite image.
-- **[sketch]** Bookmarks: player can pin locations, add annotations.
-- **[sketch]** Persistence support for procedural generation: only generated and visited regions persist on disk; others regenerate from seed.
-- **[sketch]** Logbook: per-flight summary (route, weather, cargo, incidents, wildlife sighted, photos taken), auto-authored from the flight log, becomes a keepsake.
+- **[sketch]** Exploration map: regions/hubs/landmarks the player has personally seen are drawn; unexplored regions are fogged or sketchy on the 2D hub map.
+- **[sketch]** Map reveal markers: unlocks via debt-funded upgrades (GPS, cartographer contract), mission rewards, wildlife encounters. Each unlock annotates a subset of the world-bake hub catalog with `discovered = true` so the 2D map can render them.
+- **[sketch]** Hand-drawn cel-shaded map aesthetic: matches the art direction, not a UI satellite image. Vector-drawn per [UI Direction](#ui-direction) — no bitmap map-tile imagery.
+- **[sketch]** Bookmarks: player can pin locations, add annotations. Pinned on the 2D hub map + surfaced as HUD waypoint markers in-flight.
+- **[sketch]** Persistence support for procedural generation: only discovery + annotation deltas persist on disk. The hub catalog + hydrology graph regenerate deterministically from master seed; deltas apply on top.
+- **[sketch]** Logbook: per-flight summary (route, weather, cargo, incidents, wildlife sighted, photos taken), auto-authored from the flight log, becomes a keepsake. Cross-linked to the 2D hub map (hover a hub → surface that hub's logbook entries).
+
+### Discovery + reveal tiers (progressive unlock)
+
+- **Undiscovered:** hub is **not shown** on the 2D map. Exists in the catalog but invisible to the player.
+- **Hinted:** hub shows as a `?` at approximate coords if a mission, radio transmission, or NPC dialog references it.
+- **Seen:** flown over or within a tier-dependent observation radius. Tier shows; name may still be omitted.
+- **Visited:** landed / taxied. Full hub details — name, services, runway headings, aircraft-parked-here history.
+- **Home:** designated as home hub (tier 1 or 2 only). Special iconography + free hangar / free livery edits / loyalty bonus.
+
+### Cartographer-unlockable reveals
+
+- **Regional chart pack (purchase at tier-1 cartographer vendor):** reveals all tier-1 + tier-2 hub locations in a chosen region. Names + tier iconography, services marked but not detailed.
+- **Detail chart (per-hub):** upgrades a "seen" hub to "visited"-equivalent detail without actual landing.
+- **Terrain contour overlay:** reveals coarse topography + hydrology at higher zoom. Useful for route planning through mountainous regions.
+- **Forecast overlay:** shows current weather at discovered hubs (aligns with 3.2 weather forecasts). Decays with distance.
+
+These unlocks are stored as save-format deltas — the underlying hub catalog is unchanged.
 
 ---
 
@@ -318,6 +361,50 @@ Runway numbering is **pilot-facing** data. These rules are non-negotiable:
 - Hub RON authoring tool validates that display numbering matches heading. Mismatches are authoring bugs.
 - Magnetic variation is biome-dependent at world-bake time (more accurate over vast procedural worlds). Held deterministic per master seed.
 
+### Hub reference & late binding (world-wide navigation)
+
+Missions reference hubs anywhere in the world — often 50–200 km from the aircraft, far outside the streaming disk's 8–22 km range. But Voronoi cells only generate inside the streaming disk, so the destination cell may not exist yet at mission-acceptance time. Design pattern:
+
+- **[sketch]** **World-bake hub catalog.** At world-seed load, a deterministic bake pass produces a full hub catalog (~50–80K hubs for a 1000 × 1000 km world): `{HubId, approx_world_pos, tier, parent_biome, required_surfaces, display_name, region_id}`. Catalog is stable per master seed, ~15 MB in memory, persisted alongside the hydrology graph.
+- **[sketch]** **Approximate coordinates ("fuzz").** Hubs commit approximate world-coords at bake time — accurate to Voronoi-cell scale (~2 km) but not meter-precise. Mission systems use these coords for distance + fuel + routing calculations. Great-circle distance between hubs is sufficient for flight planning.
+- **[sketch]** **Streaming-time resolution ("resolve").** When a hub's approximate coords fall into the streaming disk, the Voronoi generator snaps the hub to the nearest compatible cell (by `required_surfaces` × sub-biome feature type). If the nearest cell mismatches, the resolver walks Voronoi neighbors to find a compatible one. Exact coords cached once resolved.
+- **[sketch]** **Pattern generalizes.** Same fuzz+resolve applies to wildlife zones, mission anchors, barn-find aircraft, landmark references — any global reference to an eventually-generated local feature. See [MAPGEN.md § Hub late-binding (fuzz + resolve)](MAPGEN.md#hub-late-binding-fuzz--resolve) for full detail.
+
+### 2D hub map (hotkey-accessible navigation overlay)
+
+A player-facing 2D map overlay for route-planning, destination awareness, and mission context. Hotkey-toggled (typical: `M`), available both in-flight and on-ground. Unifies the placeholder "route planning UI stub" in Milestone 4.1 + the "hand-drawn cel-shaded map view" in Milestone 4.8.
+
+- **[sketch]** **Hotkey toggle:** `M` opens/closes the map overlay. Held / tapped modes both supported (tap to pin open, hold to peek). Pauses nothing — sim keeps running during map view.
+- **[sketch]** **Rendering:** **cel-shaded, hand-drawn aesthetic, vector-drawable** (see [UI Direction](#ui-direction) — no bitmap satellite imagery; same rendering primitives as the debug orientation widget + attitude indicator).
+- **[sketch]** **Data source:** the world-bake hub catalog + flight-log-memory discovery flags + cartographer-unlock progression. No streaming-cell dependency — the map works for hubs anywhere in the world whether their Voronoi cells have been generated or not.
+- **[sketch]** **Hub display:**
+    - Tier-differentiated iconography (big airport symbol for tier-1; dock for seaplane base; simple dot for remote; `?` for hinted-but-undiscovered).
+    - Discovered hubs named; undiscovered hubs anonymized or omitted per cartographer-unlock state.
+    - Hover / selection surfaces hub details (services, runway headings, tier, services-available icons).
+- **[sketch]** **Player + destination display:**
+    - Current aircraft position + heading (cel-shaded arrow or small plane icon).
+    - Mission destination highlighted with a route line (great-circle from current position, wrapped to world bounds if candidate-D-hybrid procedural surroundings).
+    - Active mission waypoints drawn as pinned markers.
+    - Fuel-range ring: circle around current position showing how far the aircraft can fly with current fuel + wind.
+- **[sketch]** **Pan / zoom:**
+    - Mouse / gamepad zoom and pan.
+    - Zoom range: region-level overview (~500 km across) down to local-detail (~5 km across showing individual docks and runways at discovered hubs).
+    - Snap-to-aircraft hotkey to re-center on the player's position.
+- **[sketch]** **Biome shading on the map:**
+    - Hand-drawn-feel biome tinting (colored regions at low zoom; palette-adapted per [Voronoi sub-biome-feature overlap](#regional-biomes)).
+    - Hydrology graph overlay (rivers as lines, lakes as fills, coastlines as outlines) — drawn directly from the pre-baked hydrology graph data, so the map is accurate even for unflown regions.
+    - Terrain contour hints at higher zoom, derived from coarse global heightfield (the same data the hydrology bake used).
+- **[sketch]** **Player annotations:**
+    - Pin custom waypoints (long-press / right-click). Annotated with text note; shows on the map and as a HUD marker while in flight.
+    - Bookmark favorite hubs for quick-return.
+- **[sketch]** **Logbook cross-references:**
+    - Hover a discovered hub → shows logbook entries captured there (first-landing date, wildlife sightings, mission completions).
+    - Highlights recent flight paths (trail of last N flights fading with time).
+- **[sketch]** **Performance:** since the map reads from the pre-baked hub catalog + hydrology graph (~15 MB + ~100 MB in memory, already resident), rendering is purely a vector-drawing pass. Per-frame cost at map-open scales with on-screen hub count (culled by zoom level). Off-screen hubs are LRU-culled from the draw list. Expected frame-cost impact: ≤ 1 ms at reference tier.
+- **[sketch]** **Determinism-neutral:** the map is purely presentation; no side effects on sim. Save-format only persists discovery + annotation deltas, not the map view state itself.
+
+See also [Map Memory / Cartography](#map-memory--cartography) for the progression angle (what gets revealed when).
+
 ---
 
 ## Aircraft Catalog
@@ -377,25 +464,70 @@ Runway numbering is **pilot-facing** data. These rules are non-negotiable:
 
 ## Aircraft Configuration & Upgrades
 
-- **[sketch]** Configuration swap at a hangar-equipped hub: `floats <-> tundra_tires <-> standard_tires <-> skis <-> amphib_floats <-> amphib_wheels_retracted`. Time + cost.
-- **[sketch]** Upgrade slots:
-    - **Engine** -- Rotax (light, efficient), piston upgrade (more power), turbine conversion (more power, more fuel burn, higher cost). Affects rated power, fuel burn curve, reliability profile.
-    - **Prop** -- fixed pitch, constant-speed, feathering; static advance settings; aftermarket 3- or 4-blade options (marginal performance, visual).
-    - **Wing enhancements** -- winglets (reduced induced drag, higher ceiling), leading-edge slats (lower stall speed, better STOL), vortex generators (lower stall speed marginally), STOL kit (flap/slat combo + wingtip mods).
-    - **Tires** -- standard, tundra (low pressure capable), BFG. Tire pressure adjustable via cockpit switch (ground ops only).
-    - **Floats** -- standard, amphib, heavy-duty (rougher water capable).
-    - **Avionics** -- basic, moving map, GPS, autopilot module, weather radar (post-v1), radio tier (affects comm clarity and range).
-    - **Auxiliary fuel tank** -- extends range at cost of useful load.
-    - **Cargo pod** -- belly pod adds storage, adds drag, frees cabin for passengers.
-    - **Landing lights** -- unlocks night flight capability (post-v1 feature gate).
-    - **Skis retract** -- optional for certain ski-equipped bushplanes allowing dry-surface landings.
-- **[sketch]** Ballast slots: forward, aft, wing lockers. Shift CG deliberately for trim or aerobatic feel.
-- **[sketch]** Cargo/storage layout (visual + mechanical):
-    - Discrete cargo bays with position (fore / mid / aft / wing) and max mass.
-    - Loading plan UI: drag-drop cargo into bays, see CG indicator move.
-    - Passenger seating: passengers are cargo with fixed mass; seating preference "as far forward of cargo as possible."
-    - Aircraft-specific layouts: bush singles may have limited aft baggage, cargo versions of the same airframe may omit rear seats for more cargo.
-- **[sketch]** Visual representation of stowage: seeing actual boxes/crates/passengers inside the aircraft (through windows or on walk-around inspection).
+### Design principle — utility-varying tiers, not linear progression
+
+Upgrades in flowPlan are **branching optimizations**, not a strict ladder. Each category offers three tiers (or three distinct options), and **tier 3 is not "better than" tier 1** — they're different optimizations for different mission classes. A STOL loadout and a range loadout are both valid; neither "wins". This is the core design principle for the upgrade system.
+
+Consequences:
+- **Fleet diversity is rewarded.** A STOL+floats+radial bush Beaver and a range-mod+wheels+turbine cross-country Beaver serve different mission classes.
+- **Upgrade choices feel meaningful.** No single path.
+- **Loadout storytelling.** A player's chosen upgrades reveal their playstyle — bush pilot, cross-country operator, specialty (fire bomber, wildlife, SAR).
+
+### The five categories, three tiers each
+
+**1. Gear** (mechanical-compatibility gated per [AIRCRAFT.md Configuration Matrix](AIRCRAFT.md#configuration-matrix)):
+- **[sketch]** `wheel / float / ski` (and sub-variants: tundra tires, amphib floats, retractable ski). Aircraft declares which are mechanically possible; some configurations are unavailable on specific airframes. Swap at a hangar-equipped hub — time + cost.
+- **[sketch]** Tradeoff: floats enable water ops but add ~120 kg + 8% Cd0; tundra tires enable rough-field landings but add drag + weight; skis enable snow ops but restrict to snow/ice surfaces.
+
+**2. Cargo** (payload handling):
+- **[sketch]** `standard cabin / belly pod / heavy-lift reinforce`.
+- Standard cabin — baseline.
+- Belly pod — adds storage volume + drag; frees cabin for passengers.
+- Heavy-lift reinforcement — raises MTOW tolerance + structural cargo-load rating, but costs useful load at baseline mass.
+- **[sketch]** Also: ballast slots (forward / aft / wing lockers) for CG trim or aerobatic feel. Orthogonal to tier choice.
+
+**3. Aero / Airfoil** (airframe optimization):
+- **[sketch]** `STOL kit / range-efficiency / ceiling-mod` — **three distinct optimization branches**.
+- STOL kit: drooped leading edges, vortex generators, Fowler-flap extensions; drops stall speed + shortens takeoff + slows cruise.
+- Range-efficiency: winglets + long-range tanks + wax / clean-up mods; improves cruise economy + max range; adds weight + hurts STOL.
+- Ceiling mod: turbocharged prop + high-altitude airfoil re-profile; better altitude performance + density-altitude margin; neither tops cruise nor STOL.
+- **[sketch]** Leading-edge slats (lower stall speed, better STOL) bundle with STOL kit in the design.
+- **[sketch]** Not strictly better → worse: a loaded bush pilot picks STOL; a cross-country operator picks range-efficiency; a fire-hopper-over-Rockies picks ceiling.
+
+**4. Powerplant** (engine + prop):
+- **[sketch]** Prop tier: `fixed-pitch / constant-speed / feathering`.
+    - Fixed-pitch: baseline; simplest.
+    - Constant-speed: better climb + cruise efficiency (prop pitch matches airspeed).
+    - Feathering: CS + emergency-feather for engine-out glide range.
+- **[sketch]** Engine tier: `piston radial (baseline) / piston re-rate (more power) / turbine conversion`.
+    - Turbine = significant power + altitude performance + more fuel burn + different audio signature (radial → PT6A whine).
+- **[sketch]** Combined powerplant choices: 3 prop × 3 engine = up to 9 configurations per airframe; mechanical compatibility may restrict (not every airframe accepts turbine).
+
+**5. Electronics** (avionics + autopilot ladder):
+- **[sketch]** `analog panel / digital panel / GPS + moving map / GPS-coupled autopilot`.
+- Electronics is more incremental than the other categories — each tier adds capability rather than trading one for another. But each rung **unlocks different mission classes**:
+    - Analog: all daytime-VFR missions.
+    - Digital panel: adds night-VFR readability (post-v1 night flight).
+    - GPS + moving map: nav-reliable missions in low-visibility weather.
+    - GPS-coupled autopilot: long-haul missions with autopilot-managed waypoint routing; reduces pilot workload on commercial cross-country flights.
+- **[sketch]** Radio tier (analog → digital → satellite) runs in parallel — affects comm clarity and range with remote hubs; tied loosely to electronics but upgradeable separately.
+
+### Loadout composition
+
+- **[sketch]** A complete loadout selects one option from each category (where applicable / compatible). Loadouts are hangar-swappable: same airframe can be reconfigured between sessions at a hangar-equipped hub (time + cost for major changes like gear + engine; fast for minor like cargo pod on/off).
+- **[sketch]** **Capability vector.** Each loadout resolves to a capability vector: `{service_ceiling, range_nm_with_reserve, stall_speed_low, cargo_capacity_kg, surfaces_supported, electronics_tier, best_cruise_kt, power_to_weight}`. Missions check against this vector for the [grayed-mission UX](#grayed-mission-capability-display).
+
+### Cargo / storage layout (mechanical)
+
+- **[sketch]** Discrete cargo bays with position (fore / mid / aft / wing) and max mass per bay.
+- **[sketch]** Loading plan UI: drag-drop cargo into bays; CG indicator moves with each placement.
+- **[sketch]** Passenger seating: passengers are cargo with fixed mass; seating preference "as far forward of cargo as possible" (real POH rule, simplified to UI).
+- **[sketch]** Aircraft-specific layouts: bush singles may have limited aft baggage; cargo versions of the same airframe may omit rear seats for more cargo bays.
+- **[sketch]** Visual representation: actual boxes / crates / passengers render inside the aircraft (through windows or during walk-around inspection).
+
+### Landing lights, night-ops (post-v1)
+
+- **[sketch]** Landing lights unlock post-v1 night-flight capability. Category-agnostic; a simple add-on rather than a tier.
 
 ---
 
@@ -896,6 +1028,50 @@ Light side-activities that add texture without becoming mini-games in the negati
 - **[sketch]** Optional mission objectives as bonuses: on-time delivery, no-damage delivery, fuel under budget, specific-route completion.
 - **[sketch]** Mission failure outcomes: no money (but no hard penalty on damage/progression; only rep loss). Catastrophic loss (crash, cargo destroyed): loan call-in.
 - **[sketch]** Wildlife runs as a distinct mission category -- non-financial reward, see [Wildlife](#wildlife).
+
+### Mission capability requirements
+
+Every mission declares a **capability-requirements record** that the mission board checks against the player's current aircraft + loadout before acceptance. Not every mission can be flown by every aircraft — and the mission board surfaces this visually rather than hiding incompatible missions.
+
+Capability-requirements fields:
+- **[sketch]** `service_ceiling_m` — minimum aircraft service ceiling. Computed from the heightfield maxima along great-circle + optimal-altitude route between source + destination hubs.
+- **[sketch]** `range_nm_required` — total mission distance including a reserve margin (typical 30 min reserve at cruise).
+- **[sketch]** `required_gear: SurfaceClass[]` — surfaces the mission requires at landing sites. Floatplane-only destinations require `[Dock | Lake | Beach]`; paved-major-hub destinations require `[Paved]`; soft-field delivery points require `[Grass | Gravel | Sand | Tundra]`.
+- **[sketch]** `cargo_capacity_kg` — heaviest single payload item. Passenger-transport missions translate passenger count + baggage into kg.
+- **[sketch]** `electronics_min: ElectronicsTier` — some missions need IFR-capable (weather-medevac), nav-coupled (cross-country with waypoint routing), or night-flight-rated (post-v1 night ops).
+- **[sketch]** `aircraft_class_hint` (optional) — fire-bomber missions require a water-scooper / tanker variant; SAR missions benefit from hull amphibs or bush STOL; rarely a mission constrains to a specific airframe class.
+
+### Grayed-mission capability display
+
+Mission-board UI renders every available mission at a hub with **color-coded capability match**:
+
+- **[sketch]** **Green / available** — current aircraft + loadout meets all requirements. Accept freely.
+- **[sketch]** **Yellow / marginal** — meets requirements but without margin (range covers mission + reserve but nothing extra; ceiling clears heightfield by < 500 m; only one qualifying aircraft in fleet). Acceptance allowed with an awareness cue.
+- **[sketch]** **Grayed / "outside aircraft capabilities"** — one or more requirements fails. Title rendered dim; mission cannot be accepted in current state.
+
+Grayed entries surface **specific failure reasons**:
+- "Requires float gear" (gear mismatch)
+- "Range insufficient (needs 350 nm; current 280 nm)" (range)
+- "Ceiling insufficient (needs 4,000 m; aircraft 3,800 m)" (service ceiling)
+- "Requires GPS-coupled autopilot" (electronics tier)
+- "Cargo exceeds capacity (needs 1,800 kg; aircraft 1,200 kg)" (cargo)
+- "Requires water-bomber class" (aircraft_class_hint)
+
+And **hint lines** offer paths forward:
+- **Fleet swap hint:** "Your [Beaver on floats] stored at [Hub X hangar] qualifies" — surfaces fleet value, links to the 2D hub map to route there.
+- **Upgrade hint:** "Long-range tanks upgrade ($X) would enable this mission" — surfaces economy hook; links to [Vendors & Progression § Parts/upgrades](#vendors--progression).
+- **Swap + upgrade combination:** for complex capability gaps, the UI shows the cheapest path — fleet-swap if the player already owns a qualifying aircraft, otherwise the shortest upgrade chain.
+
+**Why grayed + reason beats hidden:**
+- Player discovers capability progression organically — sees what's possible before they can reach it.
+- Upgrade + fleet gameplay hooks surface naturally; the player's curiosity pulls them toward progression.
+- No "why isn't this mission showing up?" confusion; the system's capability-gating is transparent.
+
+### Aircraft-aware mission generation (at hub)
+
+- **[sketch]** Mission templates at a hub are **generated** based on the hub's mission-source pool. *Every* generated mission gets a capability-requirements record; capability-gating filters nothing at generation time — it only affects the **display** (green / yellow / grayed).
+- **[sketch]** Some templates always generate even if no player-owned aircraft qualifies. Intentional — the board reflects the hub's actual demand, not just the player's capability window. Encourages fleet + upgrade expansion.
+- **[sketch]** Special case: a hub may host a **"featured upgrade-suggestion" mission** that's intentionally out of current capability, prominently grayed, with the hint line pointing to a specific upgrade path. Essentially an in-world advertisement for progression. Used sparingly.
 
 ---
 

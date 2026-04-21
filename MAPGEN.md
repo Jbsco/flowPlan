@@ -50,61 +50,121 @@ Under Candidate C (fresh-per-session), MAPGEN.md applies directly — each sessi
 
 ## Chunk model
 
-### Chunk shape: circular or square? (OPEN)
+### The pinned direction: streaming shape ≠ chunk shape
 
-**Square chunks** (the obvious choice, Minecraft pattern):
-- Simple indexing: `(i, j)` integer pair, neighbors at `(i±1, j)` / `(i, j±1)` / diagonals.
-- Good cache locality for heightmap storage.
-- Streaming radius as a Chebyshev (rook) disk around the player.
-- Boundary stitching is 4-way.
-- Well-understood by every engine out there.
+The user has pinned a **decoupled** chunk architecture:
 
-**Hexagonal chunks** (interesting middle ground):
-- 6-way boundary stitching (more continuous rivers / roads / biome transitions — less "staircase" artifacting at diagonals).
-- Chunk indexing via axial or cube coordinates (well-documented; red-blob-games-level known territory).
-- Good streaming radius approximation (near-circular at large radii).
-- Fits game-dev precedent for geographic simulations.
-- Loses some cache locality vs square but a known-manageable amount.
+- **Streaming shape** = **hex or circular disk** around the aircraft. This is the technical bound: "what cells do I need in memory right now?" Uniform disk → good cache locality, simple priority queue.
+- **Chunk shape** = **Voronoi cells**. Each cell is a semantic unit of world content, not a lattice tile. Cells are variable-size, variable-shape, organic — they follow natural feature boundaries rather than a grid.
+- **Voronoi seed points** = **sub-biome feature placements**. At world-bake time, each Voronoi seed is RNG-assigned a sub-biome feature type from its parent biome's library; the Voronoi partition around the seeds defines the world's chunks; each chunk takes on its seed's feature character.
 
-**Circular / concentric-ring chunks** (the user's question):
-- Player-centered rings, radial slices within rings.
-- Naturally bounds streaming by radius.
-- Boundary stitching is *irregular* — inner-ring / outer-ring boundaries have different arc lengths.
-- Chunks shift as the player moves — a chunk at ring 3 relative to player A is at ring 4 relative to player B. This breaks determinism unless chunks are keyed to world coords, not player coords.
-- **Likely impractical for persistence** — if chunks are player-centered, the "same chunk" has different coordinates depending on who observed it, and save-deltas become ambiguous.
+This reframes the problem. Chunks stop being arbitrary lattice tiles and become **mosaic pieces** of a natural-looking world where one lake cluster is one chunk, one alpine valley is one chunk, one red-rock canyon is one chunk. Voronoi boundaries align with where a cartographer would draw them.
 
-**Proposal:** default to **hexagonal chunks** if we want to differentiate from Minecraft. Square is the safer choice; hex is the interesting one. Circular-player-centered is probably a no-go for persistence reasons, but circular-world-centered Voronoi cells could work if we commit to a world-seed-locked Voronoi partition.
+### Streaming disk (the technical layer)
 
-**Decision deferred** until a computational prototype pass confirms which model can sustain streaming + boundary stitching + hydrology-query + delta-persistence at target performance. Pre-Phase-4 design work.
+Aircraft ground speed: cruise ≈ 55 m/s ≈ 200 km/h. VNE 71.5 m/s is a short-duration dive speed, not sustained. At common delivery distances (50–200 km), a flight is 15–60 minutes. Streaming needs to keep the aircraft in loaded cells continuously without frame drops.
 
-### Chunk size
+**Visibility baseline (Phase 2 playtest observation):** cel-shaded + height-fog rendering produces plausible visibility out to ~6–8 km before fog fully attenuates distant geometry. This is the effective "you can see it" horizon. Streaming disk should outrun it.
 
-Aircraft ground speed: cruise ≈ 55 m/s ≈ 200 km/h. In 1 minute the aircraft covers ~3 km. In 10 minutes, ~30 km. At common delivery distances (50–200 km), a flight is 15–60 minutes.
+**Target streaming radii:**
 
-**Minecraft chunk: 16 m × 16 m.** Far too small for aircraft — thousands of chunks would need streaming.
+| Band | Radius | Detail | Rationale |
+|------|--------|--------|-----------|
+| Inner (full detail) | 0–5 km | Full-LOD heightfield, flora instances, feature detail | Where the aircraft is actively flying through + visible for sure |
+| Mid (coarse detail) | 5–8 km | Mid-LOD heightfield, billboard flora, simplified hydrology | Visibility zone — fog attenuation starts blending distant detail |
+| Outer (pre-load zone) | 8–10 km | Generated but coarse-LOD only; upgrades as aircraft approaches | Pre-loaded to be ready when the aircraft arrives; ~3 min ahead at cruise |
+| Unload hysteresis | 10–13 km | Retained briefly to avoid thrashing on heading reversals | Aircraft can 180° without reloading |
+| Beyond 13 km | — | Evicted | Outside the hysteresis band |
 
-**Proposed flowPlan chunk: 1 km × 1 km** (square) or ~1 km² equivalent area (hex side ≈ 620 m). Gives ~100 chunks within a 5 km streaming radius and ~900 chunks within a 15 km radius. Manageable as preallocated pool; chunk-generation budget per chunk is moderate.
+At 55 m/s cruise the 8 km outer boundary is ~2.4 min ahead; 10 km is ~3 min. Comfortable for background generation. VNE 71 m/s dive shortens to ~2.3 min at the 10 km boundary — still sufficient for short-duration dive behavior.
 
-**Alternative:** 4 km² chunks (2 km side) if heightfield resolution can stay coarse. Larger chunks = fewer boundary-stitching problems but more work per chunk generation.
+**Tier-adjusted defaults + user-facing slider:** the radii above are the **Medium-preset** target matching flowPlan's Phase 2 observed visibility. Higher hardware tiers get more, exposed as a graphics-quality setting so users with headroom can open up the world:
 
-**Decision deferred** to prototype.
+| Preset | Inner full-LOD | Mid coarse | Outer pre-load | Hysteresis | Notes |
+|--------|----------------|------------|----------------|------------|-------|
+| Low / Steam Deck | 3 km | 5 km | 7 km | 9 km | Conservative; denser fog hides the edge |
+| Medium | 5 km | 8 km | 10 km | 13 km | Matches Phase 2 baseline observation |
+| High | 7 km | 12 km | 15 km | 19 km | Reference-tier default |
+| Ultra | 10 km | 18 km | 22 km | 28 km | High-tier hardware |
+| Custom | user slider (3–30 km on outer) | linked bands scale proportionally | | | Exposed in graphics panel |
 
-### Heightfield resolution per chunk
+**User-facing slider:** "Streaming distance" (3 km → 30 km) lives under [FEATURES.md § Display & Graphics Settings](FEATURES.md#display--graphics-settings) Per-subsystem quality. Couples to fog density (longer streaming wants lighter fog to make the extra range visible) — the two sliders can link with a toggle or move independently for power users. Determinism-neutral: streaming distance only affects what's loaded / visible, not what's generated (generation is deterministic per master seed).
 
-For 1 km² chunks:
-- **1 m per sample** (1024×1024): ~4 MB per chunk heightfield (f32). Too expensive to persist raw; fine for in-memory.
-- **4 m per sample** (256×256): 256 KB per chunk. Reasonable.
-- **16 m per sample** (64×64): 16 KB per chunk. Fast, loses ground detail.
+**Memory scaling with radius** (at 2 km seed spacing, full-LOD cells):
 
-Proposed hybrid: **16 m base** for distant chunks, **4 m refinement** for chunks within 2–3 km of the aircraft, **1 m refinement** only for the chunk the aircraft is in + immediate neighbors. LOD streaming, not uniform detail.
+| Outer radius | Active cells | Memory (full-LOD equivalent) |
+|--------------|--------------|------------------------------|
+| 7 km (Low outer) | ~51 | ~13 MB |
+| 10 km (Medium outer) | ~105 | ~26 MB |
+| 15 km (High outer) | ~236 | ~59 MB |
+| 22 km (Ultra outer) | ~507 | ~127 MB |
+| 30 km (Custom max) | ~942 | ~236 MB |
 
-### Streaming model
+All comfortably under DESIGN.md's 1 GB RAM ceiling even at 30 km custom max. GPU cost scales less sharply — distant cells render at coarse-LOD, flora drops to billboards beyond mid-range, so a 22 km Ultra view costs ~2–3× a Medium 10 km view in raster time, not ~5× the streaming-count.
 
-- **Preallocated chunk pool** sized to max streaming radius. No heap allocation during flight.
-- **Priority queue** of chunks to generate, sorted by distance-to-aircraft.
-- **Background generation thread** that consumes the queue and publishes completed chunks to the main-thread handle table.
-- **Eviction** by LRU + distance: chunks outside the max streaming radius are returned to the pool.
-- **No spiral-of-death behavior**: chunk-generation budget is capped per tick; if chunks aren't ready, the renderer draws a lower-LOD tier (or a placeholder visible-edge marker) until they are. Honest visible LOD is better than frame drops.
+- **Streaming shape:** circular disk is the natural representation. Hex-tiled streaming grid is an equivalent alternative where streaming query walks outward from player's hex. Pick during prototype.
+- **Spatial indexing:** coarse grid hash (e.g. 2–4 km cells) maps world coordinates → set of Voronoi cells intersecting that coarse cell. Streaming query = "enumerate Voronoi cells in the coarse cells intersecting a disk of radius R." O(log N) or better with a well-chosen grid size.
+- **Preallocated pool** sized to max streaming disk footprint. No heap allocation during flight.
+- **Priority queue** of chunks to generate, sorted by distance from aircraft.
+- **Background generation thread** consumes the queue; publishes completed chunks to the main-thread handle table.
+- **LRU + distance eviction** returns out-of-disk chunks to the pool.
+- **Visible-LOD fallback:** chunk-generation budget capped per tick; if a chunk isn't ready, the renderer draws a lower-LOD tier until it is. Honest visible LOD over frame drops.
+
+### Memory + count budget
+
+At 2 km average Voronoi seed spacing (blue-noise packing ~3 km² per cell):
+
+| Disk radius | Area | Active cells | Full-LOD memory @ 4 m heightfield (~250 KB/cell) |
+|-------------|------|--------------|--------------------------------------------------|
+| 5 km (inner) | ~79 km² | ~26 cells | ~6.5 MB |
+| 8 km (mid) | ~201 km² | ~67 cells | ~17 MB (mostly mid-LOD, smaller per cell) |
+| 10 km (outer) | ~314 km² | ~105 cells | ~26 MB (mostly outer-LOD, smaller still) |
+| 13 km (hysteresis) | ~531 km² | ~177 cells | ~45 MB (outer-most retain coarse only) |
+
+Comfortably within DESIGN.md's 1 GB RAM ceiling. Flora instances + hydrology references + feature placements roughly double the per-cell footprint at full-LOD — still well inside budget.
+
+### Voronoi partition (the semantic layer)
+
+- **Seed distribution:** blue-noise (Poisson-disk) sampling over world-space at world-bake time. Seed density varies by region based on target feature size. Seeded by `voronoi_seed = hash(master_seed, "voronoi")`.
+- **Target seed spacing:** **~2 km average center-to-center** as the default anchor. Blue-noise packing → **~3 km² average cell area**. Sub-biome feature types can scale around this: a tight alpine tarn might request 0.5 km² (1 km spacing); a broad floodplain or open plain might request 6 km² (3 km spacing); a major-hub chunk might be authored at 2–4 km². Seed density is feature-type-declared, not globally uniform.
+- **Voronoi triangulation:** Fortune's sweep or equivalent at world-bake time. O(n log n) in seed count. Computed once, cached by master-seed hash. For a 1000 × 1000 km world at ~3 km² average cell area, ~333,000 seeds → ~30 MB graph (edges + neighbor adjacency). Bake time on the order of seconds at load.
+- **Cell indexing:** each cell gets a stable `CellId` (e.g. cell-index within the Voronoi tessellation). The spatial grid hash provides the coarse world-coord → CellId lookup.
+- **Cell data:** each cell stores `{seed_point, polygon_edges, neighbor_cell_ids, parent_biome, sub_biome_feature_type, heightfield, hydrology_references, feature_placements}`.
+- **Heightfield resolution per cell:** hybrid — the cell's authored feature-type declares a base resolution + maximum resolution. A ridgeline cell might want 2 m per sample; a broad flat cell 8 m. Near-aircraft refinement still applies per-cell.
+- **Boundary stitching:** Voronoi neighbor relationships are known at bake time. Heightfield continuity at edges is enforced by sharing heightfield samples at Voronoi edge vertices between neighboring cells (each edge vertex has one canonical height shared by all adjacent cells). Same discipline for biome blending, flora density, palette.
+
+### Variable-LOD per cell
+
+Voronoi cells don't fit uniform LOD tiers neatly — cells are variable-size. Instead, LOD is driven by **distance from the aircraft** per-cell:
+
+- **Near** (within 2 km of aircraft): full heightfield resolution, full flora, full detail.
+- **Mid** (2–8 km): half-resolution heightfield, billboards replace instanced flora, simplified hydrology features.
+- **Far** (8–15 km): coarse heightfield silhouette, color/palette only, skip most feature detail.
+- **Beyond streaming disk:** not rendered.
+
+LOD transitions use cell-centroid distance as a first approximation; a cell that straddles the aircraft's edge can render at two LODs on opposite ends without visible seams if the heightfield samples along its interior are interpolated.
+
+### Why Voronoi (the architectural payoff)
+
+- **Natural boundaries.** Cell edges align with feature transitions, not arbitrary lattice lines. No staircase artifacts on diagonal rivers / roads / biome transitions.
+- **Sub-biome features are first-class.** A cell *is* a sub-biome feature. No separate "feature placement layer" trying to sprinkle features onto a monolithic chunk substrate.
+- **Palette adaptation is natural.** Cell-to-cell palette shifts are per-cell, not per-lattice-edge — transitions follow feature boundaries, which is what a player's eye expects.
+- **Hydrology stays global.** The pre-baked hydrology graph doesn't care about chunk shape; Voronoi cells query it exactly like square chunks would.
+- **Hub placement fits.** Tier-1 major hub = an authored Voronoi cell. Tier-2 regional = authored-feature-boundary Voronoi cell. Tier-4/5 remote/isolated = procedural cells where the feature-type happens to be a "hub-hosting clearing". No separate hub-chunk concept.
+
+### Acknowledged complexity (name it, don't avoid it)
+
+- **Voronoi triangulation at bake time** — Fortune's sweep is O(n log n); bake time scales with world seed count. Likely acceptable at session load (seconds); if it balloons, cache bake output to disk keyed by master seed.
+- **Spatial grid hash for streaming** — coarse grid cell size is a tuning parameter: too coarse wastes cycles enumerating candidate Voronoi cells that don't actually intersect the streaming disk; too fine wastes memory.
+- **Variable-size cell LOD** — each cell needs distance-driven LOD logic; no uniform ring structure.
+- **Cell-boundary heightfield stitching** — shared Voronoi-edge vertices need canonical heights; requires careful bake-time data structure.
+- **Feature-library authoring overhead** — each sub-biome feature type needs its authoring work (geometry rules, palette, flora, fauna, hub-compatibility, inter-biome adaptation rules). The user has explicitly welcomed this authoring work as the **design effort** rather than a cost — library-authoring is the design surface, not a burden.
+
+### Decision status
+
+**PINNED as the primary architectural hypothesis to validate in the Pre-Phase-3 world-scope prototype.** Prototype should test: Voronoi generation + streaming-disk query + sub-biome feature selection + palette adaptation. If the prototype surfaces a performance wall or an aesthetic problem, this bends — but this is the direction to try first.
+
+**Fallback:** if Voronoi turns out to be infeasible at performance targets, fall back to hex chunks (2nd choice) or square chunks (3rd choice). The sub-biome-feature concept still applies at lattice scale, just with less natural boundaries.
 
 ---
 
@@ -147,30 +207,179 @@ chunk_features_seed  = hash(features_seed, i, j)
 
 ---
 
-## Layered generation
+## Layered generation — three-layer composition (pinned)
 
-Each chunk is generated by a fixed pipeline of layers. Each layer is a pure function of `(chunk_coords, sub_seed, output_of_prior_layers, hydrology_graph_reference)`.
+World generation decomposes into **three independent, composable layers.** This is not "5 layers in a pipeline" — it's **three concerns that compose orthogonally**, each of which can ship on its own and be tested independently. The composition is **additive at the heightfield level**: `final_height(x, y) = base_topography(x, y) + Σ feature_deltas(x, y)`.
 
 ```
-Layer 0: Biome classification     (lookup from pre-baked biome map)
-Layer 1: Heightfield base         (noise + domain warp, biome-parameterized)
-Layer 2: Hydrology overlay        (carve rivers, shape lake basins from graph)
-Layer 3: Shore classification     (slope × biome × water adjacency)
-Layer 4: Feature placement        (landmarks, hubs, mission anchors)
-Layer 5: Decoration               (flora patches, rocks, small detail)
+Layer 1 — TOPOGRAPHIC BASE (global, one-time bake per master seed)
+  ├─ coarse global heightfield (biome-parameterized ridged multifractal + domain warp)
+  ├─ biome climate fields (temp / humidity / elevation) → classification w/ adjacency rules
+  ├─ hydrology graph (D8 drainage, rivers, lake footprints, coastlines)
+  ├─ magnetic variation field
+  └─ hub catalog (fuzz+resolve — see § Hub late-binding)
+
+                                                          │
+        Layer 1 shippable on its own → playable world     │
+        with real biome-coherent terrain + hydrology      │
+                                                          │
+                                                          ▼
+Layer 2 — VORONOI PARTITION (global, one-time bake; consults Layer 1)
+  ├─ blue-noise seed distribution (~2 km average spacing)
+  ├─ sub-biome feature type assigned per seed (biome-library RNG selection)
+  ├─ placement constraints evaluated against L1 coarse topography:
+  │    slope tolerance (tighter for runways, looser for remote strips)
+  │    roughness tolerance (tight for lakes, loose for dune fields)
+  │    water-adjacency required? (yes for docks + bush strips)
+  │    altitude range (glacier vs floodplain)
+  ├─ palette-adaptation curves (sub-biome feature in host biome → adapted palette)
+  └─ neighbor adjacency graph
+
+                                                          │
+        Layer 2 ships semantics only — no heightfield     │
+        impact yet. Validates partition + feature         │
+        placement logic without risking terrain.          │
+                                                          │
+                                                          ▼
+Layer 3 — FEATURE-DELTA HEIGHTFIELD MODIFICATIONS (streaming-time, per cell)
+  ├─ per-feature-type delta function: lake carves basin, runway flattens
+  │   strip with short skirt, mesa raises plateau with cliff edges,
+  │   arch adds rock geometry, dune adds noise undulation, etc.
+  ├─ delta falls off smoothly to zero at cell boundaries (bump-function)
+  ├─ additive composition: final_height = base + Σ deltas
+  ├─ flora placement (billboards / instances), decoration (rocks, snags)
+  └─ shore classification sampler (slope × biome × water-adjacency)
 ```
 
-**Layer 0 (Biome):** queries the world-bake biome map at chunk center → returns biome tag + blend ratios at chunk edges. Biome adjacency rule: forbidden pairs (snow ↔ desert, etc.) are structurally rejected in the bake, so a chunk can never inherit a forbidden-adjacency biome from its neighbors.
+### Layer 1 — Topographic base
 
-**Layer 1 (Heightfield):** biome-parameterized noise generator. Replaces Phase 2's sum-of-sines. Proposed: ridged multifractal + domain warping, with per-biome amplitude and frequency profiles. Supports independent amplitude and gradient tuning (the Phase 2 limitation). Edge-matching via seeded boundary conditions from neighbor chunks.
+Purely answers: *"What does the land look like before any features?"* Shippable as a minimum-viable procedural world.
 
-**Layer 2 (Hydrology):** carves rivers (width, depth) and lake basins into the heightfield per the world-bake hydrology graph. The graph tells the chunk "a river of X width and Y flow direction crosses this chunk from edge A to edge B, passing through these waypoints"; the chunk carves accordingly.
+- **Heightfield generator:** biome-parameterized ridged multifractal + domain warping. Per-biome amplitude, frequency, and gradient profiles — enables independent amplitude/gradient tuning (closes the Phase 2 sum-of-sines limitation). Coarse resolution (e.g. 100 m per sample) for the global bake; fine resolution (~4–8 m) generated per-cell at streaming time.
+- **Biome classification:** climate-field driven (temperature + humidity + elevation + latitude proxy) → biome tag per world coordinate. Adjacency rule enforced at bake time (no snow→desert, no snow→tropical).
+- **Hydrology graph:** D8 drainage-network computation on the coarse heightfield → sparse graph of river edges + lake footprints + coastlines. See § Hydrology sub-system. Bit-identical across platforms.
+- **Magnetic variation field:** biome-dependent at world-bake time, held deterministic. Powers runway-number authoring correctness (see [FEATURES.md § Runway authoring rules](FEATURES.md#runway-authoring-rules-reminder)).
+- **Hub catalog:** the ~50–80K-entry hub catalog per [§ Hub late-binding (fuzz + resolve)](#hub-late-binding-fuzz--resolve) is baked alongside. It references Layer 1 topography for placement viability (a major hub won't be committed to a vertical cliffside).
+- **Altitude envelope enforcement:** see [§ Altitude envelope + real-world-possible gate](#altitude-envelope--real-world-possible-gate) for bounds + soft-clamp mechanism.
 
-**Layer 3 (Shore classification):** detects water-adjacent cells (lake edge, river bank, coast) and classifies `{sand_beach, gravel_beach, rock, cliff, mudflat, delta, ice_edge}` from `(slope, biome, climate_overlay)`. Drives hub placement feasibility, splash behavior, flora tables.
+### Altitude envelope + real-world-possible gate
 
-**Layer 4 (Feature placement):** deterministic poisson-disk or grid-jitter placement of landmarks (towers, lighthouses, wrecks, boulders, waterfalls, bridges). Biome-parameterized: a high-desert chunk places mesas and arches; a boreal chunk places lakes and cabins.
+**Design gate (pinned):** *"is this possible in the real world? if not, we may have allowed too much."* Applied to terrain altitude first; generalizes to all generative systems (weather, wildlife, hubs, missions). See user memory: `real_world_possible_gate.md`.
 
-**Layer 5 (Decoration):** flora billboards / instances. Density per biome. LOD-aware — distant chunks skip Layer 5 entirely; they're too far to render flora detail.
+Unconstrained ridged multifractal drifts. Some regions trend arbitrarily high, others arbitrarily low. At 1000 × 1000 km world scale, a random region could produce Everest-level peaks or unrealistic trench-scale depressions. The fix is a three-part altitude enforcement at Layer 1:
+
+**1. World altitude bounds (hard limits, never exceeded):**
+
+| Bound | Value | Real-world analogue |
+|-------|-------|---------------------|
+| World max | ~4,500 m | Mt Rainier 4,392 m; Mauna Kea 4,205 m; Mt Elbert 4,401 m |
+| World min | ~-100 m | Death Valley -86 m (rare; highly localized) |
+
+No Himalayan biomes in flowPlan's catalog — 8,000 m isn't needed and would only break the physics envelope (Beaver service ceiling ~5,500 m; turbine conversions reach ~7 km). 4,500 m is within the flyable envelope for MVP + planned aircraft with margin for full-power climbs.
+
+**2. Per-biome altitude envelopes (soft clamps via smoothstep):**
+
+| Biome | Real reference | Typical range | Peak bound | Sub-SL extent |
+|-------|----------------|---------------|------------|---------------|
+| Coastal Alaska / Canadian boreal | Chugach / Wrangell / Alaska Range | 0–1,500 m valley; 3,000–5,000 m peaks | 4,500 m (Denali-scale capped to world max) | rare tide flats (0 to -5 m) |
+| Canadian boreal interior | Canadian Shield | 100–1,000 m | ~2,000 m | none |
+| Mediterranean archipelago | Aegean / Corsica / Sardinia | 0–1,500 m | 2,706 m (Etna) | none |
+| Pacific Northwest | Cascades / Coast Range | 0–2,500 m | 4,392 m (Rainier) | none |
+| Rocky / Alpine | Colorado Rockies | 1,500–4,000 m | 4,401 m (Elbert) | none |
+| Subarctic / North Atlantic | Iceland / Norwegian fjords | 0–1,500 m | 2,119 m (Hvannadalshnjúkur) | none |
+| Tropical island chain | Hawaii / Polynesia | 0–2,000 m | 4,205 m (Mauna Kea) | none |
+| High Desert / Plateau | Colorado Plateau | 1,500–3,000 m | 3,851 m (Uncompahgre) | -86 m (Death Valley; rare + localized) |
+
+Each biome declares `(min_altitude, typical_min, typical_max, max_altitude)`. Heightfield output is **soft-clamped** into this range with smoothstep transitions — most terrain in the biome sits inside `typical_min..typical_max`; the `typical_max..max_altitude` band allows rare peaks; `min_altitude` is a hard floor (smoothstepped to avoid visible banding).
+
+**3. Region-scale altitude trend (low-freq layer):**
+
+The world-bake heightfield is the sum of two components:
+- **Regional trend:** very-low-frequency noise at ~100 km scale. Sets the *mean altitude target* for a region. Alaska-coastal regions trend 0–500 m mean; Rocky-Alpine trend 1,500–3,000 m mean; high-desert plateaus trend 1,500–2,500 m mean.
+- **Fine variation:** ridged multifractal + domain warping on top. Adds ±500–1,500 m peak-to-valley variation within the regional mean.
+
+The two compose additively, then the biome-envelope soft-clamp caps the final output. Result: each region has plausible mean altitude for its biome, with plausible variation around it.
+
+**4. Feature-level cross-validation:**
+
+Layer 2 feature placement (`altitude_range` constraint) catches inconsistencies at bake time:
+- A `beach` feature in a cell whose Layer 1 altitude is 3,000 m fails the feature's `altitude_range` (-5 to 50 m) → feature rejected, seed re-rolls.
+- A `mesa_top` feature at Layer 1 altitude 200 m fails its `altitude_range` (1,500 to 3,500 m) → reject.
+- A `glacier_tongue` at altitude 500 m in a tropical biome fails both its altitude_range AND its biome compatibility → reject.
+
+This triple gate — world bounds + biome envelope + feature altitude_range — enforces the "real-world possible" principle at bake time. Errors surface early, not at runtime.
+
+**Interaction with flight physics:**
+
+- Beaver service ceiling ~5,500 m MSL (density altitude + engine power from 2.4.3).
+- Terrain up to ~4,000 m MSL: flyable at cruise power with margin.
+- Terrain 4,000–4,500 m MSL: full-power climb required; aircraft can go over but it's demanding.
+- Terrain > 4,500 m MSL: not in flowPlan's world envelope. Doesn't arise.
+
+**Realistic unflyable corridors are OK.** A 4,500 m ridge between two valleys is flyable-around but not flyable-over in a loaded Beaver. Real bush pilots route around the Alaska Range, not over it. flowPlan's world should produce these choices naturally.
+
+**Flag for Phase 4+ (aircraft-aware mission routing):**
+
+If terrain can produce 4,500 m ridges, mission routing must check: does a flyable great-circle-or-optimal-altitude path exist between source and destination hubs for the player's aircraft? If not, the mission doesn't generate. Fleet service ceilings come from AircraftSpec; routing checks Layer 1 heightfield maxima along candidate paths. Easy to layer in once the mission-generation machinery lands at [Milestone 4.5](ROADMAP.md#milestone-45-missions-and-template-progression). Not a 3.6 concern.
+
+### Layer 2 — Voronoi partition + sub-biome feature assignment
+
+Purely answers: *"What is where, semantically?"* No heightfield modification.
+
+- **Seed distribution:** blue-noise Poisson-disk sampling at ~2 km average spacing. See § Chunk model for the seed density and packing details.
+- **Feature-type assignment:** each seed is RNG-assigned a sub-biome feature type from its parent biome's library (see [FEATURES.md § Sub-biome feature libraries](FEATURES.md#sub-biome-feature-libraries-pinned-architecture)). RNG selection respects **placement constraints** against the Layer 1 topography:
+
+| Constraint | Semantics | Example |
+|------------|-----------|---------|
+| `slope_tolerance_max` | Max slope (deg) from L1 coarse heightfield the feature accepts | Major runway: 0.5°; remote bush strip: 4° |
+| `roughness_tolerance` | Max undulation across cell footprint (m) | Lake: 0.5 m; dune field: unbounded |
+| `water_adjacency_required` | Must touch a hydrology-graph water body | Dock: yes; mesa_top: no |
+| `altitude_range` | Min / max altitude (m MSL) | Alpine tarn: 1500–3000 m; beach: -5 to 50 m |
+
+If a seed's L1 sample doesn't satisfy the assigned feature's constraints, RNG re-rolls to a compatible feature from the biome's library. If no feature is compatible after N rolls, the seed falls back to a generic "plain" feature (still valid).
+
+- **Palette adaptation curves:** each sub-biome feature declares its home palette + adaptation rules per host biome. When placed in a non-home biome, the palette interpolates toward the host. See [FEATURES.md § Sub-biome feature overlap with palette adaptation](FEATURES.md#sub-biome-feature-overlap-with-palette-adaptation).
+- **Neighbor adjacency graph:** Voronoi cell neighbor relationships cached at bake time for hub resolution, boundary stitching, feature-group coordination.
+
+### Layer 3 — Feature-delta heightfield modifications
+
+Purely answers: *"How does this feature express in terrain?"* Additive composition on top of Layer 1.
+
+**Delta functions per feature type:**
+
+| Feature type | Delta signature | Falloff | Notes |
+|--------------|-----------------|---------|-------|
+| `lake_cluster` | Negative smooth bowl | Bump-function to zero at cell edge | Basin depth from feature parameters |
+| `runway_strip` | Flatten rectangle + short skirt | Linear blend over 50 m skirt | Heading from Voronoi-cell long-axis |
+| `mesa_top` | Positive plateau + cliff edge | Sharp falloff at cliff; bump elsewhere | Plateau altitude from feature params |
+| `arch_formation` | Positive rock geometry + void | Compact local feature | Adds mesh structure, not just heightfield |
+| `dune_field` | High-frequency positive noise | Gradual bump-function | Amplitude scales with cell area |
+| `river_floodplain` | Slight negative trough along river | Matches hydrology-graph river waypoints | Coherent with Layer 1 hydrology |
+| `alpine_tarn` | Small negative circular basin | Steep cliff-like falloff | Positioned inside elevated topo |
+| `beach` | Slight negative along shore | Smooth ramp | Classification only; no major geometry |
+
+**Invariant: hydrology continuity.** Deltas in Layer 3 **cannot** violate the Layer 1 hydrology graph. Specifically:
+
+- Cannot elevate terrain along a river channel (feature rejected at L2 placement).
+- Cannot fill an existing lake basin.
+- Cannot dam a drainage network.
+- A `mesa_top` feature rejects placement where the hydrology graph has a river passing through the cell.
+
+The hydrology graph is **immutable across layers**. Delta functions respect it or get rejected.
+
+**Boundary falloff invariant.** Each feature's delta falls smoothly to zero at its Voronoi cell edge (bump function / cosine falloff). Neighboring cells don't fight over boundary heights — each contributes zero there, final height at the boundary is the Layer 1 base value only. Continuous terrain across Voronoi edges by construction.
+
+**Flora + decoration** layers on top of the final heightfield in Layer 3. LOD-aware: near-aircraft cells render full flora instances; mid-range cells downgrade to billboards; far cells skip flora entirely.
+
+**Shore classification sampler** (`world::surface_at(x, z) -> SurfaceClass`) derives from the final heightfield + hydrology graph + biome. Unblocks [Milestone 2.5b.7 per-surface friction](ROADMAP.md#milestone-25-ground--water-contact-physics).
+
+### Composition properties (why this separation matters)
+
+- **Independent development.** Each layer lands on a separate milestone. Layer 1 = Phase 3.6.1; Layer 2 = Phase 3.6.2; Layer 3 = Phase 3.6.3 + 3.6.4.
+- **Independent testing.** Per-layer bench assertions (generalizing the flight-bench pattern): L1 produces bit-identical heightfield + hydrology across platforms; L2 produces bit-identical partition given same L1 inputs; L3 produces bit-identical final heights given same L2 partition + L1 base.
+- **Playable-at-each-step.** Phase 3.6.1 ships L1 alone — flowPlan already has real biome-coherent terrain + hydrology as a playable world. Phase 3.6.2 adds L2 semantics without breaking L1. Phase 3.6.3+ adds L3 geometry.
+- **Concern separation for later refinement.** Changing the heightfield generator (swap ridged multifractal for something else) affects L1 only. Adding a new sub-biome feature affects L2 + L3 authoring, not L1. Retuning the chunk streaming algorithm affects neither.
+- **Cross-cell feature groups.** When a feature should span multiple cells (a ridgeline, a salmon-run river through several cells), feature-group declarations at Layer 2 coordinate delta functions at Layer 3. Groups don't break the layer boundary — they're still L2 placement + L3 geometry.
 
 ---
 
@@ -325,6 +534,59 @@ Authored ↔ procedural boundary is where edge-matching matters most. Techniques
 - **Skirted boundary heightfield** — authored chunk extends height samples 1–2 cells past its own boundary into the neighbor. Neighbor's first cells blend to match.
 - **Feature masking** — authored hub chunks declare "no flora within 500 m of the dock" so neighbor procedural flora respects the boundary.
 - **Biome continuity** — authored hub declares its biome; neighbors inherit the biome adjacency rule (cannot place a hostile-biome chunk immediately next to an authored coastal hub).
+
+### Hub late-binding (fuzz + resolve)
+
+**Problem:** missions need to reference hubs that may be 50–200 km away — outside the streaming disk's 8–22 km radius. Voronoi cells only exist for the streaming disk. How do we reference a hub before its cell is generated?
+
+**Solution:** **two-phase hub binding.**
+
+**Phase 1 — World-bake (once per session, deterministic per master seed):**
+
+A **hub catalog** is committed as part of the world-bake output, alongside the hydrology graph + biome mask. Each entry:
+
+```
+struct HubEntry {
+    id: HubId,                         // stable cross-session identifier
+    approx_world_pos: (f32, f32),      // fuzzed coordinates — approximate placement
+    tier: HubTier,                      // major | regional | local | remote | isolated
+    parent_biome: BiomeId,              // for palette / sub-biome compatibility
+    required_surfaces: &[SurfaceClass], // what the hub needs to land
+    display_name: Option<String>,       // visible once discovered; pre-generated
+    region_id: RegionId,                // for missions + community-event scoping
+}
+```
+
+Placement heuristics per tier:
+- **Major** (1–2 per region): biome-core + water-adjacent + flat-ground-suitable.
+- **Regional** (~3–5 per region): biome-mid + hydrology-adjacent + populated-area.
+- **Local** (~10–20 per region): scattered across accessible terrain.
+- **Remote** (~30+ per region): scenic anchors — fishing-camp-plausible lakeshores, clearings, ranger-station spots.
+- **Isolated** (~500+ per region, discovery-gated): highly constrained placement — hidden tarns, abandoned strips, pristine coves. Not shown on any map until discovered.
+
+Catalog size: ~500–800 hubs per region × ~100 regions in a 1000 × 1000 km world = ~50–80K hubs. At ~200 bytes per entry, total ~15 MB. Persisted with the hydrology graph.
+
+**Phase 2 — Streaming-time resolution (when a hub's approximate coords fall into the streaming disk):**
+
+When the Voronoi generator produces a cell whose footprint contains (or is nearest to) a hub's `approx_world_pos`:
+
+1. Check the cell's `sub_biome_feature_type` against the hub's `required_surfaces` — is this cell the right shape/surface for the hub?
+2. If yes: **snap** the hub to the best-fit point within the cell (e.g. a lake-edge dock point for a floatplane base, a flat patch for a runway). Exact coords cached to the hub entry.
+3. If no: walk the Voronoi neighbor adjacency graph looking for a compatible neighbor cell. Pick the nearest compatible. Snap there.
+4. If **no neighbor within N hops** is compatible: hub is flagged `resolution_failed` — surfaced as a bake-time warning for the user to manually place the hub. Rare edge case; most hubs resolve on first or second-nearest attempt.
+
+**Why this works:**
+
+- **Mission routing is hub-ID-based.** A mission references `(source_hub_id, destination_hub_id)` and uses approximate coords for load / fuel / distance planning. Routing doesn't wait for cells to exist.
+- **2D hub map shows hubs as icons.** Pulls from the catalog directly; no need for cells to be generated.
+- **Hubs survive Voronoi re-partition.** If the Voronoi seed distribution changes between builds (determinism-preserving re-bake), hub IDs stay stable — they just re-resolve to the new partition.
+- **Deterministic.** Hub catalog bake is pure function of master seed; resolution is pure function of (master seed, streaming generation order). Save-format event log captures discovery deltas.
+
+**The pattern generalizes.** Beyond hubs, the same fuzz+resolve pattern applies to any "global reference to eventually-generated local feature":
+- **Wildlife zones** (rookeries, salmon-run rivers, migration paths) — committed at bake, resolved to cells as aircraft approaches.
+- **Mission anchors** (SAR beacons, cartography waypoints, fire-fighter sites) — same pattern.
+- **Barn-find aircraft in isolated hubs** — discovery pairs a hub with a barn-find entry; both bake-committed, both resolve on arrival.
+- **Landmark placements** referenced by NPC dialog / radio / message-in-a-bottle — stable IDs + approximate coords + resolve-on-arrival.
 
 ---
 
