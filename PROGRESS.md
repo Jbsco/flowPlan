@@ -15,7 +15,7 @@ Last updated: **2026-04-20** (Phase 2 in progress; 2.1 / 2.6 / 2.2 core + 2.3 co
     - Milestone 2.3 (plane model + glTF loader + spec sheet): CORE SHIPPED; 2.3.4 back-face culling deferred pending chase-camera / cockpit work
     - Milestone 2.2 (water): CORE SHIPPED (flat quad, Gerstner waves, CPU height sampler, terrain amplitude tune, pre-2.5 ground clamp); 2.2.4 shoreline foam and 2.2.5b distant-water LOD pending
     - Milestone 2.4 (flight model): COMPLETE THROUGH 2.4.8. Shipped: 2.4.1-2.4.7 per-sub-milestone items (skeleton, airfoil forces, lift direction, telemetry, engine power curve + fuel, keyboard slew, moment-based angular dynamics + HUD, real stall physics, attitude indicator, flaps, secondary effects, density altitude), plus 2.4.8 full cycle: flight-test bench framework + 7 Beaver scenarios + 2×4 panel plot pipeline + `--scenario` CLI playback + model-gap triage process + coefficient tuning pass (Cl_max 1.65→2.0, Cd0 0.045→0.055) + reference plots committed to `docs/plots/beaver/` + final inheritance snapshot in PROGRESS.md. Milestone 2.4.9 (slipstream + Cl_β dihedral) documented as optional-before-2.5.
-    - Milestone 2.5 (ground + water contact physics): IN PROGRESS — **2.5a (all 7 sub-milestones) + 2.5b.1 (per-gear normal force + VehicleConfig enum) SHIPPED.** 2.5a fully closed. 2.5b decomposed into 7 sub-milestones; 2.5b.1 done, 2.5b.2–2.5b.7 queued. 2.5c (invariants + tests) last. Entry order: 2.5a water → 2.5b ground → 2.5c invariants+tests. 2.5a decomposed into 7 dependency-ordered sub-milestones: per-pontoon buoyancy + `SimState.wave_time` deterministic wave clock (2.5a.1 — SHIPPED) → per-pontoon horizontal drag + vertical damping (2.5a.2 — SHIPPED) → multi-point float sampling + planing lift + water-taxi/takeoff bench scenarios (2.5a.3 — SHIPPED, eliminated the pitch-flip bug via fore/aft buoyancy asymmetry) → porpoising (2.5a.4) → asymmetric / one-pontoon maneuver validation (2.5a.5) → water rudder + weather-vaning (2.5a.6) → chop-intensity Phase 3.2 hook (2.5a.7). Per-pontoon physics up front means asymmetric behavior (one-float-dipped, one-pontoon takeoff) emerges for free. Wake + spray + touchdown polish land before 2.5a gate. Non-global water heights (lakes, rivers, sandbars) remain Phase 3+ per FEATURES.md § Terrain & Static Landscape — `water_height(x, z, t)` API is position-conditioned so hydrology rebuild plugs in without breaking 2.5a. See ROADMAP.md § Milestone 2.5 for full breakdown.
+    - Milestone 2.5 (ground + water contact physics): IN PROGRESS — **2.5a (all 7 sub-milestones) + 2.5b.1 (per-gear normal force + VehicleConfig enum) + 2.5b.2 (rolling friction + flat-land terrain + first wheels bench scenario) SHIPPED.** 2.5a fully closed. 2.5b: 2.5b.1 + 2.5b.2 done, 2.5b.3–2.5b.7 queued. 2.5c (invariants + tests) last. Entry order: 2.5a water → 2.5b ground → 2.5c invariants+tests. 2.5a decomposed into 7 dependency-ordered sub-milestones: per-pontoon buoyancy + `SimState.wave_time` deterministic wave clock (2.5a.1 — SHIPPED) → per-pontoon horizontal drag + vertical damping (2.5a.2 — SHIPPED) → multi-point float sampling + planing lift + water-taxi/takeoff bench scenarios (2.5a.3 — SHIPPED, eliminated the pitch-flip bug via fore/aft buoyancy asymmetry) → porpoising (2.5a.4) → asymmetric / one-pontoon maneuver validation (2.5a.5) → water rudder + weather-vaning (2.5a.6) → chop-intensity Phase 3.2 hook (2.5a.7). Per-pontoon physics up front means asymmetric behavior (one-float-dipped, one-pontoon takeoff) emerges for free. Wake + spray + touchdown polish land before 2.5a gate. Non-global water heights (lakes, rivers, sandbars) remain Phase 3+ per FEATURES.md § Terrain & Static Landscape — `water_height(x, z, t)` API is position-conditioned so hydrology rebuild plugs in without breaking 2.5a. See ROADMAP.md § Milestone 2.5 for full breakdown.
 - Milestone order taken (deviates from ROADMAP's numeric order): **2.1 -> 2.6 -> 2.3 -> 2.2 -> 2.4 -> 2.5**. Sky landed before plane because it made visual tuning of the Beaver easier; water came before flight model because buoyancy (2.5) needs it. Within 2.4: 2.4.4 jumped ahead of 2.4.3 because the moment model fundamentally changes handling feel and was a prerequisite for sensible tuning against any thrust model.
 - Gate: green. `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `cargo bench --bench frame_budget -- --test`, and the hardware snapshot tests all pass.
 - Test count: **169 total** (the bench integration test counts as one `beaver_scenarios_all_pass` test but runs the full `BEAVER_SCENARIOS` array and validates every assertion inside — 3 scenarios × 2-3 assertions each = 7 POH-anchored assertions). Three hardware snapshots committed: `scene_minimal`, `beaver_preview`, `scene_extended` (1024x640; uses the real `Terrain::from_seed` so it reflects in-game terrain faithfully). Reference photos `ref1.png`, `ref2.png`, `ref3.png` in `crates/render/tests/snapshots/` as aesthetic targets (coastal Alaska / fjord floatplane photography).
@@ -29,19 +29,33 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo bench --bench frame_budget -- --test
 
-# Run the app (release build recommended; dev build is slower but valid)
+# Run the app (release build recommended; dev build is slower but valid).
+# Defaults to the first catalog entry + its default variant (northlander/floats today).
 cargo run -p flowplan-app --release
+
+# Aircraft selection (catalog-backed). Pick aircraft + variant explicitly:
+cargo run -p flowplan-app --release -- --aircraft northlander --variant wheels
+cargo run -p flowplan-app --release -- --aircraft catalina --variant floats
+# Or via env var:
+FLOWPLAN_AIRCRAFT=catalina:wheels cargo run -p flowplan-app --release
+# List available aircraft + variants and exit:
+cargo run -p flowplan-app --release -- --list-aircraft
 
 # Brief smoke-run (3 s; useful for CI-style sanity)
 timeout 3 env RUST_LOG=info cargo run -p flowplan-app --release
 
-# Flight-test bench (Phase 2.4.8): headless scenario suite with POH assertions.
-# Writes per-scenario telemetry CSVs to target/flight-bench/.
+# Flight-test bench: headless (scenario × variant) matrix run. Writes per-tick
+# telemetry CSVs to target/flight-bench/<aircraft>/<variant>/<scenario>.csv.
+# Shared-flight scenarios (cruise, climb, stall, turns) run once per variant;
+# contact-physics scenarios (water, land) narrow to their applicable variant.
 cargo test -p flowplan-sim --test flight_bench
 
 # Visual playback of a single scenario (same sim code path; scripted inputs).
-# Names come from flowplan_sim::flight_bench::BEAVER_SCENARIOS.
+# Scenario name auto-resolves its own aircraft/variant; --aircraft / --variant
+# are honored when compatible, rejected when they mismatch the scenario.
 cargo run -p flowplan-app --release -- --scenario beaver_cruise_sl
+cargo run -p flowplan-app --release -- --scenario beaver_land_taxi          # wheels scenario; loads flat-land terrain, water suppressed
+cargo run -p flowplan-app --release -- --scenario beaver_cruise_sl --variant wheels  # run same scenario in the wheels variant
 cargo run -p flowplan-app --release -- --scenario beaver_cruise_climb --log-dir target/flight-bench --exit-on-scenario-end
 
 # Or run the whole suite visually with the orchestrator (game window opens for each).
@@ -778,6 +792,37 @@ Two framework changes landed together so each (aircraft, variant) combo has its 
 **Bench run count: 37** (12 shared-flight × 2 variants + 13 floats-only × 1 = 24 + 13). 35 passing, 2 failures — the pre-existing triaged `beaver_coordinated_turn_60_overbank` scenario now surfaces in both floats + wheels variants (expected and correct: matrix faithfully reports per-variant failures of shared-flight scenarios).
 
 **Deferred to per-aircraft coefficient migration** (logged here so catalog authoring doesn't forget the blocker): every aerodynamic coefficient in `crates/sim/src/flight.rs` (`CL_MAX`, `CD0`, `I_XX`/`I_YY`/`I_ZZ`, slipstream factors, etc.) is Beaver-hardcoded. Catalina scenarios can be authored against the matrix framework today, but every assertion will fail until coefficients migrate from `flight.rs` consts to per-aircraft `AircraftSpec` fields. That migration is queued; Catalina scenarios land after it.
+
+### Milestone 2.5b.2 — Rolling friction + flat-land terrain + first wheels bench (SHIPPED)
+
+Closes the "wheeled aircraft can actually taxi" loop. Rolling friction physics + the matching visual terrain + first wheels-only bench scenario land together.
+
+**Physics (`crates/sim/src/ground_contact.rs`):**
+- `ROLLING_FRICTION_COEFF: f32 = 0.02` — paved baseline (µ_r for tire on concrete/asphalt). Per-surface variation (grass ≈ 0.04, gravel ≈ 0.07, sand 0.10-0.15, tundra 0.15-0.25) is a 2.5b.6 follow-up when terrain classification arrives.
+- Horizontal drag per compressed gear: `F_roll = -µ_r · N · v̂_ground`, isotropic (same coefficient forward + lateral). Short-circuits at |v| < 1e-4 so a stopped aircraft doesn't oscillate between +eps / -eps friction.
+- Moment produced by the per-gear friction acts at the gear's body-frame offset (same lever-arm as the normal force), so differential friction across left/right mains contributes to yaw damping without a separate angular-friction term.
+
+**Visual terrain (`crates/world/src/terrain.rs`):**
+- `Terrain::flat_land()` sibling to `Terrain::flat()` — base_height = 0 so wheels-variant scenarios render with the aircraft sitting on a visible solid surface, gear compression matching the sim's canonical `min_altitude = 0.0`. `flat()` stays at -10 (submerged) for floats scenarios where the water surface at y=0 is the visual reference.
+- Two `flat*` unit tests verify each constructor samples to its expected constant height at arbitrary (x, z) coordinates.
+
+**Render-side water suppression (`crates/render/src/renderer.rs`):**
+- `Renderer::set_water_visible(bool)` + `draw_water: bool` field; default true. Guards the water pipeline draw call in `render()`.
+- App wires `set_water_visible(false)` when `scenario.is_some()` + variant config is `Wheels` — prevents z-fight between the y=0 terrain and y=0 water mesh.
+
+**App-side variant-aware terrain pick (`crates/app/src/game_app.rs`):**
+- Order-of-operations change: aircraft selection resolves BEFORE terrain is built so terrain choice reads the resolved variant's config. Free-flight mode still uses `Terrain::from_seed(WORLD_SEED)`; scenario mode picks `flat_land()` (wheels) or `flat()` (floats).
+
+**First wheels bench scenario (`crates/sim/src/flight_bench.rs`):**
+- `BEAVER_WHEELS_ONLY_VARIANTS: &[&str] = &["wheels"]` — new variant list for ground-contact scenarios.
+- `beaver_land_taxi` — throttle 0.05, aircraft spawns gear-on-ground at CG = 1.243 m (main compression under weight), 30-s run. Asserts airspeed at end = 5.2 m/s ± 3.0 — matches empirical equilibrium between 5% power thrust and paved rolling friction; physically close to real Beaver low-throttle paved taxi (~10 kt).
+- Idle (throttle 0.0) alone does NOT move the Beaver on paved: static thrust ~250 N < rolling friction ~454 N. This is the physically correct behavior — real pilots apply 10-20% throttle to start moving. Pure-idle ground scenarios aren't included for this reason.
+
+**5 new unit tests cover:** airborne → zero friction; stationary on ground → zero horizontal force; forward motion → drag opposes motion (correct sign + rough magnitude ~0.2 m/s² at 5 m/s); isotropic direction (forward vs lateral drag magnitudes equal within 10%).
+
+**Test counts:** 139 sim lib tests (was 135 — +4 rolling-friction + +0 terrain tests counted in world). 17 world lib tests (was 15 — +2 flat/flat_land sanity). **38 bench runs** (37 before + 1 wheels-only land_taxi). 36 pass; same 2 pre-existing triaged overbank failures.
+
+**Deferred follow-ups (2.5b.3+):** cornering / lateral tire slip (replaces isotropic µ_r with slip-angle model), brake input, tailwheel castoring, per-surface µ_r table, ground-effect aerodynamics for low-altitude takeoff runs, per-aircraft gear geometry migration (`BEAVER_GEAR` hardcoded placeholder → `AircraftSpec.gear_geometry`).
 
 ### Milestone 2.5b.1 — Per-gear normal force + VehicleConfig enum (SHIPPED)
 

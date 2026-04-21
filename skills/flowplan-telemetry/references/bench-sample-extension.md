@@ -75,11 +75,11 @@ Always verify alignment after editing:
 # Regenerate CSVs
 cargo test -p flowplan-sim --test flight_bench --release
 
-# Eyeball one of the outputs
-head -2 target/flight-bench/beaver_cruise_sl.csv
+# Eyeball one of the outputs. Path is <aircraft>/<variant>/<scenario>.csv.
+head -2 target/flight-bench/northlander/floats/beaver_cruise_sl.csv
 
 # Verify column count matches field count
-head -1 target/flight-bench/beaver_cruise_sl.csv | tr ',' '\n' | wc -l
+head -1 target/flight-bench/northlander/floats/beaver_cruise_sl.csv | tr ',' '\n' | wc -l
 ```
 
 Header column count and row column count must match. A mismatch shows up as:

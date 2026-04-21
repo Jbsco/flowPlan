@@ -133,7 +133,7 @@ Run the bench after any change:
 cargo test -p flowplan-sim --test flight_bench --release
 ```
 
-and eyeball one of the output CSVs (`target/flight-bench/beaver_cruise_sl.csv`) to verify the new column appears and is populated.
+and eyeball one of the output CSVs (`target/flight-bench/northlander/floats/beaver_cruise_sl.csv`) to verify the new column appears and is populated.
 
 ## Anti-Patterns
 
@@ -169,8 +169,9 @@ cargo test -p flowplan-render telemetry
 cargo test -p flowplan-sim --test flight_bench --release
 
 # Sanity-check CSV header + row count match
-head -1 target/flight-bench/beaver_cruise_sl.csv
-wc -l target/flight-bench/beaver_cruise_sl.csv
+# Path is target/flight-bench/<aircraft>/<variant>/<scenario>.csv
+head -1 target/flight-bench/northlander/floats/beaver_cruise_sl.csv
+wc -l target/flight-bench/northlander/floats/beaver_cruise_sl.csv
 ```
 
 ## References

@@ -513,16 +513,10 @@ impl Runtime {
         // this, the visual could diverge from the CSV when the aircraft's horizontal
         // track crosses terrain higher than sea level, breaking the determinism
         // invariant `(seed, inputs, dials, dt, min_altitude trace) → bit-identical`.
-        let terrain = if scenario.is_some() {
-            Terrain::flat()
-        } else {
-            Terrain::from_seed(WORLD_SEED)
-        };
-        let terrain_mesh = CpuMesh::terrain_patch(TERRAIN_CELLS, TERRAIN_HALF_EXTENT, |x, z| {
-            terrain.height(x, z)
-        });
         // Resolve aircraft selection from CLI/env/catalog before loading the mesh;
-        // mesh path + spec + config all come from the catalog entry.
+        // mesh path + spec + config all come from the catalog entry. The
+        // selected variant's config also drives terrain choice below
+        // (flat-land for wheels, flat-water for floats).
         let selected = resolve_aircraft_selection(opts);
         let (vehicle_mesh, aircraft_spec, vehicle_config) = selected.as_ref().map_or_else(
             || {
@@ -540,13 +534,31 @@ impl Runtime {
                 )
             },
         );
+
+        // Scenario mode picks between two flat terrains based on the selected
+        // variant's contact physics: `flat()` for floats (terrain at y=-10, water
+        // at y=0), `flat_land()` for wheels (terrain at y=0, water suppressed
+        // below). Free-flight mode keeps the procedural terrain.
+        let terrain = if scenario.is_some() {
+            if vehicle_config == flowplan_sim::VehicleConfig::Wheels {
+                Terrain::flat_land()
+            } else {
+                Terrain::flat()
+            }
+        } else {
+            Terrain::from_seed(WORLD_SEED)
+        };
+        let terrain_mesh = CpuMesh::terrain_patch(TERRAIN_CELLS, TERRAIN_HALF_EXTENT, |x, z| {
+            terrain.height(x, z)
+        });
+
         // Depth of the lowest mesh point below the origin (CG). Used below to lift the
         // spawn altitude so the floats clear terrain. Zero when the mesh sits at or
         // above y=0.
         let vehicle_float_offset = (-vehicle_mesh.bbox_min_y()).max(0.0);
         let water_mesh = CpuMesh::water_grid(WATER_CELLS, WATER_HALF_EXTENT, WATER_COLOR);
 
-        let renderer = Renderer::new(
+        let mut renderer = Renderer::new(
             &device,
             &queue,
             surface_format,
@@ -558,6 +570,11 @@ impl Runtime {
             &vehicle_mesh,
             VEHICLE_SHADING,
         );
+        // Suppress water rendering for wheels-variant scenario playback so the
+        // y=0 flat-land terrain isn't occluded by a y=0 water mesh.
+        if scenario.is_some() && vehicle_config == flowplan_sim::VehicleConfig::Wheels {
+            renderer.set_water_visible(false);
+        }
 
         // Sim. Scenario-mode init uses the scenario's ScenarioInitial so playback is
         // deterministic and reproducible. Normal-mode init is the existing cruise-

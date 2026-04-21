@@ -50,6 +50,27 @@ const GEAR_SPRING_N_PER_M: f32 = 200_000.0;
 /// paths that 2.5b.2+ add, not through overstiffening this damper.
 const GEAR_DAMPING_N_PER_MPS: f32 = 10_000.0;
 
+/// Rolling-friction coefficient on a paved surface (dimensionless, `µ_r`).
+///
+/// Produces a horizontal drag force per gear proportional to the gear's normal
+/// force: `F_roll = -µ_r · N · v̂_ground`. At idle thrust this balances the
+/// engine's output at a bounded taxi speed — the 2.5c invariant that a wheeled
+/// plane taxiing straight under low throttle reaches a steady speed without
+/// runaway.
+///
+/// `0.02` is the canonical `µ_r` for an aircraft tire on a well-maintained
+/// paved runway (concrete / asphalt). Per-surface variation (grass ≈ 0.04,
+/// gravel ≈ 0.07, sand ≈ 0.10-0.15, tundra ≈ 0.15-0.25) lands with 2.5b.6 when
+/// the terrain classifier can tell the `ground_contact` module which surface
+/// the gear is touching. Until then, every ground contact uses the paved
+/// baseline.
+///
+/// The coefficient acts on the horizontal-velocity magnitude (linear in v),
+/// not on v² — this is the standard low-speed model. High-speed tire-squeal
+/// rolling drag is speed-dependent (rises with v²) and arrives with 2.5b.3's
+/// cornering / tire-slip model.
+const ROLLING_FRICTION_COEFF: f32 = 0.02;
+
 /// Per-contact geometry. One entry per wheel / tailwheel.
 #[derive(Clone, Copy, Debug)]
 struct GearPoint {
@@ -135,6 +156,16 @@ pub struct GroundContactOutputs {
 /// rates show up in vertical damping and produce the angular-damping behavior
 /// that an attitude-constraint solver would otherwise require (same pattern as
 /// buoyancy's per-sample velocity).
+///
+/// ### Rolling friction (2.5b.2)
+///
+/// Each gear in ground contact contributes a horizontal drag
+/// `F_roll = -ROLLING_FRICTION_COEFF · N · v̂_ground`, opposing the gear's
+/// horizontal velocity. Cornering / lateral tire slip is deferred to 2.5b.3
+/// — v1 models rolling friction isotropically (same `µ_r` along forward and
+/// lateral axes). For straight-line taxi + takeoff this is indistinguishable
+/// from a direction-separated model; cornering scenarios in 2.5b.3 will
+/// introduce side-slip separately.
 #[must_use]
 pub fn compute_ground_contact(
     v: &VehicleState,
@@ -179,12 +210,29 @@ pub fn compute_ground_contact(
         }
         total_normal_magnitude += normal_n;
 
-        // Force acts at the gear contact point in world +Y.
-        let force_world = Vec3::new(0.0, normal_n, 0.0);
-        let force_body = v.orientation.inverse() * force_world;
-        let moment_body = gear.body_offset.cross(force_body);
+        // Normal force acts at the gear contact point in world +Y.
+        let normal_force_world = Vec3::new(0.0, normal_n, 0.0);
 
-        total_force_world += force_world;
+        // Rolling friction: horizontal drag proportional to the normal force
+        // this gear carries, opposing the gear's horizontal velocity. Skip
+        // when essentially stationary so a stopped aircraft doesn't oscillate
+        // between +eps / -eps via an active-at-zero friction term.
+        let v_horizontal = Vec3::new(v_gear_world.x, 0.0, v_gear_world.z);
+        let v_h_speed = v_horizontal.length();
+        let roll_force_world = if v_h_speed > 1e-4 {
+            let drag_magnitude = ROLLING_FRICTION_COEFF * normal_n;
+            -v_horizontal / v_h_speed * drag_magnitude
+        } else {
+            Vec3::ZERO
+        };
+
+        // Both forces act at the gear contact point (same lever arm). Sum in
+        // world frame, rotate to body frame for r × F moment.
+        let gear_force_world = normal_force_world + roll_force_world;
+        let gear_force_body = v.orientation.inverse() * gear_force_world;
+        let moment_body = gear.body_offset.cross(gear_force_body);
+
+        total_force_world += gear_force_world;
         total_moment_body += moment_body;
     }
 
@@ -430,6 +478,97 @@ mod tests {
             "left-banked aircraft should produce roll-right restoring moment \
              (angular_accel.z < 0), got {}",
             out.angular_accel.z,
+        );
+    }
+
+    // ── Phase 2.5b.2 tests: rolling friction ─────────────────────────────
+
+    #[test]
+    fn airborne_produces_zero_rolling_friction() {
+        // Airborne aircraft with horizontal velocity — no gear contact → no
+        // rolling drag. (Also zero normal force, verified in the earlier test.)
+        let spec = beaver_spec();
+        let mut v = wheels_vehicle_at(50.0); // well above ground
+        v.velocity = Vec3::new(5.0, 0.0, -30.0);
+        let out = compute_ground_contact(&v, Some(&spec), 0.0);
+        assert!(out.linear_accel.length() < f32::EPSILON);
+    }
+
+    #[test]
+    fn stationary_on_ground_has_no_horizontal_friction() {
+        // Parked aircraft, gear compressed under weight, zero horizontal
+        // velocity. Expect zero horizontal linear acceleration (only vertical
+        // normal force equals weight → net linear_accel.xz ≈ 0).
+        let spec = beaver_spec();
+        let weight_n = spec.max_mass_wheels_kg * GRAVITY.length();
+        let main_compression = weight_n / (2.0 * GEAR_SPRING_N_PER_M);
+        let cg_y = 1.3 - main_compression;
+        let v = wheels_vehicle_at(cg_y);
+
+        let out = compute_ground_contact(&v, Some(&spec), 0.0);
+
+        assert!(
+            out.linear_accel.x.abs() < 1e-3 && out.linear_accel.z.abs() < 1e-3,
+            "stationary aircraft should have no horizontal friction force; \
+             accel=({}, _, {})",
+            out.linear_accel.x,
+            out.linear_accel.z,
+        );
+    }
+
+    #[test]
+    fn rolling_friction_opposes_forward_motion() {
+        // Aircraft moving forward on its mains (body -Z with identity
+        // orientation = world -Z). Rolling friction should add a +Z world
+        // acceleration component (opposing the motion). Magnitude check:
+        // with main_compression under weight → normal ≈ weight, and µ_r ≈ 0.02,
+        // total rolling drag force ≈ 0.02 × 22700 = 454 N; mass 2313 kg →
+        // accel ≈ 0.20 m/s² in +Z. Bounds loose to catch direction + rough
+        // magnitude without coupling to exact compression.
+        let spec = beaver_spec();
+        let weight_n = spec.max_mass_wheels_kg * GRAVITY.length();
+        let main_compression = weight_n / (2.0 * GEAR_SPRING_N_PER_M);
+        let cg_y = 1.3 - main_compression;
+
+        let mut v = wheels_vehicle_at(cg_y);
+        v.velocity = Vec3::new(0.0, 0.0, -5.0); // 5 m/s forward (body -Z)
+
+        let out = compute_ground_contact(&v, Some(&spec), 0.0);
+
+        // Expect positive x-world-Z component (drag opposes -Z motion → +Z).
+        assert!(
+            out.linear_accel.z > 0.05 && out.linear_accel.z < 0.5,
+            "rolling friction should produce ~0.2 m/s² +Z accel (opposing -Z \
+             motion); got {}",
+            out.linear_accel.z,
+        );
+    }
+
+    #[test]
+    fn rolling_friction_direction_matches_velocity() {
+        // Same deceleration magnitude in any horizontal direction (isotropic
+        // paved-surface model for 2.5b.2). Compare forward-motion accel.z to
+        // sideways-motion accel.x; should be symmetric in magnitude.
+        let spec = beaver_spec();
+        let weight_n = spec.max_mass_wheels_kg * GRAVITY.length();
+        let main_compression = weight_n / (2.0 * GEAR_SPRING_N_PER_M);
+        let cg_y = 1.3 - main_compression;
+
+        let mut v_fwd = wheels_vehicle_at(cg_y);
+        v_fwd.velocity = Vec3::new(0.0, 0.0, -5.0);
+        let fwd = compute_ground_contact(&v_fwd, Some(&spec), 0.0);
+
+        let mut v_side = wheels_vehicle_at(cg_y);
+        v_side.velocity = Vec3::new(5.0, 0.0, 0.0);
+        let side = compute_ground_contact(&v_side, Some(&spec), 0.0);
+
+        // Forward motion → +Z drag; lateral motion → -X drag. Magnitudes equal.
+        let fwd_mag = fwd.linear_accel.z.abs();
+        let side_mag = side.linear_accel.x.abs();
+        let ratio = fwd_mag / side_mag;
+        assert!(
+            (0.9..=1.1).contains(&ratio),
+            "rolling friction should be isotropic; fwd_mag={fwd_mag} side_mag={side_mag}",
         );
     }
 }

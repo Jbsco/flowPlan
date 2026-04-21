@@ -79,16 +79,21 @@ impl Terrain {
     }
 
     /// Flat terrain at a constant depth below the water surface. Used for scenario-
-    /// bench visual playback (`cargo run -- --scenario <name>`) so the visual is a
-    /// clean "open water with a deep bottom" — water surface at y=0, terrain mesh
-    /// 10 m below. Without the depth offset the terrain would z-fight the water
-    /// mesh (both at y=0).
+    /// bench visual playback of **float-configuration** scenarios — water surface
+    /// at y=0, terrain mesh 10 m below. Without the depth offset the terrain
+    /// would z-fight the water mesh (both at y=0).
     ///
     /// Determinism note: scenario playback overrides `min_altitude = 0.0` in the
     /// game loop (matching `crates/sim/tests/flight_bench.rs`), so the terrain
     /// returned here is purely cosmetic — the simulation never queries it for
     /// physics. The visual `Terrain::flat()` and the headless bench's flat-y=0
     /// world remain consistent in their physics behavior.
+    ///
+    /// For wheels-configuration scenarios (ground contact), use
+    /// [`Terrain::flat_land`] instead — the gear contact surface needs to sit
+    /// at y=0 (the sim's `min_altitude`), and the app is expected to suppress
+    /// the water mesh for ground scenarios so there's no visible body of
+    /// water clipping through the runway.
     #[must_use]
     pub fn flat() -> Self {
         Self {
@@ -101,6 +106,35 @@ impl Terrain {
             }; 5],
             base_amplitude: 0.0,
             base_height: -10.0,
+        }
+    }
+
+    /// Flat terrain at y=0 — the "ground" sibling of [`Terrain::flat`]. Used
+    /// for scenario-bench visual playback of **wheels-configuration** scenarios
+    /// so the gear rests on a visible solid surface at the sim's canonical
+    /// `min_altitude = 0.0`.
+    ///
+    /// The app disables water rendering when using this terrain (wheels-variant
+    /// scenarios take place on dry ground — no lake / sea surface belongs in
+    /// the scene). This avoids the z-fight between a y=0 terrain and the
+    /// y=0 water mean surface.
+    ///
+    /// Determinism note: same as [`Terrain::flat`] — scenario playback uses a
+    /// fixed `min_altitude = 0.0` so the terrain mesh is purely cosmetic; the
+    /// simulation's ground-contact floor is the `min_altitude` parameter
+    /// itself, not a terrain sample.
+    #[must_use]
+    pub fn flat_land() -> Self {
+        Self {
+            seed: 0,
+            octaves: [Octave {
+                frequency: 0.0,
+                amplitude: 0.0,
+                phase_x: 0.0,
+                phase_z: 0.0,
+            }; 5],
+            base_amplitude: 0.0,
+            base_height: 0.0,
         }
     }
 
@@ -213,5 +247,35 @@ mod tests {
     fn seed_accessor_round_trips() {
         let t = Terrain::from_seed(0xDEAD);
         assert_eq!(t.seed(), 0xDEAD);
+    }
+
+    #[test]
+    fn flat_water_sits_below_y_zero() {
+        let t = Terrain::flat();
+        // Every sample should land at the constant -10 m base (no octave
+        // amplitude, no beach flatten, no per-(x,z) variation).
+        let heights = [(0.0, 0.0), (500.0, -500.0), (-100.0, 100.0)];
+        for (x, z) in heights {
+            let h = t.height(x, z);
+            assert!(
+                (h + 10.0).abs() < f32::EPSILON,
+                "flat water terrain should be y=-10 everywhere; got {h} at ({x}, {z})",
+            );
+        }
+    }
+
+    #[test]
+    fn flat_land_sits_at_y_zero() {
+        let t = Terrain::flat_land();
+        // Matches the bench's `min_altitude = 0.0` so gear compression model
+        // works out in the physical expected way.
+        let heights = [(0.0, 0.0), (500.0, -500.0), (-100.0, 100.0)];
+        for (x, z) in heights {
+            let h = t.height(x, z);
+            assert!(
+                h.abs() < f32::EPSILON,
+                "flat land terrain should be y=0 everywhere; got {h} at ({x}, {z})",
+            );
+        }
     }
 }

@@ -606,6 +606,10 @@ pub const BEAVER_SHARED_FLIGHT_VARIANTS: &[&str] = &["floats", "wheels"];
 /// landing, porpoise, one-pontoon, water rudder).
 pub const BEAVER_FLOATS_ONLY_VARIANTS: &[&str] = &["floats"];
 
+/// Wheels-configuration variant list for ground-contact scenarios (taxi, takeoff,
+/// landing on runway, braking, steering).
+pub const BEAVER_WHEELS_ONLY_VARIANTS: &[&str] = &["wheels"];
+
 /// A small nose-up initial orientation aligning roughly with cruise α. Helps
 /// scenarios start near trim rather than transient.
 ///
@@ -2748,6 +2752,69 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             last_secs: 5.0,
             target_mps: 2.5,
             tol_mps: 2.0,
+        }],
+    },
+    // beaver_land_taxi
+    //
+    // Real-world maneuver:
+    //   Paved-surface taxi under low-throttle steady thrust. Real Beaver pilots
+    //   use ~10-20% throttle on paved to get moving (pure idle static thrust
+    //   ~250 N is below paved rolling friction ~454 N at MTOW), then pull back
+    //   to idle to coast. Bench tests the steady-state equivalent: pick a low
+    //   throttle and verify the aircraft reaches a bounded taxi speed.
+    //
+    // 2.5b.2 scope:
+    //   First wheels-only scenario. Validates rolling-friction physics (µ_r=0.02
+    //   paved baseline × per-gear normal) balances against thrust so a steady
+    //   speed emerges. Steering + asymmetric braking are 2.5b.3+; here the
+    //   inputs are flat-throttle + zero stick, letting the aircraft's static
+    //   stability keep it tracking straight.
+    //
+    // Does NOT test:
+    //   - Takeoff rotation (needs elevator authority + ground-effect modeling at
+    //     speeds approaching Vs; 2.5b.3+ adds the necessary machinery).
+    //   - Lateral stability / tailwheel castoring / steering (2.5b.3).
+    //   - Brake input (2.5b.4).
+    //
+    // Assertion rationale:
+    //   AirspeedAtEnd catches three failure modes: runaway (thrust dominates,
+    //   aircraft accelerates past Vs and lifts off — would fail flat-land
+    //   invariant), stationary (friction > thrust at every speed; aircraft
+    //   sits still despite throttle), or converges-to-taxi-speed (success).
+    //   Target 15 m/s (~30 kt) with wide ±8 m/s tolerance — first scenario
+    //   with per-gear friction; coefficient tuning will tighten this as
+    //   aerodynamics / prop model are revisited in 2.5b.3+.
+    FlightScenario {
+        name: "beaver_land_taxi",
+        description: "Low-throttle taxi on paved ground. Tests rolling-friction \
+                      equilibrium with idle-plus thrust.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_WHEELS_ONLY_VARIANTS,
+        initial: ScenarioInitial {
+            // CG height chosen so the mains are compressed under weight at
+            // rest — matches the at_rest_on_ground analytic: cg_y ≈ 1.3 m
+            // minus main compression (~0.057 m) = 1.243 m. See
+            // `ground_contact::tests::at_rest_on_ground_produces_weight_matching_force`.
+            position: Vec3::new(0.0, 1.243, 0.0),
+            velocity: Vec3::ZERO,
+            orientation: Quat::IDENTITY,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.05, // ~5% — above static-friction breakout
+            flaps: FlapPosition::Up,
+            fuel_gal: 80.0,
+        },
+        inputs: &[],
+        controllers: &[],
+        duration_ticks: 3600, // 30 s for thrust/drag/friction equilibrium
+        assertions: &[Assertion::AirspeedAtEnd {
+            last_secs: 5.0,
+            // Empirical equilibrium at throttle 0.05 with paved-baseline µ_r=0.02:
+            // ~5.2 m/s (10 kt). Matches real Beaver low-throttle taxi. Tolerance
+            // wide (±3 m/s) because exact equilibrium depends on prop efficiency
+            // curve, Cd0, ground-effect lift (not yet modeled here), and the
+            // compression depth via spring stiffness — all subject to 2.5b.3+ tuning.
+            target_mps: 5.2,
+            tol_mps: 3.0,
         }],
     },
 ];

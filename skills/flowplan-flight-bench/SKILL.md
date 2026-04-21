@@ -58,15 +58,17 @@ If you are picking flight coefficients out of thin air or eye-balling altitude t
 
 ## Scenario Anatomy
 
-A `FlightScenario` has five parts. Each has a job:
+A `FlightScenario` has these parts. Each has a job:
 
 | Field | Job |
 |-------|-----|
 | `name` | CSV filename. snake_case, aircraft-prefixed (`beaver_cruise_sl`). |
 | `description` | One-line intent. Read in the plot title. |
-| `aircraft_spec_path` | Workspace-relative RON. Loaded fresh each run. |
+| `aircraft_id` | Stable catalog id (e.g. `BEAVER_ID = "northlander"`). Resolved via `AircraftCatalog::scan` at runtime. |
+| `variants` | Variant ids the scenario applies to (`BEAVER_SHARED_FLIGHT_VARIANTS`, `BEAVER_FLOATS_ONLY_VARIANTS`, `BEAVER_WHEELS_ONLY_VARIANTS`). Bench runs the scenario once per variant. |
 | `initial: ScenarioInitial` | Position, velocity, orientation (usually `CRUISE_ATTITUDE`), angular vel (usually zero), throttle, flaps, fuel. |
 | `inputs: &[ScenarioInput]` | Scripted events at specific ticks. Almost always a `SetPitch` at tick 0 to hold attitude. |
+| `controllers: &[ControlLaw]` | Closed-loop PID controllers (autopilot shares this type). |
 | `duration_ticks` | At 120 Hz: 3600 = 30 s. Stall scenarios run shorter (~20 s) so the log doesn't explode post-stall. |
 | `assertions` | See assertion table below. |
 
@@ -90,7 +92,7 @@ See [references/assertion-matrix.md](references/assertion-matrix.md) for per-sce
 
 This is the loop. Do not skip steps:
 
-1. **Run the bench** (`tools/run_flight_bench.sh` or `cargo test -p flowplan-sim --test flight_bench --release`). Writes CSVs + PNGs to `target/flight-bench/`.
+1. **Run the bench** (`tools/run_flight_bench.sh` or `cargo test -p flowplan-sim --test flight_bench --release`). Writes CSVs to `target/flight-bench/<aircraft>/<variant>/<scenario>.csv` — one per (scenario × variant) combo. Shared-flight scenarios produce multiple CSVs (one per variant); contact-physics scenarios produce one.
 2. **Read the plot for the scenario that's furthest off target.** Altitude trending one direction? Airspeed oscillating? FPA not converging? Identify the *symptom* before the fix.
 3. **Map symptom to coefficient.** See [references/symptom-map.md](references/symptom-map.md). Examples:
    - Altitude drifts down in cruise → Cm_α or throttle-to-thrust curve too weak.
@@ -130,7 +132,7 @@ Checklist:
 7. **Set `duration_ticks` conservatively.** 30 s (3600) for steady-state; 20 s (2400) for stall induction; 60 s (7200) for endurance trends; 10-15 s for takeoff/landing roll isolation.
 8. **Write one assertion per scenario question.** Two assertions only if they test the same question from different angles (e.g. `EventuallyStalls` + `MinAirspeedNearTarget` both verify the stall event).
 9. **Start tolerances wide.** 2-5× the POH spec. Document the narrowing target in a trailing comment (`// narrow toward ±2 m/s once Cl table locks`).
-10. **Add to `BEAVER_SCENARIOS`** (or the per-aircraft array when we generalize).
+10. **Add to `BEAVER_SCENARIOS`**. Pick the right variants list: `BEAVER_SHARED_FLIGHT_VARIANTS` for airborne scenarios (cruise, climb, stall, turns — runs on every flyable variant), `BEAVER_FLOATS_ONLY_VARIANTS` for water-contact (`config: Floats`), `BEAVER_WHEELS_ONLY_VARIANTS` for ground-contact (`config: Wheels`). The `aircraft_id` is `BEAVER_ID` — resolved to the catalog at runtime via `AircraftCatalog::scan`.
 11. **Run the full bench** -- your new scenario shouldn't regress others. If it does, the physics is probably wrong, not the scenario.
 
 ## In-Code Documentation Template
@@ -208,11 +210,15 @@ tools/run_flight_bench.sh
 # Headless only, no plots
 cargo test -p flowplan-sim --test flight_bench --release
 
-# Visual playback of a single scenario
+# Visual playback of a single scenario. Scenario's own aircraft_id + variants
+# drive the catalog selection; --aircraft / --variant optional overrides.
 cargo run -- --scenario beaver_cruise_sl --log-dir /tmp/flowplan --exit-on-scenario-end
+cargo run -- --scenario beaver_land_taxi  # wheels-only scenario; flat-land terrain, water hidden
+cargo run -- --scenario beaver_cruise_sl --variant wheels  # shared-flight scenario in the wheels variant
 
-# Generate plots from existing CSVs
-python tools/plot_telemetry.py target/flight-bench/*.csv --outdir target/flight-bench/
+# Generate plots from existing CSVs (path is per-aircraft-per-variant).
+python tools/plot_telemetry.py target/flight-bench/northlander/floats/*.csv --outdir target/flight-bench/northlander/floats/
+python tools/plot_telemetry.py target/flight-bench/northlander/wheels/*.csv --outdir target/flight-bench/northlander/wheels/
 ```
 
 ## References

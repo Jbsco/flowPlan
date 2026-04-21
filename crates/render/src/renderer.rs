@@ -234,6 +234,11 @@ pub struct Renderer {
     outline_params_buf: wgpu::Buffer,
     terrain: DrawModel,
     water: DrawModel,
+    /// When `false`, the water pass is skipped on render. Used by wheels-variant
+    /// scenario playback so a y=0 flat-land terrain isn't hidden by a y=0 water
+    /// mesh. Default `true` so free-flight and water-scenario playback retain
+    /// the existing Gerstner surface.
+    draw_water: bool,
     vehicle: DrawModel,
     /// 2.4.2c: line-list pipeline used by the corner widgets and (later) HUD ladders
     /// and wireframe debug views.
@@ -570,6 +575,7 @@ impl Renderer {
             outline_params_buf,
             terrain,
             water,
+            draw_water: true,
             vehicle,
             debug_lines,
             widget_camera_buf_br,
@@ -636,6 +642,13 @@ impl Renderer {
 
     /// Write scene-level parameters (sun direction / color, ambient, fog) into the
     /// scene uniform buffer. Called each frame before `render`.
+    /// Toggle whether the water mesh is rendered. Default `true`. Set to
+    /// `false` for wheels-variant scenarios on flat-land terrain, where the
+    /// y=0 water surface would z-fight the y=0 terrain.
+    pub fn set_water_visible(&mut self, visible: bool) {
+        self.draw_water = visible;
+    }
+
     pub fn set_scene(&self, queue: &wgpu::Queue, params: &SceneParams) {
         queue.write_buffer(&self.scene_buf, 0, bytemuck::bytes_of(&params.to_uniform()));
     }
@@ -823,14 +836,17 @@ impl Renderer {
 
             // Draw water with its own pipeline (Gerstner vertex displacement + water
             // fragment). Camera + model + scene bind groups are layout-compatible, so
-            // we just swap the pipeline.
-            pass.set_pipeline(&self.water_pipeline);
-            pass.set_bind_group(0, &self.camera_bg, &[]);
-            pass.set_bind_group(2, &self.scene_bg, &[]);
-            pass.set_bind_group(1, &self.water.bind_group, &[]);
-            pass.set_vertex_buffer(0, self.water.mesh.vbo.slice(..));
-            pass.set_index_buffer(self.water.mesh.ibo.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..self.water.mesh.index_count, 0, 0..1);
+            // we just swap the pipeline. Skipped entirely for wheels-variant scenes
+            // where the terrain sits at y=0 (no visible body of water).
+            if self.draw_water {
+                pass.set_pipeline(&self.water_pipeline);
+                pass.set_bind_group(0, &self.camera_bg, &[]);
+                pass.set_bind_group(2, &self.scene_bg, &[]);
+                pass.set_bind_group(1, &self.water.bind_group, &[]);
+                pass.set_vertex_buffer(0, self.water.mesh.vbo.slice(..));
+                pass.set_index_buffer(self.water.mesh.ibo.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..self.water.mesh.index_count, 0, 0..1);
+            }
 
             // Back to the scene pipeline for the vehicle.
             pass.set_pipeline(&self.pipeline);

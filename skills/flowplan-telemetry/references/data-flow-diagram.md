@@ -160,8 +160,8 @@ cargo test -p flowplan-render telemetry
 # Bench regeneration (if BenchSample was updated)
 cargo test -p flowplan-sim --test flight_bench --release
 
-# Sanity-check CSV
-head -1 target/flight-bench/beaver_cruise_sl.csv
+# Sanity-check CSV. Path is <aircraft>/<variant>/<scenario>.csv.
+head -1 target/flight-bench/northlander/floats/beaver_cruise_sl.csv
 ```
 
 Every added field touches 2-5 files, in a predictable pattern. The path is boilerplate-heavy on purpose — the alternative (each consumer computing its own load factor) leads to display values that disagree.

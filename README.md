@@ -22,7 +22,17 @@ All commands run from the workspace root. Release builds are recommended for run
 
 ```bash
 # Open the window with full keyboard flight controls.
+# Defaults to the first catalog entry (data/aircraft/*.ron sorted by filename)
+# and its declared default_variant — northlander/floats today.
 cargo run -p flowplan-app --release
+
+# Aircraft selection (catalog-driven). Pick aircraft + variant explicitly:
+cargo run -p flowplan-app --release -- --aircraft northlander --variant wheels
+cargo run -p flowplan-app --release -- --aircraft catalina --variant floats
+# Or via env var:
+FLOWPLAN_AIRCRAFT=catalina:wheels cargo run -p flowplan-app --release
+# Enumerate the catalog and exit:
+cargo run -p flowplan-app --release -- --list-aircraft
 ```
 
 In-window controls:
@@ -47,33 +57,42 @@ Screen layout: top-left `debug` panel (tick, view, vehicle pos/vel/attitude, con
 The bench replays deterministic `FlightScenario`s through the production `SimState::tick` code path, capturing per-tick telemetry CSVs that feed the plotting pipeline. See [TEST_PLAN.md § Flight Test Bench](TEST_PLAN.md#flight-test-bench) for the design.
 
 ```bash
-# Headless: runs all scenarios in crates/sim/src/flight_bench.rs::BEAVER_SCENARIOS,
-# writes target/flight-bench/<scenario>.csv, fails on assertion violation.
+# Headless: iterates the (scenario × variant) matrix — each FlightScenario in
+# BEAVER_SCENARIOS runs once per declared variant. Shared-flight scenarios
+# (cruise, climb, stall, turns) run for every applicable variant; water
+# scenarios only for floats; ground scenarios only for wheels. CSVs at
+# target/flight-bench/<aircraft>/<variant>/<scenario>.csv. Fails on any
+# assertion violation across the matrix.
 cargo test -p flowplan-sim --test flight_bench
 
-# Visual playback of a single scenario (same sim code, scripted inputs, normal
-# renderer + HUD + widgets). Auto-exits when the scenario's duration elapses
-# so shell-driven runs don't need manual intervention.
+# Visual playback of a single scenario. The scenario's own aircraft_id +
+# variants drive the catalog selection; --aircraft / --variant can override
+# when compatible, error cleanly when they mismatch the scenario.
 cargo run -p flowplan-app --release -- --scenario beaver_cruise_sl
+cargo run -p flowplan-app --release -- --scenario beaver_land_taxi   # wheels scenario: flat-land terrain, water suppressed
+cargo run -p flowplan-app --release -- --scenario beaver_cruise_sl --variant wheels  # run shared-flight scenario in wheels variant
 cargo run -p flowplan-app --release -- --scenario beaver_vy_climb \
     --log-dir target/flight-bench --exit-on-scenario-end
 
 # Full orchestrator: headless suite → CSVs → PNG plots (requires matplotlib +
-# pandas). Add --visual to additionally watch each scenario in sequence
-# (game window opens, plays scripted inputs, auto-exits per scenario).
+# pandas). Add --visual to additionally watch each scenario in sequence.
 # Add --pause to wait for Enter between visual runs.
 tools/run_flight_bench.sh
 tools/run_flight_bench.sh --visual
 tools/run_flight_bench.sh --visual --pause
 
-# Ad-hoc plot generation from captured CSVs.
-python3 tools/plot_telemetry.py target/flight-bench/*.csv
+# Ad-hoc plot generation from captured CSVs (path now includes aircraft + variant).
+python3 tools/plot_telemetry.py target/flight-bench/northlander/floats/*.csv
+python3 tools/plot_telemetry.py target/flight-bench/northlander/wheels/*.csv
 
-# List all known scenarios.
+# List all known aircraft variants and their catalog entries.
+cargo run -p flowplan-app --release -- --list-aircraft
+
+# CLI reference.
 cargo run -p flowplan-app --release -- --help
 ```
 
-Scenario names currently in `BEAVER_SCENARIOS`: `beaver_cruise_sl` (level cruise at SL), `beaver_cruise_climb` (full-throttle climb at cruise airspeed), `beaver_stall_clean` (clean stall validation). Expand by appending a `FlightScenario` const to the array; no other wiring needed.
+Scenario catalog lives in `crates/sim/src/flight_bench.rs::BEAVER_SCENARIOS`. Each `FlightScenario` declares its `aircraft_id` (catalog id) and `variants` (list of variant ids that exercise the scenario — e.g. `&["floats", "wheels"]` for airborne scenarios, `&["floats"]` for water, `&["wheels"]` for ground). Expand by appending to the array with the right variant list; no other wiring needed.
 
 ### Quality gate
 

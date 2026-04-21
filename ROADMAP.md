@@ -382,10 +382,11 @@ Decomposed into 7 dependency-ordered sub-milestones mirroring 2.5a's structure. 
 - [x] Buoyancy still runs for Floats config only (mutual exclusion by config, not by runtime branching in the caller)
 - [x] 8 unit tests: no-spec / Floats-config / airborne / at-rest weight-matching / symmetric no-roll-no-yaw / sinking adds damping / lifting never pulls / one-wheel-in-pit rolls restoring
 
-**2.5b.2 Rolling resistance + longitudinal drag.**
-- [ ] Per-gear rolling friction (paved baseline µ_r ≈ 0.02) applied along aircraft's body-X forward axis projected to ground
-- [ ] Ground drag couples into longitudinal deceleration at taxi speed → steady-state taxi under idle thrust (validates 2.5c property test)
-- [ ] Bench: `beaver_land_taxi` scenario — idle thrust reaches bounded taxi speed (analog to `beaver_water_taxi`)
+**2.5b.2 Rolling resistance + longitudinal drag.** (SHIPPED)
+- [x] Per-gear rolling friction at paved baseline `µ_r = 0.02`. Horizontal drag force `F_roll = -µ_r · N · v̂_ground` applied at each compressed gear, isotropic (forward and lateral modeled the same — cornering + lateral slip lands in 2.5b.3). Friction short-circuits at near-zero speed (1e-4 m/s threshold) so a stopped aircraft doesn't oscillate through sign flips.
+- [x] `Terrain::flat_land()` sibling to `Terrain::flat()` — base_height = 0 so wheels-variant scenario visuals rest on solid ground instead of the submerged-terrain/water-surface combo used by floats scenarios.
+- [x] App-side plumbing: `game_app.rs` resolves the aircraft selection first, then picks `Terrain::flat()` vs `Terrain::flat_land()` based on the selected variant's config; `Renderer::set_water_visible(false)` suppresses the water mesh for wheels scenarios so the y=0 water surface doesn't occlude the y=0 terrain.
+- [x] Bench: `beaver_land_taxi` — wheels-only scenario at throttle 0.05, validates bounded steady-state taxi at ~5.2 m/s (matches real Beaver low-throttle paved taxi ~10 kt). Five new unit tests cover the rolling-friction behavior.
 
 **2.5b.3 Lateral friction + tailwheel steering.**
 - [ ] Cornering force at each gear proportional to body-lateral slip velocity at the contact patch (linear tire model, capped at slip limit)

@@ -12,9 +12,10 @@
 #     tools/run_flight_bench.sh --visual        # + watch each scenario in sequence
 #     tools/run_flight_bench.sh --visual --pause  # + pause between each for review
 #
-# Outputs:
-#     target/flight-bench/<scenario>.csv        (per-tick telemetry, 120 Hz)
-#     target/flight-bench/<scenario>.png        (2x4 panel plot)
+# Outputs (per-(aircraft × variant) nested layout since the matrix harness
+# landed — shared-flight scenarios produce one CSV per applicable variant):
+#     target/flight-bench/<aircraft>/<variant>/<scenario>.csv  (per-tick telemetry, 120 Hz)
+#     target/flight-bench/<aircraft>/<variant>/<scenario>.png  (2x4 panel plot)
 #
 # The visual runs use the release build + --exit-on-scenario-end so the window
 # closes automatically once each scenario's duration elapses, and the shell can
@@ -65,8 +66,9 @@ warn()    { echo "${YELLOW}  ! $*${RESET}"; }
 # headless bench writes the current set fresh; without a clean start, the
 # visual orchestrator (below) would discover stale CSVs from deleted scenarios
 # and try to run them through the app, hitting "unknown scenario" errors.
+# Recursive cleanup because CSVs now live under <aircraft>/<variant>/.
 if [[ -d "$OUT_DIR" ]]; then
-    rm -f "$OUT_DIR"/*.csv "$OUT_DIR"/*.png
+    find "$OUT_DIR" -type f \( -name '*.csv' -o -name '*.png' \) -delete
 fi
 
 section "headless bench (all scenarios, deterministic, runs assertions)"
@@ -80,8 +82,14 @@ fi
 
 section "plots"
 if command -v python3 >/dev/null 2>&1 && python3 -c "import matplotlib, pandas" 2>/dev/null; then
-    python3 tools/plot_telemetry.py --outdir "$OUT_DIR" "$OUT_DIR"/*.csv
-    ok "wrote $(ls "$OUT_DIR"/*.png 2>/dev/null | wc -l) plot(s) to $OUT_DIR"
+    # Plot each (aircraft, variant) folder separately so PNGs sit next to
+    # the CSVs they were generated from.
+    plot_count=0
+    while IFS= read -r variant_dir; do
+        python3 tools/plot_telemetry.py --outdir "$variant_dir" "$variant_dir"/*.csv
+        plot_count=$((plot_count + $(ls "$variant_dir"/*.png 2>/dev/null | wc -l)))
+    done < <(find "$OUT_DIR" -mindepth 2 -maxdepth 2 -type d)
+    ok "wrote $plot_count plot(s) under $OUT_DIR"
 else
     warn "skipping plots: python3 + matplotlib + pandas not available"
 fi
@@ -89,9 +97,11 @@ fi
 # ---- Step 3: visual playback (optional) --------------------------------------
 
 if [[ "$VISUAL" -eq 1 ]]; then
-    # Discover scenarios from CSV outputs. Names match the const &[FlightScenario]
-    # array in crates/sim/src/flight_bench.rs.
-    mapfile -t CSVS < <(ls "$OUT_DIR"/*.csv 2>/dev/null | sort)
+    # Discover scenarios from CSV outputs. Path is <OUT>/<aircraft>/<variant>/<name>.csv.
+    # Names match the const &[FlightScenario] array in crates/sim/src/flight_bench.rs;
+    # the aircraft + variant are passed to the app so shared-flight scenarios
+    # replay in the same variant as the headless run.
+    mapfile -t CSVS < <(find "$OUT_DIR" -mindepth 3 -maxdepth 3 -type f -name '*.csv' | sort)
     TOTAL=${#CSVS[@]}
 
     section "visual playback — $TOTAL scenario(s)"
@@ -105,15 +115,21 @@ if [[ "$VISUAL" -eq 1 ]]; then
     for csv in "${CSVS[@]}"; do
         IDX=$((IDX + 1))
         name=$(basename "$csv" .csv)
+        # Decompose path to recover aircraft + variant.
+        variant_dir=$(dirname "$csv")
+        variant=$(basename "$variant_dir")
+        aircraft=$(basename "$(dirname "$variant_dir")")
 
         # Infer duration from CSV's last time_s column so the user knows what
         # they're watching.
         duration=$(tail -1 "$csv" | cut -d, -f2 | awk '{printf "%.0f", $1}')
 
-        section "[$IDX/$TOTAL] $name  (${duration}s)"
+        section "[$IDX/$TOTAL] $aircraft/$variant/$name  (${duration}s)"
         cargo run -p flowplan-app --release -- \
             --scenario "$name" \
-            --log-dir "$OUT_DIR" \
+            --aircraft "$aircraft" \
+            --variant "$variant" \
+            --log-dir "$variant_dir" \
             --exit-on-scenario-end
 
         ok "$name complete"
@@ -130,14 +146,15 @@ fi
 echo
 section "done"
 echo "  outputs:  ${BOLD}$OUT_DIR/${RESET}"
-if ls "$OUT_DIR"/*.csv >/dev/null 2>&1; then
-    for csv in "$OUT_DIR"/*.csv; do
-        name=$(basename "$csv" .csv)
-        png="$OUT_DIR/$name.png"
-        if [ -f "$png" ]; then
-            echo "    $name  (csv + png)"
-        else
-            echo "    $name  (csv only)"
-        fi
-    done
-fi
+while IFS= read -r csv; do
+    name=$(basename "$csv" .csv)
+    variant_dir=$(dirname "$csv")
+    variant=$(basename "$variant_dir")
+    aircraft=$(basename "$(dirname "$variant_dir")")
+    png="$variant_dir/$name.png"
+    if [ -f "$png" ]; then
+        echo "    $aircraft/$variant/$name  (csv + png)"
+    else
+        echo "    $aircraft/$variant/$name  (csv only)"
+    fi
+done < <(find "$OUT_DIR" -mindepth 3 -maxdepth 3 -type f -name '*.csv' | sort)
