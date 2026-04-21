@@ -793,6 +793,30 @@ Two framework changes landed together so each (aircraft, variant) combo has its 
 
 **Deferred to per-aircraft coefficient migration** (logged here so catalog authoring doesn't forget the blocker): every aerodynamic coefficient in `crates/sim/src/flight.rs` (`CL_MAX`, `CD0`, `I_XX`/`I_YY`/`I_ZZ`, slipstream factors, etc.) is Beaver-hardcoded. Catalina scenarios can be authored against the matrix framework today, but every assertion will fail until coefficients migrate from `flight.rs` consts to per-aircraft `AircraftSpec` fields. That migration is queued; Catalina scenarios land after it.
 
+### 2.5b.6 follow-up: attitude-convention helper module (SHIPPED)
+
+The 2.5b.6 strike tests surfaced the glam vs flowplan sign-convention footgun: `Quat::from_rotation_z(+angle)` produces LEFT bank (right-wing-up) because glam follows standard right-hand-rule, but flowplan's convention is "positive roll = right-wing-down." The wingtip tests initially had the sign wrong and only caught it via the test failures.
+
+The storage-side convention is already documented in `flight.rs` (yaw + roll stored negated in `angular_velocity`). But ORIENTATION quats aren't stored negated — they're actual attitudes — and scenario authors / test writers hit the sign flip every time they hand-construct a quat for a non-level attitude. The comments in flight.rs don't help unless you think to check there first.
+
+**New module `crates/sim/src/attitude.rs`** — semantic Quat constructors that wrap the sign-flips so call sites read naturally:
+- `attitude::pitch_up(rad)` — no flip, matches `from_rotation_x` directly.
+- `attitude::pitch_down(rad)` — inverse shorthand.
+- `attitude::roll_right(rad)` — flips, wraps `from_rotation_z(-rad)`.
+- `attitude::roll_left(rad)` — matches `from_rotation_z(+rad)` directly.
+- `attitude::yaw_right(rad)` — flips, wraps `from_rotation_y(-rad)`.
+- `attitude::yaw_left(rad)` — matches `from_rotation_y(+rad)` directly.
+
+8 unit tests exercise each helper: right-bank drops right wing below horizon, nose-up pitch raises forward vector's Y, pitch_up·pitch_down composes to identity, combined pitch+bank composes in the expected attitude, etc.
+
+Module docstring is the canonical reference for the convention — explains WHY the helpers exist (flowplan's right-hand-rule-but-storage-negates-yaw-and-roll pattern) and when to use each. Future scenario authors reading the docstring immediately understand the footgun + the fix.
+
+Wingtip strike tests refactored to use the helpers; read cleanly now. Bench scenarios with hand-computed quats (e.g. `beaver_land_wingtip_scrape` with its combined 15° pitch + 15° left-bank precomputed quat) still use the raw numbers because they're already committed and work — the helpers are additive for new code, not a mass refactor. Pre-existing quats' component values are documented with the angles they represent.
+
+**Test count:** 163 sim lib tests (155 → +8 attitude helpers). All bench scenarios unchanged (44 passing).
+
+**Why this small diversion, not 2.5b.7?** Deferred per-surface friction: it blocks on terrain surface-classification (paved / grass / sand / tundra) which doesn't exist yet. Without the world-side `surface_at(x, z)` sampler, implementing per-surface friction would just bake in a paved-only fallback branch — work we'd rip out later. The attitude helper, by contrast, is a small quality-of-life fix that surfaced from 2.5b.6 authoring friction and pays off every future scenario that sets a non-level attitude.
+
 ### Milestone 2.5b.6 — Attitude + strike detection (SHIPPED)
 
 Strike-point detection for non-gear airframe contact (prop, tail, wingtips) with no force applied — detection only, Phase 4+ damage system will hook the flags. Plus validation that the attitude-equilibrium work from 2.5b.5 behaves correctly under perturbation.

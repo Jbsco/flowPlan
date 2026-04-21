@@ -431,10 +431,13 @@ Audited the 2.5b.4 `beaver_land_tail_up_balance` scenario and found three couple
 - [x] Bench: `beaver_land_stall_taildown` (tail-first landing simulated by spawning the aircraft at 15° nose-up close enough to the ground that the tail-strike point is immediately in contact) and `beaver_land_wingtip_scrape` (aircraft in 15° combined pitch+bank attitude with wingtip contacting ground). Both pass the corresponding assertions.
 - [x] **Empirical finding**: the Beaver's gear restoring moment at rest is ~33,000 N·m per degree past 6.46°; full-power elevator (+10,000 N·m nose-up) cannot over-rotate the aircraft through back-stick alone. Tail-strike in this model happens from airborne attitudes descending into contact, not from elevator-driven rotation on-ground. Matches the Beaver-specific caveat already documented for tail-up-balance.
 
-**2.5b.7 Per-surface friction table.** (Was 2.5b.6.)
-- [ ] Surface classification enum (`Paved | Grass | Gravel | Sand | Tundra`) — world-side sampler at `(x, z)` returns surface class, passed to `compute_ground_contact`
-- [ ] Per-surface µ_r (rolling) + µ_s (static / side) + compliance (soft surfaces deform → effectively softer spring; bush pilots literally use soft-field technique because tundra absorbs differently than pavement)
-- [ ] Bench: paved-vs-grass taxi comparison and soft-field takeoff scenario
+**2.5b.7 Per-surface friction table.** (Was 2.5b.6. Deferred — blocks on terrain surface-classification work that doesn't exist yet.)
+
+The current ground-contact model uses a single paved-baseline coefficient set (`ROLLING_FRICTION_COEFF = 0.02`, `LATERAL_FRICTION_COEFF = 0.6`, `BRAKE_FRICTION_COEFF = 0.5`). Per-surface variation wants a `world::surface_at(x, z) -> SurfaceClass` sampler that doesn't exist yet — terrain is still a single procedural heightfield with no surface class, lakes, rivers, or shore classification (per [FEATURES.md § Terrain & Static Landscape](FEATURES.md#terrain--static-landscape) Phase 3+ hydrology rebuild). Keeping 2.5b.7 on the ROADMAP as a slot, but ordering it AFTER 2.5b.8 (app integration) since 2.5b.8 is unblocked and 2.5b.7 is blocked:
+
+- [ ] `SurfaceClass` enum (`Paved | Grass | Gravel | Sand | Tundra | Water`), world-side sampler at `(x, z)`.
+- [ ] Per-surface coefficient lookup: `µ_r` rolling, `µ_lat` lateral, `µ_brake`, compliance softness. Tundra should feel genuinely soft (mains sink, planing effect during takeoff); sand should feel draggy; paved tight.
+- [ ] Bench: paved-vs-grass taxi comparison at identical throttle → grass decelerates aggressively. Soft-field takeoff scenario where the aircraft rides on the step briefly.
 
 **2.5b.8 App integration: config toggle + land-mesh selection.** (Was 2.5b.7.)
 - [ ] App reads a config selector (env var / RON field / CLI flag) and picks `northlander.glb` (Floats) or `northlander_land.glb` (Wheels) accordingly

@@ -1100,17 +1100,14 @@ mod tests {
 
     #[test]
     fn right_bank_produces_right_wingtip_strike() {
-        // Right-bank (right wing down) per flowplan convention:
-        // angular_velocity.z is STORED NEGATED from physics convention, so
-        // a body-frame rotation about +Z by positive angle actually rotates
-        // the top of the aircraft toward body +X (right wing UP = LEFT bank).
-        // To put the aircraft into right-bank attitude directly via a quat,
-        // rotate about +Z by NEGATIVE angle (equivalent to +Z by negative
-        // angle OR -Z by positive angle). Right wingtip at (7.3, -1.0, 0)
-        // rotates DOWN; world_y drops past zero.
+        // Right-bank = right wing down. `attitude::roll_right` wraps the
+        // flowplan sign convention so the call reads semantically (see
+        // attitude.rs module docs for why from_rotation_z alone is confusing).
+        // Right wingtip at body (7.3, -1.0, 0) rotates DOWN in world; world_y
+        // drops past zero → strike.
         let spec = beaver_spec();
         let mut v = wheels_three_point_rest();
-        v.orientation *= Quat::from_rotation_z(-10.0_f32.to_radians());
+        v.orientation *= crate::attitude::roll_right(10_f32.to_radians());
         let out = compute_ground_contact(&v, Some(&spec), 0.0);
         assert!(
             out.strikes.wingtip_right,
@@ -1126,11 +1123,9 @@ mod tests {
 
     #[test]
     fn left_bank_produces_left_wingtip_strike() {
-        // Mirror of the right-bank test. Left-bank = positive Z rotation
-        // in body frame (top tilts right toward +X = left wing drops).
         let spec = beaver_spec();
         let mut v = wheels_three_point_rest();
-        v.orientation *= Quat::from_rotation_z(10.0_f32.to_radians());
+        v.orientation *= crate::attitude::roll_left(10_f32.to_radians());
         let out = compute_ground_contact(&v, Some(&spec), 0.0);
         assert!(
             out.strikes.wingtip_left,

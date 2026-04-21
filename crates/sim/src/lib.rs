@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 pub mod aircraft_spec;
+pub mod attitude;
 pub mod buoyancy;
 pub mod camera;
 pub mod catalog;
