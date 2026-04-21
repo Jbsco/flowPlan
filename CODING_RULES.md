@@ -200,48 +200,60 @@ Inside the `cpal` callback, additionally:
 
 Determinism is a first-class invariant ([DESIGN.md Invariant #8](DESIGN.md#invariants)). The flight bench, world-gen visual bench, save-format replay, and Phase 6 stretch-goal multiplayer all depend on it. Violations are **bugs**, not style preferences.
 
-### Cross-platform bit-identical output
+### Scope: what determinism flowPlan actually guarantees today
 
-Any deterministic subsystem (sim tick, flight bench, world-gen bake, cloud density, weather evolution) must produce **byte-identical output on every supported platform** given identical inputs. Divergence is typically caused by:
+**Within-platform determinism (VERIFIED):** for a given `(seed, inputs, dials, tick, min_altitude)` on a single platform, flowPlan produces bit-identical state across runs. The flight bench enforces this; every PR runs it. Violations are caught at CI.
 
-- **Transcendental math differences** across stdlib implementations (Windows MSVC CRT vs Linux glibc vs macOS libsystem). `sin`, `cos`, `atan2`, `exp`, `log` all drift between implementations.
-- **Fused multiply-add (FMA) contraction** enabled by default on some compilers / targets — changes intermediate rounding.
-- **x87 80-bit extended precision** (legacy x86) vs SSE/AVX 64-bit — irrelevant on modern x86_64 but occasionally resurfaces.
-- **ARM NEON vs x86 SSE** intermediate rounding on the same IEEE 754 spec — Apple Silicon risk.
-- **`-ffast-math` / `/fp:fast`** — allows reassociation, FMA contraction, skipped NaN handling; breaks determinism hard. **Never use.**
+**Cross-platform bit-identity (NOT YET ACHIEVED):** running the same scenario on Linux, Windows, and macOS produces **numerically close but byte-different** CSV output. Root cause: glam's internal transcendentals (`Vec3::normalize`, `Quat::from_rotation_x`, `.to_euler()`, etc.) route through each platform's stdlib (MSVC CRT vs glibc vs Apple libsystem), which differ at single-precision rounding. Glam 0.29's `libm` feature only adds the dep; it doesn't re-route internals under `std`.
 
-### Rules
+Full cross-platform bit-identity is **Phase 6.1 determinism hardening** work — it requires patching glam (or a soft-float math layer) to force libm everywhere. Blocked until multiplayer lockstep is actually load-bearing (Phase 6 stretch-goal).
 
-1. **Use the `libm` crate for transcendentals in sim hot paths + world-gen paths.** Pure Rust, platform-independent implementations of `sin`, `cos`, `atan2`, `exp`, `log`, `sqrt` (for `fast_sqrt`), etc. Slower than stdlib by a few percent; worth it for bit-identical cross-platform output.
+The [cross-platform determinism CI workflow](../.github/workflows/determinism.yml) runs the bench on Linux / Windows / macOS-aarch64 each commit; the diff job is marked `continue-on-error` so divergence is reported as a warning, not a failure, until Phase 6.1 closes it.
+
+### Divergence sources (documented; partially mitigated)
+
+- **Transcendental stdlib drift** across MSVC CRT / glibc / Apple libsystem / musl. Our direct code uses `libm` (mitigated). glam internals don't (unmitigated; Phase 6.1).
+- **SIMD architecture variance** (SSE vs NEON vs AVX). glam's `scalar-math` feature is an option if needed in 6.1.
+- **FMA contraction** — `a*b+c` → single fused op. Rust defaults `fp-contract=off` at language level; `-Ctarget-feature=-fma` on x86 targets would disable ISA-level FMA but was not observed to affect output in our benches (dead code). Re-investigate in 6.1 if cross-arch is truly gated on this.
+- **`-ffast-math` / `/fp:fast`** — allows reassociation, FMA contraction, skipped NaN handling; breaks determinism hard. **Never use.** (We don't, and wouldn't.)
+
+### Rules (apply today)
+
+1. **Use the `libm` crate for transcendentals in sim hot paths + world-gen paths.** Pure Rust, platform-independent implementations of `sin`, `cos`, `atan2`, `exp`, `log`, `sqrt`, `hypot`, `powf`. In use: `flight.rs`, `terrain.rs`, `water.rs`, `sky.rs`, `flight_bench.rs`. Modest perf cost; zero risk.
 
     ```rust
     libm::sinf(x)   // not x.sin() on f32
     libm::atan2f(y, x)  // not y.atan2(x)
     ```
 
-2. **glam `libm` + `scalar-math` features together (both required).** Our direct `libm::` use above covers flowPlan's own calls, but glam's internals (`Vec3::normalize`, `Quat::from_rotation_x`, `.to_euler()`, etc.) also use transcendentals. Both features are needed:
-    - **`scalar-math`** disables SIMD fallback paths (SSE on x86, NEON on ARM), forcing scalar math throughout. Removes SIMD-architecture variance.
-    - **`libm`** routes scalar-path transcendentals through the libm crate. Removes stdlib variance.
-    - **Alone, neither is sufficient:** `libm` without `scalar-math` still hits SIMD intrinsics; `scalar-math` without `libm` still calls platform stdlib transcendentals. Use **both**.
-    - Flowplan's Cargo.toml: `glam = { features = ["bytemuck", "serde", "libm", "scalar-math"] }`.
+    This is partial mitigation — it doesn't reach glam internals — but it's correct discipline for our own code, and it prevents our direct calls from contributing to divergence.
 
-3. **Disable FMA contraction.** Set `-Ctarget-feature=-fma` in `.cargo/config.toml` target flags, or equivalent per-target. Prevents the compiler from fusing `a * b + c` into a single FMA instruction that rounds differently than the sequential operations.
+2. **Pin `codegen-units = 1` + `lto = "thin"` in `[profile.release]`** (already done in flowPlan's Cargo.toml). Prevents cross-unit optimization variation between builds.
 
-4. **Pin `codegen-units = 1` + `lto = "thin"` in `[profile.release]`** (already done in flowPlan's Cargo.toml). Prevents cross-unit optimization variation between builds.
+3. **CPU-GPU shared samplers must use identical math both sides.** Where a world-gen sampler (e.g. `world::cloud_density`) is consumed on both CPU (sim) and GPU (shader), the WGSL implementation must match the Rust implementation bit-for-bit. Use the same noise formulas, same constants, same transcendentals (libm on CPU; hand-rolled WGSL equivalent on GPU — WGSL's built-in trig is not guaranteed bit-identical across drivers).
 
-5. **CPU-GPU shared samplers must use identical math both sides.** Where a world-gen sampler (e.g. `world::cloud_density`) is consumed on both CPU (sim) and GPU (shader), the WGSL implementation must match the Rust implementation bit-for-bit. Use the same noise formulas, same constants, same transcendentals (libm on CPU; hand-rolled WGSL equivalent on GPU — WGSL's built-in trig is not guaranteed bit-identical across drivers).
+4. **No wall-clock reads in sim or world-gen hot paths.** Use `SimState.wave_time` / `SimState.tick` / explicit function parameters. No `Instant::now()`, `SystemTime::now()`, or thread-local timing. (Presentation-side smoothing in render or HUD is fine — just not in deterministic paths.)
 
-6. **No wall-clock reads in sim or world-gen hot paths.** Use `SimState.wave_time` / `SimState.tick` / explicit function parameters. No `Instant::now()`, `SystemTime::now()`, or thread-local timing. (Presentation-side smoothing in render or HUD is fine — just not in deterministic paths.)
+5. **Seeded RNG only.** PCG or xorshift via flowPlan's `core::rng`; seed derivation via `hash(master_seed, subsystem_name)`. No `thread_rng()`, no `rand::random()`, no OS entropy.
 
-7. **Seeded RNG only.** PCG or xorshift via flowPlan's `core::rng`; seed derivation via `hash(master_seed, subsystem_name)`. No `thread_rng()`, no `rand::random()`, no OS entropy.
-
-8. **Hashing function for seed derivation must be platform-independent.** `SipHash` or `wyhash`; reject anything using the Rust stdlib `DefaultHasher` (not portable across stdlib versions).
+6. **Hashing function for seed derivation must be platform-independent.** `SipHash` or `wyhash`; reject anything using the Rust stdlib `DefaultHasher` (not portable across stdlib versions).
 
 ### Verification
 
-- **Flight bench** ([TEST_PLAN.md § Flight Test Bench](TEST_PLAN.md#flight-test-bench)): existing Linux-only CSV check extends to Linux-Windows-10 smoke in Phase 3 (see ROADMAP § Pre-Phase-3 prerequisites).
-- **World-gen visual bench** ([TEST_PLAN.md § World-Gen Visual Bench](TEST_PLAN.md#world-gen-visual-bench)): PNG artifacts + graph-structural equality across platforms.
-- **Full cross-platform hardening** (Apple Silicon + Steam Deck): deferred to [Phase 6.1](ROADMAP.md#milestone-61-determinism-hardening-cross-platform) when hardware access lands. Until then: research + configuration-as-insurance per user memory `hardware_access_constraints`.
+- **Flight bench** ([TEST_PLAN.md § Flight Test Bench](TEST_PLAN.md#flight-test-bench)): within-platform bit-identity enforced on every push via CI.
+- **World-gen visual bench** ([TEST_PLAN.md § World-Gen Visual Bench](TEST_PLAN.md#world-gen-visual-bench)): within-platform bit-identity for the world-bake pipeline. Lands with Phase 3.6.1.
+- **Cross-platform bit-identity** (Linux == Windows == macOS): **deferred to Phase 6.1**. The CI workflow reports divergence today as a warning (non-blocking).
+
+### What investigations in Phase 3 Step 1 revealed (documented for Phase 6.1)
+
+This section retains the forensic findings from the Phase 3 Step 1 cross-platform determinism investigation, so Phase 6.1 starts with full context rather than repeating the exploration.
+
+- `-Ctarget-feature=-fma`, `-Cllvm-args=-fp-contract=off`, `-Cllvm-args=-vectorize-loops=false`, `-Cllvm-args=-vectorize-slp=false` — all had zero effect on bench output. Rust release builds already disable fp-contract at the language level; LLVM vectorization appears not to be the source of divergence.
+- glam's `libm` feature + `scalar-math` feature **changed** Linux output (from pre-libm baseline), but did **not** bring Windows x86_64 in line with Linux x86_64. Indicates glam still calls stdlib transcendentals under `std`; the `libm` feature only adds the dep.
+- Root cause for x86_64-cross-OS divergence: stdlib transcendentals inside glam (MSVC CRT on Windows ≠ glibc on Linux). glam needs patching or replacement.
+- Root cause for aarch64 additional divergence: likely the same plus NEON vs SSE when glam has SIMD enabled. `scalar-math` mitigates SIMD; stdlib transcendentals remain.
+
+Phase 6.1 plan: patch glam's scalar-math paths to force libm, via `[patch.crates-io]` fork; or introduce a thin math-abstraction layer over glam that the hot paths go through; or adopt a different math crate that provides libm routing under `std`.
 
 ### What about presentation-side non-determinism?
 

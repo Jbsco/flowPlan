@@ -78,6 +78,46 @@ Task #97 ("2.5b.5 scope: tire/float compliance + asymmetric damping") was delete
 
 ---
 
+## 2026-04-21 — Phase 3 Step 1 (determinism smoke) — partially complete
+
+Phase 3 Step 1 (cross-platform determinism verification via libm + build-config insurance) was pursued across 5 CI matrix runs. Outcome: **within-platform determinism verified + enforced; cross-platform bit-identity deferred to Phase 6.1**. Findings + remaining infrastructure documented below.
+
+### Shipped (kept)
+
+- **CI infrastructure.** `.github/workflows/determinism.yml` matrix on Linux / macOS-aarch64 / Windows. Runs flight bench on each platform, SHA-256 hashes all 44 CSV outputs, compares to baseline. Diff job marked `continue-on-error: true` so divergence reports as warning without failing the build — visibility without blocking. Foundation for Phase 3.4 full CI.
+- **`libm` crate + direct-call discipline.** 10 hot-path transcendental sites in `flight.rs` / `terrain.rs` / `water.rs` / `sky.rs` / `flight_bench.rs` replaced with `libm::*` calls. Platform-independent in our own code. Modest perf cost, no downside, correct forward-looking discipline.
+- **`CODING_RULES.md § Determinism Discipline`** with scoped claims: within-platform bit-identity verified; cross-platform bit-identity deferred to Phase 6.1; forensic findings preserved so Phase 6.1 starts with full context.
+- **`DESIGN.md` tech-stack amendment:** libm entry added as an approved dependency.
+
+### Reverted (proved ineffective)
+
+Forensic documentation in `CODING_RULES.md § Determinism Discipline` retains findings.
+
+- **glam `libm` feature** — doesn't route glam internals through libm under `std` (only under `no_std`). Zero effective benefit.
+- **glam `scalar-math` feature** — changed Linux output from pre-feature baseline but didn't bring Windows or macOS in line. Root cause is stdlib transcendentals inside glam, not SIMD.
+- **`.cargo/config.toml`** with `-Ctarget-feature=-fma`, `-Cllvm-args=-fp-contract=off`, `-Cllvm-args=-vectorize-loops=false`, `-Cllvm-args=-vectorize-slp=false`. All four flags had **zero effect** on bench output across 3 CI runs. File removed entirely.
+
+### Root cause (for Phase 6.1)
+
+Cross-platform divergence source: glam's internal transcendentals (`Quat::from_rotation_x` → `f32::sin`, `Vec3::normalize` → `f32::sqrt`, etc.) call each platform's stdlib, which differ at single-precision rounding between MSVC CRT (Windows), glibc (Linux), and Apple libsystem (macOS). Glam's `libm` feature only adds the crate as a dep without routing internals through it under `std`.
+
+**Phase 6.1 fix options (documented, not yet executed):**
+- Patch glam via `[patch.crates-io]` fork — force libm in scalar-math paths.
+- Thin math-abstraction layer over glam — hot paths go through a flowplan wrapper that uses libm.
+- Alternative math crate — find one that routes through libm under std.
+
+### Why deferred rather than fixed now
+
+- **Load-bearing for multiplayer lockstep (Phase 6 stretch-goal), not for v1.** Within-platform determinism suffices for flight bench regression gate, save-format replay, and scenario reproducibility.
+- **Iteration cost was already high** (5 CI runs + 4 failed hypotheses). Further progress requires glam patching — a phase-sized effort, not a flag-flip.
+- **Phase 3 execution order** continues independent of this. Step 2 (3.3 sim worker thread) doesn't depend on cross-platform bit-identity.
+
+### Bench state
+
+All 44 scenarios pass their assertions on every platform. Within-platform: byte-identical across runs. Cross-platform: numerically close but byte-different (documented in CI diff output).
+
+---
+
 ## Current status
 
 - **Phase 0 (Skeleton)**: COMPLETE 2026-04-19

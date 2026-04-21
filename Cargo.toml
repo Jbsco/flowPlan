@@ -32,19 +32,17 @@ flowplan-render = { path = "crates/render" }
 flowplan-audio = { path = "crates/audio" }
 
 # Math and POD casts
-# glam's `scalar-math` feature disables SIMD fallback paths (SSE / NEON),
-# forcing scalar math. Combined with our direct `libm` use and the glam
-# `libm` dep (which takes effect in scalar paths), this removes both
-# SIMD-architecture variance (SSE vs NEON) AND compiler-auto-vectorization
-# variance from the determinism surface. `libm` alone wasn't sufficient —
-# glam still used SIMD intrinsics by default. See CODING_RULES.md §
-# Determinism Discipline.
-glam = { version = "0.29", features = ["bytemuck", "serde", "libm", "scalar-math"] }
+glam = { version = "0.29", features = ["bytemuck", "serde"] }
 bytemuck = { version = "1.19", features = ["derive"] }
 
 # Platform-independent transcendentals (sin/cos/atan2/exp/ln/powf) for
-# deterministic sim + world-gen hot paths. Replaces platform-varying stdlib
-# implementations. Required for bit-identical cross-platform output.
+# deterministic sim + world-gen hot paths in flowPlan's own code. Note: this
+# does NOT fix glam's internal transcendentals (Quat::from_rotation_x,
+# Vec3::normalize, etc.) — glam 0.29's `libm` feature only adds the dep
+# without routing internals through it under `std`. Cross-platform bit-
+# identity for the full sim tick is deferred to Phase 6.1 determinism
+# hardening, which would likely require patching glam. See CODING_RULES.md
+# § Determinism Discipline for current scoped-bit-identity claims.
 libm = "0.2"
 
 # GPU + windowing (for render, app)
