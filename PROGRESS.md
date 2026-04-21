@@ -515,6 +515,8 @@ Hydrodynamic forces on top of 2.5a.1 hydrostatics. First sub-milestone with game
 
 **Deferred to 2.5a.3:** water-taxi bench scenario (needs multi-point fore/aft float sampling so longitudinal wetted-area asymmetry produces the natural pitch-restoring moment; single-point sampling alone produces unbounded nose-down pitch under drag). Step transition (plow → on-step regime shift). 2.5a.3 is now scoped to bundle multi-point sampling with the step transition since both depend on per-section pontoon geometry.
 
+**Known 2.5a.2-era limitation: water-surface contact at airspeed produces nose-down pitch runaway.** Single-point float drag acts below the CG, producing a pitch moment with nothing fore-or-aft to counter it. Workaround in-game: **press `R` to reset orientation + zero velocity/angular velocity** (preserves position, throttle, controls, fuel). Implementation: `InputEvent::ResetVehicle` in `state::apply_inputs` restores `orientation = Quat::IDENTITY` and zeros `velocity` + `angular_velocity`. Tested in `state::tests::reset_vehicle_restores_level_attitude_and_zeros_velocity`. Honest 2.5a.3 fix is multi-point sampling so drag at forward float sections is offset by more buoyancy at those sections, bounding pitch-down naturally.
+
 ### Pre-Phase-2.5 gate — EVALUATED
 
 Before opening Phase 2.5 contact physics work, six criteria. All evidence current as of 2.4.8 close:

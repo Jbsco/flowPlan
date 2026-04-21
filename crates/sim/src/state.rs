@@ -11,7 +11,6 @@ use glam::Quat;
 use crate::aircraft_spec::AircraftSpec;
 use crate::buoyancy;
 use crate::camera::Camera;
-use crate::controls::Controls;
 use crate::difficulty::DifficultyDials;
 use crate::flight;
 use crate::input::{InputEvent, InputEvents};
@@ -107,7 +106,7 @@ impl SimState {
         dt: f32,
         min_altitude: f32,
     ) {
-        apply_inputs(&mut self.vehicle.controls, &mut self.camera, inputs);
+        apply_inputs(&mut self.vehicle, &mut self.camera, inputs);
         self.last_flight = tick_dynamics(
             &mut self.vehicle,
             self.aircraft.as_ref(),
@@ -125,29 +124,35 @@ impl SimState {
     }
 }
 
-/// Drain the batch, mutating controls and camera view state. Clamps all axes at end.
-fn apply_inputs(controls: &mut Controls, camera: &mut Camera, inputs: &InputEvents) {
+/// Drain the batch, mutating vehicle and camera view state. Clamps controls at end.
+///
+/// `ResetVehicle` is the in-game recovery action (bound to `R`): restores a level
+/// attitude and zeros linear + angular velocity while preserving position, throttle,
+/// stick inputs, flap state, and fuel. Lets the player recover from an unrecoverable
+/// attitude (e.g., water-contact pitch runaway pre-2.5a.3 multi-point float sampling)
+/// without losing their place in the world.
+fn apply_inputs(v: &mut VehicleState, camera: &mut Camera, inputs: &InputEvents) {
     for ev in inputs {
         match *ev {
-            InputEvent::SetThrottle(t) => controls.throttle = t,
-            InputEvent::SetPitch(p) => controls.pitch = p,
-            InputEvent::SetYaw(y) => controls.yaw = y,
-            InputEvent::SetRoll(r) => controls.roll = r,
-            InputEvent::ThrottleDelta(d) => controls.throttle += d,
+            InputEvent::SetThrottle(t) => v.controls.throttle = t,
+            InputEvent::SetPitch(p) => v.controls.pitch = p,
+            InputEvent::SetYaw(y) => v.controls.yaw = y,
+            InputEvent::SetRoll(r) => v.controls.roll = r,
+            InputEvent::ThrottleDelta(d) => v.controls.throttle += d,
             InputEvent::CycleView => camera.view_kind = camera.view_kind.cycled(),
-            InputEvent::SetView(v) => camera.view_kind = v,
+            InputEvent::SetView(nv) => camera.view_kind = nv,
             InputEvent::LookDelta(d) => camera.apply_look_delta(d),
             InputEvent::ResetLook => camera.reset_look(),
             InputEvent::ResetVehicle => {
-                // Snap the vehicle back to origin without wiping the camera state.
-                // Controls remain so the player keeps their current stick input.
-                // (Debug-only input; not exposed in production UI.)
+                v.orientation = Quat::IDENTITY;
+                v.velocity = glam::Vec3::ZERO;
+                v.angular_velocity = glam::Vec3::ZERO;
             },
-            InputEvent::ExtendFlaps => controls.flaps = controls.flaps.extended(),
-            InputEvent::RetractFlaps => controls.flaps = controls.flaps.retracted(),
+            InputEvent::ExtendFlaps => v.controls.flaps = v.controls.flaps.extended(),
+            InputEvent::RetractFlaps => v.controls.flaps = v.controls.flaps.retracted(),
         }
     }
-    controls.clamp();
+    v.controls.clamp();
 }
 
 /// Advance vehicle dynamics by `dt` given its current controls, the flight-model
@@ -372,6 +377,56 @@ mod tests {
             "wave_time should accumulate; got {}",
             s.wave_time
         );
+    }
+
+    #[test]
+    fn reset_vehicle_restores_level_attitude_and_zeros_velocity() {
+        // Player bound to `R` as the in-game recovery action: from any attitude /
+        // velocity / angular velocity, reset to level + stationary while preserving
+        // position, throttle, controls, flaps, fuel.
+        let mut s = SimState::new(1);
+        s.vehicle.position = Vec3::new(100.0, 50.0, -200.0);
+        s.vehicle.velocity = Vec3::new(5.0, -10.0, -30.0);
+        s.vehicle.orientation = Quat::from_rotation_z(std::f32::consts::PI); // upside-down
+        s.vehicle.angular_velocity = Vec3::new(1.5, 0.7, -2.1);
+        s.vehicle.controls.throttle = 0.72;
+        s.vehicle.controls.pitch = 0.4;
+        s.vehicle.controls.flaps = crate::controls::FlapPosition::Takeoff;
+        s.vehicle.fuel_gal = 45.0;
+
+        let mut inputs = InputEvents::default();
+        inputs.push(InputEvent::ResetVehicle);
+        let d = DifficultyDials::default();
+        s.tick(&inputs, &d, FIXED_DT, 0.5);
+
+        // Position preserved (a one-tick integration step happens after the reset,
+        // so position moves by essentially zero since velocity was zeroed first).
+        assert!(
+            (s.vehicle.position.x - 100.0).abs() < 0.01
+                && (s.vehicle.position.z - (-200.0)).abs() < 0.01,
+            "position should be preserved, got {:?}",
+            s.vehicle.position,
+        );
+        // Orientation reset to identity, velocity + angular velocity zeroed (modulo
+        // the one tick of flight-model effects post-reset).
+        assert!(
+            s.vehicle.orientation.angle_between(Quat::IDENTITY) < 0.1,
+            "orientation should be near-identity, got {:?}",
+            s.vehicle.orientation,
+        );
+        assert!(
+            s.vehicle.velocity.length() < 1.0,
+            "velocity should be near-zero after reset, got {:?}",
+            s.vehicle.velocity,
+        );
+        // Pilot settings preserved.
+        assert!((s.vehicle.controls.throttle - 0.72).abs() < f32::EPSILON);
+        assert!((s.vehicle.controls.pitch - 0.4).abs() < f32::EPSILON);
+        assert_eq!(
+            s.vehicle.controls.flaps,
+            crate::controls::FlapPosition::Takeoff
+        );
+        assert!((s.vehicle.fuel_gal - 45.0).abs() < 0.01);
     }
 
     #[test]
