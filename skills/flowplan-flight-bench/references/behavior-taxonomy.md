@@ -101,6 +101,55 @@ Symmetric to takeoff; same 2.5 prerequisite.
 | Water landing, calm (glassy) | **[blocked: 2.5a]** | Float buoyancy | Power-on approach; validate nose-up attitude at touchdown. |
 | Water landing, chop | **[blocked: 2.5a + 3.2]** | Water chop state | Spray obstructs forward view; validate airframe doesn't take chop impact as stall spike. |
 
+## 6b. Takeoff / landing execution-quality variations
+
+Cross-cutting section: each takeoff and landing scenario in §5–6 above is the **nominal** case. Real pilots execute maneuvers across a spectrum — from a "buttered" perfect touchdown to a harsh arrival that tests structural limits — and players will want that range. This table enumerates the quality / mishap variants that should be authored once the 2.5b contact physics + Phase 4 damage model are in place.
+
+Why call these out explicitly:
+- Each variant exercises a different coupling of the physics — "buttered" validates the low-sink-rate damping regime, "harsh" validates the high-compression regime, "porpoise" validates attitude oscillation under mis-input, "tail-strike" validates contact-point detection at non-gear locations.
+- Players who practice bush flying (MVP audience) push aircraft into regimes where mishaps are expected outcomes. A sim that only validates nominal behavior leaves every off-nominal flight silently untested.
+- Feel tuning converges faster against a quality spectrum than against a single target: "this touchdown should feel like a greaser" is more actionable than "landing must work."
+
+| Variant | Applies to | Status | Prereqs | What it validates |
+|---------|-----------|--------|---------|-------------------|
+| **Buttered touchdown** (minimal sink) | Landing (land + water) | **[blocked: 2.5b / 2.5a]** | Contact damping tuning | Touchdown sink < 0.3 m/s; gear compression smooth; no bounce; centerline hold. Success = the aircraft is "on the ground" by tick N+K with no visible impact transient. |
+| **Firm / planted** (nominal) | Landing | **[blocked: 2.5b / 2.5a]** | Normal-force + damping | Positive touchdown with controlled sink (~0.5-1 m/s); gear compresses and stays; no bounce. This is the reference variant. |
+| **Harsh / hard landing** (high sink) | Landing | **[blocked: 2.5b damage — 2.5b.5 detection hooks]** | Sink-rate event + Phase 4 structural load tracking | Sink > 2 m/s at contact; compression maxes out; raises hard-landing event. Detection ships with 2.5b.5; damage consequences are Phase 4. |
+| **Bounced landing** | Landing | **[blocked: 2.5b.2]** | Gear spring-damper; elevator authority post-touchdown | Aircraft touches, lifts back off, re-contacts. Validates the spring's restitution behavior + the pilot's ability to either re-flare or go-around. Secondary contact expected within 2-3 s. |
+| **Porpoise on rollout** (ground) | Landing rollout | **[blocked: 2.5b.5]** | Wetted-fraction × pitch coupling (same pattern as water porpoise in 2.5a.4) | Oscillating pitch on rollout when pilot over-corrects; validates that ground-contact pitch coupling behaves analogously to float porpoise. |
+| **Tail-strike on rotation** | Takeoff | **[blocked: 2.5b.5]** | Tail contact-point detection | Over-rotation on takeoff: elevator held full-aft, pitch exceeds rotation angle before Vs, tail strikes ground. Event raised; damage Phase 4. |
+| **Tail-strike on flare** | Landing | **[blocked: 2.5b.5]** | Tail contact-point detection | Excessive flare attitude at touchdown (> ~12° pitch for taildragger Beaver); tail contacts before gear. |
+| **Wingtip strike** | Landing (crosswind / crab-to-kick) | **[blocked: 2.5b.5 + 3.2]** | Wingtip contact-point detection + wind field | Landing with residual bank angle; wingtip contacts surface. Detection ships with 2.5b.5. |
+| **Wheel-barrow takeoff** | Takeoff | **[blocked: 2.5b.2 + 2.5b.3]** | Per-gear normal-force distribution | Pilot doesn't hold sufficient back-pressure; weight-on-nose dominant; aircraft rolls on mains without rotation; takeoff distance long / fails to rotate by end-of-runway. |
+| **Ground loop** | Takeoff or landing (taildragger) | **[blocked: 2.5b.3]** | Lateral friction + tailwheel steering + mis-input | Asymmetric lateral friction → heading departure → uncontrolled yaw. Distinguishes proper tailwheel technique from simple taxi. |
+| **Long flare / floating** | Landing | **[blocked: 2.5b]** | Ground effect + rolling-resistance | Pilot holds aircraft off with excess approach speed; aircraft floats hundreds of feet before touching. Validates that ground-effect lift delays touchdown proportionally. |
+| **Short approach / undershoot** | Landing | **[blocked: 2.5b + playable-setting]** | Target-aim-point in scenario schema | Landed short of aim point; validates flare-late failure mode. |
+| **Hot approach / runway overrun** | Landing | **[blocked: 2.5b.4 brakes]** | Brake authority + rolling resistance | Landed long with excess energy; validates whether braking decel matches POH. |
+| **Go-around from short final** | Landing (abort) | **[blocked: 2.5b scenarios + throttle transient]** | Throttle transient + pitch trim change | Power applied late in approach; aircraft arrests descent and climbs. Validates power-on-pitch coupling + trim transient. |
+| **Crosswind landing — crab to kick** | Landing | **[blocked: 3.2 + 2.5b]** | Wind + rudder on final | Crab angle held on final, de-crabbed with rudder just before touchdown. Validates that sideslip → straight touchdown is achievable. |
+| **Crosswind landing — wing-low sideslip** | Landing | **[blocked: 3.2 + 2.5b]** | Wind + aileron-into-wind | Aileron-into-wind + opposite rudder; aircraft tracks straight with bank angle. Validates coordination. |
+| **Glassy-water landing** (floats) | Landing | **[blocked: 2.5a.7 chop hook + scenario schema]** | Chop-intensity override | Power-on approach to glassy water (no wave reference for depth perception) — per-float contact at minimum sink rate. The single scenario where "buttered" technique is **required**, not optional. |
+| **Rough-water landing** (floats) | Landing | **[blocked: 2.5a + 3.2]** | Wave-crest sampling per-float + chop intensity | Land into-swell at low ground speed; wave crest shock validates per-float contact dynamics vs a flat-mean-water assumption. |
+| **Aborted takeoff** (RTO analog) | Takeoff | **[blocked: 2.5b.4 brakes + throttle cut]** | Brakes + simulated engine failure | Full throttle → failure event → throttle cut + brakes; aircraft stops before runway end. Validates emergency deceleration. |
+| **Engine failure after rotation** | Takeoff (abort path) | **[blocked: Phase 3 engine failures]** | Engine failure event | Power loss just after lift-off; validates gliding response with flaps and nose-down pitch attitude recovery. |
+| **Single-pontoon asymmetric landing** | Landing (water) | **[shipped: 2.5a.5]** | 2.5a multi-point buoyancy | Already shipped as `beaver_water_landing_one_pontoon_{right,left}` — included here for reference so the taxonomy stays complete. |
+
+**Authoring discipline for variants:**
+- Each variant gets its own `FlightScenario` with the quality level in the name: `beaver_land_landing_buttered`, `beaver_land_landing_harsh`, etc. Avoids one scenario with a quality-level parameter.
+- Assertion per variant targets the *distinguishing* physical quantity: buttered landing asserts touchdown sink < threshold, harsh asserts sink > threshold, bounced asserts tick-range where vertical velocity goes positive after first contact.
+- Use `variants: BEAVER_WHEELS_ONLY_VARIANTS` or `BEAVER_FLOATS_ONLY_VARIANTS` as appropriate — the quality variants are not cross-variant-meaningful (a buttered landing on floats is a different physical event than a buttered landing on wheels).
+- Scenarios that depend on pilot quality (buttered, harsh) should use a `ControlLaw`-driven closed-loop controller that targets the specific sink rate at touchdown, not a scripted-event open-loop trim. The controller's job is to make the quality variant reproducible.
+- Target POH / operator-handbook figures where they exist (maximum sink rate for gear design, published touchdown speeds per configuration); where they don't, document the feel target explicitly and cross-reference the playtest that set it.
+
+**Phase mapping** (so the roadmap carries the dependency):
+- 2.5b.2 — spring-damper physics enables buttered / firm / bounced variations
+- 2.5b.3 — lateral friction + steering enables wheel-barrow, ground-loop, crosswind basics
+- 2.5b.4 — brakes enable RTO, overrun scenarios
+- 2.5b.5 — strike-detection hooks (tail, wing, prop) enable tail-strike / wingtip-strike variants
+- Phase 3.2 — weather enables crosswind + rough-water + gust variants
+- Phase 4 — damage model turns detection events into gameplay consequences (hard-landing gear fatigue, prop strike engine damage)
+- The scenario authoring itself is a dedicated post-physics pass; a single sub-milestone in Phase 4 or a scenario-family follow-up alongside the damage model.
+
 ## 7. Turns / maneuvering
 
 Behaviors that validate coordinated flight and load-factor response.

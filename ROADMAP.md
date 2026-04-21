@@ -653,6 +653,18 @@ The plane has a voice (engine, wind, water, splash). Weather actively shapes fli
 - [ ] Recovery paths: field repair (supplies), tow/trailer to hub, write-off with barn-find replacement
 - [ ] "Critter assist" stub (humor hook) -- data entry only in Phase 4; animation / interaction polish in Phase 5
 
+### Milestone 4.3b: Takeoff / landing scenario buildout + execution-quality variants
+
+Depends on 2.5b physics + 4.3 damage detection hooks. Authors the full comprehensive takeoff/landing scenario set — including variants that exercise off-nominal technique.
+
+- [ ] Nominal takeoff + landing for each `(aircraft × variant)` combo: paved/grass/gravel/sand for wheels, calm/chop/glassy for floats. Fills the entries currently marked `[blocked: 2.5b]` / `[blocked: 2.5a]` in [`skills/flowplan-flight-bench/references/behavior-taxonomy.md`](../skills/flowplan-flight-bench/references/behavior-taxonomy.md) §5–6.
+- [ ] **Execution-quality variants** per `behavior-taxonomy.md` §6b — buttered / firm / harsh / bounced touchdowns, porpoise-on-rollout, tail-strike (rotation + flare), wingtip-strike, wheel-barrow, ground-loop, long-flare/float, short-approach, runway-overrun, go-around, crosswind (crab + wing-low), glassy-water, rough-water, aborted-takeoff, engine-failure-after-rotation.
+- [ ] Each variant gets its own `FlightScenario`; assertions target the *distinguishing* quantity (buttered: sink < threshold; harsh: sink > threshold; bounced: tick-range where vertical velocity re-goes-positive; tail-strike: event raised at expected pitch angle).
+- [ ] Use `ControlLaw` closed-loop controllers (not open-loop scripted trims) for pilot-quality variants — controller targets the specific quality metric so variants are reproducible across coefficient tuning.
+- [ ] Damage consequences wire through 4.3: hard-landing → gear fatigue event; tail-strike → tail structural damage; prop-strike → engine damage + prop bend. Scenarios validate that the detection → damage → flight-model-modifier chain closes correctly.
+- [ ] Per-variant CSVs feed the (aircraft × variant) matrix harness (shipped 2.5b.2 follow-up), so every combo gets its quality spectrum captured in the bench gate. Expected scenario count ~3-4× current (25 → ~80-100), matching real pilot training-maneuver coverage.
+- [ ] Cross-links: [`behavior-taxonomy.md` §6b](../skills/flowplan-flight-bench/references/behavior-taxonomy.md) is the authoritative catalog; this milestone is the "author them against shipped physics" slot.
+
 ### Milestone 4.4: Economy and reputation
 
 - [ ] Credits ledger with deterministic transaction history
