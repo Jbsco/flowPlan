@@ -34,17 +34,19 @@ struct SceneUniform {
 
 // Wave definitions. Each vec4 packs (dir.x, dir.z, wavelength_m, amplitude_m).
 // Steepness + speed in the companion array as (speed_mps, steepness_Q, _, _).
-// Sum(steepness * k * amplitude) should stay < 1.0 to avoid crest loops. With the values
-// below: k1*A1*Q1 + k2*A2*Q2 + k3*A3*Q3 ~= 0.06 + 0.04 + 0.03 = 0.13, well under.
+// Sum(steepness * k * amplitude) should stay < 1.0 to avoid crest loops.
+//
+// MUST match `WAVES` in `crates/world/src/water.rs` for sim/render consistency.
+// Tuning rationale (gentle lake / float-friendly): see the world-side comment.
 
 const WAVE_COUNT: u32 = 3u;
 
 fn wave_dir_and_params(i: u32) -> vec4<f32> {
     // Separate function avoids the array<vec4> const init that some wgsl backends
     // rejected at Phase 2.2 test. Explicit branching is equally fast at 3 waves.
-    if (i == 0u) { return vec4<f32>( 1.00,  0.10, 18.0, 0.25); }
-    if (i == 1u) { return vec4<f32>( 0.20,  1.00, 11.0, 0.12); }
-    return             vec4<f32>(-0.70,  0.50,  7.0, 0.08);
+    if (i == 0u) { return vec4<f32>( 1.00,  0.20, 40.0, 0.080); } // long swell
+    if (i == 1u) { return vec4<f32>( 0.30,  1.00,  5.0, 0.040); } // medium chop
+    return             vec4<f32>(-0.60,  0.70,  2.5, 0.025);     // fine chop
 }
 
 // 2D value noise: hash at integer grid corners, smooth bilinear interpolation. Gives
@@ -66,9 +68,9 @@ fn value_noise2(p: vec2<f32>) -> f32 {
 }
 
 fn wave_speed_and_steep(i: u32) -> vec2<f32> {
-    if (i == 0u) { return vec2<f32>(3.2, 0.7); }
-    if (i == 1u) { return vec2<f32>(2.0, 0.5); }
-    return             vec2<f32>(1.5, 0.4);
+    if (i == 0u) { return vec2<f32>(4.0, 0.5); } // long swell — slight trochoidal
+    if (i == 1u) { return vec2<f32>(2.0, 0.3); } // medium chop
+    return             vec2<f32>(1.4, 0.2);     // fine chop — minimal trochoidal
 }
 
 struct VsIn {
@@ -152,17 +154,22 @@ fn fs_water(in: VsOut) -> @location(0) vec4<f32> {
     let spec_align = max(dot(view_reflect, sun_dir), 0.0);
     let spec = pow(spec_align, 64.0) * 0.35;
 
-    // Whitecap foam: only the tops of the largest wave crests, masked by value noise
-    // with spatial coherence so foam clusters read as patches (not per-pixel static).
-    // Two noise scales combined -- the larger places patch clusters, the smaller adds
-    // within-patch detail. Pattern sampled on displaced world_pos so it moves with the
-    // waves.
-    let crest = smoothstep(0.20, 0.26, in.world_pos.y);
-    // 20 m wavelength patch scale, 5 m wavelength detail. `* 1/wavelength` scaling.
-    let noise_large = value_noise2(in.world_pos.xz * 0.05);
-    let noise_detail = value_noise2(in.world_pos.xz * 0.2);
-    let foam_field = noise_large * 0.75 + noise_detail * 0.25;
-    let foam_mask = smoothstep(0.45, 0.70, foam_field);
+    // Whitecap foam: tops of the largest combined wave crests, masked by value
+    // noise with spatial coherence so foam clusters read as patches (not per-pixel
+    // static). Two noise scales combined -- the larger places patch clusters,
+    // the smaller adds within-patch detail. Pattern sampled on displaced world_pos
+    // so it moves with the waves.
+    //
+    // Tuning targets a "frequent small foam" look — short scattered patches across
+    // visible water rather than sparse sweeping bands. Crest threshold lowered so
+    // chop crests (max ~0.065 m combined) pass without depending on the long swell
+    // for elevation; eliminates the 40-m-spaced sweeping band pattern that came
+    // from foam appearing only on swell tops.
+    let crest = smoothstep(0.02, 0.05, in.world_pos.y);
+    let noise_large = value_noise2(in.world_pos.xz * 0.40);   // ~2.5 m patch
+    let noise_detail = value_noise2(in.world_pos.xz * 1.20);  // ~0.8 m detail
+    let foam_field = noise_large * 0.55 + noise_detail * 0.45;
+    let foam_mask = smoothstep(0.30, 0.58, foam_field);
     let foam_color = vec3<f32>(0.94, 0.96, 0.98);
 
     let base_lit = in.vert_color.rgb * diffuse * scene.sun_color.rgb

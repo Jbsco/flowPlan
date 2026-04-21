@@ -615,6 +615,77 @@ Buoyancy + drag + damping still act at section geometric center; planing lift no
 - Aborted takeoff / power-chop scenarios
 - Step landing vs full-stall water landing
 
+### Milestone 2.5a follow-up: gentle wave set (smaller chop + visible swell)
+
+In-game playtest revealed the original wave amplitudes (max combined 0.45 m) were dominating water-takeoff dynamics — half-meter swells slammed the floats hard enough to prevent the aircraft from accelerating through hump speed. Visual: the foam pattern showed sweeping bands of crest with large bare-water gaps because the longest waves were 18 m wavelength.
+
+**Wave set retune (`crates/world/src/water.rs` + matching `crates/render/src/water.wgsl`):**
+- Long swell: 40 m wavelength, 0.080 m amplitude (was 18 m / 0.25 m). Gentle rocking, barely perceptible.
+- Medium chop: 5 m wavelength, 0.040 m amplitude (was 11 m / 0.12 m). Visible texture.
+- Fine chop: 2.5 m wavelength, 0.025 m amplitude (was 7 m / 0.08 m). Granular surface detail.
+- Total max amplitude: **0.145 m** (was 0.45 m).
+
+**Foam pattern retune (`crates/render/src/water.wgsl`):**
+- Crest threshold lowered to `smoothstep(0.06, 0.10, y)` (was 0.20-0.26) — matches the gentler wave set.
+- Foam noise scales tightened: ~5 m patch + ~1.5 m detail (was ~20 m + 5 m). Foam clusters now break up across visible water rather than sweeping in long bands.
+
+**Resulting takeoff behavior (`beaver_water_takeoff`):**
+- Smooth monotonic acceleration 18 m/s → 32 m/s over 60 s (past Vx 29 m/s, approaching Vy 38 m/s).
+- Pitch oscillates only ±0.8° (was ±5° pre-wave-retune, ±20° pre-2.5a.3c).
+- Roll bounded ±2° (was ±10°).
+- y stable around 2.50-2.61 m, no slamming.
+- Aircraft now reaches liftoff-speed regime; further pitch tuning enables actual rotation off floats.
+
+**Updated bench assertions:** all 3 water scenarios re-targeted to the new measured airspeed at end. `beaver_water_takeoff` now expects 31.5 ± 5 m/s (was 22 ± 5). The retuned wave set is what unblocks the path to real takeoff.
+
+**Triaged failing tests (per user direction "tests aren't currently passing but are triaged while related features are still in development"):**
+- `crates/render/tests/visual_snapshot.rs::beaver_preview` — water visuals changed; needs `cargo insta accept` after we agree the new wave/foam look is correct.
+- `crates/render/tests/visual_snapshot.rs::scene_extended` — same root cause.
+- `scene_minimal_snapshot` still passes (no water in that scene).
+- `flight_bench::beaver_coordinated_turn_60_overbank` — needs scenario re-design after slipstream-q-boost (see follow-up below) made the auto-rudder strong enough to keep even 70° coordinated turns from stalling. Probably wants either no AirspeedHold (let energy bleed) or much steeper bank (80°+).
+
+These will be re-baselined once the wave/foam tuning settles. The other 191 sim tests + 14 bench scenarios all pass.
+
+**Files updated:**
+- `crates/world/src/water.rs` — new `WAVES` constant + updated `max_amplitude_matches_sum` test
+- `crates/render/src/water.wgsl` — matching wave constants + foam threshold + foam noise scales
+- `crates/sim/src/flight_bench.rs` — re-targeted assertions for 3 water scenarios to new measured values
+- `docs/plots/beaver/*.png` — 17 reference plots regenerated
+
+### Milestone 2.5a follow-up: slipstream-q-boost on rudder + auto-rudder coordination on takeoff
+
+In-game playtest revealed pervasive left-yaw at low speeds preventing takeoffs. Bench investigation confirmed: spiral-slipstream produces ~10000 N·m nose-left yaw at V=20 m/s + full power, but freestream-q-only rudder authority delivers only ~3300 N·m at full deflection — physically the rudder + elevator sit in the prop wash, so their authority must scale with thrust loading. That's the missing physics piece from 2.4.9b (which added the slipstream YAW MOMENT but not the corresponding RUDDER AUTHORITY BOOST).
+
+**New constant in `crates/sim/src/flight.rs`:**
+- `RUDDER_SLIPSTREAM_Q_PER_N = 0.15` — slipstream-augmented dynamic pressure at rudder. `q_local_at_rudder = q_dyn + K · thrust · slipstream_factor`. Uses the same `slipstream_factor` as the spiral-slipstream-yaw formula so authority and yaw scale together at all speeds.
+
+**Bench scenario updates:**
+- `beaver_water_takeoff`: added `CoordinationHold` controller (auto-rudder, same as autopilot's coord-assist mode). Yaw drift drops from ~95° to ~2° over the 60-s run; aircraft accelerates smoothly to 36 m/s (approaching Vy 38 m/s). Validates that the in-game auto-rudder assist is sufficient for hands-off takeoff.
+- `beaver_water_takeoff_rotation`: same controller, accelerates to 36.3 m/s.
+- `beaver_cruise_climb`: yaw trim adjusted 0.18 → 0.13 to match new rudder balance (~7% rudder boost at cruise q + slipstream).
+
+**Resulting takeoff trace (`beaver_water_takeoff`):**
+```
+t=4 yaw=1.1 V=15.2    t=20 yaw=1.8 V=31.4    t=40 yaw=1.9 V=35.1
+t=12 yaw=1.5 V=26.9   t=24 yaw=1.6 V=32.7    t=60 yaw≈2 V≈36
+```
+Yaw stays under 2° throughout, smooth monotonic acceleration past Vx (29 m/s) toward Vy (38 m/s).
+
+**Foam pattern further tightened** (per user feedback "the foam detail looked good, it's the swathes of it that move through the space that are too spaced out"):
+- `crest` threshold lowered: `smoothstep(0.04, 0.08)` → `smoothstep(0.02, 0.05, y)`. Eliminates the 40-m-spaced sweeping band pattern that came from foam appearing only on long-swell tops; now chop crests (without depending on swell elevation) get foam too.
+- `foam_mask` threshold lowered: `smoothstep(0.38, 0.62)` → `smoothstep(0.30, 0.58, foam_field)`. Widens noise-pass region.
+
+**Updated bench scenario count:** 17 (was 14 — water_takeoff, water_takeoff_rotation, water_landing_approach, water_porpoise_emerge, plus the older ones). 16 of 17 pass; overbank scenario triaged as needing re-design after the auto-rudder authority improvement.
+
+**Triaged tests** (in addition to the visual snapshots noted above):
+- `flight_bench::beaver_coordinated_turn_60_overbank` — auto-rudder now strong enough to maintain even 70° coordinated turns without stalling. Needs scenario re-design.
+
+**Files updated:**
+- `crates/sim/src/flight.rs` — added `RUDDER_SLIPSTREAM_Q_PER_N` constant and `q_local_at_rudder` calculation in yaw moment
+- `crates/sim/src/flight_bench.rs` — added CoordinationHold to takeoff scenarios, lowered cruise_climb yaw trim, updated assertion targets
+- `crates/render/src/water.wgsl` — further-tightened foam crest + mask thresholds
+- `docs/plots/beaver/*.png` — 17 reference plots regenerated
+
 ### Pre-Phase-2.5 gate — EVALUATED
 
 Before opening Phase 2.5 contact physics work, six criteria. All evidence current as of 2.4.8 close:

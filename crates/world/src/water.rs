@@ -30,24 +30,39 @@ struct Wave {
 /// Wave set. Must match the `wave_dir_and_params` / `wave_speed_and_steep` tables in
 /// `crates/render/src/water.wgsl`. Steepness is omitted here because it controls only
 /// the trochoidal X/Z displacement, not the Y height.
+///
+/// Tuning goal: gentle protected-water surface that allows float aircraft to taxi /
+/// take off without being slammed by half-meter swells, while still showing visible
+/// surface motion and texture. Real Beavers operate routinely in chop up to ~0.3 m;
+/// the in-game baseline simulates a quiet morning lake (max combined amplitude
+/// ~0.14 m, well below typical operational chop). Wind/chop variation will scale
+/// this up at runtime once Phase 3.2 weather + 2.5a.7 chop-intensity hook lands.
+///
+/// Wave hierarchy:
+/// - Long swell (40 m wavelength): low-frequency rocking, barely perceptible.
+/// - Medium chop (5 m wavelength): visible texture, gentle aircraft rocking.
+/// - Fine chop (2.5 m wavelength): granular surface detail.
+///
+/// Total max amplitude 0.145 m — a reduction from the original 0.45 m that was
+/// dominating water-takeoff dynamics and producing visually-sweeping foam patches.
 const WAVES: [Wave; 3] = [
     Wave {
-        dir: (1.00, 0.10),
-        wavelength_m: 18.0,
-        amplitude_m: 0.25,
-        speed_mps: 3.2,
+        dir: (1.00, 0.20),
+        wavelength_m: 40.0,
+        amplitude_m: 0.08,
+        speed_mps: 4.0,
     },
     Wave {
-        dir: (0.20, 1.00),
-        wavelength_m: 11.0,
-        amplitude_m: 0.12,
+        dir: (0.30, 1.00),
+        wavelength_m: 5.0,
+        amplitude_m: 0.04,
         speed_mps: 2.0,
     },
     Wave {
-        dir: (-0.70, 0.50),
-        wavelength_m: 7.0,
-        amplitude_m: 0.08,
-        speed_mps: 1.5,
+        dir: (-0.60, 0.70),
+        wavelength_m: 2.5,
+        amplitude_m: 0.025,
+        speed_mps: 1.4,
     },
 ];
 
@@ -128,7 +143,7 @@ mod tests {
 
     #[test]
     fn max_amplitude_matches_sum() {
-        // 0.25 + 0.12 + 0.08 = 0.45
-        assert!((max_amplitude() - 0.45).abs() < 1e-6);
+        // Post 2.5a wave-set retune: 0.080 + 0.040 + 0.025 = 0.145
+        assert!((max_amplitude() - 0.145).abs() < 1e-6);
     }
 }

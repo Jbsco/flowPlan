@@ -256,6 +256,31 @@ const P_FACTOR_ARM_M: f32 = 10.0;
 const SPIRAL_SLIPSTREAM_ARM_M: f32 = 2.0;
 const SPIRAL_SLIPSTREAM_V_REF: f32 = 20.0;
 
+// Slipstream-augmented dynamic pressure at rudder/elevator. The prop wash blasts
+// air over the empennage, multiplying control-surface authority on top of free-
+// stream q. Required for the model to be physically consistent: spiral slipstream
+// produces a strong nose-left yaw at low V + high power, but rudder authority
+// grows only with freestream q² → at takeoff regime the rudder cannot counter
+// slipstream yaw. Real Beaver pilots use 50-80% right rudder during takeoff;
+// the slipstream-augmented q-boost makes that input range produce realistic
+// counter-yaw authority.
+//
+// Magnitude tuned so that at V=20 m/s, full thrust (~10 kN), full rudder produces
+// enough moment to slightly exceed the spiral-slipstream yaw — giving the pilot
+// authority to hold heading at takeoff with realistic rudder input (~80%).
+// At cruise the boost is small (~7-12%) so existing scenario yaw trims see a
+// modest but real change.
+//
+// Same factor reused in the spiral-slipstream-moment formula
+// (V_REF/(V_REF+V) × coupling_airspeed_factor) so rudder authority and slipstream
+// yaw scale together — pilot input has correct relative effect at all speeds.
+//
+// The cruise / cruise-climb / endurance scenarios were tuned without the q-boost
+// (pre-2.5a-yaw-fix); their yaw trim values may need slight downward adjustment
+// once this constant is fully tuned. Marked as triaged behavior during 2.5a
+// completion work.
+const RUDDER_SLIPSTREAM_Q_PER_N: f32 = 0.15;
+
 // Torque roll: engine torque reacts against the airframe. Right-rotating prop rolls
 // the airframe LEFT. Magnitude scales with shaft power. At 335 kW max: ~500 N·m
 // rolling-left moment → ~0.1 rad/s² roll accel on I_zz=5000. Noticeable on power
@@ -926,8 +951,27 @@ pub fn compute_forces(
         * thrust_n_this_tick
         * spiral_slipstream_factor
         * coupling_airspeed_factor;
+
+    // Slipstream-augmented dynamic pressure at the rudder (and elevator). Real
+    // Beaver rudder + elevator sit in the prop wash, so their authority scales
+    // with thrust loading on top of freestream q. Without this term, rudder
+    // input cannot counter the spiraling-slipstream yaw moment at low V + high
+    // power (takeoff regime) — the slipstream produces a strong nose-left yaw
+    // but the rudder, computed only with freestream q, has weak authority at
+    // low V. With the boost, rudder authority grows with thrust on the same
+    // schedule as the slipstream itself, giving the pilot the right amount of
+    // control to counter prop-wash effects.
+    let slipstream_q_boost = RUDDER_SLIPSTREAM_Q_PER_N
+        * thrust_n_this_tick.max(0.0)
+        * spiral_slipstream_factor
+        * coupling_airspeed_factor;
+    let q_local_at_rudder = q_dyn + slipstream_q_boost;
     let yaw_moment = MomentBreakdown {
-        control: q_dyn * wing_area_moments * WING_SPAN_M * CN_DELTA_R * state.controls.yaw,
+        control: q_local_at_rudder
+            * wing_area_moments
+            * WING_SPAN_M
+            * CN_DELTA_R
+            * state.controls.yaw,
         stability: q_dyn * wing_area_moments * WING_SPAN_M * CN_BETA * beta,
         damping: q_dyn * wing_area_moments * WING_SPAN_M * CN_R * yaw_damp_nd,
         coupling: adverse_yaw_moment + p_factor_moment + spiral_slipstream_moment,

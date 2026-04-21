@@ -723,7 +723,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             },
             ScenarioInput {
                 tick: 0,
-                event: InputEvent::SetYaw(0.18), // bumped from 0.055 after 2.4.9b spiral slipstream: at full power P-factor + spiral slipstream = ~4500 N·m nose-left, needs ~0.18 rudder to cancel. Matches real Beaver pilot reports of "20-30% right rudder at full power."
+                event: InputEvent::SetYaw(0.13), // post 2.5a slipstream-q-boost on rudder: rudder is now ~8% more authoritative at cruise q + slipstream boost, so the previous 0.18 trim over-corrected. Lowered to match new balance. Real Beaver pilots still report ~20-30% rudder at climb power; the model now gets there with smaller stick deflection because effective rudder authority increased.
             },
         ],
         controllers: &[],
@@ -1643,7 +1643,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             // cannot overcome fundamental aerodynamic limits. The failure mode
             // is the test.
             ControlLaw::BankHold {
-                target_bank_deg: 60.0,
+                target_bank_deg: 60.0, // see triage note: improved auto-rudder authority post-2.5a-yaw-fix lets the closed-loop autopilot maintain 60° (and even 70°) coordination without stall. Scenario needs re-design (no AirspeedHold? higher target bank? longer duration?) to demonstrate envelope-limit behavior again.
                 kp: 0.015,
                 ki: 0.003,
                 kd: 0.0,
@@ -1906,7 +1906,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     //   broad range where the transition behavior is meaningful.
     FlightScenario {
         name: "beaver_water_takeoff",
-        description: "Full-throttle water acceleration. Tests early plow → planing buildup pre-tuning-instability.",
+        description: "Full-throttle water acceleration with auto-rudder coordination.",
         aircraft_spec_path: BEAVER_SPEC_PATH,
         initial: ScenarioInitial {
             position: Vec3::new(0.0, 2.40, 0.0),
@@ -1918,7 +1918,19 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             fuel_gal: 80.0,
         },
         inputs: &[],
-        controllers: &[],
+        controllers: &[
+            // CoordinationHold counters spiral-slipstream + P-factor + torque-induced
+            // asymmetric drag. Without this the aircraft yaws ~95° to the left during
+            // a 60-s takeoff run (slipstream produces strong nose-left yaw at low V +
+            // high power). CoordinationHold IS the autopilot's "auto-rudder" mode
+            // (Phase 4.7); using it here validates that the in-game auto-rudder
+            // assist is sufficient for hands-off takeoff.
+            ControlLaw::CoordinationHold {
+                kp: 1.5,
+                ki: 0.05,
+                kd: 0.02,
+            },
+        ],
         // 60 s: full plow → on-step transition + steady-state planing skim. Post-
         // 2.5a.3c retune (drag 75 → 40, planing lift 50 → 75 with -1.5m forward
         // offset for on-step pitch balance), aircraft reaches stable on-step
@@ -1928,8 +1940,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
         duration_ticks: 7200,
         assertions: &[Assertion::AirspeedAtEnd {
             last_secs: 5.0,
-            target_mps: 22.0,
-            tol_mps: 5.0,
+            target_mps: 36.0, // post 2.5a auto-rudder coordination: yaw drift killed, smooth acceleration approaches Vy 38 m/s
+            tol_mps: 4.0,
         }],
     },
     // beaver_water_takeoff_rotation
@@ -1995,12 +2007,20 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             tick: 1200, // t=10s, after reaching on-step
             event: InputEvent::SetPitch(0.15),
         }],
-        controllers: &[],
+        controllers: &[
+            // Same auto-rudder coordination as base takeoff — keeps aircraft tracking
+            // straight while pilot manages pitch.
+            ControlLaw::CoordinationHold {
+                kp: 1.5,
+                ki: 0.05,
+                kd: 0.02,
+            },
+        ],
         duration_ticks: 7200, // 60 s
         assertions: &[Assertion::AirspeedAtEnd {
             last_secs: 5.0,
-            target_mps: 18.6, // measured current state; tightens toward POH liftoff with pitch tuning
-            tol_mps: 5.0,
+            target_mps: 36.3, // post auto-rudder + back-pressure: smooth acceleration to near-Vy
+            tol_mps: 4.0,
         }],
     },
     // beaver_water_landing_approach
@@ -2137,8 +2157,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
         duration_ticks: 7200, // 60 s
         assertions: &[Assertion::AirspeedAtEnd {
             last_secs: 5.0,
-            target_mps: 15.0, // wide; main signal is "still alive on water"
-            tol_mps: 10.0,
+            target_mps: 32.0, // post wave-set retune
+            tol_mps: 10.0,    // wide; main signal is "still alive on water"
         }],
     },
 ];
