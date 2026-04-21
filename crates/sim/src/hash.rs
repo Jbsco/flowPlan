@@ -149,6 +149,38 @@ mod tests {
         prop::collection::vec(event_strategy(), 0..4)
     }
 
+    /// Minimal wheels spec matching `ground_contact::tests::beaver_spec`.
+    /// Private to this test module; keeps the proptest self-contained.
+    fn test_spec() -> crate::aircraft_spec::AircraftSpec {
+        crate::aircraft_spec::AircraftSpec {
+            name: "Test".to_string(),
+            inspiration: "Test".to_string(),
+            empty_mass_kg: 1315.5,
+            max_mass_wheels_kg: 2313.0,
+            max_mass_floats_kg: 2435.8,
+            wing_area_m2: 23.23,
+            aspect_ratio: 9.2,
+            airfoil_root: "NACA 64A416".to_string(),
+            airfoil_tip: "NACA 64A412".to_string(),
+            engine: crate::aircraft_spec::EngineSpec {
+                name: "Test".to_string(),
+                power_hp: 450.0,
+                cruise_fuel_gph: 27.0,
+            },
+            fuel_capacity_gal: 95.0,
+            speeds: crate::aircraft_spec::SpeedsSpec {
+                vne_mps: 71.53,
+                cruise_mps: 64.31,
+                vs_clean_mps: 23.25,
+                vso_mps: 21.01,
+                vx_mps: 29.06,
+                vy_mps: 37.99,
+            },
+            variants: Vec::new(),
+            default_variant: String::new(),
+        }
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig { cases: 32, .. ProptestConfig::default() })]
 
@@ -185,6 +217,76 @@ mod tests {
             }
             // Seed is folded into state_hash; divergence is guaranteed.
             prop_assert_ne!(state_hash(&a), state_hash(&b));
+        }
+
+        /// 2.5c determinism invariant (ground-contact path).
+        ///
+        /// Same as `prop_same_seed_same_trace_same_hash` but with the aircraft
+        /// in wheels config at its 3-point rest state, so gear physics fires
+        /// every tick. Guards that `compute_ground_contact` is a pure function
+        /// of `(state, ground_y, dt)` — no wall-clock, no hidden RNG, no
+        /// accumulator that diverges across parallel runs.
+        #[test]
+        fn prop_wheels_on_ground_same_seed_same_trace_same_hash(
+            seed in 0u64..10_000,
+            batches in prop::collection::vec(batch_strategy(), 1..32),
+        ) {
+            use crate::config::VehicleConfig;
+            use glam::{Quat, Vec3};
+            let make = |seed: u64| {
+                let mut sim = SimState::new(seed);
+                sim.aircraft = Some(test_spec());
+                // 3-point rest equilibrium (same as wheels_three_point_rest
+                // in ground_contact tests).
+                sim.vehicle.config = VehicleConfig::Wheels;
+                sim.vehicle.position = Vec3::new(0.0, 1.155, 0.0);
+                sim.vehicle.orientation = Quat::from_rotation_x(0.112_79);
+                sim.vehicle.fuel_gal = 80.0;
+                sim
+            };
+            let mut a = make(seed);
+            let mut b = make(seed);
+            let d = DifficultyDials::default();
+            for batch in &batches {
+                let ev = InputEvents::from_slice(batch);
+                a.tick(&ev, &d, FIXED_DT, 0.0);
+                b.tick(&ev, &d, FIXED_DT, 0.0);
+            }
+            prop_assert_eq!(state_hash(&a), state_hash(&b));
+        }
+
+        /// 2.5c determinism invariant (buoyancy path).
+        ///
+        /// Floats config at the water-rest equilibrium: buoyancy fires every
+        /// tick via `water_height(x, z, wave_time)`. Validates that wave
+        /// sampling + per-pontoon force computation is deterministic across
+        /// parallel runs.
+        #[test]
+        fn prop_floats_on_water_same_seed_same_trace_same_hash(
+            seed in 0u64..10_000,
+            batches in prop::collection::vec(batch_strategy(), 1..32),
+        ) {
+            use crate::config::VehicleConfig;
+            use glam::{Quat, Vec3};
+            let make = |seed: u64| {
+                let mut sim = SimState::new(seed);
+                sim.aircraft = Some(test_spec());
+                // Float-rest equilibrium (CG≈2.40 per buoyancy tests).
+                sim.vehicle.config = VehicleConfig::Floats;
+                sim.vehicle.position = Vec3::new(0.0, 2.40, 0.0);
+                sim.vehicle.orientation = Quat::IDENTITY;
+                sim.vehicle.fuel_gal = 80.0;
+                sim
+            };
+            let mut a = make(seed);
+            let mut b = make(seed);
+            let d = DifficultyDials::default();
+            for batch in &batches {
+                let ev = InputEvents::from_slice(batch);
+                a.tick(&ev, &d, FIXED_DT, 0.0);
+                b.tick(&ev, &d, FIXED_DT, 0.0);
+            }
+            prop_assert_eq!(state_hash(&a), state_hash(&b));
         }
     }
 }

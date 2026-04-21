@@ -1221,8 +1221,11 @@ mod tests {
 
         let d = DifficultyDials::default();
         let batch = InputEvents::empty();
-        // 240 ticks = 2.0 s at FIXED_DT=1/120.
-        for _ in 0..240 {
+        // 2.5c property-test duration: 10 s (1200 ticks at 120 Hz). Long
+        // enough that any slow drift from numerical error, integration
+        // rounding, or coefficient mismatch has time to accumulate into
+        // observable deviation. Was 2 s during 2.5b.5 initial guard.
+        for _ in 0..1200 {
             sim.tick(&batch, &d, FIXED_DT, 0.0);
         }
 
@@ -1230,17 +1233,17 @@ mod tests {
         let pitch_drift_deg = (pitch_final - pitch0).to_degrees().abs();
         let pos_drift = (sim.vehicle.position - pos0).length();
 
-        // Thresholds are loose enough that small damped-oscillation settle
-        // still passes, tight enough that the pre-2.5b.5 drift (0.69° in 0.5 s
-        // → >2° in 2 s + 5 cm position rise) is detected.
+        // Thresholds sized for 10 s: pitch <0.5° covers numerical settle
+        // without tolerating real drift; position <10 cm covers sub-m/s
+        // creep without letting true runaway slip through.
         assert!(
             pitch_drift_deg < 0.5,
             "wheels-at-rest aircraft drifted {pitch_drift_deg:.3}° in pitch over \
-             2 s (limit 0.5°). Check gear geometry equilibrium + damping asymmetry.",
+             10 s (limit 0.5°). Check gear geometry equilibrium + damping asymmetry.",
         );
         assert!(
-            pos_drift < 0.05,
-            "wheels-at-rest aircraft moved {pos_drift:.3} m in 2 s (limit 5 cm). \
+            pos_drift < 0.10,
+            "wheels-at-rest aircraft moved {pos_drift:.3} m in 10 s (limit 10 cm). \
              Check moment balance at the declared rest state.",
         );
     }

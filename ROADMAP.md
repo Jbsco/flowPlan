@@ -451,11 +451,20 @@ Most of the app-integration plumbing landed alongside the earlier catalog work �
 
 **Deferred to playtest pass:** full "can taxi, takeoff, land, park the wheeled Beaver — feel matches expectations for a taildragger" — the free-flight spawn still starts airborne at 25 m AGL cruising at 55 m/s, which exercises ground-contact only on landing. A dedicated "start on ground, ready to taxi" spawn-mode toggle could land with settings UI in Phase 4.
 
-**2.5c Invariants + tests:**
-- [ ] Determinism preserved: contact forces are a deterministic function of `(state, terrain/water sample, dt)`; no wall-clock in the contact path.
-- [ ] Property test: a stationary plane on level ground remains stationary (no drift, no chatter) for 10 s of sim time.
-- [ ] Property test: a plane taxiing straight on paved surface at low throttle reaches a steady taxi speed determined by rolling resistance and idle thrust (not runaway).
-- [ ] Property test: a float-configured plane at rest on water settles to equilibrium height matching displacement of the fully-loaded vehicle.
+**2.5c Invariants + tests.** (SHIPPED)
+
+Mostly consolidation — the four invariants were ALREADY covered by tests that grew organically during 2.5a / 2.5b implementation. 2.5c formalizes the coverage and adds the missing contact-path determinism proptests.
+
+- [x] **Determinism preserved** — contact forces are pure functions of `(state, ground_y, dt)`. Three proptests in `hash.rs`:
+  - `prop_same_seed_same_trace_same_hash` (Phase 2.4, general) — 32 random cases per run.
+  - `prop_wheels_on_ground_same_seed_same_trace_same_hash` (new in 2.5c) — aircraft spawned at 3-point rest with wheels config, gear physics fires every tick; 32 random cases.
+  - `prop_floats_on_water_same_seed_same_trace_same_hash` (new in 2.5c) — floats at water-rest equilibrium, buoyancy + wave-sampling fires every tick; 32 random cases.
+- [x] **Stationary on level ground for 10 s** — `wheels_at_rest_has_zero_drift` extended from 2 s (2.5b.5 guard) to 10 s (1200 ticks at 120 Hz). Asserts pitch drift < 0.5° AND position drift < 10 cm. Fuel=0 so idle-thrust creep doesn't conflate.
+- [x] **Taxi reaches steady speed on paved** — `beaver_land_taxi` bench scenario: idle-plus throttle at 3-point rest, 30-s run, `AirspeedAtEnd target_mps: 5.2, tol: 3.0`. Not runaway, not stationary — equilibrium between thrust and rolling friction. Matches real Beaver low-throttle paved taxi (~10 kt).
+- [x] **Float plane settles to equilibrium** — `state::tests::float_at_rest_settles_to_equilibrium` (from 2.5a): Beaver on floats dropped at y=4.0 (above analytic equilibrium 2.40 m) settles under damped buoyancy-gravity to the correct height, matching displacement.
+- [x] **"No wall-clock in contact path"** — confirmed by code review: `compute_ground_contact` takes `(state, ground_y)`; `compute_buoyancy` takes `(state, wave_time, chop_intensity)` where `wave_time` is a deterministic scalar advanced by `dt` each tick. No `Instant`, no `SystemTime`, no hidden RNG. The proptests above would detect any wall-clock leak (parallel same-seed runs would diverge).
+
+Phase 2.5 (ground + water contact physics) is now complete. 2.5a water physics + 2.5b.1-2.5b.6 + 2.5b.8 ground physics + 2.5c invariants. 2.5b.7 (per-surface friction) deferred pending terrain surface classification (Phase 3+ terrain work).
 
 ### Milestone 2.6: Sky (daytime foundation) -- COMPLETE
 
