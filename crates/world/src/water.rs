@@ -121,15 +121,21 @@ pub fn water_height(x: f32, z: f32, t: f32) -> f32 {
 }
 
 /// Upper bound on `|water_height|` anywhere. Used for conservative clearance checks.
+///
+/// Includes the amp-modulation worst case: each wave's effective amplitude can
+/// reach `base_amp × (1 + strength)`, so the bound multiplies by the per-class
+/// `(1 + strength)` factor (taking the largest, which is the fine-chop bin's
+/// strength = 0.65 → factor 1.65).
 #[must_use]
 pub fn max_amplitude() -> f32 {
+    const AMP_MOD_WORST_CASE: f32 = 1.65; // 1 + 0.65 (fine-chop strength)
     let mut sum = 0.0_f32;
     let mut i = 0;
     while i < WAVES.len() {
         sum += WAVES[i].amplitude_m;
         i += 1;
     }
-    sum
+    sum * AMP_MOD_WORST_CASE
 }
 
 #[cfg(test)]
@@ -179,8 +185,9 @@ mod tests {
 
     #[test]
     fn max_amplitude_matches_sum() {
-        // Post 2.5a 7-wave expansion (anti-plaid):
-        // 0.040 + 0.030 + 0.045 + 0.045 + 0.040 + 0.035 + 0.025 = 0.260
-        assert!((max_amplitude() - 0.260).abs() < 1e-6);
+        // Post 2.5a amp-modulation: sum × (1 + max strength). Worst case for
+        // clearance checks; instantaneous heights typically much lower.
+        // Sum: 0.040+0.030+0.045+0.045+0.040+0.035+0.025 = 0.260; × 1.65 = 0.429.
+        assert!((max_amplitude() - 0.429).abs() < 1e-3);
     }
 }

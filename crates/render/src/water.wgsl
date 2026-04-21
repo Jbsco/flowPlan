@@ -82,6 +82,76 @@ fn wave_speed_and_steep(i: u32) -> vec2<f32> {
     return             vec2<f32>(0.85, 0.20);    // fine chop — minimal trochoidal
 }
 
+// Per-wave amplitude modulation — gives each wave a non-stationary effective
+// amplitude that varies over space and time. Goal: break the visible oval/grid
+// patterns that constant-amplitude wave superposition produces.
+//
+// Three sources combined per wave (none alone is sufficient):
+//   1. Two SUMMED sine modulators at incommensurate time-frequencies → the
+//      composite is aperiodic-looking (LCM of two irrational ratios is
+//      effectively never reached on practical viewing timescales).
+//   2. Spatial value-noise sampled at world_pos (with time drift) → organic
+//      patches of stronger/weaker waves drifting across the surface.
+//   3. Per-WAVE-index phase + frequency perturbation (not just per class) so
+//      seven waves don't all modulate in unison.
+//
+// Per-class base parameters (long swell / chop / fine chop) for time-scale and
+// spatial-scale of variation. Each class gets its own characteristic period.
+fn amp_modulation(i: u32, t: f32, world_xz: vec2<f32>) -> f32 {
+    var time_freq_a: f32;
+    var time_freq_b: f32;
+    var noise_scale: f32;
+    var noise_drift: f32;
+    var strength: f32;
+
+    if (i < SWELL_COUNT) {
+        // Swells: 45-s and 70-s periods for the two sine components, ~520-m
+        // spatial noise scale. Very slow drift → large calm/rough regions.
+        time_freq_a = 0.140;
+        time_freq_b = 0.089;
+        noise_scale = 0.012;
+        noise_drift = 0.5;
+        strength = 0.40;
+    } else if (i < 5u) {
+        // Chop: 12-s and 19-s periods, ~50-m spatial scale. Visible breathing.
+        time_freq_a = 0.55;
+        time_freq_b = 0.33;
+        noise_scale = 0.13;
+        noise_drift = 1.5;
+        strength = 0.50;
+    } else {
+        // Fine chop: 3-s and 4.8-s periods, ~14-m spatial scale. Fast small-
+        // scale variation across the visible field.
+        time_freq_a = 2.0;
+        time_freq_b = 1.3;
+        noise_scale = 0.45;
+        noise_drift = 3.0;
+        strength = 0.55;
+    }
+
+    // Per-wave perturbations (irrational multipliers chosen to avoid harmonic
+    // alignment). Each wave i gets unique phase, slightly different frequencies,
+    // and unique noise sampling offset so the seven waves never modulate in
+    // lockstep within a class.
+    let i_f = f32(i);
+    let phase = i_f * 1.71;
+    let freq_perturb = 1.0 + i_f * 0.08;
+
+    // Two-sine temporal component (aperiodic appearance).
+    let temporal_a = sin(time_freq_a * freq_perturb * t + phase);
+    let temporal_b = sin(time_freq_b * freq_perturb * t + phase * 1.73);
+    let temporal = 0.5 * temporal_a + 0.5 * temporal_b;
+
+    // Spatial value-noise component (drifts with time).
+    let noise_pos = world_xz * noise_scale
+        + vec2<f32>(t * noise_drift * 0.5, t * noise_drift * 0.3)
+        + vec2<f32>(phase, phase * 1.3);
+    let spatial = (value_noise2(noise_pos) - 0.5) * 2.0;
+
+    // Combined: 50/50 temporal+spatial. Final range [1 - strength, 1 + strength].
+    return 1.0 + strength * (0.5 * temporal + 0.5 * spatial);
+}
+
 struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal:   vec3<f32>,
@@ -122,12 +192,14 @@ fn vs_water(in: VsIn) -> VsOut {
     var chop_y: f32 = 0.0;
     var chop_amp_max: f32 = 0.0;
 
+    let world_xz = vec2<f32>(world0.x, world0.z);
+
     for (var i: u32 = 0u; i < WAVE_COUNT; i = i + 1u) {
         let dp = wave_dir_and_params(i);
         let sp = wave_speed_and_steep(i);
         let dir = normalize(dp.xy);
         let wavelength = dp.z;
-        let amp = dp.w;
+        let base_amp = dp.w;
         let speed = sp.x;
         let steep = sp.y;
         let k = TAU / wavelength;
@@ -135,6 +207,11 @@ fn vs_water(in: VsIn) -> VsOut {
         let phase = k * (dir.x * world0.x + dir.y * world0.z) + omega * t;
         let c = cos(phase);
         let s = sin(phase);
+
+        // Per-wave amplitude modulation breaks the constant-amplitude periodicity.
+        // Same modulation factor used for displacement AND normal accumulator so
+        // lighting matches geometry.
+        let amp = base_amp * amp_modulation(i, t, world_xz);
         let wa = k * amp;
 
         offset.x = offset.x + steep * amp * dir.x * c;
@@ -146,8 +223,8 @@ fn vs_water(in: VsIn) -> VsOut {
         n_acc.y = n_acc.y - steep * wa * s;
 
         // Split height per component class. First SWELL_COUNT waves are swells;
-        // remaining are chop. Lets fragment shader weight foam + color tinting
-        // independently per scale.
+        // remaining are chop. Use the modulated amp so wave_t correctly tracks
+        // the local wave activity (not the unmodulated base).
         if (i < SWELL_COUNT) {
             swell_y = swell_y + amp * s;
             swell_amp_max = swell_amp_max + amp;
@@ -157,7 +234,25 @@ fn vs_water(in: VsIn) -> VsOut {
         }
     }
 
-    let displaced = world0 + offset;
+    // Organic noise displacement on top of the Gerstner sum. Breaks the regular
+    // INTERFERENCE PATTERN that constant-direction sinusoids produce (the visible
+    // ovals/grids). Two octaves at different scales drift with time so the
+    // perturbation is non-stationary. This is the single biggest contributor to
+    // the surface looking like real water vs. a sum of pure sinusoids.
+    //
+    // Two-octave noise:
+    //   - Coarse: ~5 m wavelength, ±5 cm amplitude, slow drift
+    //   - Fine:   ~2 m wavelength, ±2.5 cm amplitude, slightly faster drift
+    let world_xz_for_noise = vec2<f32>(displaced_x_raw(world0), world0.z);
+    let n_coarse = (value_noise2(
+        world_xz_for_noise * 0.20 + vec2<f32>(t * 0.40, t * 0.20)
+    ) - 0.5) * 0.10;
+    let n_fine = (value_noise2(
+        world_xz_for_noise * 0.55 + vec2<f32>(t * 0.70, t * -0.30)
+    ) - 0.5) * 0.05;
+    let noise_displacement = n_coarse + n_fine;
+
+    let displaced = world0 + offset + vec3<f32>(0.0, noise_displacement, 0.0);
     let n = normalize(n_acc);
 
     var out: VsOut;
@@ -170,6 +265,12 @@ fn vs_water(in: VsIn) -> VsOut {
         chop_y / max(chop_amp_max, 0.001),
     );
     return out;
+}
+
+// Helper to discourage WGSL backends from constant-folding the noise sample
+// across vertices (forces re-evaluation per vertex). Returns world0.x unchanged.
+fn displaced_x_raw(p: vec3<f32>) -> f32 {
+    return p.x;
 }
 
 @fragment

@@ -166,6 +166,10 @@ impl Default for SceneParams {
 /// snap is invisible.
 const WATER_FOLLOW_SNAP_M: f32 = 4.0;
 
+/// Embedded WGSL shader source. Exposed so tests can verify the binary actually
+/// has the latest shader edits.
+pub const WATER_WGSL_SOURCE: &str = include_str!("water.wgsl");
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct SceneUniform {

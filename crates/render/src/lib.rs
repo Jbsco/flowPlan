@@ -24,7 +24,7 @@ pub mod telemetry;
 pub mod hot_reload;
 
 pub use debug_lines::{DebugLineBatch, DebugLineVertex, DebugLinesRenderer};
-pub use renderer::{Renderer, SceneParams, ShadingParams};
+pub use renderer::{Renderer, SceneParams, ShadingParams, WATER_WGSL_SOURCE};
 pub use telemetry::Telemetry;
 
 // Dev-deps are consumed by `tests/visual_snapshot.rs` (Tier-3, hardware-gated). Mark
@@ -38,3 +38,39 @@ use image as _;
 use insta as _;
 #[cfg(test)]
 use pollster as _;
+
+/// Verify that the water shader source compiled into this binary contains the
+/// expected wave-set + modulation features. Catches the stale-build failure mode.
+#[cfg(test)]
+mod shader_baked_in_tests {
+    use super::WATER_WGSL_SOURCE;
+
+    #[test]
+    fn water_shader_has_seven_waves() {
+        assert!(WATER_WGSL_SOURCE.contains("WAVE_COUNT: u32 = 7u"));
+    }
+
+    #[test]
+    fn water_shader_has_amp_modulation() {
+        assert!(WATER_WGSL_SOURCE.contains("fn amp_modulation"));
+        assert!(WATER_WGSL_SOURCE.contains("amp_modulation(i, t, world_xz)"));
+    }
+
+    #[test]
+    fn water_shader_uses_value_noise_for_modulation() {
+        assert!(WATER_WGSL_SOURCE.contains("value_noise2(noise_pos)"));
+    }
+
+    #[test]
+    fn water_shader_has_noise_displacement() {
+        assert!(WATER_WGSL_SOURCE.contains("noise_displacement"));
+    }
+
+    #[test]
+    fn water_shader_has_per_component_wave_t() {
+        assert!(
+            WATER_WGSL_SOURCE.contains("wave_t:      vec2<f32>")
+                || WATER_WGSL_SOURCE.contains("wave_t: vec2<f32>"),
+        );
+    }
+}
