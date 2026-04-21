@@ -495,8 +495,32 @@ A small set of design / prototype tasks that land **between Phase 2.5 close-out 
     - World-bake hub catalog (~50–80K hubs for a 1000 × 1000 km world) with approximate-coord fuzz + streaming-time resolve to nearest compatible Voronoi cell.
     - If the prototype surfaces a performance wall or aesthetic problem, the architecture bends or falls back to hex/square lattice — but Voronoi is the hypothesis to test first.
 - [ ] Measure: world-bake time (hydrology graph + biome mask + Voronoi partition + hub catalog), persistence footprint per play-hour (Candidate D deltas only), frame-budget impact at the 10-km streaming outer radius, subjective replay appeal after 2–3 fresh sessions on each candidate.
-- [ ] **Deterministic / telemetric validation** (generalize the flight-bench pattern to world-gen): deterministic chunk output given `(master_seed, chunk_coords)`; bit-identical across platforms; bench-tier assertions on hub-catalog byte-identical reproduction across platforms and on hub-resolve outcomes given the same approach path.
+- [ ] **Deterministic / telemetric validation** via the **visual-bench pattern** (see [TEST_PLAN.md § World-Gen Visual Bench](TEST_PLAN.md#world-gen-visual-bench)): emits PNG artifacts per layer (heightfield / biome / hydrology / hub catalog / terrain Voronoi / wind field / weather Voronoi / composite) committed to `docs/world-gen-plots/<scenario>/<seed>/`. Determinism assertions: byte-exact biome classification, SSIM > 0.99 heightfield cross-run, graph-structural equality for hydrology + frontal-boundary graphs. Cross-platform scope limited to Linux + Windows 10 (research-based Mac/Deck per `hardware_access_constraints`).
+- [ ] **Free-camera debug mode (dev-only, `#[cfg(debug_assertions)]`)**: detach camera from aircraft, WASD / mouse-look, toggleable overlay for Voronoi cell boundaries + hub catalog + hydrology + weather cells. In-engine complement to the static PNG artifacts. Same camera primitive evolves into [Phase 5.5 photo mode](#milestone-55-visual-polish) and [Phase 6 stretch-goal multiplayer spectator](#phase-6-stretch-goal-post-v1-multiplayer).
 - [ ] Output: amendment PR to FEATURES.md § World Scope + MAPGEN.md § Chunk model + MAPGEN.md § Hub late-binding. Decision locked. If a completely different architecture wins, the amendment documents that instead.
+
+### Cross-platform determinism smoke test (alongside 3.4 CI)
+
+Phase 2.5 bench scenarios have run Linux-only. Before Phase 3.6 world-bake work ships (hydrology graph + Voronoi partition + hub catalog all demand bit-identical cross-platform output), validate that the existing flight bench produces byte-identical CSVs across available hardware.
+
+- [ ] Run `cargo test -p flowplan-sim --test flight_bench --release` on **multiple Linux machines** (different distros / CPU generations / Intel + AMD where available). Byte-diff CSVs. Goal: catch same-ISA different-microarch drift.
+- [ ] Run same bench on **Windows 10** target. Byte-diff against Linux output. Catches MSVC-CRT vs glibc transcendental drift + FMA contraction defaults.
+- [ ] **Pin build config as insurance**: adopt `libm` crate in sim hot paths (pure Rust, platform-independent transcendentals), set `-Ctarget-feature=-fma` or equivalent, verify `codegen-units=1` + `lto="thin"` already pinned. Pull forward from Phase 6.1 determinism hardening.
+- [ ] **Research-based Mac / Steam Deck coverage:** since those platforms aren't directly testable at this time (see user-memory `hardware_access_constraints`), survey public game-dev + scientific-computing determinism reports for Apple Silicon (ARM / NEON) and AMD APU drivers. Document findings + risks. Full verification of those platforms deferred to [Phase 6.1 determinism hardening](#milestone-61-determinism-hardening-cross-platform) when hardware access lands.
+- [ ] Output: cross-platform bench report committed to `docs/determinism-report.md`; any fixes from the Linux/Windows smoke test (likely minimal with libm + fp-contract pinned); documented risk register for Mac/Deck pending direct test.
+
+### Cloud rendering research memo (pre-3.2x)
+
+Volumetric cloud implementation has real design space that needs surveying before 3.2x implementation starts. Light task, bounded to ~1 page of design memo + a prototype recommendation. **Critical requirements surfacing from gameplay side (pinned):**
+
+- **Fly-through semantics:** players will invariably fly through low clouds. Billboard-based approaches fundamentally cannot render camera-inside-cloud — rejected. Raymarched volumetric is required. See `cloud_flythrough_requirement` memory.
+- **CPU-samplable density field:** the sim must query cloud density each tick for turbulence (scales with density-gradient magnitude), visibility reduction (hundreds of meters inside dense cloud), and icing probability (cold + moist cloud interior). Implies **CPU-GPU shared noise field** — same Perlin-Worley formula runs on both sides, bit-identical by construction. Pattern matches `world::water_height(x, z, t)` from Phase 2.2.
+
+- [ ] Survey references: Schneider & Vos "The Real-Time Volumetric Cloudscapes of Horizon: Zero Dawn" (SIGGRAPH 2015); Andrew Schneider GDC follow-ups at Guerrilla; Frostbite "Physically Based Sky, Atmosphere and Cloud Rendering" (SIGGRAPH 2016); Sebastian Lague's accessible YouTube walk-through.
+- [ ] Pick v1 scope: Perlin-Worley noise field (2-3 octaves), raymarch 32-48 steps near / 16-24 far, banded-alpha via quantized density sampling for cel-shading compatibility, simple sun-lit vs shadow-side shading (no multi-scatter).
+- [ ] Pin CPU-GPU shared noise architecture: shared formula, shared parameters, deterministic from master seed; `world::cloud_density(x, y, z, t)` signature for sim consumption.
+- [ ] Defer beyond v1: cloud shadows on terrain, volumetric light scattering through gaps, multi-layer cloud decks.
+- [ ] Output: `docs/CLOUDS.md` design memo committed; 3.2x implementation uses it as the spec.
 
 ### Design-doc closures (pre-Phase-4 commitments)
 
@@ -504,7 +528,7 @@ Tracked under [Pre-Phase-4 design-doc commitments](#pre-phase-4-design-doc-commi
 
 ### Gate
 
-> **Gate (Pre-Phase-3):** Phase 3 implementation work can start without these complete — the only hard block is that **Phase 3.6 cannot open until the world-scope prototype lands and its amendment PR merges.** This gives Phase 3 audio / weather / thread / CI work a runway while the prototype happens on scratch branches.
+> **Gate (Pre-Phase-3):** Phase 3 implementation work can start without these complete — the only hard block is that **Phase 3.6 cannot open until the world-scope prototype lands and its amendment PR merges.** Cross-platform determinism smoke + cloud research memo land alongside early Phase 3 work (3.4 CI + 3.2x kickoff). This gives Phase 3 audio / weather / thread / CI work a runway while the prototype happens on scratch branches.
 
 ---
 
@@ -524,17 +548,42 @@ Tracked under [Pre-Phase-4 design-doc commitments](#pre-phase-4-design-doc-commi
 
 ### Milestone 3.2: Weather state
 
-- [ ] Wind vector in `sim` (speed, direction, gustiness, terrain-induced turbulence)
-- [ ] Pressure / temperature / humidity / visibility as sim-level state
+Weather is architected as a three-layer composable subsystem paralleling the terrain three-layer (see [MAPGEN.md § Three-layer weather composition](MAPGEN.md#three-layer-weather-composition-second-application-of-the-pattern)). Ships W1 + W2 + basic W3; cloud-rendering consumption of W3 lands in 3.2x.
+
+**W1 — Atmospheric base field:**
+- [ ] **Pressure field** (latitude + seasonal + regional patterns) driving prevailing-wind derivation via geostrophic balance.
+- [ ] **Temperature + humidity fields** (latitude + elevation + season + diurnal).
+- [ ] **Altitude-stratified prevailing-wind field** — low-altitude wind differs from wind aloft; drives the W2 temporal drift offset (clouds at different altitudes drift at different rates).
+- [ ] **Frontal-boundary graph** pre-baked as a line-structure graph analogous to the L1 hydrology river graph. Cells along a frontal line bias toward frontal-passage cell types in W2. Immutable across W2/W3.
+- [ ] **Terrain-induced turbulence map** derived from L1 topographic gradients (lee-side rotors, valley channeling, ridge thermals). Static per master seed after terrain bakes.
+
+**W2 — Weather Voronoi partition:**
+- [ ] **Voronoi partition bake** (see [MAPGEN.md § Weather Voronoi layer](MAPGEN.md#weather-voronoi-layer-second-partition)): ~20–50 km average seed spacing, ~11K cells world-wide, blue-noise + Fortune's sweep at world-bake. Independent seed stream from terrain Voronoi.
+- [ ] **Per-cell state**: `{cell_type, base_altitude, top_altitude, density, column_height, precip_type, storm_state, evolution_phase}`. Placement constraints check against W1 (pressure range, humidity threshold, temperature range, wind-shear threshold); bad placements re-roll.
+- [ ] **Temporal drift** via altitude-dependent W1 wind offset — weather moves past stationary observers at prevailing wind speed, layer-stratified.
+- [ ] **Adjacency-biased evolution** on slow cadence (once per sim-second); clear-air cells first-class (`no-weather is weather`). Frontal-boundary-graph lines bias cell evolution along fronts.
+
+**W3 — Cell atmospheric deltas (baseline):**
+- [ ] **Per-cell delta functions** for wind / turbulence / visibility / precipitation (see MAPGEN.md § W3 table). Storm cells add local updrafts/downdrafts/gusts; clear-air zero.
+- [ ] Adjacent-cell edge-interpolation for organic transitions.
+- [ ] Exposes `world::cloud_density(x, y, z, t)` + `world::wind_at(x, y, z, t)` + `world::turbulence_at(x, y, z, t)` as the shared CPU-GPU consumer interface for 3.2x cloud rendering + weather-affects-flight physics.
+- [ ] Frontal-boundary-graph-immutable invariant enforced: W3 deltas cannot place weather inconsistent with W1 pressure/frontal structure.
+
+**Remaining 3.2 items (unchanged):**
+- [ ] Pressure / temperature / humidity / visibility as sim-level state (this is what W1 exposes)
 - [ ] Precipitation regime enum and visuals (drizzle -> heavy_rain -> squall; light_snow -> blizzard in winter biomes)
 - [ ] Storm state machine (clear -> building cumulus -> scattered thunderheads -> squall line / organized storm / frontal passage)
 - [ ] Fog / mist state ladder (ground mist, wingtip mist, layer fog, dense fog)
 - [ ] Wind shear at terrain edges and gust fronts
-- [ ] Water chop per water body (calm / ripple / moderate / heavy / breakers) driven by wind fetch + duration
+- [ ] Water chop per water body (calm / ripple / moderate / heavy / breakers) driven by wind fetch + duration **+ overlying weather-Voronoi-cell storm state** (unidirectional coupling: weather drives chop; closes the 2.5a.7 chop hook with real input)
 - [ ] Season overlay (spring / summer / autumn / winter) -- static-per-region acceptable for Phase 3; cycling is an open question tracked in [FEATURES.md](FEATURES.md#remaining-open-questions)
 - [ ] Debris regime (dust, leaves, ash/smoke, blowing snow)
 - [ ] Time-of-day advances with sim clock; dawn/dusk palette shifts land in Phase 5 polish
-- [ ] Weather affects flight: wind on ground track, gust attitude perturbation, density altitude effect on performance, icing probability at cold+moist conditions
+- [ ] Weather affects flight: wind on ground track, gust attitude perturbation, density altitude effect on performance, icing probability at cold+moist conditions.
+- [ ] **Cloud interactions (fly-through):** consume `world::cloud_density(x, y, z, t)` from 3.2x:
+    - **Turbulence** scales with density-gradient magnitude — smooth cloud interior, rough at edges; cumulonimbus (storm state) multiplier.
+    - **Visibility reduction** inside dense cloud — aircraft effective visibility drops to hundreds of meters; instruments-only flight couples with electronics-tier (see [FEATURES.md § Aircraft Configuration & Upgrades](FEATURES.md#aircraft-configuration--upgrades) electronics ladder).
+    - **Icing accumulation** at cold + moist cloud interior; affects lift + drag + stall speed; pitot + carb heat mitigate.
 - [ ] Weather forecast at hubs with accuracy decay by range and time
 
 ### Milestone 3.2b: Chop wiring + water scenario family
@@ -553,7 +602,13 @@ Consumes the 2.5a.7 chop hook (`SimState.chop_intensity`) and the 3.2 wind state
 Parallel to 3.2 (state) and 3.2b (chop). Weather **state** is one problem; weather **visuals** are another, and flowPlan has no particle system yet. This milestone builds the visual/particle layer that the rest of Phase 3+ will reuse.
 
 - [ ] **Particle system architecture:** preallocated pool, arena-backed per-frame instances, LOD + distance culling, lifecycle (spawn / update / despawn) on the render side. No allocations in the render hot path.
-- [ ] **Volumetric clouds** — target volumetric rendering from the start. 2D billboards are out of the target art direction (see PLAN.md amendment in the same phase). Banded alpha + hard-edge thresholding retains cel-shading compatibility. Sized to sit within the frame budget — reference-tier 240 Hz cap of 60% GPU utilization is the ceiling; per-pass budget target ≤ 0.6 ms at reference.
+- [ ] **Volumetric clouds** — target volumetric rendering from the start. 2D billboards rejected (fundamentally cannot render camera-inside-cloud, and players will invariably fly through clouds — see `cloud_flythrough_requirement` memory). Design spec comes from the [pre-3.2x cloud rendering research memo](#cloud-rendering-research-memo-pre-32x) (`docs/CLOUDS.md`). Implementation requirements:
+    - **Raymarched volumetric** with CPU-GPU shared noise field (Perlin-Worley blend). Camera-inside-cloud handled natively.
+    - **Weather-Voronoi-cell lookup** per raymarch sample (from 3.2; see [MAPGEN.md § Weather Voronoi layer](MAPGEN.md#weather-voronoi-layer-second-partition)). Cell provides gross weather-system shape (base/top altitude, density, column height, storm state); Perlin-Worley noise provides sub-cell detail. Adjacent-cell density interpolation at Voronoi edges for organic blending.
+    - **CPU-samplable density:** expose `world::cloud_density(x, y, z, t)` using the same formula the shader samples — bit-identical by construction. Pattern matches `world::water_height(x, z, t)` from Phase 2.2. Sim consumes this for turbulence / visibility / icing (see 3.2 "Weather affects flight").
+    - Banded alpha + hard-edge thresholding for cel-shading compatibility.
+    - Sized to sit within the frame budget — reference-tier 240 Hz cap of 60% GPU utilization is the ceiling; per-pass budget target ≤ 0.6 ms at reference.
+    - Deferred beyond v1: cloud shadows on terrain, volumetric light scattering through gaps, multi-layer cloud decks (though weather-Voronoi already supports altitude-stratified decks structurally).
 - [ ] **Rain / snow particles** — world-space streaks (far) + screen-space on-windshield overlay (near-camera). Density scales with precipitation regime from 3.2.
 - [ ] **Layer fog render** — horizontal fog plane at altitude (huge atmosphere win over valleys; the `ground_mist | wingtip_mist | layer_fog | dense_fog` state ladder's visual layer).
 - [ ] **Wingtip mist effect** — the signature mood beat from PLAN.md. Thin-column particle emitter at wingtip positions under humidity + low-altitude + water-takeoff conditions.

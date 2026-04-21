@@ -13,6 +13,7 @@ Agents are fast and capable but accumulate subtle bugs and technical debt across
 - [Frame-Budget Tests](#frame-budget-tests)
 - [Determinism Tests](#determinism-tests)
 - [Flight Test Bench](#flight-test-bench)
+- [World-Gen Visual Bench](#world-gen-visual-bench)
 - [Visual Snapshot Tests](#visual-snapshot-tests)
 - [Audio Callback Tests](#audio-callback-tests)
 - [Test Fixture Strategy](#test-fixture-strategy)
@@ -323,6 +324,65 @@ Tolerances start deliberately wide and tighten as 2.4.8 coefficient tuning dials
 ### Future integration
 
 Once Phase 5 flight-log / replay lands (`FEATURES.md § Flight Log & Save Format`), the bench's scenario format is the natural seed: a player's captured flight (input trace + seed) becomes a scenario, telemetry is extracted, they share it with another player who replays it bit-identically. The Phase 4 aircraft-description UI can also consume bench output: run the scenario suite at build time, generate per-aircraft performance-envelope plots, commit as cel-shaded content (hand-drawn-feel ROC-vs-airspeed curve on the Beaver's spec page, etc.).
+
+---
+
+## World-Gen Visual Bench
+
+**Scope:** generalize the flight-bench pattern to world-gen subsystems (terrain, weather, biomes, hydrology, hubs, Voronoi partitions). Telemetry format shifts from CSV-per-tick to PNG/SVG-per-layer because world-gen state is inherently visual. Same deterministic-per-seed + committed-reference-artifacts + CI-gate discipline.
+
+**Rationale:** a heightfield is a 2D scalar field; a biome mask is a 2D discrete field; a wind field is 2D vectors; Voronoi partitions are colored polygons. Numerical assertions alone cannot validate these — a human looking at the output can instantly see "this biome adjacency is wrong" or "rivers don't connect at the chunk boundary." The visual-bench produces the artifacts deterministically so the human check is reproducible.
+
+### Architecture
+
+Mirrors the flight-bench:
+
+- **`WorldGenScenario`** = `{master_seed, world_scope_config, layers_under_test, assertions}`. Pinned like a `FlightScenario`.
+- **Runner** produces PNG artifacts per requested layer: heightfield, biome classification, hydrology graph, hub catalog, terrain Voronoi, wind vector field, weather Voronoi, frontal-boundary graph, composite overlay.
+- **`cargo test` integration** asserts determinism (byte-or-perceptual-identical across runs + platforms) + structural invariants (biome adjacency, hub-count-per-tier, hydrology continuity, altitude envelope bounds).
+- **Rendering** via top-down orthographic viewport + direct scalar/vector/polygon rasterization. No game camera, no aircraft involvement.
+- **Reference artifacts** committed at `docs/world-gen-plots/<scenario>/<seed>/<layer>.png` — analogous to `docs/plots/beaver/` for flight scenarios.
+
+### `--visual` flag
+
+```
+cargo test -p flowplan-world --test world_gen_bench --features visual
+```
+
+- Default off (CI runs emit only the deterministic-output hash per scenario for byte-comparison).
+- Opt-in: emits full PNG suite to `target/world-gen-plots/`.
+- Accept-reference: `--update-refs` (or `cargo insta`-style workflow) promotes new artifacts to the committed `docs/world-gen-plots/`.
+
+### Artifact catalog (canonical scenarios)
+
+- **Heightfield** — color-ramped top-down elevation image.
+- **Biome classification** — discrete color-coded regions; verifies adjacency rule.
+- **Hydrology graph** — river lines + lake polygons + coastlines overlaid on heightfield; verifies flow continuity.
+- **Hub catalog** — scatter plot by tier; verifies placement respects biome + altitude envelope.
+- **Terrain Voronoi partition** — cells colored by sub-biome feature type.
+- **Sub-biome palette-adaptation** — partition with cells rendered in adapted palette; visualizes gradient transitions.
+- **W1 wind vector field** — arrow plot on sample grid; reveals prevailing flow.
+- **W1 pressure / temperature / humidity fields** — color-ramped top-down.
+- **Frontal-boundary graph** — line structure overlaid on pressure field.
+- **W2 weather Voronoi partition** — cells colored by cell-type + storm-state; snapshots at t₀, t+10m, t+1h, t+6h reveal drift + evolution.
+- **Composite overlay** — heightfield + hydrology + biome + hub catalog + both Voronoi partitions composited.
+
+### Determinism assertions
+
+- **Byte-exact:** biome classification (categorical output; should be identical every time).
+- **Perceptual (SSIM > 0.99):** heightfield (floating-point rendering has minor platform variance).
+- **Graph-structural:** hydrology + frontal-boundary graphs compared by node count + edge set equality.
+- **Cross-platform:** Linux-Linux + Linux-Windows direct test; Mac + Steam Deck research-based per `hardware_access_constraints`.
+
+### Interaction with `--visual` in-engine mode
+
+The in-engine free-camera debug mode (see [FEATURES.md § Camera & Views](FEATURES.md#camera--views) free-cam evolution path) is the runtime complement to these static artifacts: same data rendered in 3D with interactive inspection. PNG artifacts are CI-gated + committed; free-cam is dev workflow + player photo mode (Phase 5.5).
+
+### Future integration
+
+- **Phase 4 mission system:** mission templates can assert their generated waypoints fall within biome + hydrology constraints (visual-bench verifies placement is reasonable before the template ships).
+- **Phase 5 flight-log / replay:** sharing a flight log implicitly shares the master seed; the recipient regenerates the world from seed + visual-benches verify their world matches the log author's.
+- **Per-aircraft performance envelopes:** the Phase 4 aircraft-description UI pattern generalizes — per-world analytic plots for trip-planning overlays ("fuel range ring" on the 2D hub map is effectively a runtime visual-bench).
 
 ---
 

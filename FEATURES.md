@@ -584,7 +584,9 @@ Camera is a first-class control, not a setting buried in a menu. Switching is fl
     - In third-person: right-stick (with modifier) orbits the camera around the aircraft without breaking chase frame.
     - Mouse-based look where appropriate (mouse-look modifier key, returns to default on release).
 - **[sketch]** **Per-view camera inertia** tuned individually (first-person head sway under turbulence, third-person damping against abrupt attitude changes).
-- **[sketch]** **Photo mode** (post-v1) -- pause sim, free-orbit, long-exposure / star-trail under night sky, framing grid, export.
+- **[sketch]** **Free-camera debug mode** (Phase 3.6+, `#[cfg(debug_assertions)]`): detach camera from aircraft, WASD / mouse-look / arrow-key 6-DOF movement, toggleable overlays for Voronoi cell boundaries + hub catalog + hydrology + weather cells + other world-gen layers. Built primarily to inspect procedural world output in-engine during 3.6 development. In-engine complement to the static PNG artifacts emitted by the world-gen visual-bench (see [TEST_PLAN.md § World-Gen Visual Bench](TEST_PLAN.md#world-gen-visual-bench)).
+- **[sketch]** **Photo mode** (post-v1, Phase 5.5): same free-camera primitive, production-polished — pause sim, free-orbit, long-exposure / star-trail under night sky, framing grid, export. Evolution of the Phase 3.6 dev tool.
+- **[sketch]** **Multiplayer spectator** (Phase 6 stretch): same free-camera for downed-aircraft or spawn-waiting players. Observation-only. Third evolution of the same primitive — **build once, expose to more contexts over time**.
 - **[sketch]** **Camera for on-foot mode** -- default third-person character cam with first-person toggle. Consistent switching paradigm with in-aircraft views.
 - **[sketch]** **FOV settings** per view (default + player override).
 - **[sketch]** Visual cue (brief on-screen indicator) when a view changes, especially after a tween skip.
@@ -830,9 +832,20 @@ Weather is a first-class emergent systems driver. It influences feel, ambience, 
 ### Visual target — volumetric, not billboarded
 
 - **[amend]** Clouds target **volumetric in-game**, not 2D billboards. The [PLAN.md](PLAN.md) entry about "2D billboards near camera, optional volumetric only in cutscenes" is out of date / was never audited in detail. Phase 3.2x delivers the volumetric implementation. Cel-shading compatibility via banded alpha steps + hard-edge thresholding on volumetric sampling — the art direction is a constraint, not a reason to fall back to billboards.
+- **[amend]** **Fly-through is a first-class requirement.** Players will invariably fly through low clouds. Billboard-based rendering fundamentally cannot handle camera-inside-cloud (the billboard is back-facing from inside, so the view shows nothing). Raymarched volumetric handles camera-inside natively — this is a **functional** reason for volumetric, not just aesthetic.
 - **[sketch]** Storm visuals (cumulonimbus anvils, squall-line walls, gust-front rolls, lightning flashes, distant rain curtains) benefit directly from volumetric cloud primitives. Layered cloud regimes (low stratus below higher cumulus) are natural in a volumetric system.
 - **[sketch]** Atmospheric optics in scope: sun halos, sun dogs, rainbows, crepuscular rays through broken decks. These are inexpensive when the cloud system is volumetric; expensive bolt-ons when it isn't.
 - **[sketch]** Performance discipline: cloud rendering sits inside the DESIGN.md frame-budget ceiling (60% GPU utilization at 240 Hz reference tier). Forward-thinking constraint on render-cost per pass: ≤ 0.6 ms on reference at target quality.
+
+### Cloud-interior flight semantics (fly-through effects)
+
+The cloud density field is **CPU-samplable** (deterministic `world::cloud_density(x, y, z, t)` using the same Perlin-Worley formula the shader samples — bit-identical by construction, same pattern as `world::water_height(x, z, t)` from Phase 2.2). The sim consumes density each tick for three effects:
+
+- **[sketch]** **Turbulence intensity scales with density-gradient magnitude.** Smooth cloud interior is relatively calm; cloud edges + convective cells are rough. Storm state modulates — cumulonimbus = worst turbulence, stratus = mildest. Physics effect: attitude perturbation, control-surface buffeting, stall-margin reduction.
+- **[sketch]** **Visibility reduction inside clouds.** Aircraft's effective visibility drops from fog-limited 6-8 km to a few hundred meters inside dense cloud. Instruments-only flight. Couples with the electronics-tier utility-varying upgrade ladder ([Aircraft Configuration & Upgrades](#aircraft-configuration--upgrades)): GPS / autopilot / IFR avionics become mission-enabling rather than convenience.
+- **[sketch]** **Icing accretion** in cold + moist cloud interior at appropriate altitudes. Already sketched in the weather feature list above; cloud-density sampling makes it concrete. Reduces lift + increases drag + raises stall speed. Pitot heat + carb heat mitigate.
+
+These effects compound into a real "weather flying is its own skill" gameplay loop — flying under a cloud deck, choosing to punch through a gap vs detour around, learning which aircraft loadouts give comfortable margin. Mission capability requirements for adverse-weather missions (medevac-in-storm, urgent-mail-in-squall) consume these semantics naturally.
 
 ---
 

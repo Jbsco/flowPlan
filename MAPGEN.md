@@ -383,6 +383,156 @@ The hydrology graph is **immutable across layers**. Delta functions respect it o
 
 ---
 
+## Three-layer weather composition (second application of the pattern)
+
+The three-layer composable architecture used for terrain (Topographic base × Voronoi partition × Feature deltas) applies directly to weather. Same pattern, different scale, different state, temporal drift.
+
+| Terrain | Weather |
+|---------|---------|
+| **L1 Topographic base** — continuous heightfield + biome + hydrology + magnetic variation | **W1 Atmospheric base** — continuous pressure + temperature + humidity + altitude-stratified wind + frontal-boundary graph |
+| **L2 Voronoi partition** (~2 km cells; placement constraints vs L1: slope, roughness, altitude, water-adjacency) | **W2 Weather Voronoi** (~20–50 km cells; placement constraints vs W1: pressure range, humidity threshold, temperature range, wind-shear threshold) |
+| **L3 Feature deltas** (per-cell heightfield modifications: lakes carve, runways flatten, mesas raise) | **W3 Cell atmospheric deltas** (per-cell updrafts/downdrafts, gusts, cloud density, precipitation; storm cells add local turbulence; clear-air contributes nothing) |
+| **Invariant: hydrology graph immutable across layers** — L3 deltas cannot elevate rivers, fill lakes, dam drainage | **Invariant: frontal-boundary graph immutable across layers** — W3 deltas cannot place weather inconsistent with W1 pressure field; placement rejected at W2 |
+
+Incremental-development dividend applies the same way: **W1 ships useful alone** (real atmospheric state — wind affects flight, density altitude changes with weather), **W2 adds semantics** (where weather happens), **W3 adds visible geometry + active physics** (rendered clouds, turbulence, precipitation).
+
+### W1 — Atmospheric base field
+
+The continuous Layer 1 for weather. All deterministic per `(master_seed, world_coord, sim_time)`; static in world-space; evolves only through slow prevailing-wind shifts.
+
+- **Pressure field:** low-frequency global field shaped by latitude (equatorial low, mid-latitude high), seasonal shifts, and large-scale regional patterns (Aleutian Low, Pacific High analogs). Drives prevailing wind.
+- **Temperature field:** latitude + elevation + season + diurnal cycle. Feeds density altitude, icing probability, cloud base altitude (condensation level).
+- **Humidity field:** regional (coastal moist, interior continental dry, PNW perpetual-moist, high-desert dry). Feeds cloud formation probability and icing risk.
+- **Prevailing wind field, altitude-stratified:** derived from pressure gradient via approximate geostrophic balance. Low-altitude wind (terrain-influenced) differs from wind aloft. Feeds the W2 temporal drift offset (clouds at different altitudes drift at different rates).
+- **Frontal-boundary graph:** pre-baked lines of maximal temperature/pressure gradient — the weather analog of L1's hydrology river graph. Cells along a frontal line bias toward frontal-passage cell types in W2. Global structure, immutable across W2/W3.
+- **Terrain-induced turbulence map:** derived from L1 topographic gradients — lee-side rotors, valley wind channeling, ridge thermals. Static per master seed once terrain is baked.
+
+Physics consumers (wind at aircraft position, density altitude, turbulence baseline) sample W1 directly. W2 cells + W3 deltas augment — they don't replace.
+
+### W2 — Weather Voronoi partition
+
+## Weather Voronoi layer (second partition)
+
+Weather is organized as a **second Voronoi partition** independent of the terrain Voronoi — same architectural pattern, different scale, different cell semantics, temporal drift. The parallel is intentional: Voronoi cells align with natural weather-system boundaries (frontal passages, convective cells, clear-air gaps) the same way terrain Voronoi cells align with natural landscape features.
+
+### Why a separate partition
+
+- **Scale mismatch.** Terrain Voronoi cells are ~2 km (feature scale). Weather systems are 20–50 km (frontal / convective-cell scale). Using the same partition for both would either make weather cells far too small (per-2-km-cell weather looks chaotic) or terrain cells far too large (a 30 km "lake cluster" is absurd).
+- **Temporal mismatch.** Terrain is static in world-space. Weather moves. They need independent data flow.
+- **Semantic mismatch.** Terrain cells carry sub-biome-feature types (geometry-determining); weather cells carry storm-state + cloud-deck parameters (atmospheric-determining). Different authoring surfaces.
+
+### Seed + bake
+
+- **Seed derivation:** `weather_voronoi_seed = hash(master_seed, "weather_voronoi")`. Independent stream from terrain Voronoi.
+- **Blue-noise distribution** at **20–50 km average seed spacing**. For a 1000 × 1000 km world at 30 km average spacing, ~1,100 weather cells per region and ~11,000 world-wide. Much sparser than terrain (333K) because of the larger cell size.
+- **Partition triangulation:** Fortune's sweep at world-bake time; cached alongside the terrain partition + hydrology graph.
+- **Neighbor adjacency graph** cached at bake time for adjacency-bias evolution and edge-interpolation lookup.
+
+### Per-cell state
+
+```rust
+struct WeatherCell {
+    id: WeatherCellId,
+    seed_point: Vec2,
+    polygon_edges: Vec<Edge>,
+    neighbor_ids: Vec<WeatherCellId>,
+    cell_type: CellType,          // clear_air | cumulus | nimbus | stratus | squall | frontal
+    base_altitude_m: f32,         // cloud deck bottom
+    top_altitude_m: f32,          // cloud deck top
+    density: f32,                 // 0..1 scalar
+    column_height_m: f32,         // redundant-ish with top-base; kept for convective towers
+    precip_type: PrecipType,      // none | drizzle | rain | snow | hail
+    storm_state: StormState,      // state-machine instance from FEATURES.md § Weather
+    evolution_phase: f32,         // 0..1 within the current state (for build/peak/dissipate curves)
+}
+```
+
+### Temporal drift
+
+Cells are static in world-space (determinism preserved) but consulted via a drift-offset coordinate driven by prevailing wind aloft:
+
+```rust
+fn weather_cell_at(world_pos: Vec2, sim_time: f32, altitude: f32) -> WeatherCellId {
+    let wind = prevailing_wind(altitude);  // from Phase 3.2 wind field
+    let drift = wind * sim_time;            // cumulative offset
+    weather_voronoi.cell_at(world_pos - drift)
+}
+```
+
+Weather moves past a stationary observer at the prevailing wind-aloft speed. Deterministic per `(master_seed, sim_time, world_pos, altitude)`. No partition re-bake. **Altitude-dependent drift** is a free win: a low-level stratus deck drifts at one speed, high-altitude cirrus at another — matches real atmospheric layering.
+
+### Adjacency-bias evolution
+
+Cells evolve through their storm state machine on a **slow cadence** (e.g. once per sim-second, not per-tick — folds into `state_hash` for determinism). When a cell transitions, neighbor-content biases the choice:
+
+- A cell adjacent to a `building_cumulus` neighbor has elevated probability of entering `building_cumulus` itself. Produces large sprawling systems.
+- A cell surrounded by `clear_air` neighbors tends to stay clear or transition to mild `cumulus`. Clear-air regions stay clear; weather concentrates coherently.
+- Storm dissipation also biases — an `organized_storm` cell with clear neighbors is more likely to dissipate than one with storm neighbors (systems die out at their edges).
+
+This is the mechanism that produces **weather-that-looks-like-weather**: frontal bands, organized convection, clear-air gaps, storm-free regions. Per-cell random weather looks chaotic; adjacency-biased cells look like real weather systems.
+
+### "No-weather is a type of weather"
+
+Empty cells are first-class `cell_type = clear_air` cells with `density = 0` and normal atmospheric-state fields (temperature, humidity, pressure from Phase 3.2 state). Transitions between clear-air and stormy cells at Voronoi edges happen via standard density interpolation — no special-case code for "where does weather start / end". The model is uniform.
+
+### Cloud rendering consumption
+
+Raymarched volumetric clouds (Phase 3.2x) consult the weather Voronoi at each sample point:
+
+1. Apply altitude-dependent drift offset to the sample's world coord.
+2. Query weather cell at the drifted coord.
+3. If cell is `clear_air` or sample's altitude is outside cell's `[base_altitude, top_altitude]` → density = 0.
+4. Otherwise: compute density from cell parameters + sub-cell Perlin-Worley noise detail. Interpolate with adjacent cells' densities near Voronoi edges.
+
+CPU-side physics (Phase 3.2 weather-affects-flight) samples `world::cloud_density(x, y, z, t)` using the same function. Turbulence, visibility, icing all consume it. Same determinism guarantee as the rendering side.
+
+### Coupling with water-body chop (cross-system integration)
+
+Water-body chop state is **derived from the overlying weather cell**:
+
+```
+water_body.chop = chop_fn(
+    wind_at_body.magnitude,
+    weather_cell_over_body.storm_state,
+    body.fetch_distance,
+    body.surface_area
+)
+```
+
+A storm cell over a lake drives heavy chop; a clear-air cell leaves calm water. **Unidirectional coupling** — weather drives chop, not the reverse. Closes the 2.5a.7 chop hook with a real weather input in Phase 3.
+
+### Storage + persistence
+
+- **W1 atmospheric base** — pressure + temperature + humidity + wind + frontal graph — baked once at session load, ~10-20 MB. Deterministic per master seed; cached on disk keyed by seed if needed.
+- **W2 Weather Voronoi partition** (~11K cells × ~200 bytes per cell) ≈ 2–3 MB. Trivial compared to the hub catalog + hydrology graph + terrain partition.
+- **W3 Per-cell state evolution deltas** are persisted in the save-format event log (storm initiations, dissipations, state-machine transitions). Replay reconstructs weather state exactly.
+- **Drift offset** is a pure function of `(master_seed, sim_time)` — no persistence needed.
+
+### W3 — Cell atmospheric deltas (how weather manifests in physics + rendering)
+
+Cells modify W1 locally. Within a cell's footprint, the aircraft-position wind / turbulence / visibility / precipitation is:
+
+```
+wind(x, y, z, t)       = W1.wind(x, y, z, t) + active_cell.wind_delta(x, y, z, t)
+turbulence(x, y, z, t) = W1.turbulence(x, y, z) + cell-edge-gradient + active_cell.convective_turb
+visibility(x, y, z, t) = W1.visibility × (1 - active_cell.cloud_density(x, y, z, t))
+precip(x, y, z, t)     = active_cell.precip_rate × precip_falloff(altitude)
+```
+
+Delta functions per cell type:
+- **`clear_air`**: all deltas are zero. Pure W1 state.
+- **`cumulus`**: mild updraft column beneath; mild turbulence at cloud base; cloud density bounded [0, 0.6] at `[base_altitude, top_altitude]`.
+- **`nimbus`**: strong updraft core + downdraft fringe; moderate turbulence throughout cell; cloud density up to 0.9; rain precipitation below cloud base.
+- **`stratus`**: no significant updraft/downdraft; very low turbulence; horizontal cloud layer at moderate density.
+- **`squall`**: strong horizontal wind-shift as the cell moves (gust front at leading edge); heavy rain; sharp turbulence peak at gust front; passes relatively quickly.
+- **`frontal`**: cells along a W1 frontal-boundary line segment; strong wind shift across the line; mixed precipitation; cells biased to evolve together (the whole frontal band moves as a system).
+
+Adjacent-cell blending at Voronoi edges uses standard Voronoi-edge distance weighting — density / wind / turbulence interpolate across the edge for organic transitions rather than step discontinuities.
+
+**Invariant: W3 deltas respect W1 frontal graph.** Just as L3 feature deltas cannot violate the hydrology graph, W3 cell deltas cannot place weather inconsistent with the W1 pressure + frontal structure. A storm cell cannot form in a stable high-pressure core (constraint enforced at W2 placement); frontal cells must align with a frontal-boundary line segment.
+
+---
+
 ## Hydrology sub-system
 
 Hydrology deserves its own section because the design problem is harder than any other layer.
