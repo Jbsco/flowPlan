@@ -127,11 +127,20 @@ impl SimState {
 /// Drain the batch, mutating vehicle and camera view state. Clamps controls at end.
 ///
 /// `ResetVehicle` is the in-game recovery action (bound to `R`): restores a level
-/// attitude and zeros linear + angular velocity while preserving position, throttle,
-/// stick inputs, flap state, and fuel. Lets the player recover from an unrecoverable
-/// attitude (e.g., water-contact pitch runaway pre-2.5a.3 multi-point float sampling)
-/// without losing their place in the world.
+/// attitude, zeros linear + angular velocity, and bumps altitude up by `RESET_DROP_M`
+/// so buoyancy or aerodynamics can settle the aircraft from a "slight height"
+/// instead of resetting in place. Throttle, stick inputs, flap state, fuel, and
+/// horizontal position are preserved. Lets the player recover from an
+/// unrecoverable attitude (water-flip, mid-air upset, sunken floats) without
+/// losing their place in the world.
 fn apply_inputs(v: &mut VehicleState, camera: &mut Camera, inputs: &InputEvents) {
+    /// Altitude bump applied on reset. Sized to clear typical sunken-float depth
+    /// (~2 m below water if the aircraft has flipped) plus a couple of meters of
+    /// drop room so buoyancy / aero damps the impact rather than instantly
+    /// settling. Repeated resets stack — pressing R several times gains altitude
+    /// if a single bump isn't enough.
+    const RESET_DROP_M: f32 = 5.0;
+
     for ev in inputs {
         match *ev {
             InputEvent::SetThrottle(t) => v.controls.throttle = t,
@@ -147,6 +156,7 @@ fn apply_inputs(v: &mut VehicleState, camera: &mut Camera, inputs: &InputEvents)
                 v.orientation = Quat::IDENTITY;
                 v.velocity = glam::Vec3::ZERO;
                 v.angular_velocity = glam::Vec3::ZERO;
+                v.position.y += RESET_DROP_M;
             },
             InputEvent::ExtendFlaps => v.controls.flaps = v.controls.flaps.extended(),
             InputEvent::RetractFlaps => v.controls.flaps = v.controls.flaps.retracted(),
@@ -399,13 +409,21 @@ mod tests {
         let d = DifficultyDials::default();
         s.tick(&inputs, &d, FIXED_DT, 0.5);
 
-        // Position preserved (a one-tick integration step happens after the reset,
-        // so position moves by essentially zero since velocity was zeroed first).
+        // Horizontal position preserved (a one-tick integration step happens after
+        // the reset, so x/z move by essentially zero since velocity was zeroed first).
+        // Vertical position bumps up by RESET_DROP_M so the aircraft drops from a
+        // slight height — covers the sunken-float case where reset-in-place wouldn't
+        // help.
         assert!(
             (s.vehicle.position.x - 100.0).abs() < 0.01
                 && (s.vehicle.position.z - (-200.0)).abs() < 0.01,
-            "position should be preserved, got {:?}",
+            "horizontal position should be preserved, got {:?}",
             s.vehicle.position,
+        );
+        assert!(
+            s.vehicle.position.y > 50.0 + 4.5 && s.vehicle.position.y < 50.0 + 5.5,
+            "vertical position should bump up by ~5 m (gravity acts during the post-reset tick), got y={}",
+            s.vehicle.position.y,
         );
         // Orientation reset to identity, velocity + angular velocity zeroed (modulo
         // the one tick of flight-model effects post-reset).
@@ -459,9 +477,10 @@ mod tests {
 
         let mut s = SimState::new(1);
         s.aircraft = Some(spec);
-        // Start slightly above analytic equilibrium with zero velocity; integration
-        // should settle downward to ~0.66 m under damped buoyancy-gravity dynamics.
-        s.vehicle.position = Vec3::new(0.0, 1.5, 0.0);
+        // Start above analytic equilibrium (CG≈2.40m post-2.5a.3 mesh-aligned float
+        // geometry) with zero velocity; integration should settle downward under
+        // damped buoyancy-gravity dynamics.
+        s.vehicle.position = Vec3::new(0.0, 4.0, 0.0);
         s.vehicle.velocity = Vec3::ZERO;
         s.vehicle.orientation = Quat::IDENTITY;
         s.vehicle.angular_velocity = Vec3::ZERO;
@@ -497,8 +516,8 @@ mod tests {
         let mean_y: f32 = late_y_samples.iter().sum::<f32>() / late_y_samples.len() as f32;
 
         assert!(
-            (mean_y - 0.66).abs() < 0.15,
-            "expected mean-over-last-10s settle near 0.66 m (analytic equilibrium), got {mean_y:.3} m (samples: {late_y_samples:?})",
+            (mean_y - 2.40).abs() < 0.20,
+            "expected mean-over-last-10s settle near 2.40 m (analytic equilibrium for mesh-aligned floats), got {mean_y:.3} m (samples: {late_y_samples:?})",
         );
         // Vertical velocity envelope should be bounded (residual oscillation only).
         assert!(

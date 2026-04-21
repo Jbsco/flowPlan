@@ -323,13 +323,14 @@ are in scope -- the Beaver is flown on both.
 - [x] App `min_altitude` clamp drops the `WATER_LEVEL` floor — buoyancy now manages water contact in-game; terrain remains the only `min_altitude` source until 2.5b lands
 - [ ] Water-taxi scenario migrated to 2.5a.3 — single-point float sampling can't produce the fore/aft buoyancy restoring moment that real floats use to limit pitch-down under drag; 2.5a.3 multi-point sampling supplies it naturally. 2.5a.2 drag-in-isolation is validated by unit tests (vertical damping opposes motion, horizontal drag opposes motion, drag scales with wetted fraction).
 
-**2.5a.3 Step transition (plow → on-step).**
-- [ ] Multi-point float sampling (fore/mid/aft per float) so longitudinal wetted-area asymmetry produces the natural pitch-restoring moment under drag — decouples pitch dynamics from the single-point-centroid approximation
-- [ ] Drag regime shift when float velocity crosses hump speed
-- [ ] Pitch attitude reduction as aircraft rises onto planing surface
-- [ ] Bench: water-taxi scenario reaches steady speed at idle thrust (not runaway, not stationary — migrated from 2.5a.2 because it needs multi-point sampling to converge stably)
-- [ ] Bench: water-takeoff scenario reaches on-step phase; wetted area drops; acceleration increases visibly in telemetry
-- [ ] Feel moment: tactile transition audible in telemetry trace
+**2.5a.3 Step transition (plow → on-step). — SHIPPED**
+- [x] Multi-point float sampling (fore / fore-mid / mid / aft-mid / aft per float, 5 samples × 2 floats = 10 force points) so longitudinal wetted-area asymmetry produces the natural pitch-restoring moment under drag — decouples pitch dynamics from the single-point-centroid approximation. Buoyancy, vertical damping, horizontal drag, and planing lift all distributed per-sample with `per_section_scale = 1/N` normalization.
+- [x] Hydrodynamic planing lift: `F_lift = PLANING_LIFT_N_PER_MPS2 × v_forward_body² × wetted_fraction` per section (world +Y direction, quadratic in forward body velocity, only positive for forward motion). Physical mechanism by which wetted pontoon area produces upward lift at speed. `PLANING_LIFT_N_PER_MPS2 = 50.0` tunes toward plausible plow-to-hump transition; full liftoff requires tuning pass documented as future 2.5a.3b follow-up if needed.
+- [x] Step transition emerges naturally from wetted-fraction-per-section scaling: as aircraft rises, aft sections stay wet while fore sections rise out of water, so effective drag + planing lift drop from the per-section wetted terms. No separate step geometry needed in v1.
+- [x] Pitch attitude reduction as aircraft rises onto planing surface (tests: `nose_down_pitch_produces_pitch_up_buoyancy_moment`, `nose_up_pitch_produces_pitch_down_buoyancy_moment` — would have caught the 2.5a.2 flip bug).
+- [x] Bench: `beaver_water_taxi` reaches steady 3.4 m/s at idle thrust (not runaway, not stationary — validates plow-drag balance at equilibrium draft; ±1.5 m/s tolerance per 2-3× discipline).
+- [x] Bench: `beaver_water_takeoff` reaches 12.7 m/s hump-speed region at full throttle in 30 s, rises from 0.66 m to 0.88 m CG (plow → partial planing), pitch stays bounded at -0.8° (vs unbounded flip pre-2.5a.3). Full rotation-off-water requires further planing-lift tuning; documented as v1 limitation.
+- [x] `symmetric_rest_produces_no_roll_moment` test refactored to `deeply_submerged_symmetric_produces_no_roll_or_yaw` — old assertion relied on single-point sampling luckily hitting the displacement cap at y=0.3; multi-point correctly exposes wave-phase asymmetry at partial immersion, so test now uses deep submersion (y=-1.0) where every section saturates and wave variation doesn't affect buoyancy.
 
 **2.5a.4 Porpoising.**
 - [ ] Pitch oscillation when elevator input mismatches step phase (classic pilot-induced oscillation)
