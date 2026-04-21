@@ -1855,8 +1855,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
         duration_ticks: 3600, // 30 s — long enough for thrust-drag equilibrium
         assertions: &[Assertion::AirspeedAtEnd {
             last_secs: 5.0,
-            target_mps: 4.3, // measured post-2.5a.3c drag retune (75 → 40)
-            tol_mps: 1.5,    // 2-3× measured margin per narrowing discipline
+            target_mps: 2.4, // post idle-power reduction (20→10 kW). Matches real Beaver idle taxi ~4-6 kt (2-3 m/s).
+            tol_mps: 1.5,
         }],
     },
     // beaver_water_takeoff

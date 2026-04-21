@@ -115,9 +115,13 @@ const THRUST_ACCEL_MAX_FALLBACK: f32 = 3.5;
 
 /// Maximum sea-level shaft power (kW). 450 hp × 0.7457 kW/hp ≈ 335 kW.
 const ENGINE_POWER_MAX_KW: f32 = 335.0;
-/// Idle shaft power (kW). ~6% of max; represents residual combustion power that keeps
-/// the engine running at idle RPM and generates a small amount of prop thrust.
-const ENGINE_POWER_IDLE_KW: f32 = 20.0;
+/// Idle shaft power (kW). ~3% of max — calibrated against real R-985 idle behavior
+/// (~8 hp / 6 kW shaft at 600-700 RPM). At idle the prop is mostly producing drag,
+/// not thrust; the small residual thrust is enough for water-taxi creep but should
+/// not produce meaningful in-flight acceleration. Previously 20 kW (6% of max),
+/// which produced ~700 N idle thrust at low V — enough to slowly accelerate the
+/// aircraft at low cruise speeds, more than real Beaver behavior.
+const ENGINE_POWER_IDLE_KW: f32 = 10.0;
 
 /// Minimum airspeed used as the denominator in `T = η·P/V`, to prevent thrust from
 /// diverging as V → 0. Tuned so static thrust at max power ≈ 9 kN (Beaver rule-of-
