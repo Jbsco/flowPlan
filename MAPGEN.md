@@ -740,6 +740,56 @@ When the Voronoi generator produces a cell whose footprint contains (or is neare
 
 ---
 
+## Consumer API surface
+
+World-gen subsystems are consumed by multiple downstream callers (flight model, rendering, bench, UI). The API surface is **emergent** — exact signatures finalize at implementing-milestone time — but the **shape is load-bearing**: changes to these signatures touch many callers simultaneously, so design with that coupling in mind.
+
+**Core world-sampling functions** (exposed by world-crate subsystems, consumed CPU-side by sim + render + bench; some also have matching WGSL shader implementations for GPU-side sampling):
+
+```rust
+// Layer 1 topographic base (ships Phase 3.6.1)
+world::height_at(x: f32, z: f32) -> f32;                        // final heightfield, post L3 deltas
+world::biome_at(x: f32, z: f32) -> BiomeId;
+world::surface_at(x: f32, z: f32) -> SurfaceClass;              // unblocks 2.5b.7 per-surface friction
+world::magnetic_variation(x: f32, z: f32) -> f32;
+
+// W1 atmospheric base (ships Phase 3.2.1)
+world::pressure_at(x: f32, y: f32, z: f32) -> f32;
+world::temperature_at(x: f32, y: f32, z: f32, t: f32) -> f32;
+world::humidity_at(x: f32, y: f32, z: f32, t: f32) -> f32;
+world::wind_at(x: f32, y: f32, z: f32, t: f32) -> Vec3;         // W1 baseline in 3.2.1;
+                                                                 // composes with W3 deltas in 3.2.3
+world::turbulence_at(x: f32, y: f32, z: f32, t: f32) -> f32;    // W1 baseline 3.2.1;
+                                                                 // W3-augmented 3.2.3
+
+// W3 weather deltas (ships Phase 3.2.3)
+world::cloud_density(x: f32, y: f32, z: f32, t: f32) -> f32;    // CPU-GPU shared formula
+world::precipitation_at(x: f32, y: f32, z: f32, t: f32) -> PrecipRate;
+
+// Existing (shipped Phase 2.2)
+world::water_height(x: f32, z: f32, t: f32) -> f32;             // Gerstner; replaced by
+                                                                 // FFT ocean in 3.5b
+```
+
+**Hub catalog + Voronoi partition** (exposed by world-gen subsystems, consumed at scale by UI + mission systems):
+
+```rust
+world::hub_catalog() -> &HubCatalog;                             // Phase 3.6.1; read-only
+world::voronoi_cell_at(x: f32, z: f32) -> CellId;                // Phase 3.6.2
+world::voronoi_neighbors(cell: CellId) -> &[CellId];
+world::weather_cell_at(x: f32, z: f32, y: f32, t: f32) -> WeatherCellId;  // Phase 3.2.2
+```
+
+### Awareness directives
+
+- **These signatures will emerge through the implementing milestones** — not rigidly pre-specified. The shape sketch above is a **forward-looking contract** to keep in mind so early milestone decisions don't accidentally foreclose on downstream needs.
+- **Downstream consumers depend on this surface existing** by the time their milestone starts. E.g. `world::cloud_density` is produced by 3.2.3 and consumed by 3.2x (cloud rendering) + 2.5 turbulence hooks + 4.5 mission capability-gating. Changes to its shape mid-Phase-3 would ripple.
+- **Same formula on CPU + GPU** where both consume — `cloud_density`, `water_height`, noise-based fields. Uses the `libm` discipline (same transcendentals on CPU; matching WGSL on GPU) for bit-identical output. See [CODING_RULES.md § Determinism Discipline](CODING_RULES.md#determinism-discipline).
+- **Determinism contract:** every sampler above is a pure function of `(master_seed, inputs, [time])`. No hidden state, no wall-clock reads, no thread-local RNG. Bit-identical cross-platform with libm + `-fma` pinned.
+- **Coupling with physics invariants:** sampled values feed `SimState` ticks (turbulence, visibility, icing, buoyancy). Any change to sampling semantics can affect scenario-bench reproducibility — flag in PR + re-baseline bench CSVs if the physics-facing output shifts.
+
+---
+
 ## Flight-log memory
 
 The save file holds the **event log** that generated the current state, per [FEATURES.md § Flight Log & Save Format](FEATURES.md#flight-log--save-format). For MAPGEN, this means:

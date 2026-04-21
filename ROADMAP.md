@@ -536,6 +536,28 @@ Tracked under [Pre-Phase-4 design-doc commitments](#pre-phase-4-design-doc-commi
 
 **Goal:** audio spine, weather state, dedicated sim thread, CI pipeline. The game becomes a living system.
 
+### Execution order
+
+Milestones below are listed in numeric order for presentation; **implementation order is not numeric** because of cross-milestone dependencies + parallel-development opportunities. Recommended sequence:
+
+1. **3.4 CI + cross-platform determinism smoke test** (alongside the Pre-Phase-3 smoke). Unblocks everything downstream — CI + libm + `-fma` discipline should be in place before world-bake / Voronoi work accumulates determinism debt.
+2. **3.3 Sim worker thread.** Minimal new functionality, maximal architectural validation — proves the determinism invariant under the new scheduling. Lands before weather / audio add complexity that would obscure threading regressions.
+3. **World-scope prototype** (scratch branch, parallel with 3.3 / 3.4). Validates the pinned Voronoi + three-layer + hub-catalog architecture before Phase 3.6 needs to start. Non-blocking on Phase 3 proper.
+4. **3.2 Weather state (3.2.1 → 3.2.2 → 3.2.3)** + **3.2b chop wiring.** Three-layer-composition milestones in order: W1 atmospheric base → W2 Voronoi partition → W3 deltas. 3.2b closes the 2.5a.7 chop hook with real weather input.
+5. **3.1 Audio spine + 3.5 Soundtrack** (can run in parallel with 3.2 chain — independent subsystem). 3.1 is infrastructure; 3.5 polishes on top. Glicol fallback criteria evaluated opportunistically if the R-985 radial patch resists authoring.
+6. **3.5b FFT ocean.** Builds the compute-pipeline abstraction that 3.2x clouds + 3.6.2 hydrology bake + 5.6 aurora all later consume. Design the abstraction with those downstream consumers in mind (see the 3.5b infrastructure-dividend note).
+7. **3.2x Weather visuals + particle system + volumetric clouds.** Consumes 3.2 W3 density fields + 3.5b compute abstraction + the pre-3.2x CLOUDS.md design memo.
+8. **Phase 3 gate closes** once all above are green against the quality gate + CI smoke. Cross-platform determinism report committed.
+9. **World-scope prototype results lock** the world-scope decision + chunk-shape decision. Amendment PR merges.
+10. **Phase 3.6 opens** with Voronoi + three-layer + hub-catalog architecture validated.
+
+Parallel-development opportunities:
+- **3.4 CI / 3.3 sim-thread / world-scope prototype** can all run simultaneously — independent work surfaces.
+- **3.1 audio / 3.5 soundtrack chain** is independent of the 3.2 weather chain; either order or parallel.
+- **3.5b compute infrastructure** must complete before 3.2x starts (unless 3.2x develops the compute abstraction standalone, in which case 3.5b inherits it — symmetrical option).
+
+The order is **non-binding** where milestones are genuinely independent. The hard dependencies are: (a) 3.4 CI before Phase 3 gate closes; (b) 3.5b or 3.2x builds compute abstraction before the other consumes it; (c) Pre-Phase-3 determinism + world-scope prototype both land before Phase 3.6 opens.
+
 ### Milestone 3.1: Audio spine
 
 - [ ] `cpal` stream in `audio` crate
@@ -548,43 +570,54 @@ Tracked under [Pre-Phase-4 design-doc commitments](#pre-phase-4-design-doc-commi
 
 ### Milestone 3.2: Weather state
 
-Weather is architected as a three-layer composable subsystem paralleling the terrain three-layer (see [MAPGEN.md § Three-layer weather composition](MAPGEN.md#three-layer-weather-composition-second-application-of-the-pattern)). Ships W1 + W2 + basic W3; cloud-rendering consumption of W3 lands in 3.2x.
+Weather is architected as a three-layer composable subsystem paralleling the terrain three-layer (see [MAPGEN.md § Three-layer weather composition](MAPGEN.md#three-layer-weather-composition-second-application-of-the-pattern)). Split into three sub-milestones matching W1/W2/W3 — each ships playable on its own, enabling incremental validation.
 
-**W1 — Atmospheric base field:**
+### Milestone 3.2.1: Layer W1 — Atmospheric base field
+
+**Ships W1 alone. Playable world with real atmospheric state — wind affects flight, density altitude varies with weather, no clouds or weather systems yet.**
+
 - [ ] **Pressure field** (latitude + seasonal + regional patterns) driving prevailing-wind derivation via geostrophic balance.
 - [ ] **Temperature + humidity fields** (latitude + elevation + season + diurnal).
-- [ ] **Altitude-stratified prevailing-wind field** — low-altitude wind differs from wind aloft; drives the W2 temporal drift offset (clouds at different altitudes drift at different rates).
-- [ ] **Frontal-boundary graph** pre-baked as a line-structure graph analogous to the L1 hydrology river graph. Cells along a frontal line bias toward frontal-passage cell types in W2. Immutable across W2/W3.
+- [ ] **Altitude-stratified prevailing-wind field** — low-altitude wind differs from wind aloft; will drive the W2 temporal drift offset in 3.2.2 (clouds at different altitudes drift at different rates).
+- [ ] **Frontal-boundary graph** pre-baked as a line-structure graph analogous to the L1 hydrology river graph. Cells along a frontal line will bias toward frontal-passage cell types in W2 (3.2.2). Immutable across W2/W3.
 - [ ] **Terrain-induced turbulence map** derived from L1 topographic gradients (lee-side rotors, valley channeling, ridge thermals). Static per master seed after terrain bakes.
+- [ ] **Consumer API sketch** (see [MAPGEN.md § Consumer API surface](MAPGEN.md#consumer-api-surface)): expose `world::pressure_at(x, y, z)`, `world::temperature_at(x, y, z, t)`, `world::humidity_at(x, y, z, t)`, `world::wind_at(x, y, z, t)` (W1 baseline, pre-W3-delta), `world::turbulence_at(x, y, z)` (W1 baseline).
+- [ ] **Visual-bench artifacts** (per [TEST_PLAN.md § World-Gen Visual Bench](TEST_PLAN.md#world-gen-visual-bench)): pressure / temperature / humidity / wind-vector / frontal-boundary-graph / terrain-turbulence PNG plots committed to `docs/world-gen-plots/`.
+- [ ] **Determinism + cross-platform:** byte-identical W1 fields across Linux + Windows given same master seed.
 
-**W2 — Weather Voronoi partition:**
-- [ ] **Voronoi partition bake** (see [MAPGEN.md § Weather Voronoi layer](MAPGEN.md#weather-voronoi-layer-second-partition)): ~20–50 km average seed spacing, ~11K cells world-wide, blue-noise + Fortune's sweep at world-bake. Independent seed stream from terrain Voronoi.
+### Milestone 3.2.2: Layer W2 — Weather Voronoi partition
+
+**Adds W2 semantics on top of W1. Playable world: weather cells exist as data + debug-overlay, but no cloud rendering or physics delta yet.**
+
+- [ ] **Weather Voronoi bake** (see [MAPGEN.md § Weather Voronoi layer](MAPGEN.md#weather-voronoi-layer-second-partition)): ~20–50 km average seed spacing, ~11K cells world-wide, blue-noise + Fortune's sweep at world-bake. Independent seed stream from terrain Voronoi.
 - [ ] **Per-cell state**: `{cell_type, base_altitude, top_altitude, density, column_height, precip_type, storm_state, evolution_phase}`. Placement constraints check against W1 (pressure range, humidity threshold, temperature range, wind-shear threshold); bad placements re-roll.
 - [ ] **Temporal drift** via altitude-dependent W1 wind offset — weather moves past stationary observers at prevailing wind speed, layer-stratified.
-- [ ] **Adjacency-biased evolution** on slow cadence (once per sim-second); clear-air cells first-class (`no-weather is weather`). Frontal-boundary-graph lines bias cell evolution along fronts.
+- [ ] **Adjacency-biased evolution** on slow cadence (once per sim-second; folds into `state_hash` for determinism); clear-air cells first-class (`no-weather is weather`). Frontal-boundary-graph lines bias cell evolution along fronts.
+- [ ] **Debug overlay** via the free-camera debug mode (`#[cfg(debug_assertions)]`) — cell boundaries + cell-type color coding + storm-state labels. Doubles as visual-bench artifact.
+- [ ] **Visual-bench artifacts:** weather Voronoi partition snapshots at t₀ / t+10min / t+1h / t+6h; verifies drift + evolution + adjacency bias.
+- [ ] **Determinism + cross-platform:** byte-identical partition + cell state trajectory across platforms given same master seed + tick count.
 
-**W3 — Cell atmospheric deltas (baseline):**
-- [ ] **Per-cell delta functions** for wind / turbulence / visibility / precipitation (see MAPGEN.md § W3 table). Storm cells add local updrafts/downdrafts/gusts; clear-air zero.
-- [ ] Adjacent-cell edge-interpolation for organic transitions.
-- [ ] Exposes `world::cloud_density(x, y, z, t)` + `world::wind_at(x, y, z, t)` + `world::turbulence_at(x, y, z, t)` as the shared CPU-GPU consumer interface for 3.2x cloud rendering + weather-affects-flight physics.
-- [ ] Frontal-boundary-graph-immutable invariant enforced: W3 deltas cannot place weather inconsistent with W1 pressure/frontal structure.
+### Milestone 3.2.3: Layer W3 — Cell atmospheric deltas + weather-affects-flight
 
-**Remaining 3.2 items (unchanged):**
-- [ ] Pressure / temperature / humidity / visibility as sim-level state (this is what W1 exposes)
-- [ ] Precipitation regime enum and visuals (drizzle -> heavy_rain -> squall; light_snow -> blizzard in winter biomes)
-- [ ] Storm state machine (clear -> building cumulus -> scattered thunderheads -> squall line / organized storm / frontal passage)
-- [ ] Fog / mist state ladder (ground mist, wingtip mist, layer fog, dense fog)
-- [ ] Wind shear at terrain edges and gust fronts
-- [ ] Water chop per water body (calm / ripple / moderate / heavy / breakers) driven by wind fetch + duration **+ overlying weather-Voronoi-cell storm state** (unidirectional coupling: weather drives chop; closes the 2.5a.7 chop hook with real input)
-- [ ] Season overlay (spring / summer / autumn / winter) -- static-per-region acceptable for Phase 3; cycling is an open question tracked in [FEATURES.md](FEATURES.md#remaining-open-questions)
-- [ ] Debris regime (dust, leaves, ash/smoke, blowing snow)
-- [ ] Time-of-day advances with sim clock; dawn/dusk palette shifts land in Phase 5 polish
-- [ ] Weather affects flight: wind on ground track, gust attitude perturbation, density altitude effect on performance, icing probability at cold+moist conditions.
-- [ ] **Cloud interactions (fly-through):** consume `world::cloud_density(x, y, z, t)` from 3.2x:
-    - **Turbulence** scales with density-gradient magnitude — smooth cloud interior, rough at edges; cumulonimbus (storm state) multiplier.
-    - **Visibility reduction** inside dense cloud — aircraft effective visibility drops to hundreds of meters; instruments-only flight couples with electronics-tier (see [FEATURES.md § Aircraft Configuration & Upgrades](FEATURES.md#aircraft-configuration--upgrades) electronics ladder).
-    - **Icing accumulation** at cold + moist cloud interior; affects lift + drag + stall speed; pitot + carb heat mitigate.
-- [ ] Weather forecast at hubs with accuracy decay by range and time
+**Adds W3 deltas + wires weather into flight physics. Weather is now functionally present in the sim — turbulence, visibility, icing all respond to cloud density + storm state.**
+
+- [ ] **Per-cell delta functions** for wind / turbulence / visibility / precipitation (see MAPGEN.md § W3 table). Storm cells add local updrafts/downdrafts/gusts; clear-air zero. Frontal cells add horizontal wind shift across frontal line.
+- [ ] **Adjacent-cell edge-interpolation** for organic transitions — density / wind / turbulence lerp across Voronoi edges.
+- [ ] **Consumer API extension:** `world::cloud_density(x, y, z, t)`, `world::wind_at(x, y, z, t)` (W1 + W3 composed), `world::turbulence_at(x, y, z, t)` (W1 + W3 composed), `world::precipitation_at(x, y, z, t)`. Shared CPU-GPU interface for 3.2x cloud rendering + 2.5 turbulence hooks + 4.5 mission capability.
+- [ ] **Frontal-boundary-graph-immutable invariant enforced:** W3 deltas cannot place weather inconsistent with W1 pressure/frontal structure. Verified at bake-time by rejecting incompatible cell types at W2.
+- [ ] **Precipitation regime** (drizzle → heavy_rain → squall → light_snow → blizzard → hail) per cell type + temperature. Rain / snow particle rendering ships in 3.2x; 3.2.3 just exposes the rate.
+- [ ] **Fog / mist state ladder** (ground_mist → wingtip_mist → layer_fog → dense_fog); derives from W1 humidity + temperature + W3 cloud-base altitude. Visual render in 3.2x.
+- [ ] **Debris regime** (dust in dry biomes, leaves in autumn, blowing snow, ash/smoke during fire events) — per-cell parameter feeding 3.2x wind-debris particles.
+- [ ] **Season overlay** (spring / summer / autumn / winter — static-per-region acceptable for Phase 3; cycling is an open question).
+- [ ] **Time-of-day advances with sim clock;** dawn/dusk palette shifts land in Phase 5 polish.
+- [ ] **Weather-affects-flight wiring:**
+    - **Wind** on ground track + gust attitude perturbation.
+    - **Density altitude** effect on performance (consumes W1 temperature + humidity).
+    - **Turbulence** scales with density-gradient magnitude (W3 cloud density) + baseline (W1 terrain turbulence).
+    - **Visibility** reduction inside dense cloud — drops from fog-limited 6-8 km to hundreds of meters.
+    - **Icing** accumulation at cold + moist cloud interior; affects lift + drag + stall speed.
+- [ ] **Weather forecast at hubs** with accuracy decay by range and time. Consumes W1 + W2 state; projects forward on the slow-evolution cadence.
+- [ ] **Visual-bench artifacts:** W3 delta composite overlays (wind + turbulence + precipitation) on selected scenarios.
 
 ### Milestone 3.2b: Chop wiring + water scenario family
 
@@ -640,7 +673,21 @@ parameterizes by wind speed + direction (Phillips or JONSWAP spectrum → IFFT �
 height field), so wind-driven sea state becomes physically motivated rather than
 a separate layer on top of fixed-parameter sinusoids.
 
-**Infrastructure dividend:** the compute-pipeline support added here (storage buffers, compute-shader bind groups, dispatch lifecycle) is reusable by later-roadmap items — 3.2x volumetric clouds, 3.6 hydrology-bake pass, post-v1 erosion passes, Phase 5.6 aurora shader. Design the compute-pipeline abstraction with those consumers in mind rather than FFT-ocean-only. The FFT ocean is the first compute-using milestone; the others follow naturally once the boundary is in place.
+**Infrastructure dividend (critical architectural awareness):** the compute-pipeline support added here (storage buffers, compute-shader bind groups, dispatch lifecycle, readback path) is **reusable by multiple downstream milestones**. The FFT ocean is the first compute consumer and therefore carries the burden of designing the abstraction; shape decisions made here ripple into every consumer. **Design with these downstream consumers in mind from day one**, even if the FFT needs of each differ:
+
+- **[3.2x Volumetric clouds]** — raymarch in compute (more efficient for high-step counts) vs fragment shader with compute-precomputed 3D noise texture. Either way needs storage-buffer / 3D-texture bind-group patterns.
+- **[3.6.2 Hydrology-graph bake]** — one-shot compute at session load (coarse heightfield → D8 drainage → river + lake + coastline graph). Compute-pipeline lifecycle (dispatch-and-readback) differs from the per-frame FFT use; abstraction should handle both patterns.
+- **[Phase 5.6 Aurora shader]** — continuous compute for dynamic aurora bands; similar dispatch pattern to FFT but at lower cadence.
+- **[Post-v1 erosion simulation]** — if pursued, multi-pass compute on heightfield; same abstraction.
+
+Specifically, the FFT-ocean abstraction design should anticipate:
+
+- **Lifecycle variation:** one-shot bake (hydrology) vs per-frame (FFT ocean, clouds, aurora).
+- **Readback path:** GPU-only (clouds, aurora) vs CPU-readback (hydrology graph, some bench-visual-artifact rendering).
+- **Storage buffer vs 3D texture vs atomic buffer:** each downstream case varies; abstraction should support each without forcing rework.
+- **Bind-group reuse patterns:** standard layouts so downstream consumers don't re-author each time.
+
+The abstraction shape is **emergent** — it finalizes as the FFT implementation lands and the first downstream consumer pulls on it. **Awareness that these consumers exist + will depend on the abstraction's shape is encoded here** so design decisions made in isolation don't accidentally foreclose on downstream needs. A short design memo (candidate: `docs/COMPUTE_PIPELINE.md` stub) captured during 3.5b scoping is cheap insurance.
 
 **Visual target (from 2.5a iteration):** water is the star of flowPlan's visual identity. Near/small scale (floats in chop, spray, wake, touchdown) AND large scale (horizon-far sea state, wind-swept waves, swell patterns) must read well. Slope-based shading tricks along the lines of Sea of Thieves — normal-map variation driven by wave slope, not just height — are a good reference. FFT ocean supports this naturally since the spectrum yields both height AND slope per frame.
 

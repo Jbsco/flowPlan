@@ -11,6 +11,7 @@ The rules exist because flowPlan has strict architectural constraints (see [DESI
 - [Type Discipline](#type-discipline)
 - [Code Style](#code-style)
 - [Real-Time Discipline](#real-time-discipline)
+- [Determinism Discipline](#determinism-discipline)
 - [Unsafe and FFI](#unsafe-and-ffi)
 - [Error Handling](#error-handling)
 - [Logging and Tracing](#logging-and-tracing)
@@ -192,6 +193,57 @@ Inside the `cpal` callback, additionally:
 - Every crate adds its own `tracing` spans at subsystem entry points.
 - Tracy is integrated in dev builds; profile early, profile often.
 - Per-phase CI runs a benchmark scene against the reference hardware budget (see [TEST_PLAN.md](TEST_PLAN.md)).
+
+---
+
+## Determinism Discipline
+
+Determinism is a first-class invariant ([DESIGN.md Invariant #8](DESIGN.md#invariants)). The flight bench, world-gen visual bench, save-format replay, and Phase 6 stretch-goal multiplayer all depend on it. Violations are **bugs**, not style preferences.
+
+### Cross-platform bit-identical output
+
+Any deterministic subsystem (sim tick, flight bench, world-gen bake, cloud density, weather evolution) must produce **byte-identical output on every supported platform** given identical inputs. Divergence is typically caused by:
+
+- **Transcendental math differences** across stdlib implementations (Windows MSVC CRT vs Linux glibc vs macOS libsystem). `sin`, `cos`, `atan2`, `exp`, `log` all drift between implementations.
+- **Fused multiply-add (FMA) contraction** enabled by default on some compilers / targets — changes intermediate rounding.
+- **x87 80-bit extended precision** (legacy x86) vs SSE/AVX 64-bit — irrelevant on modern x86_64 but occasionally resurfaces.
+- **ARM NEON vs x86 SSE** intermediate rounding on the same IEEE 754 spec — Apple Silicon risk.
+- **`-ffast-math` / `/fp:fast`** — allows reassociation, FMA contraction, skipped NaN handling; breaks determinism hard. **Never use.**
+
+### Rules
+
+1. **Use the `libm` crate for transcendentals in sim hot paths + world-gen paths.** Pure Rust, platform-independent implementations of `sin`, `cos`, `atan2`, `exp`, `log`, `sqrt` (for `fast_sqrt`), etc. Slower than stdlib by a few percent; worth it for bit-identical cross-platform output.
+
+    ```rust
+    use libm::{cos, sin, atan2};  // not std::f32::{sin, cos, atan2}
+    ```
+
+2. **Disable FMA contraction.** Set `-Ctarget-feature=-fma` in `.cargo/config.toml` target flags, or equivalent per-target. Prevents the compiler from fusing `a * b + c` into a single FMA instruction that rounds differently than the sequential operations.
+
+3. **Pin `codegen-units = 1` + `lto = "thin"` in `[profile.release]`** (already done in flowPlan's Cargo.toml). Prevents cross-unit optimization variation between builds.
+
+4. **CPU-GPU shared samplers must use identical math both sides.** Where a world-gen sampler (e.g. `world::cloud_density`) is consumed on both CPU (sim) and GPU (shader), the WGSL implementation must match the Rust implementation bit-for-bit. Use the same noise formulas, same constants, same transcendentals (libm on CPU; hand-rolled WGSL equivalent on GPU — WGSL's built-in trig is not guaranteed bit-identical across drivers).
+
+5. **No wall-clock reads in sim or world-gen hot paths.** Use `SimState.wave_time` / `SimState.tick` / explicit function parameters. No `Instant::now()`, `SystemTime::now()`, or thread-local timing. (Presentation-side smoothing in render or HUD is fine — just not in deterministic paths.)
+
+6. **Seeded RNG only.** PCG or xorshift via flowPlan's `core::rng`; seed derivation via `hash(master_seed, subsystem_name)`. No `thread_rng()`, no `rand::random()`, no OS entropy.
+
+7. **Hashing function for seed derivation must be platform-independent.** `SipHash` or `wyhash`; reject anything using the Rust stdlib `DefaultHasher` (not portable across stdlib versions).
+
+### Verification
+
+- **Flight bench** ([TEST_PLAN.md § Flight Test Bench](TEST_PLAN.md#flight-test-bench)): existing Linux-only CSV check extends to Linux-Windows-10 smoke in Phase 3 (see ROADMAP § Pre-Phase-3 prerequisites).
+- **World-gen visual bench** ([TEST_PLAN.md § World-Gen Visual Bench](TEST_PLAN.md#world-gen-visual-bench)): PNG artifacts + graph-structural equality across platforms.
+- **Full cross-platform hardening** (Apple Silicon + Steam Deck): deferred to [Phase 6.1](ROADMAP.md#milestone-61-determinism-hardening-cross-platform) when hardware access lands. Until then: research + configuration-as-insurance per user memory `hardware_access_constraints`.
+
+### What about presentation-side non-determinism?
+
+**Allowed** in render / HUD / audio feedback paths:
+- Wall-clock-driven animations (cel outline shimmer, debug HUD readout smoothing).
+- Rolling averages / needle lag for instrument readouts.
+- Non-deterministic render timing (frame interpolation alpha from a wall-clock accumulator is expected).
+
+These must not feed back into sim state. If a presentation smoother's output is ever fed back into `SimState.tick()`, you've created a determinism violation — redirect it through a deterministic intermediary first.
 
 ---
 
