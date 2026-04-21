@@ -439,10 +439,17 @@ The current ground-contact model uses a single paved-baseline coefficient set (`
 - [ ] Per-surface coefficient lookup: `µ_r` rolling, `µ_lat` lateral, `µ_brake`, compliance softness. Tundra should feel genuinely soft (mains sink, planing effect during takeoff); sand should feel draggy; paved tight.
 - [ ] Bench: paved-vs-grass taxi comparison at identical throttle → grass decelerates aggressively. Soft-field takeoff scenario where the aircraft rides on the step briefly.
 
-**2.5b.8 App integration: config toggle + land-mesh selection.** (Was 2.5b.7.)
-- [ ] App reads a config selector (env var / RON field / CLI flag) and picks `northlander.glb` (Floats) or `northlander_land.glb` (Wheels) accordingly
-- [ ] `VEHICLE_GLB_PATH` becomes conditional; initial spawn position + `min_altitude` use the gear offset instead of float offset for wheels config
-- [ ] Playtest: can taxi, takeoff, land, park the wheeled Beaver — feel matches expectations for a taildragger
+**2.5b.8 App integration: config toggle + land-mesh selection.** (SHIPPED)
+
+Most of the app-integration plumbing landed alongside the earlier catalog work — the `--aircraft` / `--variant` CLI flags, `FLOWPLAN_AIRCRAFT` env var, `AircraftCatalog` auto-scan, and variant-aware mesh + terrain selection all shipped during the catalog implementation. 2.5b.8 closes the remaining gap: **free-flight mode's `min_altitude` computation**, which up to now was config-agnostic and assumed a float-offset.
+
+- [x] App CLI + env-var selector (`--aircraft <id>` / `--variant <id>` / `--list-aircraft`; env `FLOWPLAN_AIRCRAFT=<id>[:<variant>]`) — shipped with the catalog.
+- [x] Variant-aware mesh selection: catalog entry's `variants[].mesh_path` drives the `.glb` loaded at startup; `sim.vehicle.config` is set to the variant's `config` field.
+- [x] Variant-aware terrain + water suppression: scenario-playback mode picks `Terrain::flat_land()` (wheels) vs `Terrain::flat()` (floats); renderer's `set_water_visible(false)` suppresses water for wheels scenarios so the y=0 terrain isn't occluded.
+- [x] **Per-config `min_altitude` in free-flight mode (new in 2.5b.8):** wheels config uses `terrain_here + SURFACE_MARGIN` (gear physics handles the rest); floats config keeps `terrain_here + vehicle_float_offset + SURFACE_MARGIN` (pontoon clearance). Pre-fix, the wheels variant in free-flight had its ground physics seeing an "elevated phantom ground" ~1.69 m above the rendered terrain, so gear never reached contact on descent.
+- [x] Smoke-tested: `flowplan --aircraft northlander --variant wheels` boots cleanly in free-flight mode. `flowplan --scenario beaver_land_taxi` auto-resolves to wheels variant and works. Pre-existing water scenarios (`beaver_water_takeoff`) still route to floats config correctly.
+
+**Deferred to playtest pass:** full "can taxi, takeoff, land, park the wheeled Beaver — feel matches expectations for a taildragger" — the free-flight spawn still starts airborne at 25 m AGL cruising at 55 m/s, which exercises ground-contact only on landing. A dedicated "start on ground, ready to taxi" spawn-mode toggle could land with settings UI in Phase 4.
 
 **2.5c Invariants + tests:**
 - [ ] Determinism preserved: contact forces are a deterministic function of `(state, terrain/water sample, dt)`; no wall-clock in the contact path.

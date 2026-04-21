@@ -731,7 +731,25 @@ impl Runtime {
             } else {
                 let pos = self.sim.vehicle.position;
                 let terrain_here = self.terrain.height(pos.x, pos.z);
-                terrain_here + self.vehicle_float_offset + SURFACE_MARGIN
+                match self.sim.vehicle.config {
+                    // Floats: CG clamp keeps pontoons above terrain. The
+                    // `vehicle_float_offset` (mesh-derived pontoon depth)
+                    // adds the pontoon-to-CG distance so buoyancy never
+                    // samples negative compression through terrain.
+                    flowplan_sim::VehicleConfig::Floats => {
+                        terrain_here + self.vehicle_float_offset + SURFACE_MARGIN
+                    }
+                    // Wheels: ground-contact physics handles gear spring +
+                    // damping directly. `min_altitude` is passed to
+                    // `compute_ground_contact` as `ground_y`, so it must be
+                    // the ACTUAL terrain — adding float offset here would
+                    // simulate an elevated phantom ground 1.69 m above the
+                    // rendered terrain, preventing the gear from reaching
+                    // contact on descent. The CG hard-clamp using the same
+                    // value is a safety net; gear spring arrests descent
+                    // long before CG reaches raw terrain.
+                    flowplan_sim::VehicleConfig::Wheels => terrain_here + SURFACE_MARGIN,
+                }
             };
             self.sim
                 .tick(&batch, &self.difficulty, FIXED_DT, min_altitude);
