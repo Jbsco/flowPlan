@@ -540,23 +540,29 @@ Tracked under [Pre-Phase-4 design-doc commitments](#pre-phase-4-design-doc-commi
 
 Milestones below are listed in numeric order for presentation; **implementation order is not numeric** because of cross-milestone dependencies + parallel-development opportunities. Recommended sequence:
 
-1. **3.4 CI + cross-platform determinism smoke test** (alongside the Pre-Phase-3 smoke). Unblocks everything downstream — CI + libm + `-fma` discipline should be in place before world-bake / Voronoi work accumulates determinism debt.
-2. **3.3 Sim worker thread.** Minimal new functionality, maximal architectural validation — proves the determinism invariant under the new scheduling. Lands before weather / audio add complexity that would obscure threading regressions.
-3. **World-scope prototype** (scratch branch, parallel with 3.3 / 3.4). Validates the pinned Voronoi + three-layer + hub-catalog architecture before Phase 3.6 needs to start. Non-blocking on Phase 3 proper.
-4. **3.2 Weather state (3.2.1 → 3.2.2 → 3.2.3)** + **3.2b chop wiring.** Three-layer-composition milestones in order: W1 atmospheric base → W2 Voronoi partition → W3 deltas. 3.2b closes the 2.5a.7 chop hook with real weather input.
-5. **3.1 Audio spine + 3.5 Soundtrack** (can run in parallel with 3.2 chain — independent subsystem). 3.1 is infrastructure; 3.5 polishes on top. Glicol fallback criteria evaluated opportunistically if the R-985 radial patch resists authoring.
-6. **3.5b FFT ocean.** Builds the compute-pipeline abstraction that 3.2x clouds + 3.6.2 hydrology bake + 5.6 aurora all later consume. Design the abstraction with those downstream consumers in mind (see the 3.5b infrastructure-dividend note).
-7. **3.2x Weather visuals + particle system + volumetric clouds.** Consumes 3.2 W3 density fields + 3.5b compute abstraction + the pre-3.2x CLOUDS.md design memo.
-8. **Phase 3 gate closes** once all above are green against the quality gate + CI smoke. Cross-platform determinism report committed.
-9. **World-scope prototype results lock** the world-scope decision + chunk-shape decision. Amendment PR merges.
-10. **Phase 3.6 opens** with Voronoi + three-layer + hub-catalog architecture validated.
+1. **3.4 CI** — full fmt / clippy / test / frame-budget gate on every push, on top of the Pre-Phase-3 cross-platform determinism smoke workflow. Unblocks all downstream work with automated regression detection.
+2. **3.2.1 Layer W1 atmospheric base** — pressure / temperature / humidity / altitude-stratified wind / frontal-boundary graph / terrain-induced turbulence. Ships playable alone per three-layer-composition pattern. Exposes `world::wind_at` + `world::turbulence_at` + related samplers.
+3. **World-scope prototype** (scratch branch, parallel with 3.4 / 3.2.1). Validates the pinned Voronoi + three-layer + hub-catalog architecture before Phase 3.6 needs to start. Non-blocking on Phase 3 proper.
+4. **3.1 Audio spine + 3.3 Sim worker thread (co-landed)** — audio SPSC ring from sim-thread is the forcing function for 3.3's refactor. Doing them together means the sim-thread design is driven by a concrete consumer (audio callback reading `AudioContext` snapshots that sim pre-computes per tick from Voronoi / weather / engine / position state). Separating 3.3 from 3.1 would force audio to consume shared-state-with-careful-locking on main thread — strictly worse architecture. `AudioContext` struct (engine params + cell IDs + proximity + event flags) is designed here.
+5. **3.2.2 Layer W2 Weather Voronoi partition** — blue-noise seeds, per-cell state, adjacency-bias evolution, temporal drift. Consumes W1. Cells feed audio snapshots via the 3.1 SPSC ring (weather cell ID + storm state → audio) → richer soundtrack layers unlock automatically.
+6. **3.2.3 Layer W3 deltas + weather-affects-flight + 3.2b chop wiring** — per-cell wind/turbulence/precip deltas; wires weather into flight model (turbulence, visibility, icing); closes the 2.5a.7 chop hook. Exposes `world::cloud_density` + `world::precipitation_at`.
+7. **3.5b FFT ocean** — builds the compute-pipeline abstraction that 3.2x clouds + 3.6.2 hydrology bake + 5.6 aurora all later consume. Design the abstraction with those downstream consumers in mind (see the 3.5b infrastructure-dividend note).
+8. **3.2x Weather visuals + particle system + volumetric clouds** — consumes 3.2 W3 density fields + 3.5b compute abstraction + the pre-3.2x CLOUDS.md design memo.
+9. **3.5 Soundtrack** — Glicol-graph library layered on top of 3.1 audio spine. Per-biome motifs, storm-cell proximity layers, hub-approach radio, altitude-band pads, wildlife-zone pan — all driven by the `AudioContext` snapshots produced by sim thread.
+10. **Phase 3 gate closes** once all above are green against the quality gate + CI smoke. Cross-platform determinism report committed (within-platform verified; cross-platform deferred to 6.1 per Phase 3 Step 1 findings).
+11. **World-scope prototype results lock** the world-scope decision + chunk-shape decision. Amendment PR merges.
+12. **Phase 3.6 opens** with Voronoi + three-layer + hub-catalog architecture validated.
 
 Parallel-development opportunities:
-- **3.4 CI / 3.3 sim-thread / world-scope prototype** can all run simultaneously — independent work surfaces.
-- **3.1 audio / 3.5 soundtrack chain** is independent of the 3.2 weather chain; either order or parallel.
+- **3.4 CI / 3.2.1 W1 / world-scope prototype** can all run simultaneously — independent work surfaces.
+- **3.1 audio + 3.3 sim-thread** must co-land per above; can't be safely separated.
 - **3.5b compute infrastructure** must complete before 3.2x starts (unless 3.2x develops the compute abstraction standalone, in which case 3.5b inherits it — symmetrical option).
+- **3.5 soundtrack** is downstream of 3.1 audio; but its Glicol patch authoring (per-biome motifs, etc.) can start whenever the `AudioContext` schema lands in 3.1.
 
-The order is **non-binding** where milestones are genuinely independent. The hard dependencies are: (a) 3.4 CI before Phase 3 gate closes; (b) 3.5b or 3.2x builds compute abstraction before the other consumes it; (c) Pre-Phase-3 determinism + world-scope prototype both land before Phase 3.6 opens.
+**Why 3.3 co-lands with 3.1 rather than as its own step:**
+3.3's stated benefits (determinism under threading, latency, Phase 6 readiness) are **future-proofing**, not solving any current pain — sim tick is ~0.5 ms of the frame budget, below the threshold where threading is forced. The audio SPSC ring in 3.1 is the first consumer that genuinely requires sim-thread separation (lock-free audio callback reading from a thread that owns `SimState`). Doing 3.3 as a standalone step means inventing an abstraction without a concrete consumer; doing 3.3 together with 3.1 means the audio schema informs the sim-thread boundary. The co-land is the cheaper + less speculative path.
+
+The order is **non-binding** where milestones are genuinely independent. The hard dependencies are: (a) 3.4 CI before Phase 3 gate closes; (b) 3.5b or 3.2x builds compute abstraction before the other consumes it; (c) Pre-Phase-3 world-scope prototype lands before Phase 3.6 opens; (d) 3.1 audio and 3.3 sim-thread co-land.
 
 ### Milestone 3.1: Audio spine
 

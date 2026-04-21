@@ -1,0 +1,103 @@
+# Full quality gate for every push + PR.
+#
+# Runs fmt / clippy / test / frame-budget bench on Linux. Single runner for
+# speed; cross-platform determinism verification lives in determinism.yml.
+#
+# Scope is the gate defined in ROADMAP.md § Per-Phase Quality Gate + the
+# frame-budget check in DESIGN.md § Performance Budget.
+
+name: Quality gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (1.93)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93"
+          components: rustfmt
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (1.93)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93"
+          components: clippy
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: cargo test --workspace
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (1.93)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93"
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: test
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+      - name: cargo test --release flight_bench
+        run: cargo test -p flowplan-sim --test flight_bench --release
+
+  bench:
+    name: frame-budget smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (1.93)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93"
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+
+      - name: cargo bench (smoke)
+        run: cargo bench -p flowplan-benches --bench frame_budget -- --test
