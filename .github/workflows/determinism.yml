@@ -1,0 +1,180 @@
+# Cross-platform determinism check.
+#
+# Runs the flight-bench suite on Linux / macOS Intel / macOS Apple Silicon /
+# Windows, hashes the per-scenario CSV outputs, and fails the build if any
+# platform diverges from the Ubuntu baseline.
+#
+# See CODING_RULES.md § Determinism Discipline for the underlying rules
+# (libm / -fma / codegen-units=1). This workflow is the verification.
+#
+# Scoped narrowly to determinism verification; broader CI (fmt / clippy /
+# full test / frame budget) lands with the 3.4 CI milestone proper.
+
+name: Cross-platform determinism
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: # manual trigger from the Actions UI
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: Flight bench on ${{ matrix.os }}
+    strategy:
+      fail-fast: false # see all platforms' output even if one diverges
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x86_64
+          # macos-14 (Apple Silicon / aarch64) is the unique Apple-ecosystem
+          # coverage we can't get elsewhere — ARM + NEON + Apple libsystem.
+          # macos-13 (Intel / x86_64) was deliberately dropped: GitHub has
+          # been deprecating Intel Mac runners (queue times of 10-30+ min),
+          # and its target triple coverage largely overlaps Linux + Windows
+          # x86_64 entries. If Mac-Intel coverage becomes necessary (e.g.
+          # specific bug triage), re-add with continue-on-error: true.
+          - os: macos-14
+            label: macos-aarch64
+          - os: windows-latest
+            label: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (1.93)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93"
+
+      - name: Install Python (for cross-platform hashing)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Per-platform cache; bench target directory varies by OS
+          key: determinism-${{ matrix.label }}
+          # .cargo/config.toml affects build output so invalidate cache on change
+          env-vars: "CARGO_TERM_COLOR CARGO_BUILD_TARGET"
+
+      - name: Run flight bench (release)
+        run: cargo test -p flowplan-sim --test flight_bench --release
+
+      - name: Hash CSV outputs
+        shell: bash
+        run: |
+          python3 - <<'EOF'
+          import hashlib, os, pathlib, sys
+
+          root = pathlib.Path("target/flight-bench")
+          if not root.exists():
+              print("ERROR: target/flight-bench not present — did the bench run?", file=sys.stderr)
+              sys.exit(1)
+
+          manifest = []
+          for p in sorted(root.rglob("*.csv")):
+              data = p.read_bytes()
+              digest = hashlib.sha256(data).hexdigest()
+              # Normalize path separators + strip leading dirs for stable cross-OS keys
+              rel = str(p.relative_to(root)).replace(os.sep, "/")
+              manifest.append(f"{digest}  {rel}")
+
+          manifest.sort(key=lambda line: line.split("  ", 1)[1])
+
+          with open("bench-manifest.txt", "w", encoding="utf-8", newline="\n") as f:
+              for line in manifest:
+                  f.write(line + "\n")
+
+          print(f"Hashed {len(manifest)} CSV files:")
+          for line in manifest[:5]:
+              print(f"  {line}")
+          if len(manifest) > 5:
+              print(f"  ... ({len(manifest) - 5} more)")
+          EOF
+
+      - name: Upload per-platform artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.label }}
+          path: |
+            bench-manifest.txt
+            target/flight-bench/**/*.csv
+          retention-days: 30
+
+  diff:
+    name: Cross-platform hash diff
+    needs: bench
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bench-*
+          path: artifacts/
+
+      - name: Diff manifests across platforms
+        shell: bash
+        run: |
+          set -eu
+
+          echo "=== Per-platform manifests ==="
+          for dir in artifacts/bench-*; do
+              platform=$(basename "$dir" | sed 's/^bench-//')
+              echo ""
+              echo "--- $platform ---"
+              if [ -f "$dir/bench-manifest.txt" ]; then
+                  head -3 "$dir/bench-manifest.txt"
+                  total=$(wc -l < "$dir/bench-manifest.txt")
+                  echo "... ($total total)"
+              else
+                  echo "MANIFEST MISSING"
+              fi
+          done
+
+          echo ""
+          echo "=== Cross-platform diff ==="
+
+          baseline="artifacts/bench-linux-x86_64/bench-manifest.txt"
+          if [ ! -f "$baseline" ]; then
+              echo "Baseline (linux-x86_64) manifest missing."
+              exit 1
+          fi
+
+          divergence=0
+          for dir in artifacts/bench-*; do
+              platform=$(basename "$dir" | sed 's/^bench-//')
+              if [ "$platform" = "linux-x86_64" ]; then continue; fi
+              manifest="$dir/bench-manifest.txt"
+              if [ ! -f "$manifest" ]; then
+                  echo "[MISSING] $platform — no manifest"
+                  divergence=1
+                  continue
+              fi
+              if diff -q "$baseline" "$manifest" > /dev/null 2>&1; then
+                  echo "[OK]       $platform matches linux-x86_64"
+              else
+                  echo "[DIVERGED] $platform differs from linux-x86_64:"
+                  diff "$baseline" "$manifest" | head -40 | sed 's/^/    /'
+                  divergence=1
+              fi
+          done
+
+          echo ""
+          if [ $divergence -ne 0 ]; then
+              echo "Cross-platform determinism FAILED — at least one platform diverges."
+              echo "See per-line diffs above. Investigate:"
+              echo "  1. A transcendental call path not routed through libm."
+              echo "  2. A platform-specific code path introduced since last green run."
+              echo "  3. FMA contraction leaking past -Ctarget-feature=-fma."
+              exit 1
+          fi
+
+          echo "Cross-platform determinism: all platforms byte-identical. ✓"
