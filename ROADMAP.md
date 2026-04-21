@@ -113,41 +113,41 @@ Running `cargo run -p flow-app` opens a window showing a cleared color, exits cl
 
 ### Milestone 1.1: Fixed-timestep loop
 
-- [ ] Accumulator in `app` drives `sim.tick(dt_fixed)` at 120 Hz
-- [ ] `SimState` triple-buffered; render reads front while sim writes back
-- [ ] Interpolation alpha passed to render each frame
-- [ ] Property test: deterministic state for fixed input sequence and seed
-- [ ] Property test: swap correctness under concurrent tick/render
+- [x] Accumulator in `app` drives `sim.tick(dt_fixed)` at 120 Hz
+- [x] `SimState` triple-buffered; render reads front while sim writes back
+- [x] Interpolation alpha passed to render each frame
+- [x] Property test: deterministic state for fixed input sequence and seed
+- [x] Property test: swap correctness under concurrent tick/render
 
 ### Milestone 1.2: Input
 
-- [ ] winit events -> `InputEvent` enum in main thread
-- [ ] Bounded `crossbeam::queue::ArrayQueue<InputEvent>` drained at tick start
-- [ ] Gamepad via `gilrs` (approved dep added in this phase if not in DESIGN.md's stack yet; amend DESIGN.md first)
-- [ ] Test: simulated input event sequence produces expected sim state
+- [x] winit events -> `InputEvent` enum in main thread
+- [x] Bounded `crossbeam::queue::ArrayQueue<InputEvent>` drained at tick start
+- [x] Gamepad via `gilrs` (approved dep added in this phase if not in DESIGN.md's stack yet; amend DESIGN.md first)
+- [x] Test: simulated input event sequence produces expected sim state
 
 ### Milestone 1.3: Camera
 
-- [ ] `Camera` in `sim` (position, orientation, fov, view-kind tag)
-- [ ] View kinds implemented: first-person cockpit (placeholder rig until a plane model lands in Phase 2), third-person chase, exterior orbit. Tail / wingtip / cowl views are Phase 2+ once the plane model provides reference points.
-- [ ] Free switching between view kinds at any time, bound to keys / gamepad face buttons
-- [ ] Short 60-120 ms camera transition tween with hold-to-hard-cut option
-- [ ] Chase-camera controller that tracks a target entity with configurable stiffness/damping
-- [ ] Camera interpolation uses the same alpha as scene interpolation
-- [ ] Right-stick look-around inside a view (POV-hat emulation) with center-snap-on-release; mouse-look on modifier
-- [ ] Per-view FOV setting and inertia tuning
+- [x] `Camera` in `sim` (position, orientation, fov, view-kind tag)
+- [x] View kinds implemented: first-person cockpit (placeholder rig until a plane model lands in Phase 2), third-person chase, exterior orbit. Tail / wingtip / cowl views are Phase 2+ once the plane model provides reference points.
+- [x] Free switching between view kinds at any time, bound to keys / gamepad face buttons
+- [x] Short 60-120 ms camera transition tween with hold-to-hard-cut option
+- [x] Chase-camera controller that tracks a target entity with configurable stiffness/damping
+- [x] Camera interpolation uses the same alpha as scene interpolation
+- [x] Right-stick look-around inside a view (POV-hat emulation) with center-snap-on-release; mouse-look on modifier
+- [x] Per-view FOV setting and inertia tuning
 
 ### Milestone 1.4: Terrain
 
-- [ ] Heightmap loaded from a 16-bit PNG / RAW in `assets`
-- [ ] Terrain mesh generated on CPU into a static vertex/index buffer
-- [ ] Flat-shaded render pass (no cel shading yet; just verify geometry)
-- [ ] Terrain sample function in `world` exposed to `sim` (for future buoyancy)
+- [x] Heightmap loaded from a 16-bit PNG / RAW in `assets`
+- [x] Terrain mesh generated on CPU into a static vertex/index buffer
+- [x] Flat-shaded render pass (no cel shading yet; just verify geometry)
+- [x] Terrain sample function in `world` exposed to `sim` (for future buoyancy)
 
 ### Milestone 1.5: Test / bench
 
-- [ ] Unit tests for `sim` tick determinism, input queue bounds, camera damping
-- [ ] Frame-budget bench on a flat terrain + cube scene: must hit 240 Hz on reference hardware
+- [x] Unit tests for `sim` tick determinism, input queue bounds, camera damping
+- [x] Frame-budget bench on a flat terrain + cube scene: must hit 240 Hz on reference hardware
 
 ### Deliverable
 
@@ -183,7 +183,7 @@ A cube can be flown (WASD/gamepad) over a terrain. Frame budget check passes at 
 
 - [x] glTF import in `assets` (`flowplan_assets::load_mesh` handles `.glb` + embedded-buffer `.gltf`, first-mesh first-primitive, optional NORMAL / UV / COLOR fallbacks)
 - [x] DHC-2 Beaver reference aircraft, hand-authored in Blender -- low-poly, cel-shaded, sanitized, no branding. Committed at `data/aircraft/northlander.glb`.
-- [ ] Wheels + straight floats variants modeled at minimum; amphib floats in the same milestone if feasible, otherwise Milestone 2.5 *(current model bundles both as the STL source; per-part swap comes later)*
+- [x] Wheels + straight floats variants modeled at minimum; amphib floats in the same milestone if feasible, otherwise Milestone 2.5 *(current model bundles both as the STL source; per-part swap comes later)*
 - [x] Plane rendered with cel shading + outline
 - [x] In-game name placeholder committed: **Northlander**
 - [x] Spec sheet (`.ron` data) authored: `data/aircraft/northlander.ron` from AIRCRAFT.md § MVP Reference, SI-normalized. Loaded via `AircraftSpec::from_ron` at startup; consumed by the flight model in Milestone 2.4.
@@ -227,15 +227,15 @@ A cube can be flown (WASD/gamepad) over a terrain. Frame budget check passes at 
     - [deferred post-2.4.8] `beaver_coordinated_turn_30` / `_turn_60` — attempted during 2.4.8 audit; deferred with clear rationale inline in `flight_bench.rs`. Reason: flight model lacks Cl_β (dihedral roll stability), so a banked aircraft has no restoring roll moment. With only scripted constant inputs and no trim system, bank angle spirals instead of locking at a target. Unblocking options: (a) add Cl_β coefficient (cleanest), (b) ship trim system (Phase 3+), (c) add ramped scripted-input type. Not blocking 2.5 — the 4 new scenarios above (plus 3 original) give 7 constraints for coefficient tuning, which is enough. Revisit when feel-tuning returns to rotational or trim system ships.
 
     *Step 2 — Coefficient tuning pass (follow [model-gap-triage.md](skills/flowplan-flight-bench/references/model-gap-triage.md); one coefficient per commit; full ripple analysis and regression check each):*
-    - [ ] Close Gap 3 (Cl_max) — raise `CL_TABLE` peak from 1.65 toward ~2.0. Analytic target `Vs² = 2W/(ρSCl_max)` → ~2.95 for POH Vs; choose conservative first step. Ripples: stall scenarios, flap-stall, wing-drop, ground-effect, induced drag at high α.
-    - [ ] Close Gap 1 (Cd0 light) — raise `Cd0` from 0.045 toward ~0.055-0.060. Ripples: cruise equilibrium throttle, cruise-climb ROC, L/D_max glide ratio.
-    - [ ] Attempt coefficient-only fix for Gap 2 (P-factor). If over-corrects cruise rudder, mark as missing-physics (slipstream over rudder) and defer to post-2.4 roadmap item. This is an expected outcome — document it cleanly rather than forcing a fit.
+    - [x] Close Gap 3 (Cl_max) — raise `CL_TABLE` peak from 1.65 toward ~2.0. Analytic target `Vs² = 2W/(ρSCl_max)` → ~2.95 for POH Vs; choose conservative first step. Ripples: stall scenarios, flap-stall, wing-drop, ground-effect, induced drag at high α.
+    - [x] Close Gap 1 (Cd0 light) — raise `Cd0` from 0.045 toward ~0.055-0.060. Ripples: cruise equilibrium throttle, cruise-climb ROC, L/D_max glide ratio.
+    - [x] Attempt coefficient-only fix for Gap 2 (P-factor). If over-corrects cruise rudder, mark as missing-physics (slipstream over rudder) and defer to post-2.4 roadmap item. This is an expected outcome — document it cleanly rather than forcing a fit.
 
     *Step 3 — Lock and commit references:*
-    - [ ] Narrow tolerances on all 9 scenarios based on post-tuning measured margins (2-3× actual margin per triage discipline).
-    - [ ] Commit reference plots to `docs/plots/beaver/<scenario>.png` (versioned artifacts, reviewed in PRs).
-    - [ ] Update [PROGRESS.md § Bench-identified gaps](PROGRESS.md#bench-identified-model-gaps-open-from-phase-248-audit): move closed gaps to "Resolved" subsection with final values; open-phase deferrals (slipstream physics) documented with target phase.
-    - [ ] Close out 2.4.8 with a section in PROGRESS summarizing final coefficient set, final scenario suite, and what Phase 2.5 inherits.
+    - [x] Narrow tolerances on all 9 scenarios based on post-tuning measured margins (2-3× actual margin per triage discipline).
+    - [x] Commit reference plots to `docs/plots/beaver/<scenario>.png` (versioned artifacts, reviewed in PRs).
+    - [x] Update [PROGRESS.md § Bench-identified gaps](PROGRESS.md#bench-identified-model-gaps-open-from-phase-248-audit): move closed gaps to "Resolved" subsection with final values; open-phase deferrals (slipstream physics) documented with target phase.
+    - [x] Close out 2.4.8 with a section in PROGRESS summarizing final coefficient set, final scenario suite, and what Phase 2.5 inherits.
 
     **Deferred (not required before 2.5):**
     - Per-aircraft coefficient migration from `flight.rs` constants to `AircraftSpec`. Explicitly deferred to [Phase 5.1 Content milestone](#milestone-51-content) when the 2nd aircraft lands — migrating before multiple aircraft means migrating and then waiting. Beaver values in `flight.rs` are authoritative until then.
@@ -252,14 +252,14 @@ A cube can be flown (WASD/gamepad) over a terrain. Frame budget check passes at 
     6. Final coefficient set documented in PROGRESS so 2.5 contact physics work starts from a known-stable flight model.
 
     Completing these six items means the flight model is *locked for 2.5* — contact physics development won't see coefficient drift mid-milestone.
-- [ ] Property tests (close at end of 2.4):
+- [x] Property tests (close at end of 2.4):
     - Level flight at cruise power holds altitude within tolerance under zero wind
     - Published cruise speed achievable at published power setting within tolerance
     - Stall speeds (clean / flaps / floats) match POH figures within tolerance
     - Stall recovery within documented time at configured input sequence
     - Determinism: same seed + same input trace + same dial state -> bit-identical state
-- [ ] Validate against DHC-2 POH performance charts (takeoff distance, climb rate, cruise fuel burn) before milestone close
-- [ ] **Scratch-branch prototype of the flight-model feel belongs in Phase 1**; this milestone is where feel locks. If feel has not clicked by 4-6 weeks into this milestone, trim scope per MVP re-planning in [skills/flowplan-methodology/SKILL.md](skills/flowplan-methodology/SKILL.md).
+- [x] Validate against DHC-2 POH performance charts (takeoff distance, climb rate, cruise fuel burn) before milestone close
+- [x] **Scratch-branch prototype of the flight-model feel belongs in Phase 1**; this milestone is where feel locks. If feel has not clicked by 4-6 weeks into this milestone, trim scope per MVP re-planning in [skills/flowplan-methodology/SKILL.md](skills/flowplan-methodology/SKILL.md).
 
 ### Milestone 2.4.9: Flight-model refinement (optional-before-2.5, required-before-v1)
 
@@ -270,22 +270,22 @@ Both items discovered via the triage protocol encoded in [skills/flowplan-flight
 **2.4.9a Slipstream-over-rudder physics.**
 - Context: Gap 2 in [PROGRESS.md § Bench-identified gaps](PROGRESS.md#bench-identified-model-gaps-open-from-phase-248-audit). Real Beaver pilots at full power use 20-40% right rudder; our model only needs 5.5%. Confirmed via coefficient experiment (raising `P_FACTOR_ARM_M` over-corrects cruise while barely helping climb) that the issue is *rudder effectiveness scaling with thrust*, not P-factor magnitude.
 - Implementation sketch: add slipstream term to yaw-moment calc. `q_local_at_rudder = q_freestream + slipstream_boost(thrust)`, where `slipstream_boost` is a function of prop-disc velocity increment (derived from thrust, prop area, freestream velocity). Rudder moment uses `q_local_at_rudder` instead of `q_freestream`. Similar boost applies to elevator (if behind prop) but smaller due to geometry.
-- [ ] Add `slipstream_boost(thrust, airspeed)` helper in `flight.rs`.
-- [ ] Modify yaw-moment calculation to use slipstream-augmented q for rudder term.
-- [ ] Optionally modify pitch-moment for elevator (if geometry supports).
-- [ ] Ripple-analyze + regression check per [triage protocol](skills/flowplan-flight-bench/references/model-gap-triage.md).
-- [ ] Re-tune cruise / climb scenarios if rudder-trim values shift (expected: cruise_climb rudder rises toward 0.25-0.30; cruise_sl slightly rises too).
-- [ ] Update Gap 2 in PROGRESS to "Resolved" with final slipstream parameters + scenario rudder-trim updates.
+- [x] Add `slipstream_boost(thrust, airspeed)` helper in `flight.rs`.
+- [x] Modify yaw-moment calculation to use slipstream-augmented q for rudder term.
+- [x] Optionally modify pitch-moment for elevator (if geometry supports).
+- [x] Ripple-analyze + regression check per [triage protocol](skills/flowplan-flight-bench/references/model-gap-triage.md).
+- [x] Re-tune cruise / climb scenarios if rudder-trim values shift (expected: cruise_climb rudder rises toward 0.25-0.30; cruise_sl slightly rises too).
+- [x] Update Gap 2 in PROGRESS to "Resolved" with final slipstream parameters + scenario rudder-trim updates.
 
 **2.4.9b Cl_β dihedral roll stability.**
 - Context: discovered during 2.4.8 Step 1 when attempting turn scenarios. Without Cl_β (rolling moment from sideslip), a banked aircraft has no restoring roll moment — bank spirals rather than locking. Coordinated turn scenarios blocked.
 - Implementation sketch: add `Cl_β` coefficient to flight.rs. Roll moment gains `q_dyn·S·b·Cl_β·β` term. Typical value for a Beaver-class GA single: Cl_β ≈ -0.07 to -0.10 per rad (negative = right-wing-down rolls induce nose-right yaw which induces nose-right β which induces right-wing-up rolling moment = restoring).
-- [ ] Add `CL_BETA` constant in `flight.rs`.
-- [ ] Add dihedral-roll term to roll moment calculation.
-- [ ] Ripple-analyze: unlikely to affect straight-line scenarios; may slightly dampen roll transients.
-- [ ] Add `beaver_coordinated_turn_30` scenario (previously deferred inline in `flight_bench.rs`). Validates turn holds at 30° bank without spiral.
-- [ ] Add `beaver_coordinated_turn_60` scenario. Validates accelerated-stall α calculation under 2 g load.
-- [ ] Update PROGRESS "Bench-identified gaps" section: remove turn-scenarios-deferred note.
+- [x] Add `CL_BETA` constant in `flight.rs`.
+- [x] Add dihedral-roll term to roll moment calculation.
+- [x] Ripple-analyze: unlikely to affect straight-line scenarios; may slightly dampen roll transients.
+- [x] Add `beaver_coordinated_turn_30` scenario (previously deferred inline in `flight_bench.rs`). Validates turn holds at 30° bank without spiral.
+- [x] Add `beaver_coordinated_turn_60` scenario. Validates accelerated-stall α calculation under 2 g load.
+- [x] Update PROGRESS "Bench-identified gaps" section: remove turn-scenarios-deferred note.
 
 ### Deliverable (2.4.9)
 
@@ -321,7 +321,7 @@ are in scope -- the Beaver is flown on both.
 - [x] Per-pontoon velocity includes angular contribution (`v_pontoon = v_cg + ω_world × r_world`) so roll/yaw rates couple into drag → angular damping emerges naturally
 - [x] Integration test: float dropped from 1.5 m settles near analytic equilibrium draft (~0.66 m CG mean over last 10 s of a 30 s run, ±0.15 m tolerance)
 - [x] App `min_altitude` clamp drops the `WATER_LEVEL` floor — buoyancy now manages water contact in-game; terrain remains the only `min_altitude` source until 2.5b lands
-- [ ] Water-taxi scenario migrated to 2.5a.3 — single-point float sampling can't produce the fore/aft buoyancy restoring moment that real floats use to limit pitch-down under drag; 2.5a.3 multi-point sampling supplies it naturally. 2.5a.2 drag-in-isolation is validated by unit tests (vertical damping opposes motion, horizontal drag opposes motion, drag scales with wetted fraction).
+- [x] Water-taxi scenario migrated to 2.5a.3 — single-point float sampling can't produce the fore/aft buoyancy restoring moment that real floats use to limit pitch-down under drag; 2.5a.3 multi-point sampling supplies it naturally. 2.5a.2 drag-in-isolation is validated by unit tests (vertical damping opposes motion, horizontal drag opposes motion, drag scales with wetted fraction).
 
 **2.5a.3c On-step retune (drag + planing-lift forward offset). — SHIPPED**
 - [x] Reduced `HORIZONTAL_DRAG_N_PER_MPS2` 75 → 40 (drag pitch-down moment was 4.5× too strong post mesh-aligned floats)
@@ -737,7 +737,7 @@ The plane has a voice (engine, wind, water, splash). Weather actively shapes fli
 
 Phase 4 implementation work requires several design decisions that can be frozen earlier. These are **design doc deliverables**, not code — authored in Phase 3 (or earlier) so Phase 4 milestones have a concrete spec to build from.
 
-- [ ] **[MAPGEN.md](MAPGEN.md)** — map generation / chunk model / hydrology / biomes. **DRAFT SHIPPED** (initial version authored during Phase 2.5 close-out stock-take).
+- [x] **[MAPGEN.md](MAPGEN.md)** — map generation / chunk model / hydrology / biomes. **DRAFT SHIPPED** (initial version authored during Phase 2.5 close-out stock-take).
 - [ ] **UI_ARCHITECTURE.md** — UI framework decision (egui for settings/menus vs hand-rolled vs hybrid), navigation model, prompt system, toggle-able debug overlay. Target: vector/math/shader-drawn UI with minimal bitmap assets (see [FEATURES.md § UI Direction](FEATURES.md#ui-direction)). Unblocks Milestones 4.8 / 4.8.5 / 4.9.
 - [ ] **LIVERY.md** (or expanded FEATURES.md § Livery & Customization) — paint-editor representation choice (UV-space / decal projection / hybrid), brush types, layer model, undo-history scope, save format. Unblocks save-format lock in 4.10 and Paint Shop in 5.3.
 
