@@ -57,6 +57,17 @@ pub struct SimState {
     /// aligned with the physics. Folded into `state_hash` so determinism covers
     /// wave phase.
     pub wave_time: f32,
+    /// Chop intensity scalar — multiplies wave amplitudes sampled by buoyancy.
+    /// Default 1.0 (nominal chop per `WAVES` constants). Phase 3.2 weather
+    /// wires this from `ChopState`: 0.0 = glassy water (no waves), 1.0 = current
+    /// baseline, 2.0+ = heavy chop. Folded into `state_hash` so changing chop
+    /// state is part of the deterministic trace.
+    ///
+    /// Visual-only: render shader samples its own wall-clock wave sum without
+    /// this scalar. Phase 3.2 will wire `SceneParams.chop_intensity` to keep
+    /// visual and physics chop aligned; until then, render shows nominal chop
+    /// regardless of this value.
+    pub chop_intensity: f32,
     /// Per-sim RNG (for future spawn / weather; retained so `SimState` is seeded).
     pub rng: Rng,
     /// World seed for replay / state-hash purposes.
@@ -85,6 +96,8 @@ impl SimState {
             // the sampled surface height is zero. Scenarios start from this clean
             // state so bench CSVs are reproducible across runs.
             wave_time: 0.0,
+            // Nominal chop baseline. Phase 3.2 weather drives this from ChopState.
+            chop_intensity: 1.0,
             rng: Rng::from_seed(seed),
             seed,
             aircraft: None,
@@ -113,6 +126,7 @@ impl SimState {
             dt,
             min_altitude,
             self.wave_time,
+            self.chop_intensity,
         );
         self.camera
             .follow(self.vehicle.position, self.vehicle.orientation, dt);
@@ -178,6 +192,7 @@ fn tick_dynamics(
     dt: f32,
     min_altitude: f32,
     wave_time: f32,
+    chop_intensity: f32,
 ) -> flight::FlightOutputs {
     // AGL approximation for ground effect (2.4.6). `min_altitude` is the app-supplied
     // surface clamp that includes the float offset + a small margin; for ground
@@ -190,7 +205,7 @@ fn tick_dynamics(
 
     // Per-pontoon buoyancy (Phase 2.5a.1). Short-circuits to zero above water or
     // when no aircraft spec is loaded.
-    let buoy = buoyancy::compute_buoyancy(v, spec, wave_time);
+    let buoy = buoyancy::compute_buoyancy(v, spec, wave_time, chop_intensity);
 
     // Angular: Euler-integrate angular velocity from the summed aero-moment-derived
     // and buoyancy-derived angular acceleration, then compose the resulting rotation

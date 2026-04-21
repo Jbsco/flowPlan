@@ -15,7 +15,7 @@ Last updated: **2026-04-20** (Phase 2 in progress; 2.1 / 2.6 / 2.2 core + 2.3 co
     - Milestone 2.3 (plane model + glTF loader + spec sheet): CORE SHIPPED; 2.3.4 back-face culling deferred pending chase-camera / cockpit work
     - Milestone 2.2 (water): CORE SHIPPED (flat quad, Gerstner waves, CPU height sampler, terrain amplitude tune, pre-2.5 ground clamp); 2.2.4 shoreline foam and 2.2.5b distant-water LOD pending
     - Milestone 2.4 (flight model): COMPLETE THROUGH 2.4.8. Shipped: 2.4.1-2.4.7 per-sub-milestone items (skeleton, airfoil forces, lift direction, telemetry, engine power curve + fuel, keyboard slew, moment-based angular dynamics + HUD, real stall physics, attitude indicator, flaps, secondary effects, density altitude), plus 2.4.8 full cycle: flight-test bench framework + 7 Beaver scenarios + 2×4 panel plot pipeline + `--scenario` CLI playback + model-gap triage process + coefficient tuning pass (Cl_max 1.65→2.0, Cd0 0.045→0.055) + reference plots committed to `docs/plots/beaver/` + final inheritance snapshot in PROGRESS.md. Milestone 2.4.9 (slipstream + Cl_β dihedral) documented as optional-before-2.5.
-    - Milestone 2.5 (ground + water contact physics): IN PROGRESS — 2.5a.1 + 2.5a.2 + 2.5a.3 + R-reset SHIPPED, 2.5a.4–2.5a.7 queued. Entry order: 2.5a water → 2.5b ground → 2.5c invariants+tests. 2.5a decomposed into 7 dependency-ordered sub-milestones: per-pontoon buoyancy + `SimState.wave_time` deterministic wave clock (2.5a.1 — SHIPPED) → per-pontoon horizontal drag + vertical damping (2.5a.2 — SHIPPED) → multi-point float sampling + planing lift + water-taxi/takeoff bench scenarios (2.5a.3 — SHIPPED, eliminated the pitch-flip bug via fore/aft buoyancy asymmetry) → porpoising (2.5a.4) → asymmetric / one-pontoon maneuver validation (2.5a.5) → water rudder + weather-vaning (2.5a.6) → chop-intensity Phase 3.2 hook (2.5a.7). Per-pontoon physics up front means asymmetric behavior (one-float-dipped, one-pontoon takeoff) emerges for free. Wake + spray + touchdown polish land before 2.5a gate. Non-global water heights (lakes, rivers, sandbars) remain Phase 3+ per FEATURES.md § Terrain & Static Landscape — `water_height(x, z, t)` API is position-conditioned so hydrology rebuild plugs in without breaking 2.5a. See ROADMAP.md § Milestone 2.5 for full breakdown.
+    - Milestone 2.5 (ground + water contact physics): IN PROGRESS — **2.5a.1 + 2.5a.2 + 2.5a.3 + 2.5a.3c + 2.5a.4 (co-shipped) + 2.5a.5 + 2.5a.6 + 2.5a.7 + R-reset SHIPPED.** 2.5a fully closed; 2.5b (ground/wheels) + 2.5c (invariants) remaining. Entry order: 2.5a water → 2.5b ground → 2.5c invariants+tests. 2.5a decomposed into 7 dependency-ordered sub-milestones: per-pontoon buoyancy + `SimState.wave_time` deterministic wave clock (2.5a.1 — SHIPPED) → per-pontoon horizontal drag + vertical damping (2.5a.2 — SHIPPED) → multi-point float sampling + planing lift + water-taxi/takeoff bench scenarios (2.5a.3 — SHIPPED, eliminated the pitch-flip bug via fore/aft buoyancy asymmetry) → porpoising (2.5a.4) → asymmetric / one-pontoon maneuver validation (2.5a.5) → water rudder + weather-vaning (2.5a.6) → chop-intensity Phase 3.2 hook (2.5a.7). Per-pontoon physics up front means asymmetric behavior (one-float-dipped, one-pontoon takeoff) emerges for free. Wake + spray + touchdown polish land before 2.5a gate. Non-global water heights (lakes, rivers, sandbars) remain Phase 3+ per FEATURES.md § Terrain & Static Landscape — `water_height(x, z, t)` API is position-conditioned so hydrology rebuild plugs in without breaking 2.5a. See ROADMAP.md § Milestone 2.5 for full breakdown.
 - Milestone order taken (deviates from ROADMAP's numeric order): **2.1 -> 2.6 -> 2.3 -> 2.2 -> 2.4 -> 2.5**. Sky landed before plane because it made visual tuning of the Beaver easier; water came before flight model because buoyancy (2.5) needs it. Within 2.4: 2.4.4 jumped ahead of 2.4.3 because the moment model fundamentally changes handling feel and was a prerequisite for sensible tuning against any thrust model.
 - Gate: green. `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `cargo bench --bench frame_budget -- --test`, and the hardware snapshot tests all pass.
 - Test count: **169 total** (the bench integration test counts as one `beaver_scenarios_all_pass` test but runs the full `BEAVER_SCENARIOS` array and validates every assertion inside — 3 scenarios × 2-3 assertions each = 7 POH-anchored assertions). Three hardware snapshots committed: `scene_minimal`, `beaver_preview`, `scene_extended` (1024x640; uses the real `Terrain::from_seed` so it reflects in-game terrain faithfully). Reference photos `ref1.png`, `ref2.png`, `ref3.png` in `crates/render/tests/snapshots/` as aesthetic targets (coastal Alaska / fjord floatplane photography).
@@ -685,6 +685,56 @@ Yaw stays under 2° throughout, smooth monotonic acceleration past Vx (29 m/s) t
 - `crates/sim/src/flight_bench.rs` — added CoordinationHold to takeoff scenarios, lowered cruise_climb yaw trim, updated assertion targets
 - `crates/render/src/water.wgsl` — further-tightened foam crest + mask thresholds
 - `docs/plots/beaver/*.png` — 17 reference plots regenerated
+
+### Milestone 2.5a.5 — Asymmetric / one-pontoon maneuver validation (SHIPPED)
+
+No new physics; the multi-point / multi-pontoon buoyancy of 2.5a.1 + 2.5a.3 already supports asymmetric wetted-area behavior. 2.5a.5 is scenario coverage — verifying the emergent asymmetry matches what a pilot would feel.
+
+**Six new bench scenarios** (per `skills/flowplan-flight-bench/SKILL.md` Core Rule #10 asymmetric-pair discipline — right-rotating prop means left/right are NOT mirror images):
+- `beaver_water_right_bank_accel` + `beaver_water_left_bank_accel` — full-power acceleration with the aircraft held at ±5° roll via `Quat::from_xyzw(0, 0, ±0.043_619_387, 0.999_048_23)` (precomputed const-compatible Z-axis quaternion). Validates that a banked attitude reaches planing speed on a single pontoon.
+- `beaver_water_takeoff_one_pontoon_{right,left}` — full takeoff on one pontoon; assertion verifies reaching target airspeed.
+- `beaver_water_landing_one_pontoon_{right,left}` — approach banked, touch down on one pontoon, transition to level. Tests the opposite half of the asymmetric-pair discipline (landings aren't mirror of takeoffs because power + prop effects differ).
+
+Landing-one-pontoon scenarios settle to ~18.0 m/s (bank adds drag asymmetry relative to wings-level reference); assertion tolerance updated accordingly.
+
+### Milestone 2.5a.6 — Water rudder + weather-vaning (SHIPPED)
+
+**New controls / input plumbing:**
+- `InputEvent::SetWaterRudder(bool)` — cross-boundary input event; translated by the app from keyboard / joystick to this deployment intent.
+- `Controls.water_rudder: bool` field (default `false` — retracted, matches real-aircraft pre-takeoff state).
+- `ControlsSnapshot.water_rudder: u32` bit in the GPU-visible snapshot (padding re-budgeted: `pad0: [f32; 2]` instead of `[f32; 3]`).
+
+**Physics** (`crates/sim/src/buoyancy.rs`):
+- `WATER_RUDDER_COEFF = 25.0` (N·s²/m² per unit yaw-input per wetted fraction), `WATER_RUDDER_ARM_M = 3.2 m` aft of CG.
+- Deployed side force: `F_side = WATER_RUDDER_COEFF × v_forward² × avg_wetted_fraction × yaw_input`, applied at body +Z. Moment arm via cross product puts the moment in the yaw axis.
+- Retracted state contributes zero; weathervaning still works via the existing aero `CN_BETA` stability, so the aircraft tracks its velocity vector at low water speed even without the rudder.
+
+**Five new unit tests** verify: retracted → zero yaw accel; deployed + right yaw → negative body-Y accel (nose-right per flowplan convention); deployed + left yaw → positive body-Y accel; v² scaling (fast/slow ratio ~4); zero force when airborne.
+
+**Two new bench scenarios:**
+- `beaver_water_taxi_rudder_deployed` — idle throttle, water rudder on, right yaw input → heading turns measurably.
+- `beaver_water_taxi_rudder_retracted` — same but rudder off → heading delta much smaller, validates the controls path.
+
+**Unrelated idle-tuning:** `ENGINE_POWER_IDLE_KW` dropped 20 → 10 during this sub-milestone to match real Beaver idle (user feedback "more realistic idle please"). Ripple: `beaver_water_taxi` target updated 4.3 → 2.4 m/s (matches real Beaver idle taxi).
+
+### Milestone 2.5a.7 — Chop-intensity Phase 3.2 hook (SHIPPED)
+
+**New `SimState` field:** `chop_intensity: f32` (default 1.0). Multiplies `water_height(x, z, wave_time)` inside `buoyancy::compute_buoyancy` per sample. 0.0 = glassy water (wave phase frozen at rest plane), 1.0 = nominal `WAVES` set, 2.0+ = heavy chop. Folded into `state_hash` so the deterministic trace stays complete under future weather modulation.
+
+**Pure-multiplicative design** preserves phase — sweeping chop from 0 → 2 deterministically rescales amplitude without breaking reproducibility. `tick_dynamics` signature extended with `chop_intensity: f32` passthrough; all test call sites updated.
+
+**Two new unit tests:**
+- `chop_intensity_zero_freezes_wave_phase_effect` — at chop=0, force at t=0 and t=0.5 are bit-identical (glassy water guarantee).
+- `chop_intensity_amplifies_wave_phase_swing` — chop=2 produces >1.5× the wave-phase force swing of chop=1.
+
+**Phase 3.2 integration points remaining:**
+- `ChopState` (weather module, not yet built) → drives `SimState.chop_intensity` via the same `apply_inputs`-style path used for controls, or via a separate per-tick environment update.
+- `SceneParams.chop_intensity` (render-side) → lets the visual shader modulate amplitude in sync with physics. Currently the shader samples the unmodulated nominal `WAVES` set via wall-clock time; until this wires up, visual and physics chop can desync if someone sets `chop_intensity != 1.0`.
+- Both integration points are clean because the v1 shipment keeps the runtime constant at 1.0.
+
+**2.5a total scope delivered:** 2.5a.1 through 2.5a.7 + 2.5a.3c retune + 2.5a.4 (co-shipped) + R-reset + wave retune + slipstream-q-boost + foam retune + camera-follow water mesh + shader-baked-in regression tests + top-down water snapshot tests. **Bench scenario count: 25 total** (24 passing, 1 triaged = `beaver_coordinated_turn_60_overbank` pending scenario re-design). All 14 water-contact scenarios pass.
+
+**Deferred to Phase 3 (explicitly logged in ROADMAP § 3.5b):** FFT-based ocean water (Tessendorf/Phillips/JONSWAP). Gerstner sum-of-sinusoids fundamentally produces a visible lattice pattern that no amount of amplitude modulation, noise displacement, or domain warping fully eliminates; logged as its own milestone rather than pushed further here.
 
 ### Pre-Phase-2.5 gate — EVALUATED
 

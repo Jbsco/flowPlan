@@ -227,6 +227,7 @@ pub fn compute_buoyancy(
     v: &VehicleState,
     spec: Option<&AircraftSpec>,
     wave_time: f32,
+    chop_intensity: f32,
 ) -> BuoyancyOutputs {
     let Some(spec) = spec else {
         return BuoyancyOutputs::default();
@@ -266,8 +267,12 @@ pub fn compute_buoyancy(
             let world_offset = v.orientation * sample_body_offset;
             let world_center = v.position + world_offset;
 
-            // Water surface at this sample's (x, z).
-            let water_y = water_height(world_center.x, world_center.z, wave_time);
+            // Water surface at this sample's (x, z). Scaled by `chop_intensity` so
+            // the same deterministic wave phase can be damped (glassy water) or
+            // amplified (heavy chop) without recomputing the Gerstner sum. The
+            // function returns displacement around the y=0 rest plane, so scalar
+            // multiplication correctly scales amplitude while preserving phase.
+            let water_y = water_height(world_center.x, world_center.z, wave_time) * chop_intensity;
 
             // Orientation-aware section bottom: body -Y half-height rotated.
             let section_bottom_world =
@@ -438,7 +443,7 @@ mod tests {
     #[test]
     fn no_spec_returns_zero() {
         let v = level_vehicle_at(0.0);
-        let out = compute_buoyancy(&v, None, 0.0);
+        let out = compute_buoyancy(&v, None, 0.0, 1.0);
         assert_eq!(out.linear_accel, Vec3::ZERO);
         assert_eq!(out.angular_accel, Vec3::ZERO);
         assert!(out.total_force_n.abs() < f32::EPSILON);
@@ -449,7 +454,7 @@ mod tests {
         // CG at y=50m → floats nowhere near water.
         let v = level_vehicle_at(50.0);
         let spec = beaver_spec();
-        let out = compute_buoyancy(&v, Some(&spec), 0.0);
+        let out = compute_buoyancy(&v, Some(&spec), 0.0, 1.0);
         assert!(
             out.total_force_n.abs() < f32::EPSILON,
             "expected zero buoyancy above water, got {} N",
@@ -463,7 +468,7 @@ mod tests {
         // top at -0.12m, both below water level y=0). Expect the displacement cap.
         let v = level_vehicle_at(0.0);
         let spec = beaver_spec();
-        let out = compute_buoyancy(&v, Some(&spec), 0.0);
+        let out = compute_buoyancy(&v, Some(&spec), 0.0, 1.0);
 
         // Max force = 2 pontoons × 2.236 m³ × 1000 kg/m³ × 9.81 m/s² ≈ 43,870 N.
         let expected_max = 2.0 * 2.236 * WATER_DENSITY_KG_M3 * GRAVITY.length();
@@ -491,7 +496,7 @@ mod tests {
         // CG_y = center_y - body_offset.y = 0.159 - (-2.24) = 2.40 m.
         let v = level_vehicle_at(2.40);
         let spec = beaver_spec();
-        let out = compute_buoyancy(&v, Some(&spec), 0.0);
+        let out = compute_buoyancy(&v, Some(&spec), 0.0, 1.0);
 
         let weight_n = spec.max_mass_wheels_kg * GRAVITY.length();
         // Expect buoyancy ≈ weight within a few percent (box-approximation tolerance).
@@ -515,7 +520,7 @@ mod tests {
         // must give zero roll and yaw moments.
         let v = level_vehicle_at(-1.0);
         let spec = beaver_spec();
-        let out = compute_buoyancy(&v, Some(&spec), 0.0);
+        let out = compute_buoyancy(&v, Some(&spec), 0.0, 1.0);
         assert!(
             out.angular_accel.z.abs() < 1e-4,
             "expected zero roll accel at deep submersion, got {}",
@@ -543,8 +548,8 @@ mod tests {
         // the surface by ±0.2 m cause force to swing noticeably.
         let v = level_vehicle_at(2.32);
         let spec = beaver_spec();
-        let out_t0 = compute_buoyancy(&v, Some(&spec), 0.0);
-        let out_t1 = compute_buoyancy(&v, Some(&spec), 0.5);
+        let out_t0 = compute_buoyancy(&v, Some(&spec), 0.0, 1.0);
+        let out_t1 = compute_buoyancy(&v, Some(&spec), 0.5, 1.0);
         assert!(
             (out_t0.total_force_n - out_t1.total_force_n).abs() > 1.0,
             "buoyancy should differ with wave phase in the unsaturated regime; t0={:.1} t1={:.1}",
@@ -563,11 +568,11 @@ mod tests {
         let mut v = level_vehicle_at(2.32);
         v.velocity = Vec3::new(0.0, -1.0, 0.0); // sinking at 1 m/s
 
-        let out = compute_buoyancy(&v, Some(&spec), 0.0);
+        let out = compute_buoyancy(&v, Some(&spec), 0.0, 1.0);
 
         // Baseline buoyancy at y=0.58 with zero velocity, for comparison.
         let v_still = level_vehicle_at(2.32);
-        let baseline = compute_buoyancy(&v_still, Some(&spec), 0.0);
+        let baseline = compute_buoyancy(&v_still, Some(&spec), 0.0, 1.0);
 
         assert!(
             out.linear_accel.y > baseline.linear_accel.y,
@@ -585,9 +590,9 @@ mod tests {
         let mut v = level_vehicle_at(2.32);
         v.velocity = Vec3::new(0.0, 1.0, 0.0); // rising at 1 m/s
 
-        let out = compute_buoyancy(&v, Some(&spec), 0.0);
+        let out = compute_buoyancy(&v, Some(&spec), 0.0, 1.0);
         let v_still = level_vehicle_at(2.32);
-        let baseline = compute_buoyancy(&v_still, Some(&spec), 0.0);
+        let baseline = compute_buoyancy(&v_still, Some(&spec), 0.0, 1.0);
 
         assert!(
             out.linear_accel.y < baseline.linear_accel.y,
@@ -606,7 +611,7 @@ mod tests {
         let mut v = level_vehicle_at(2.32);
         v.velocity = Vec3::new(0.0, 0.0, -5.0); // 5 m/s forward
 
-        let out = compute_buoyancy(&v, Some(&spec), 0.0);
+        let out = compute_buoyancy(&v, Some(&spec), 0.0, 1.0);
 
         // With quadratic drag at 5 m/s, partial wet (0.58 CG → ~0.37 wetted):
         // F_drag per float = 75 × 25 × 0.37 = 694 N opposing motion.
@@ -626,11 +631,11 @@ mod tests {
         let spec = beaver_spec();
         let mut v_shallow = level_vehicle_at(2.50);
         v_shallow.velocity = Vec3::new(5.0, 0.0, 0.0);
-        let out_shallow = compute_buoyancy(&v_shallow, Some(&spec), 0.0);
+        let out_shallow = compute_buoyancy(&v_shallow, Some(&spec), 0.0, 1.0);
 
         let mut v_deep = level_vehicle_at(2.05);
         v_deep.velocity = Vec3::new(5.0, 0.0, 0.0);
-        let out_deep = compute_buoyancy(&v_deep, Some(&spec), 0.0);
+        let out_deep = compute_buoyancy(&v_deep, Some(&spec), 0.0, 1.0);
 
         assert!(
             out_deep.linear_accel.x.abs() > out_shallow.linear_accel.x.abs(),
@@ -659,7 +664,7 @@ mod tests {
         v.velocity = Vec3::ZERO;
         v.angular_velocity = Vec3::ZERO;
 
-        let out = compute_buoyancy(&v, Some(&spec), 0.0);
+        let out = compute_buoyancy(&v, Some(&spec), 0.0, 1.0);
 
         // Body-frame pitch moment: positive X → nose-up. Nose-down attitude should
         // produce positive pitch moment (restoring toward level).
@@ -680,7 +685,7 @@ mod tests {
         v.velocity = Vec3::ZERO;
         v.angular_velocity = Vec3::ZERO;
 
-        let out = compute_buoyancy(&v, Some(&spec), 0.0);
+        let out = compute_buoyancy(&v, Some(&spec), 0.0, 1.0);
 
         assert!(
             out.angular_accel.x < -0.01,
@@ -698,16 +703,16 @@ mod tests {
 
         let mut v_slow = level_vehicle_at(2.32);
         v_slow.velocity = Vec3::new(0.0, 0.0, -10.0); // 10 m/s forward (body -Z)
-        let out_slow = compute_buoyancy(&v_slow, Some(&spec), 0.0);
+        let out_slow = compute_buoyancy(&v_slow, Some(&spec), 0.0, 1.0);
 
         let mut v_fast = level_vehicle_at(2.32);
         v_fast.velocity = Vec3::new(0.0, 0.0, -20.0); // 20 m/s forward
-        let out_fast = compute_buoyancy(&v_fast, Some(&spec), 0.0);
+        let out_fast = compute_buoyancy(&v_fast, Some(&spec), 0.0, 1.0);
 
         // Extract the planing lift contribution by subtracting buoyancy-only baseline
         // (at rest at same draft).
         let v_still = level_vehicle_at(2.32);
-        let baseline = compute_buoyancy(&v_still, Some(&spec), 0.0);
+        let baseline = compute_buoyancy(&v_still, Some(&spec), 0.0, 1.0);
 
         let slow_lift_component = out_slow.linear_accel.y - baseline.linear_accel.y;
         let fast_lift_component = out_fast.linear_accel.y - baseline.linear_accel.y;
@@ -734,11 +739,11 @@ mod tests {
         let spec = beaver_spec();
         let mut v_forward = level_vehicle_at(2.32);
         v_forward.velocity = Vec3::new(0.0, 0.0, -10.0); // body -Z (forward)
-        let out_forward = compute_buoyancy(&v_forward, Some(&spec), 0.0);
+        let out_forward = compute_buoyancy(&v_forward, Some(&spec), 0.0, 1.0);
 
         let mut v_backward = level_vehicle_at(2.32);
         v_backward.velocity = Vec3::new(0.0, 0.0, 10.0); // body +Z (backward)
-        let out_backward = compute_buoyancy(&v_backward, Some(&spec), 0.0);
+        let out_backward = compute_buoyancy(&v_backward, Some(&spec), 0.0, 1.0);
 
         // Forward produces planing lift on top of buoyancy; backward does not. So
         // forward vertical accel > backward vertical accel.
@@ -762,7 +767,7 @@ mod tests {
         v.velocity = Vec3::new(0.0, 0.0, -5.0); // forward 5 m/s
         v.controls.yaw = 1.0; // full right rudder
         v.controls.water_rudder = false;
-        let out = compute_buoyancy(&v, Some(&spec), 0.0);
+        let out = compute_buoyancy(&v, Some(&spec), 0.0, 1.0);
 
         assert!(
             out.angular_accel.y.abs() < 0.01,
@@ -781,7 +786,7 @@ mod tests {
         v.velocity = Vec3::new(0.0, 0.0, -5.0); // 5 m/s forward
         v.controls.yaw = 1.0; // full right rudder
         v.controls.water_rudder = true;
-        let out = compute_buoyancy(&v, Some(&spec), 0.0);
+        let out = compute_buoyancy(&v, Some(&spec), 0.0, 1.0);
 
         assert!(
             out.angular_accel.y < -0.01,
@@ -797,7 +802,7 @@ mod tests {
         v.velocity = Vec3::new(0.0, 0.0, -5.0);
         v.controls.yaw = -1.0; // full left rudder
         v.controls.water_rudder = true;
-        let out = compute_buoyancy(&v, Some(&spec), 0.0);
+        let out = compute_buoyancy(&v, Some(&spec), 0.0, 1.0);
 
         assert!(
             out.angular_accel.y > 0.01,
@@ -813,13 +818,13 @@ mod tests {
         v_slow.velocity = Vec3::new(0.0, 0.0, -3.0);
         v_slow.controls.yaw = 1.0;
         v_slow.controls.water_rudder = true;
-        let slow = compute_buoyancy(&v_slow, Some(&spec), 0.0);
+        let slow = compute_buoyancy(&v_slow, Some(&spec), 0.0, 1.0);
 
         let mut v_fast = level_vehicle_at(2.40);
         v_fast.velocity = Vec3::new(0.0, 0.0, -6.0); // 2× speed
         v_fast.controls.yaw = 1.0;
         v_fast.controls.water_rudder = true;
-        let fast = compute_buoyancy(&v_fast, Some(&spec), 0.0);
+        let fast = compute_buoyancy(&v_fast, Some(&spec), 0.0, 1.0);
 
         // 2× speed → ~4× moment (quadratic scaling).
         let ratio = fast.angular_accel.y / slow.angular_accel.y;
@@ -838,9 +843,52 @@ mod tests {
         v.velocity = Vec3::new(0.0, 0.0, -30.0);
         v.controls.yaw = 1.0;
         v.controls.water_rudder = true;
-        let out = compute_buoyancy(&v, Some(&spec), 0.0);
+        let out = compute_buoyancy(&v, Some(&spec), 0.0, 1.0);
 
         assert!(out.angular_accel.y.abs() < 1e-6);
+    }
+
+    // ── Phase 2.5a.7 tests: chop-intensity scalar ────────────────────────────
+
+    #[test]
+    fn chop_intensity_zero_freezes_wave_phase_effect() {
+        // With chop_intensity = 0, the sampled water surface collapses to y=0
+        // regardless of wave_time. So buoyancy at t=0 and t=0.5 must be identical
+        // (the same test that `wave_time_changes_sampled_surface` relies on would
+        // fail here — which is exactly the glassy-water guarantee we want).
+        let v = level_vehicle_at(2.32);
+        let spec = beaver_spec();
+        let out_t0 = compute_buoyancy(&v, Some(&spec), 0.0, 0.0);
+        let out_t1 = compute_buoyancy(&v, Some(&spec), 0.5, 0.0);
+        assert!(
+            (out_t0.total_force_n - out_t1.total_force_n).abs() < f32::EPSILON,
+            "chop=0 should freeze wave phase; t0={:.3} t1={:.3}",
+            out_t0.total_force_n,
+            out_t1.total_force_n,
+        );
+    }
+
+    #[test]
+    fn chop_intensity_amplifies_wave_phase_swing() {
+        // Heavier chop → larger per-tick force swings as the wave phase sweeps.
+        // Same draft, same wave_times, but chop=2 should produce a bigger delta
+        // between t=0 and t=0.5 than chop=1. Uses the unsaturated regime (y=2.32)
+        // where phase differences translate to volume differences.
+        let v = level_vehicle_at(2.32);
+        let spec = beaver_spec();
+        let nominal_t0 = compute_buoyancy(&v, Some(&spec), 0.0, 1.0);
+        let nominal_t1 = compute_buoyancy(&v, Some(&spec), 0.5, 1.0);
+        let nominal_swing = (nominal_t0.total_force_n - nominal_t1.total_force_n).abs();
+
+        let heavy_t0 = compute_buoyancy(&v, Some(&spec), 0.0, 2.0);
+        let heavy_t1 = compute_buoyancy(&v, Some(&spec), 0.5, 2.0);
+        let heavy_swing = (heavy_t0.total_force_n - heavy_t1.total_force_n).abs();
+
+        assert!(
+            heavy_swing > nominal_swing * 1.5,
+            "chop=2 should amplify wave-phase force swing vs chop=1; \
+             nominal_swing={nominal_swing:.1} heavy_swing={heavy_swing:.1}",
+        );
     }
 
     #[test]
@@ -851,7 +899,7 @@ mod tests {
         let mut v = level_vehicle_at(50.0);
         v.velocity = Vec3::new(10.0, -5.0, -30.0);
 
-        let out = compute_buoyancy(&v, Some(&spec), 0.0);
+        let out = compute_buoyancy(&v, Some(&spec), 0.0, 1.0);
         assert!(out.linear_accel.length() < f32::EPSILON);
         assert!(out.total_force_n.abs() < f32::EPSILON);
     }

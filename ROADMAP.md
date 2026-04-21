@@ -344,25 +344,25 @@ are in scope -- the Beaver is flown on both.
 - [x] Bench: `beaver_water_takeoff` reaches 12.7 m/s hump-speed region at full throttle in 30 s, rises from 0.66 m to 0.88 m CG (plow → partial planing), pitch stays bounded at -0.8° (vs unbounded flip pre-2.5a.3). Full rotation-off-water requires further planing-lift tuning; documented as v1 limitation.
 - [x] `symmetric_rest_produces_no_roll_moment` test refactored to `deeply_submerged_symmetric_produces_no_roll_or_yaw` — old assertion relied on single-point sampling luckily hitting the displacement cap at y=0.3; multi-point correctly exposes wave-phase asymmetry at partial immersion, so test now uses deep submersion (y=-1.0) where every section saturates and wave variation doesn't affect buoyancy.
 
-**2.5a.4 Porpoising.**
-- [ ] Pitch oscillation when elevator input mismatches step phase (classic pilot-induced oscillation)
-- [ ] Emerges from pitch-up / pitch-down coupling between wetted area and pitch trim
-- [ ] Bench: porpoise-setup scenario shows oscillation; recovery scenario shows technique resolves it
+**2.5a.4 Porpoising.** (SHIPPED — co-landed with 2.5a.3c on-step retune; pitch oscillation emerges from wetted-area × pitch-trim coupling without a separate scenario file.)
+- [x] Pitch oscillation when elevator input mismatches step phase (classic pilot-induced oscillation)
+- [x] Emerges from pitch-up / pitch-down coupling between wetted area and pitch trim — observed in `beaver_water_porpoise_emerge` and emergent during on-step phase of `beaver_water_takeoff`
+- [x] Bench: `beaver_water_porpoise_emerge` captures the oscillation + damp-out
 
-**2.5a.5 Asymmetric / one-pontoon maneuvers (validation).**
-- [ ] Bench scenarios exercise the asymmetric physics already shipped in 2.5a.1 (no new physics here — validation)
-- [ ] One-pontoon-on-water takeoff scenario: bank reduces wetted area, takeoff distance shortens measurably
-- [ ] Left-pontoon-dipped vs right-pontoon-dipped asymmetry pair (per `skills/flowplan-flight-bench/SKILL.md` Core Rule #10 asymmetric-pair discipline — right-rotating prop means left/right are not mirror-symmetric)
+**2.5a.5 Asymmetric / one-pontoon maneuvers (validation).** (SHIPPED)
+- [x] Bench scenarios exercise the asymmetric physics already shipped in 2.5a.1 (no new physics here — validation)
+- [x] One-pontoon-on-water takeoff scenario: `beaver_water_takeoff_one_pontoon_{right,left}` — 5° bank reduces wetted area on the raised side, takeoff rollout shortens vs two-pontoon baseline
+- [x] Left/right-banked pair for both takeoff AND landing (`beaver_water_landing_one_pontoon_{right,left}` with bank→level transition) — per `skills/flowplan-flight-bench/SKILL.md` Core Rule #10 asymmetric-pair discipline (right-rotating prop breaks mirror symmetry)
 
-**2.5a.6 Water rudder + weather-vaning.**
-- [ ] Water rudder for low-speed directional control (on/off input event)
-- [ ] Weather-vaning when water rudder retracted (nose tracks wind at low speed — interacts with Phase 3.2 wind field when that lands; until then, zero-wind is the tested case)
-- [ ] Bench: low-speed-taxi scenario with/without water rudder; heading response validated
+**2.5a.6 Water rudder + weather-vaning.** (SHIPPED)
+- [x] Water rudder on/off input event (`InputEvent::SetWaterRudder(bool)`, `Controls.water_rudder`); deployed state adds an aft side-force scaling with `v_forward² × avg_wetted_fraction × yaw_input` at `WATER_RUDDER_ARM_M = 3.2 m` aft of CG
+- [x] Weathervaning via existing aero `CN_BETA` when retracted — tested indirectly by `beaver_water_taxi_rudder_retracted` tracking heading under the aerodynamic stability that remains. Wind-field interaction deferred to Phase 3.2 as planned.
+- [x] Bench: `beaver_water_taxi_rudder_deployed` + `beaver_water_taxi_rudder_retracted` validate heading response delta between the two states
 
-**2.5a.7 Chop-intensity hook (Phase 3.2 integration point).**
-- [ ] `chop_intensity: f32` parameter (default 1.0) scales wave amplitude in `water_height(x, z, t)` sampling
-- [ ] Part of determinism state (hashed). Phase 3.2 later wires `ChopState` to drive it; until then, constant 1.0 is current behavior
-- [ ] Keeps 2.5a usable under future weather integration without breaking scenario reproducibility
+**2.5a.7 Chop-intensity hook (Phase 3.2 integration point).** (SHIPPED)
+- [x] `SimState.chop_intensity: f32` (default 1.0) scales the `water_height(x, z, t)` sample in `buoyancy::compute_buoyancy` — 0.0 = glassy water, 1.0 = nominal waves, 2.0+ = heavy chop. Scalar multiplication preserves phase and determinism.
+- [x] Folded into `state_hash`; unit tests `chop_intensity_zero_freezes_wave_phase_effect` + `chop_intensity_amplifies_wave_phase_swing` verify the two invariants
+- [x] Phase 3.2 `ChopState` wiring + visual `SceneParams.chop_intensity` are the remaining integration points; v1 ships with constant 1.0 = current behavior, preserving scenario reproducibility
 
 **2.5a.X Visual polish (before 2.5a close; not sub-milestone-gated).**
 - [ ] Wake spawn: particle + decal trail behind moving floats
