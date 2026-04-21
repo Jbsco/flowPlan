@@ -25,7 +25,7 @@
 //! sample is `ground_y` today; per-surface terrain classification arrives with
 //! 2.5b.6.
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 use crate::aircraft_spec::AircraftSpec;
 use crate::flight::{I_XX, I_YY, I_ZZ};
@@ -71,6 +71,46 @@ const GEAR_DAMPING_N_PER_MPS: f32 = 10_000.0;
 /// cornering / tire-slip model.
 const ROLLING_FRICTION_COEFF: f32 = 0.02;
 
+/// Lateral (cornering) friction coefficient on paved surface.
+///
+/// Tires resist side-slip much more than they resist rolling — that asymmetry
+/// IS what makes wheeled vehicles track straight. A rolling tire has an
+/// effective `µ_r ≈ 0.02`; a laterally-slipping tire grips up to a peak
+/// sliding coefficient of `µ_s ≈ 0.7-0.9` on dry paved, which decays to
+/// ~0.6 under sustained slip.
+///
+/// For 2.5b.3, we model this as a simple kinetic-friction approximation:
+/// lateral force magnitude per gear is `µ_lat · N`, direction opposing the
+/// lateral-slip component of the gear's horizontal velocity. This is
+/// anisotropic (different forward vs lateral coefficients) without the full
+/// slip-angle / cornering-stiffness tire model — which would be 2.5b.6 or
+/// later if vehicle-dynamics realism demands it.
+///
+/// `0.6` chosen mid-range for dry paved; low enough that a modest crosswind
+/// can still weathervane the aircraft, high enough that pilots tracking
+/// straight don't see drift at taxi speed.
+const LATERAL_FRICTION_COEFF: f32 = 0.6;
+
+/// Maximum tailwheel deflection from neutral (radians). Real Beaver tailwheel
+/// steering range is approximately ±30° (0.524 rad) before the linkage bottoms
+/// out. Deflection commanded by yaw input × this angle when the tailwheel is
+/// locked (low ground speed); zero when castoring above threshold.
+const TAILWHEEL_MAX_STEER_RAD: f32 = 0.524; // ~30°
+
+/// Ground speed at which tailwheel starts transitioning from locked (steering)
+/// to fully castoring (free-pivot aligned with velocity). Real Beaver behavior:
+/// at taxi speeds (< ~15 kt / 7.7 m/s) the tailwheel is locked and responds to
+/// pedal input; above ~20 kt (~10 m/s) the rudder has enough authority that the
+/// tailwheel disengages and castors — pilot steers with rudder instead.
+const V_STEER_FULL_MPS: f32 = 7.7;
+const V_CASTOR_FULL_MPS: f32 = 10.0;
+
+/// Velocity threshold below which friction smoothly ramps through zero, so a
+/// stopped aircraft doesn't jitter between +eps / -eps sign flips. At
+/// `|v_component|` ≥ `V_EPS` the friction magnitude is the full `µ·N`;
+/// between 0 and `V_EPS` it scales linearly.
+const V_EPS: f32 = 0.1;
+
 /// Per-contact geometry. One entry per wheel / tailwheel.
 #[derive(Clone, Copy, Debug)]
 struct GearPoint {
@@ -80,6 +120,10 @@ struct GearPoint {
     /// point (rigid-body approximation — strut compression is not modeled as a
     /// separate degree of freedom in v1).
     body_offset: Vec3,
+    /// Steering authority (0.0 = fixed, 1.0 = full). Mains are fixed; tailwheel
+    /// is 1.0 but its effective steering ramps down via the castor-threshold
+    /// gate — this field only scales the *maximum* commanded deflection.
+    steer_factor: f32,
     /// Label for diagnostics / plots. Not functional.
     #[allow(dead_code)]
     label: &'static str,
@@ -101,19 +145,22 @@ struct GearPoint {
 /// realign these to the actual mesh geometry, mirroring the 2.5a.3 float
 /// realignment. Same applies if an `AircraftSpec.gear_geometry` migration lands.
 const BEAVER_GEAR: [GearPoint; 3] = [
-    // Left main wheel.
+    // Left main wheel (fixed — mains don't steer on a taildragger).
     GearPoint {
         body_offset: Vec3::new(-1.65, -1.3, -0.8),
+        steer_factor: 0.0,
         label: "left_main",
     },
     // Right main wheel.
     GearPoint {
         body_offset: Vec3::new(1.65, -1.3, -0.8),
+        steer_factor: 0.0,
         label: "right_main",
     },
-    // Tailwheel — higher (closer to CG in y) because attached to tail structure.
+    // Tailwheel — steerable via yaw input at taxi speed; castors above.
     GearPoint {
         body_offset: Vec3::new(0.0, -0.7, 4.5),
+        steer_factor: 1.0,
         label: "tailwheel",
     },
 ];
@@ -213,22 +260,78 @@ pub fn compute_ground_contact(
         // Normal force acts at the gear contact point in world +Y.
         let normal_force_world = Vec3::new(0.0, normal_n, 0.0);
 
-        // Rolling friction: horizontal drag proportional to the normal force
-        // this gear carries, opposing the gear's horizontal velocity. Skip
-        // when essentially stationary so a stopped aircraft doesn't oscillate
-        // between +eps / -eps via an active-at-zero friction term.
-        let v_horizontal = Vec3::new(v_gear_world.x, 0.0, v_gear_world.z);
-        let v_h_speed = v_horizontal.length();
-        let roll_force_world = if v_h_speed > 1e-4 {
-            let drag_magnitude = ROLLING_FRICTION_COEFF * normal_n;
-            -v_horizontal / v_h_speed * drag_magnitude
+        // ── Wheel-frame velocity decomposition ────────────────────────────
+        //
+        // Tires are anisotropic: they roll freely along their forward axis
+        // (low µ_r) and grip laterally (high µ_lat). Decompose the gear's
+        // horizontal velocity into wheel-frame (forward, lateral) and apply
+        // the two coefficients independently.
+        //
+        // Wheel heading in BODY frame:
+        // - Mains: fixed at body -Z (straight ahead), `steer_factor = 0`.
+        // - Tailwheel: body -Z rotated by `yaw_input × max_angle × lock_factor`.
+        //   Sign flipped so positive yaw input (nose-right per flowplan) drives
+        //   the tailwheel to deflect body-left; the resulting lateral friction
+        //   at the tail produces a positive-body-Y moment that translates to
+        //   nose-right rotation under the "yaw > 0 → angular_velocity.y < 0"
+        //   storage convention (see flight.rs docs around angular_velocity.y).
+
+        // Aircraft ground speed (body-forward component). Used to gate
+        // tailwheel castoring: below V_STEER_FULL the tailwheel is locked and
+        // responds to yaw input; above V_CASTOR_FULL it free-pivots (no
+        // steering authority, negligible lateral grip).
+        let v_cg_body = v.orientation.inverse() * v.velocity;
+        let ground_speed = (-v_cg_body.z).max(0.0); // body -Z is forward
+
+        let lock_factor = if gear.steer_factor > 0.0 {
+            // smoothstep from V_STEER_FULL (1.0) to V_CASTOR_FULL (0.0).
+            let t = ((ground_speed - V_STEER_FULL_MPS) / (V_CASTOR_FULL_MPS - V_STEER_FULL_MPS))
+                .clamp(0.0, 1.0);
+            1.0 - t * t * (3.0 - 2.0 * t) // smoothstep
         } else {
-            Vec3::ZERO
+            1.0
         };
+
+        // Sign: positive yaw input (nose-right per flowplan) needs the
+        // tailwheel to deflect so its rolling direction has a BODY +X
+        // component (right). When aircraft moves forward, the tailwheel
+        // slips right; lateral friction points body-left at the tail;
+        // r × F about +Y produces the correct-signed yaw moment for
+        // nose-right rotation. Determined by convention chase + unit test,
+        // not a-priori (flight.rs stores yaw negated — the friction-from-
+        // lateral-slip path handles that implicitly).
+        let steer_angle_rad =
+            v.controls.yaw * TAILWHEEL_MAX_STEER_RAD * gear.steer_factor * lock_factor;
+        let wheel_forward_body = Quat::from_rotation_y(steer_angle_rad) * Vec3::NEG_Z;
+        let wheel_forward_world = v.orientation * wheel_forward_body;
+        let wheel_lateral_world = wheel_forward_world.cross(Vec3::Y).normalize_or_zero();
+
+        // Horizontal gear velocity and its wheel-frame components.
+        let v_horizontal = Vec3::new(v_gear_world.x, 0.0, v_gear_world.z);
+        let v_forward = v_horizontal.dot(wheel_forward_world);
+        let v_lateral = v_horizontal.dot(wheel_lateral_world);
+
+        // Friction forces, smoothed through zero by clamping (v / V_EPS) to
+        // [-1, 1]. At |v| >= V_EPS the magnitude is the full µ·N; at v=0 it's
+        // zero (no jitter). Continuous through zero avoids integrator
+        // oscillation at a stopped aircraft.
+        let f_forward = -ROLLING_FRICTION_COEFF * normal_n * (v_forward / V_EPS).clamp(-1.0, 1.0);
+
+        // Tailwheel lateral coefficient scales with lock_factor: locked tailwheel
+        // grips laterally (enables steering); castoring tailwheel free-pivots
+        // with negligible lateral grip. Mains always use the full coefficient.
+        let lateral_coeff = if gear.steer_factor > 0.0 {
+            LATERAL_FRICTION_COEFF * lock_factor
+        } else {
+            LATERAL_FRICTION_COEFF
+        };
+        let f_lateral = -lateral_coeff * normal_n * (v_lateral / V_EPS).clamp(-1.0, 1.0);
+
+        let friction_world = f_forward * wheel_forward_world + f_lateral * wheel_lateral_world;
 
         // Both forces act at the gear contact point (same lever arm). Sum in
         // world frame, rotate to body frame for r × F moment.
-        let gear_force_world = normal_force_world + roll_force_world;
+        let gear_force_world = normal_force_world + friction_world;
         let gear_force_body = v.orientation.inverse() * gear_force_world;
         let moment_body = gear.body_offset.cross(gear_force_body);
 
@@ -293,6 +396,26 @@ mod tests {
         let mut v = VehicleState::at_origin();
         v.position = Vec3::new(0.0, y, 0.0);
         v.orientation = Quat::IDENTITY;
+        v.velocity = Vec3::ZERO;
+        v.angular_velocity = Vec3::ZERO;
+        v.config = VehicleConfig::Wheels;
+        v
+    }
+
+    /// Wheels-configured aircraft pitched to the taildragger rest attitude so
+    /// all three gear points touch the ground. Main offset y=-1.3, tail
+    /// offset y=-0.7; the ~6.5° nose-up pitch (0.113 rad) puts both at the
+    /// same world-y when CG ≈ 1.19 m. This is the configuration required by
+    /// tests that exercise tailwheel physics (steering, castoring).
+    fn wheels_three_point_rest() -> VehicleState {
+        let mut v = VehicleState::at_origin();
+        // Pitch nose-up so tailwheel contacts ground. 0.113 rad = 6.5° per
+        // geometric calc: atan((1.3-0.7)/5.3).
+        v.orientation = Quat::from_rotation_x(0.113);
+        // CG chosen so the tailwheel is roughly at ground level with modest
+        // compression on all three gears. Empirically: 1.19 m puts tail and
+        // main offsets at roughly the same world y.
+        v.position = Vec3::new(0.0, 1.19, 0.0);
         v.velocity = Vec3::ZERO;
         v.angular_velocity = Vec3::ZERO;
         v.config = VehicleConfig::Wheels;
@@ -545,10 +668,11 @@ mod tests {
     }
 
     #[test]
-    fn rolling_friction_direction_matches_velocity() {
-        // Same deceleration magnitude in any horizontal direction (isotropic
-        // paved-surface model for 2.5b.2). Compare forward-motion accel.z to
-        // sideways-motion accel.x; should be symmetric in magnitude.
+    fn lateral_drag_exceeds_forward_drag_at_same_slip() {
+        // 2.5b.3: tires are anisotropic — they roll forward (low µ_r = 0.02) and
+        // grip laterally (high µ_lat = 0.6, ratio 30×). Compare forward-motion
+        // decel vs pure-sideways-motion decel at the same speed; lateral
+        // deceleration should be substantially larger.
         let spec = beaver_spec();
         let weight_n = spec.max_mass_wheels_kg * GRAVITY.length();
         let main_compression = weight_n / (2.0 * GEAR_SPRING_N_PER_M);
@@ -562,13 +686,109 @@ mod tests {
         v_side.velocity = Vec3::new(5.0, 0.0, 0.0);
         let side = compute_ground_contact(&v_side, Some(&spec), 0.0);
 
-        // Forward motion → +Z drag; lateral motion → -X drag. Magnitudes equal.
         let fwd_mag = fwd.linear_accel.z.abs();
         let side_mag = side.linear_accel.x.abs();
-        let ratio = fwd_mag / side_mag;
         assert!(
-            (0.9..=1.1).contains(&ratio),
-            "rolling friction should be isotropic; fwd_mag={fwd_mag} side_mag={side_mag}",
+            side_mag > fwd_mag * 10.0,
+            "lateral drag should dominate forward drag (µ_lat/µ_r ≈ 30); \
+             fwd_mag={fwd_mag} side_mag={side_mag}",
+        );
+    }
+
+    // ── Phase 2.5b.3 tests: tailwheel steering ─────────────────────────────
+
+    #[test]
+    fn yaw_input_at_taxi_produces_nose_right_moment() {
+        // Positive yaw input (nose-right per flowplan convention) + low
+        // ground speed → tailwheel deflects, lateral friction at the tail
+        // generates a body-Y moment stored as NEGATIVE angular_accel.y
+        // (flowplan convention: yaw-right → angular_velocity.y < 0; see
+        // flight.rs docs near line 753).
+        //
+        // Uses the 3-point rest attitude (tailwheel touching) with
+        // world-frame horizontal velocity (no rotating through pitch — we
+        // want the aircraft rolling on ground at constant y).
+        let spec = beaver_spec();
+        let mut v = wheels_three_point_rest();
+        v.velocity = Vec3::new(0.0, 0.0, -3.0); // world-frame: 3 m/s forward, no rise
+        v.controls.yaw = 1.0;
+        let out = compute_ground_contact(&v, Some(&spec), 0.0);
+
+        assert!(
+            out.angular_accel.y < -0.01,
+            "yaw-right input at taxi should produce nose-right moment \
+             (angular_accel.y < 0 per storage convention); got {}",
+            out.angular_accel.y,
+        );
+    }
+
+    #[test]
+    fn yaw_input_reverses_with_opposite_direction() {
+        let spec = beaver_spec();
+        let mut v = wheels_three_point_rest();
+        v.velocity = Vec3::new(0.0, 0.0, -3.0);
+        v.controls.yaw = -1.0;
+        let out = compute_ground_contact(&v, Some(&spec), 0.0);
+
+        assert!(
+            out.angular_accel.y > 0.01,
+            "yaw-left input at taxi should produce nose-left moment \
+             (angular_accel.y > 0); got {}",
+            out.angular_accel.y,
+        );
+    }
+
+    #[test]
+    fn castoring_reduces_tailwheel_authority_at_speed() {
+        // Tailwheel locks at low ground speed and castors above V_CASTOR_FULL.
+        // Same yaw input should produce a larger yaw moment at taxi speed
+        // than at castor speed (lock_factor smoothsteps 1 → 0 between 7.7
+        // and 10 m/s). Uses 3-point attitude + world-frame velocity.
+        let spec = beaver_spec();
+
+        let mut v_taxi = wheels_three_point_rest();
+        v_taxi.velocity = Vec3::new(0.0, 0.0, -3.0);
+        v_taxi.controls.yaw = 1.0;
+        let taxi = compute_ground_contact(&v_taxi, Some(&spec), 0.0);
+
+        let mut v_fast = wheels_three_point_rest();
+        v_fast.velocity = Vec3::new(0.0, 0.0, -15.0);
+        v_fast.controls.yaw = 1.0;
+        let fast = compute_ground_contact(&v_fast, Some(&spec), 0.0);
+
+        assert!(
+            taxi.angular_accel.y.abs() > fast.angular_accel.y.abs() * 2.0,
+            "taxi tailwheel should produce >2× castor-speed moment \
+             (lock_factor scales µ_lat); taxi={}, fast={}",
+            taxi.angular_accel.y,
+            fast.angular_accel.y,
+        );
+    }
+
+    #[test]
+    fn straight_rolling_produces_negligible_lateral_force() {
+        // Pure body-forward motion with no yaw input → v_lateral in wheel
+        // frame is ~0 at every gear → lateral friction is ~0. Use identity
+        // orientation (mains-only) since we only need to verify lateral ≈ 0.
+        let spec = beaver_spec();
+        let weight_n = spec.max_mass_wheels_kg * GRAVITY.length();
+        let main_compression = weight_n / (2.0 * GEAR_SPRING_N_PER_M);
+        let cg_y = 1.3 - main_compression;
+
+        let mut v = wheels_vehicle_at(cg_y);
+        v.velocity = Vec3::new(0.0, 0.0, -5.0);
+        let out = compute_ground_contact(&v, Some(&spec), 0.0);
+
+        assert!(
+            out.linear_accel.x.abs() < 0.05,
+            "straight rolling should have near-zero lateral accel, got {}",
+            out.linear_accel.x,
+        );
+        assert!(
+            out.linear_accel.z > 0.1,
+            "straight rolling should have forward drag (+Z accel) opposing \
+             -Z motion, got {}",
+            out.linear_accel.z,
         );
     }
 }

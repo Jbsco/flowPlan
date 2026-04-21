@@ -388,10 +388,12 @@ Decomposed into 7 dependency-ordered sub-milestones mirroring 2.5a's structure. 
 - [x] App-side plumbing: `game_app.rs` resolves the aircraft selection first, then picks `Terrain::flat()` vs `Terrain::flat_land()` based on the selected variant's config; `Renderer::set_water_visible(false)` suppresses the water mesh for wheels scenarios so the y=0 water surface doesn't occlude the y=0 terrain.
 - [x] Bench: `beaver_land_taxi` — wheels-only scenario at throttle 0.05, validates bounded steady-state taxi at ~5.2 m/s (matches real Beaver low-throttle paved taxi ~10 kt). Five new unit tests cover the rolling-friction behavior.
 
-**2.5b.3 Lateral friction + tailwheel steering.**
-- [ ] Cornering force at each gear proportional to body-lateral slip velocity at the contact patch (linear tire model, capped at slip limit)
-- [ ] Tailwheel steering: full authority at taxi speeds, castoring (free-pivot) above a threshold ground speed (Beaver's actual behavior); steering input via existing `yaw` control channel when on ground
-- [ ] Bench: taxi-turn scenarios with/without tailwheel lock; heading response validated
+**2.5b.3 Lateral friction + tailwheel steering.** (SHIPPED)
+- [x] Per-gear wheel-frame velocity decomposition: horizontal velocity at each gear split into (forward, lateral) components in the wheel's reference frame. Rolling friction (`µ_r = 0.02`) acts along -forward; lateral friction (`µ_lat = 0.6`, 30× rolling) acts along -lateral. Anisotropy IS what makes wheeled vehicles track straight. Both smoothly ramp through zero via `V_EPS = 0.1` m/s to prevent stopped-aircraft jitter.
+- [x] Tailwheel steering: commanded heading = body-forward rotated by `yaw_input · TAILWHEEL_MAX_STEER_RAD (±30°) · lock_factor`. `lock_factor` smoothsteps from 1.0 (locked) below `V_STEER_FULL = 7.7 m/s` (~15 kt) to 0.0 (castoring) above `V_CASTOR_FULL = 10.0 m/s` (~20 kt) — matches Beaver's real behavior (locked at taxi, castors above rudder-takes-over speed). Lateral friction coefficient at the tailwheel also scales with `lock_factor` so a castoring tailwheel free-pivots with negligible lateral grip.
+- [x] `Assertion::HeadingChangeAtEnd { last_secs, target_deg, tol_deg }` — new assertion type; short-arc wrap-safe. Primary use: taxi-turn / coordinated-turn scenarios.
+- [x] Bench: `beaver_land_taxi_turn_{right, left}` asymmetric-pair scenarios — 0.5 yaw input at throttle 0.05 produces ±8.6°–8.8° heading change over 30 s at 3-point rest attitude. Tolerance ±3° covers coefficient-tuning drift.
+- [x] 4 new unit tests on top of existing ground_contact coverage: lateral drag > forward drag at same slip, yaw-input-right produces nose-right moment, yaw-left mirror, castoring reduces tailwheel yaw authority at speed.
 
 **2.5b.4 Brake input.**
 - [ ] `InputEvent::SetBrakes(bool)` + `Controls.brakes: bool` field; when held on ground, symmetric brake force applied to both main wheels (asymmetric toe-brakes deferred to Phase 4 remap UI)

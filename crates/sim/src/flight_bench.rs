@@ -120,6 +120,18 @@ pub enum Assertion {
     /// endurance / burn-rate validation: run at a known power setting for a known
     /// duration and verify fuel consumed matches POH burn rate.
     FinalFuelWithin { min_gal: f32, max_gal: f32 },
+
+    /// Net heading change from start to the mean-of-last-`last_secs` window is
+    /// within `tol_deg` of `target_deg`. Signed: positive target = nose-right
+    /// rotation (per flowplan convention). Handles wrap-around through ±180°
+    /// by picking the short-arc difference. Primary use: turn scenarios
+    /// (taxi turn, coordinated turn) where the distinguishing quantity is
+    /// *how much* the heading changed over the run.
+    HeadingChangeAtEnd {
+        last_secs: f32,
+        target_deg: f32,
+        tol_deg: f32,
+    },
 }
 
 /// A `FlightScenario` is the top-level description of a test case.
@@ -570,6 +582,28 @@ fn check_one(assertion: Assertion, log: &[BenchSample]) -> AssertionResult {
                 assertion,
                 passed: last >= min_gal && last <= max_gal,
                 message: format!("final fuel {last:.2} gal (range [{min_gal:.2}, {max_gal:.2}])"),
+            }
+        },
+        Assertion::HeadingChangeAtEnd {
+            last_secs,
+            target_deg,
+            tol_deg,
+        } => {
+            let initial_yaw = log[0].yaw_deg;
+            let n = ((last_secs / FIXED_DT) as usize).max(1).min(log.len());
+            let mean_yaw: f32 = log.iter().rev().take(n).map(|s| s.yaw_deg).sum::<f32>() / n as f32;
+            // Short-arc difference handles wrap through ±180°: reduce to
+            // (−180, 180] by adding 360 and taking mod.
+            let raw_delta = mean_yaw - initial_yaw;
+            let delta = ((raw_delta + 180.0).rem_euclid(360.0)) - 180.0;
+            let err = (delta - target_deg).abs();
+            AssertionResult {
+                assertion,
+                passed: err <= tol_deg,
+                message: format!(
+                    "heading change {delta:+.1}° (initial {initial_yaw:+.1}°, \
+                     final-window mean {mean_yaw:+.1}°, target {target_deg:+.1} ±{tol_deg:.1})"
+                ),
             }
         },
     }
@@ -2815,6 +2849,95 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             // compression depth via spring stiffness — all subject to 2.5b.3+ tuning.
             target_mps: 5.2,
             tol_mps: 3.0,
+        }],
+    },
+    // beaver_land_taxi_turn_right / _left
+    //
+    // Real-world maneuver:
+    //   Paved-surface taxi with pedal-driven tailwheel steering. Pilot applies
+    //   rudder pedal right-or-left at low throttle; the tailwheel deflects,
+    //   aircraft rolls forward with a turn component. In the Beaver this is
+    //   THE directional control at taxi speed — air rudder authority is
+    //   negligible at ground speeds < 10 kt.
+    //
+    // 2.5b.3 scope:
+    //   Validates lateral-friction physics + tailwheel steering. Spawns at
+    //   3-point rest attitude (nose-up 6.5°) so all three gears contact.
+    //   Half-rudder input drives the tailwheel's 30° range to ~15° deflection.
+    //   Ground speed stays below V_CASTOR_FULL for full steering authority.
+    //
+    // Asymmetric-pair discipline (per SKILL.md Core Rule #10):
+    //   Right-rotating prop means left/right are NOT mirror-symmetric even on
+    //   ground — slipstream-over-rudder still works at ~zero airspeed because
+    //   the prop wash produces a local dynamic pressure. Torque-roll also
+    //   differentially loads mains (but gated for speed in 2.4.9b; minimal at
+    //   taxi). Expect similar-but-not-identical heading deltas for ±yaw.
+    //
+    // Assertion:
+    //   HeadingChangeAtEnd with target opposite-sign-same-magnitude. Wide tol
+    //   (±10°) because turn rate depends on lateral-friction coefficient
+    //   magnitude (subject to 2.5b.6 per-surface tuning) and tailwheel
+    //   moment arm (mesh-alignment follow-up).
+    FlightScenario {
+        name: "beaver_land_taxi_turn_right",
+        description: "Low-throttle paved taxi with full right rudder; tailwheel \
+                      steers nose right.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_WHEELS_ONLY_VARIANTS,
+        initial: ScenarioInitial {
+            // 3-point rest attitude. Pitch +6.5° = 0.1134 rad about body +X.
+            // Quat precomputed: q = (sin(0.0567), 0, 0, cos(0.0567)) =
+            // (0.05664, 0, 0, 0.99840).
+            position: Vec3::new(0.0, 1.19, 0.0),
+            velocity: Vec3::ZERO,
+            orientation: Quat::from_xyzw(0.056_638_55, 0.0, 0.0, 0.998_395_6),
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.05,
+            flaps: FlapPosition::Up,
+            fuel_gal: 80.0,
+        },
+        inputs: &[ScenarioInput {
+            tick: 0,
+            event: InputEvent::SetYaw(0.5),
+        }],
+        controllers: &[],
+        duration_ticks: 3600, // 30 s
+        assertions: &[Assertion::HeadingChangeAtEnd {
+            last_secs: 2.0,
+            // Empirical at 0.05 throttle, 0.5 yaw, 3-point rest: -8.6° over 30 s.
+            // Tolerance ±3° covers expected drift under coefficient tuning;
+            // tightens as 2.5b.6 per-surface work lands.
+            target_deg: -8.6,
+            tol_deg: 3.0,
+        }],
+    },
+    FlightScenario {
+        name: "beaver_land_taxi_turn_left",
+        description: "Low-throttle paved taxi with full left rudder; tailwheel \
+                      steers nose left. Asymmetric pair of _turn_right.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_WHEELS_ONLY_VARIANTS,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 1.19, 0.0),
+            velocity: Vec3::ZERO,
+            orientation: Quat::from_xyzw(0.056_638_55, 0.0, 0.0, 0.998_395_6),
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.05,
+            flaps: FlapPosition::Up,
+            fuel_gal: 80.0,
+        },
+        inputs: &[ScenarioInput {
+            tick: 0,
+            event: InputEvent::SetYaw(-0.5),
+        }],
+        controllers: &[],
+        duration_ticks: 3600,
+        assertions: &[Assertion::HeadingChangeAtEnd {
+            last_secs: 2.0,
+            // Empirical: +8.8° (asymmetry from _right ~0.2°, tailwheel
+            // dominates at this speed over slipstream/torque asymmetry).
+            target_deg: 8.8,
+            tol_deg: 3.0,
         }],
     },
 ];
