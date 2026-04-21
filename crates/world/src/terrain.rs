@@ -18,6 +18,11 @@ pub struct Terrain {
     seed: u64,
     octaves: [Octave; 5],
     base_amplitude: f32,
+    /// Constant offset applied to every height query. Zero for `from_seed()`
+    /// (terrain centered around y=0); negative for `flat()` to put the visible
+    /// terrain below the water surface (mean water at y=0) and prevent z-fighting
+    /// with the water mesh in scenario playback.
+    base_height: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -69,14 +74,21 @@ impl Terrain {
             seed,
             octaves,
             base_amplitude: 1.0,
+            base_height: 0.0,
         }
     }
 
-    /// Flat terrain that returns 0.0 height everywhere. Used for scenario-bench
-    /// visual playback (`cargo run -- --scenario <name>`) so the visual matches
-    /// the headless bench exactly — both operate over a flat y=0 surface, so
-    /// CSV outputs and visual trajectory agree. The normal game uses
-    /// `from_seed()` for procedural terrain.
+    /// Flat terrain at a constant depth below the water surface. Used for scenario-
+    /// bench visual playback (`cargo run -- --scenario <name>`) so the visual is a
+    /// clean "open water with a deep bottom" — water surface at y=0, terrain mesh
+    /// 10 m below. Without the depth offset the terrain would z-fight the water
+    /// mesh (both at y=0).
+    ///
+    /// Determinism note: scenario playback overrides `min_altitude = 0.0` in the
+    /// game loop (matching `crates/sim/tests/flight_bench.rs`), so the terrain
+    /// returned here is purely cosmetic — the simulation never queries it for
+    /// physics. The visual `Terrain::flat()` and the headless bench's flat-y=0
+    /// world remain consistent in their physics behavior.
     #[must_use]
     pub fn flat() -> Self {
         Self {
@@ -88,6 +100,7 @@ impl Terrain {
                 phase_z: 0.0,
             }; 5],
             base_amplitude: 0.0,
+            base_height: -10.0,
         }
     }
 
@@ -97,10 +110,11 @@ impl Terrain {
         self.seed
     }
 
-    /// The maximum height achievable (sum of octave amplitudes).
+    /// The maximum height achievable (base offset + sum of octave amplitudes).
     #[must_use]
     pub fn max_height(&self) -> f32 {
-        self.base_amplitude * self.octaves.iter().map(|o| o.amplitude).sum::<f32>()
+        self.base_height
+            + self.base_amplitude * self.octaves.iter().map(|o| o.amplitude).sum::<f32>()
     }
 
     /// Iterator over the octaves (for inspection / mesh tooling).
@@ -138,7 +152,7 @@ impl HeightSampler for Terrain {
                 * ((x * o.frequency + o.phase_x).sin())
                 * ((z * o.frequency + o.phase_z).cos())
         }) * self.base_amplitude;
-        beach_flatten(raw, BEACH_WIDTH_M)
+        beach_flatten(raw, BEACH_WIDTH_M) + self.base_height
     }
 }
 

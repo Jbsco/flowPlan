@@ -71,7 +71,13 @@ const VERTICAL_DAMPING_N_PER_MPS: f32 = 30_000.0;
 /// As the aircraft rises onto the step, aft sections stay wet while fore sections
 /// rise out of water, so effective drag drops naturally from the wetted-fraction
 /// per-section scaling — no separate step-transition coefficient needed.
-const HORIZONTAL_DRAG_N_PER_MPS2: f32 = 75.0;
+///
+/// Reduced from 75 → 40 in 2.5a.3c retune: with the deeper float position
+/// (`body_offset.y = -2.24`) the drag pitch-down moment scaled 4.5× and overwhelmed
+/// the buoyancy pitch-restoring moment around 14 m/s, causing porpoise instability
+/// to grow into a flip. Reducing drag plus adding a forward offset to planing lift
+/// (see `PLANING_LIFT_CENTROID_Z_FWD_M`) produces stable plow → on-step transition.
+const HORIZONTAL_DRAG_N_PER_MPS2: f32 = 40.0;
 
 /// Per-pontoon planing lift coefficient (N·s²/m², quadratic in forward velocity),
 /// scaled by wetted fraction. Hydrodynamic lift from water flowing past the pontoon
@@ -83,7 +89,24 @@ const HORIZONTAL_DRAG_N_PER_MPS2: f32 = 75.0;
 /// For v1 we model planing lift as world-frame +Y (approximately normal to water
 /// surface). This is accurate for small pitch angles; larger pitch angles would
 /// need a pitch-dependent Cl curve. Tune via the water-takeoff bench scenario.
-const PLANING_LIFT_N_PER_MPS2: f32 = 50.0;
+///
+/// Raised from 50 → 75 in 2.5a.3c retune: stronger lift enables actual rise onto
+/// the step and provides the pitch-up balancing moment via `PLANING_LIFT_CENTROID_Z_FWD_M`.
+const PLANING_LIFT_N_PER_MPS2: f32 = 75.0;
+
+/// Forward body-Z offset (m) where planing lift's center of pressure acts, relative
+/// to each section's geometric center. Real planing-hull lift acts at the bow-wave
+/// region (forward of the wetted area's geometric center) — modeling this with a
+/// simple constant offset gives the natural pitch-up moment that balances the drag
+/// pitch-down moment, producing the characteristic nose-up attitude of an aircraft
+/// on the step. Negative = forward (per flowplan convention, aircraft faces -Z).
+///
+/// `-1.5 m` chosen so that at typical planing conditions (V ~14-20 m/s, wetted ~0.29),
+/// planing pitch-up moment slightly exceeds drag pitch-down moment, allowing the
+/// aircraft to settle into a stable on-step attitude rather than oscillating into
+/// a flip. Buoyancy fore/aft asymmetry then bounds the pitch-up at a few degrees
+/// nose-up — exactly the characteristic on-step posture.
+const PLANING_LIFT_CENTROID_Z_FWD_M: f32 = -1.5;
 
 /// Number of sample points along each pontoon's longitudinal axis. 5 gives good
 /// pitch stability (fore / fore-mid / mid / aft-mid / aft) without excessive compute
@@ -287,16 +310,23 @@ pub fn compute_buoyancy(
                 Vec3::ZERO
             };
 
-            let section_force_world = buoyancy_force_world
-                + Vec3::new(horizontal_drag_world.x, v_damp_y, horizontal_drag_world.z)
-                + planing_lift_world;
+            // Buoyancy + drag + damping all act at the section geometric center.
+            let other_force_world = buoyancy_force_world
+                + Vec3::new(horizontal_drag_world.x, v_damp_y, horizontal_drag_world.z);
+            let other_force_body = v.orientation.inverse() * other_force_world;
+            let other_moment_body = sample_body_offset.cross(other_force_body);
 
-            // Moment in body frame: r_body × F_body.
-            let force_body = v.orientation.inverse() * section_force_world;
-            let moment_body = sample_body_offset.cross(force_body);
+            // Planing lift acts at a forward-offset point (PLANING_LIFT_CENTROID_Z_FWD_M
+            // ahead of the section center) — models the bow-wave center-of-pressure
+            // location on a real planing hull. This gives planing the natural pitch-up
+            // moment that balances drag's pitch-down, enabling stable on-step attitude.
+            let planing_offset_body =
+                sample_body_offset + Vec3::new(0.0, 0.0, PLANING_LIFT_CENTROID_Z_FWD_M);
+            let planing_force_body = v.orientation.inverse() * planing_lift_world;
+            let planing_moment_body = planing_offset_body.cross(planing_force_body);
 
-            total_force_world += section_force_world;
-            total_moment_body += moment_body;
+            total_force_world += other_force_world + planing_lift_world;
+            total_moment_body += other_moment_body + planing_moment_body;
         }
     }
 

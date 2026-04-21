@@ -323,6 +323,18 @@ are in scope -- the Beaver is flown on both.
 - [x] App `min_altitude` clamp drops the `WATER_LEVEL` floor — buoyancy now manages water contact in-game; terrain remains the only `min_altitude` source until 2.5b lands
 - [ ] Water-taxi scenario migrated to 2.5a.3 — single-point float sampling can't produce the fore/aft buoyancy restoring moment that real floats use to limit pitch-down under drag; 2.5a.3 multi-point sampling supplies it naturally. 2.5a.2 drag-in-isolation is validated by unit tests (vertical damping opposes motion, horizontal drag opposes motion, drag scales with wetted fraction).
 
+**2.5a.3c On-step retune (drag + planing-lift forward offset). — SHIPPED**
+- [x] Reduced `HORIZONTAL_DRAG_N_PER_MPS2` 75 → 40 (drag pitch-down moment was 4.5× too strong post mesh-aligned floats)
+- [x] Raised `PLANING_LIFT_N_PER_MPS2` 50 → 75 (stronger planing supports rise to step)
+- [x] Added `PLANING_LIFT_CENTROID_Z_FWD_M = -1.5` — planing lift acts at a forward offset (real planing-hull bow-wave CoP location), giving the natural pitch-up balancing moment that lets aircraft sit stably on step
+- [x] Bench: `beaver_water_takeoff` reaches stable on-step skim at 18-20 m/s with bounded pitch (±5°) and roll (±10°). Aircraft accelerates from rest through hump speed to on-step plateau over 60 s.
+
+**2.5a.4 Porpoising + bench scenario expansion. — SHIPPED**
+- [x] Porpoise mode emerges naturally in `beaver_water_takeoff` (visible as ±5° pitch oscillation in the on-step phase) — demonstrates the under-damped pitch mode characteristic of real planing-hull dynamics. Buoyancy fore/aft asymmetry + vertical damping bound it; not destabilizing.
+- [x] `beaver_water_takeoff_rotation` — pilot back-pressure (0.15) added at t=10s. Documents current state where buoyancy pitch dynamics override elevator at low Q (aircraft does NOT yet rotate to liftoff, settles on-step at 18-20 m/s). "Document the gap" scenario per model-gap-triage discipline; tightens toward POH liftoff (V > 25 m/s off the water) when Cm_δe vs buoyancy pitch balance retunes.
+- [x] `beaver_water_landing_approach` — idle-power descent from 100 m at 30 m/s with landing flaps. Validates float-contact deceleration (V drops from 26 m/s touchdown to 5.5 m/s coast over 30 s).
+- [x] `beaver_water_porpoise_emerge` — strong sustained back-pitch (0.4) during takeoff. Envelope-limit scenario per Core Rule #9 pairing discipline. Currently shows model handles the stress without crashing; explicit porpoise-amplitude assertion deferred (would need new `PitchAmplitudeBounded` assertion type).
+
 **2.5a.3 Step transition (plow → on-step). — SHIPPED**
 - [x] Multi-point float sampling (fore / fore-mid / mid / aft-mid / aft per float, 5 samples × 2 floats = 10 force points) so longitudinal wetted-area asymmetry produces the natural pitch-restoring moment under drag — decouples pitch dynamics from the single-point-centroid approximation. Buoyancy, vertical damping, horizontal drag, and planing lift all distributed per-sample with `per_section_scale = 1/N` normalization.
 - [x] Hydrodynamic planing lift: `F_lift = PLANING_LIFT_N_PER_MPS2 × v_forward_body² × wetted_fraction` per section (world +Y direction, quadratic in forward body velocity, only positive for forward motion). Physical mechanism by which wetted pontoon area produces upward lift at speed. `PLANING_LIFT_N_PER_MPS2 = 50.0` tunes toward plausible plow-to-hump transition; full liftoff requires tuning pass documented as future 2.5a.3b follow-up if needed.

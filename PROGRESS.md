@@ -569,7 +569,51 @@ Visual feedback from in-game playtest revealed that `BEAVER_PONTOONS.body_offset
 
 **Workspace test count:** 191 passing (unchanged — same test count, retuned values). Gate green. Hardware snapshots (`beaver_preview`, `scene_minimal`, `scene_extended`) still match committed baselines.
 
-**Deferred to 2.5a.3c (coefficient retune):** `HORIZONTAL_DRAG_N_PER_MPS2 = 75.0` was tuned for the old (placeholder) float position. With 4.5× larger pitch arm, drag moment dominates buoyancy restoring above ~14 m/s, causing pitch/roll instability that prevents reaching liftoff. Reducing horizontal drag (or scaling pitch-restoring buoyancy) would re-enable full takeoff scenarios. Not blocking — visual fix delivered, plow-acceleration validated.
+**Deferred to 2.5a.3c (coefficient retune):** `HORIZONTAL_DRAG_N_PER_MPS2 = 75.0` was tuned for the old (placeholder) float position. With 4.5× larger pitch arm, drag moment dominates buoyancy restoring above ~14 m/s, causing pitch/roll instability that prevents reaching liftoff. Reducing horizontal drag (or scaling pitch-restoring buoyancy) would re-enable full takeoff scenarios. Not blocking — visual fix delivered, plow-acceleration validated. **RESOLVED in 2.5a.3c below.**
+
+### Milestone 2.5a.3c + 2.5a.4 — On-step skim retune + porpoise + landing/takeoff scenario expansion (SHIPPED)
+
+Combined sub-milestone delivering stable on-step skimming, porpoise mode validation, and a full water takeoff/landing scenario family. The user's primary goal — "maintain on-plane skimming in a scenario" — is achieved.
+
+**Coefficient retune (2.5a.3c):**
+- `HORIZONTAL_DRAG_N_PER_MPS2`: 75 → 40 (drag pitch-down moment was 4.5× too strong with mesh-aligned float position)
+- `PLANING_LIFT_N_PER_MPS2`: 50 → 75 (stronger planing enables rise to step)
+- New `PLANING_LIFT_CENTROID_Z_FWD_M = -1.5` — planing lift now acts at a forward offset from each section center (models real planing-hull bow-wave center-of-pressure location). Gives planing the natural pitch-up moment that balances drag's pitch-down, allowing stable on-step attitude.
+
+**Force application architecture refactor:**
+Buoyancy + drag + damping still act at section geometric center; planing lift now applies at the forward offset. `compute_buoyancy` separates these into two moment contributions per section. Pure refactor — total force unchanged, only pitch-moment distribution changes.
+
+**Resulting on-step behavior (`beaver_water_takeoff`):**
+- Aircraft accelerates from rest through hump speed (10-15 m/s) to on-step plateau at 18-20 m/s
+- Stable on-step pitch attitude (±5° oscillation, bounded by buoyancy fore/aft asymmetry — this IS porpoise mode, properly damped)
+- Bounded roll (±10°) maintained throughout
+- y bobs 2.21-2.83 m as planing lift balances weight (vs unbounded flip pre-2.5a.3c)
+
+**New scenarios:**
+1. `beaver_water_takeoff_rotation` — full throttle + pilot back-stick (0.15) applied at t=10 s. Documents current state where buoyancy pitch dynamics override elevator at low Q; aircraft settles on-step at 18.6 m/s rather than rotating to liftoff. Marked as "document the gap" baseline; assertion tightens upward when Cm_δe vs buoyancy pitch balance retunes (future tuning pass).
+2. `beaver_water_landing_approach` — idle-power descent from 100 m at 30 m/s with LANDING flaps. Validates float-contact deceleration: V touches down at 26 m/s, coasts to 5.5 m/s over 30 s of post-touchdown drag.
+3. `beaver_water_porpoise_emerge` — strong sustained back-pitch (0.4) from t=8 s. Envelope-limit scenario per SKILL.md Core Rule #9. Currently shows model handles inappropriate input without crashing; explicit porpoise-amplitude assertion deferred (needs new `PitchAmplitudeBounded` assertion type when porpoise becomes a regression-tracked behavior).
+
+**Bench scenario count: 14** (12 prior + 2 added in 2.5a.3 water + 3 added in 2.5a.3c/4). All passing at the gate.
+
+**Reference plots:** 17 PNGs committed to `docs/plots/beaver/` (12 prior aerial + 2 base water + 3 new water variants).
+
+**Workspace test count:** 191 sim tests + 3 hardware snapshots passing (unchanged count, retuned values + new scenarios). Quality gate green.
+
+**Files updated:**
+- `crates/sim/src/buoyancy.rs` — drag/lift coefficient retune, new `PLANING_LIFT_CENTROID_Z_FWD_M`, force-vs-moment refactor
+- `crates/sim/src/flight_bench.rs` — 3 new scenarios with full fidelity comment blocks
+- `docs/plots/beaver/*.png` — regenerated 17 reference plots
+
+**Next available tuning gap (deferred — not blocking):** `Cm_δe` vs buoyancy-pitch balance. Currently elevator authority is too weak to override buoyancy fore/aft pitch dynamics on water; pilot back-pressure can't rotate aircraft to liftoff α. Tightening `beaver_water_takeoff_rotation` upward toward POH (V > 25 m/s off water) is the bench-driven target for this work.
+
+**Future scenario family** (per ROADMAP § 2.5a — for after current sub-milestones close):
+- Glassy-water takeoff (Phase 2.5a.7 chop-intensity hook lets us toggle this)
+- Choppy-water takeoff/landing (same)
+- Crosswind variants (blocked on Phase 3.2 weather)
+- One-pontoon takeoff (2.5a.5 asymmetric maneuver validation)
+- Aborted takeoff / power-chop scenarios
+- Step landing vs full-stall water landing
 
 ### Pre-Phase-2.5 gate — EVALUATED
 
