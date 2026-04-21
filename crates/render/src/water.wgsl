@@ -107,26 +107,28 @@ fn amp_modulation(i: u32, t: f32, world_xz: vec2<f32>) -> f32 {
     if (i < SWELL_COUNT) {
         // Swells: 45-s and 70-s periods for the two sine components, ~520-m
         // spatial noise scale. Very slow drift → large calm/rough regions.
+        // Strength reduced from 0.40 to 0.18 so swell amp doesn't create its
+        // own visible "blob" pattern at the modulation period — the noise
+        // displacement layer above does the heavy lifting for non-stationarity.
         time_freq_a = 0.140;
         time_freq_b = 0.089;
         noise_scale = 0.012;
         noise_drift = 0.5;
-        strength = 0.40;
+        strength = 0.18;
     } else if (i < 5u) {
-        // Chop: 12-s and 19-s periods, ~50-m spatial scale. Visible breathing.
+        // Chop: 12-s and 19-s periods, ~50-m spatial scale.
         time_freq_a = 0.55;
         time_freq_b = 0.33;
         noise_scale = 0.13;
         noise_drift = 1.5;
-        strength = 0.50;
+        strength = 0.22;
     } else {
-        // Fine chop: 3-s and 4.8-s periods, ~14-m spatial scale. Fast small-
-        // scale variation across the visible field.
+        // Fine chop: 3-s and 4.8-s periods, ~14-m spatial scale.
         time_freq_a = 2.0;
         time_freq_b = 1.3;
         noise_scale = 0.45;
         noise_drift = 3.0;
-        strength = 0.55;
+        strength = 0.25;
     }
 
     // Per-wave perturbations (irrational multipliers chosen to avoid harmonic
@@ -194,6 +196,25 @@ fn vs_water(in: VsIn) -> VsOut {
 
     let world_xz = vec2<f32>(world0.x, world0.z);
 
+    // Per-wave domain warping — the key to breaking the regular Gerstner
+    // interference lattice. Without this, wave crests run in perfectly straight
+    // lines and where two crests cross you get a hot spot; these hot spots
+    // arrange in a regular grid (the visible "oval lattice" at ~30-40 m spacing).
+    //
+    // KEY INSIGHT: a GLOBAL warp (same shift for all waves) just TRANSLATES the
+    // lattice locally — lattice shape preserved, only position shifts. To
+    // actually break the lattice, EACH WAVE must be warped INDEPENDENTLY so
+    // their crests bend in different directions and their intersections no
+    // longer align in a regular grid. Per-wave phase offset (`i * 3.1`) uses
+    // `value_noise2` with a unique per-wave sampling position.
+    //
+    // Warp parameters: ~80 m noise scale, ±12 m shift. Large enough shift that
+    // on the chop wavelengths (3-6 m) the warp is 2-4× the wavelength — crests
+    // displace visibly. 80 m scale keeps warp slowly-varying (doesn't itself
+    // introduce high-freq distortion).
+    let warp_scale = 0.012;
+    let warp_strength = 12.0;
+
     for (var i: u32 = 0u; i < WAVE_COUNT; i = i + 1u) {
         let dp = wave_dir_and_params(i);
         let sp = wave_speed_and_steep(i);
@@ -204,7 +225,19 @@ fn vs_water(in: VsIn) -> VsOut {
         let steep = sp.y;
         let k = TAU / wavelength;
         let omega = k * speed;
-        let phase = k * (dir.x * world0.x + dir.y * world0.z) + omega * t;
+
+        // Per-wave warp: each wave samples the noise at a unique offset so
+        // their crests curve INDEPENDENTLY, randomizing intersection points.
+        let i_phase = f32(i) * 3.1;
+        let warp_x = (value_noise2(
+            world_xz * warp_scale + vec2<f32>(t * 0.10 + i_phase, i_phase * 1.3)
+        ) - 0.5) * warp_strength;
+        let warp_z = (value_noise2(
+            world_xz * warp_scale + vec2<f32>(i_phase * 1.7, t * 0.10 + i_phase)
+        ) - 0.5) * warp_strength;
+        let warped_x = world0.x + warp_x;
+        let warped_z = world0.z + warp_z;
+        let phase = k * (dir.x * warped_x + dir.y * warped_z) + omega * t;
         let c = cos(phase);
         let s = sin(phase);
 
@@ -236,21 +269,42 @@ fn vs_water(in: VsIn) -> VsOut {
 
     // Organic noise displacement on top of the Gerstner sum. Breaks the regular
     // INTERFERENCE PATTERN that constant-direction sinusoids produce (the visible
-    // ovals/grids). Two octaves at different scales drift with time so the
-    // perturbation is non-stationary. This is the single biggest contributor to
-    // the surface looking like real water vs. a sum of pure sinusoids.
+    // ovals/grids).
     //
-    // Two-octave noise:
-    //   - Coarse: ~5 m wavelength, ±5 cm amplitude, slow drift
-    //   - Fine:   ~2 m wavelength, ±2.5 cm amplitude, slightly faster drift
+    // CRITICAL: noise scales chosen to NOT overlap any explicit wave wavelength.
+    // - Wave wavelengths: 50m, 35m (swells); 6m, 4m, 3m (chop); 2m, 1.4m (fine)
+    // - Noise scales:     150m, 18m, 1.5m — all in gaps between wave scales
+    // Previously the "large" noise was at 50 m — EXACTLY the swell wavelength, so
+    // noise reinforced rather than broke the 50 m pattern. Now noise fills the
+    // gaps so it perturbs wave visibility at OTHER scales.
+    //
+    // Each octave samples value_noise2 at a DIFFERENTLY ROTATED coordinate so
+    // the grid character of value_noise2 doesn't align with wave directions.
+    //
+    // Three-octave noise:
+    //   - Super-large: ~150 m, ±25 cm — macro undulation, larger than any wave
+    //   - Mid:         ~18 m, ±12 cm — between swell and chop scales
+    //   - Small:       ~1.5 m, ±6 cm — sub-chop surface tremor
     let world_xz_for_noise = vec2<f32>(displaced_x_raw(world0), world0.z);
-    let n_coarse = (value_noise2(
-        world_xz_for_noise * 0.20 + vec2<f32>(t * 0.40, t * 0.20)
-    ) - 0.5) * 0.10;
-    let n_fine = (value_noise2(
-        world_xz_for_noise * 0.55 + vec2<f32>(t * 0.70, t * -0.30)
-    ) - 0.5) * 0.05;
-    let noise_displacement = n_coarse + n_fine;
+    let rot23 = vec2<f32>(0.9205, 0.3907); // 23° -> (cos, sin)
+    let rot47 = vec2<f32>(0.6820, 0.7314); // 47°
+    let rot73 = vec2<f32>(0.2924, 0.9563); // 73°
+    let p_super = vec2<f32>(
+        world_xz_for_noise.x * rot23.x - world_xz_for_noise.y * rot23.y,
+        world_xz_for_noise.x * rot23.y + world_xz_for_noise.y * rot23.x,
+    ) * 0.0067 + vec2<f32>(t * 0.04, t * 0.02);
+    let p_mid = vec2<f32>(
+        world_xz_for_noise.x * rot47.x - world_xz_for_noise.y * rot47.y,
+        world_xz_for_noise.x * rot47.y + world_xz_for_noise.y * rot47.x,
+    ) * 0.056 + vec2<f32>(t * 0.25, t * -0.12);
+    let p_small = vec2<f32>(
+        world_xz_for_noise.x * rot73.x - world_xz_for_noise.y * rot73.y,
+        world_xz_for_noise.x * rot73.y + world_xz_for_noise.y * rot73.x,
+    ) * 0.67 + vec2<f32>(t * 0.90, t * 0.50);
+    let n_super = (value_noise2(p_super) - 0.5) * 0.50;
+    let n_mid = (value_noise2(p_mid) - 0.5) * 0.24;
+    let n_small = (value_noise2(p_small) - 0.5) * 0.12;
+    let noise_displacement = n_super + n_mid + n_small;
 
     let displaced = world0 + offset + vec3<f32>(0.0, noise_displacement, 0.0);
     let n = normalize(n_acc);

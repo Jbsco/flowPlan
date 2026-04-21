@@ -30,7 +30,7 @@
 )]
 
 use flowplan_assets::CpuMesh;
-use flowplan_render::{Renderer, ShadingParams};
+use flowplan_render::{Renderer, SceneParams, ShadingParams};
 use flowplan_sim::SimSnapshot;
 use glam::{Quat, Vec3};
 
@@ -363,4 +363,152 @@ fn scene_minimal_snapshot() {
     let snap = build_snapshot();
     let png = capture_png(&device, &queue, &mut renderer, &snap, SIZE);
     insta::assert_binary_snapshot!("scene_minimal.png", png);
+}
+
+/// Top-down water render. Dedicated view for iterating on wave patterns, noise
+/// displacement, foam, and color tinting without the cockpit-view perspective
+/// complicating pattern inspection. Camera at 100 m altitude looking straight
+/// down at a ~60 m × 60 m patch of water, centered at world origin.
+///
+/// Renders 3 PNGs at three different `t` values so visible time-variation of
+/// the wave field can be verified from one test run: `t=0`, `t=10`, `t=30`.
+/// Anything reading as "static" across frames would indicate a bug in the
+/// time-dependent shader code (wave phase, amp modulation, noise drift all
+/// depend on `t`).
+///
+/// Output files written to `target/water_topdown/`:
+///   - `water_topdown_t0.png`
+///   - `water_topdown_t10.png`
+///   - `water_topdown_t30.png`
+///
+/// Skips insta (no regression tracking) — this is an iterative debug tool, not
+/// a regression guard. For regression, use the cockpit-view `beaver_preview` /
+/// `scene_extended` snapshots.
+#[cfg(feature = "hardware-tests")]
+#[test]
+fn water_topdown() {
+    let (device, queue) = init_wgpu();
+
+    // Tiny hidden terrain and vehicle — the renderer requires them for init but
+    // the top-down view only shows water.
+    let terrain = CpuMesh::terrain_patch(8, 2000.0, |_x, _z| -200.0); // way below water
+    let water = CpuMesh::water_grid(512, 60.0, WATER_COLOR);
+    let cube = CpuMesh::cube(0.1, [0.0, 0.0, 0.0, 0.0]); // invisible placeholder
+
+    #[allow(clippy::items_after_statements)]
+    const TOPDOWN_SIZE: (u32, u32) = (512, 512);
+
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        FORMAT,
+        TOPDOWN_SIZE,
+        &terrain,
+        TERRAIN_SHADING,
+        &water,
+        WATER_SHADING,
+        &cube,
+        VEHICLE_SHADING,
+    );
+
+    // Top-down camera: 100 m altitude at world origin, looking straight down.
+    // Camera-local +Y points toward world -Z (so "up in screen" = world -Z).
+    let cam_orient = Quat::from_rotation_x(-core::f32::consts::FRAC_PI_2);
+    let mut snap = SimSnapshot::default();
+    snap.camera.position = Vec3::new(0.0, 100.0, 0.0);
+    snap.camera.orientation = cam_orient;
+    snap.camera.fov_y_radians = 35.0_f32.to_radians(); // 60m × 60m window at 100m alt
+                                                       // Vehicle parked far below the water plane (invisible in top-down view).
+    snap.vehicle.position = Vec3::new(0.0, -1000.0, 0.0);
+    snap.vehicle.orientation = Quat::IDENTITY;
+
+    // Ensure the output directory exists.
+    let out_dir = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../target/water_topdown"
+    ));
+    std::fs::create_dir_all(&out_dir).expect("mkdir target/water_topdown");
+
+    // Render at three time points to verify time-variation is real.
+    for (label, t) in &[("t0", 0.0_f32), ("t10", 10.0), ("t30", 30.0)] {
+        let params = SceneParams {
+            time_seconds: *t,
+            ..SceneParams::default()
+        };
+        renderer.set_scene(&queue, &params);
+        let png = capture_png(&device, &queue, &mut renderer, &snap, TOPDOWN_SIZE);
+        let path = out_dir.join(format!("water_topdown_{label}.png"));
+        std::fs::write(&path, &png).expect("write water_topdown PNG");
+        println!("wrote {}", path.display());
+    }
+}
+
+/// Wide top-down water render — zoomed out ~3× from `water_topdown` (180 m × 180 m
+/// window vs 60 m × 60 m). Same camera-angle, same three time points. Reveals:
+///   - Large-scale wave patterns (swell interference, long rollers)
+///   - Whether the macro noise octave (150 m wavelength) produces visible
+///     bumps/rollers at this scale
+///   - Whether pattern "ovals" change character at longer viewing distance
+///     (suggesting it's about the wave scales themselves, not close-up artifacts)
+///
+/// Uses altitude 300 m + same 35° FOV → covers ~190 m at the water plane. Water
+/// mesh is expanded to 300 m total extent (150 m half) so the full visible
+/// area is covered by tessellated water even with the mesh-follow-camera
+/// snapping (which is handled by the Renderer).
+///
+/// Output files written to `target/water_topdown/`:
+///   - `water_topdown_wide_t0.png`
+///   - `water_topdown_wide_t10.png`
+///   - `water_topdown_wide_t30.png`
+#[cfg(feature = "hardware-tests")]
+#[test]
+fn water_topdown_wide() {
+    let (device, queue) = init_wgpu();
+
+    let terrain = CpuMesh::terrain_patch(8, 2000.0, |_x, _z| -200.0);
+    let water = CpuMesh::water_grid(512, 150.0, WATER_COLOR);
+    let cube = CpuMesh::cube(0.1, [0.0, 0.0, 0.0, 0.0]);
+
+    #[allow(clippy::items_after_statements)]
+    const TOPDOWN_SIZE: (u32, u32) = (512, 512);
+
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        FORMAT,
+        TOPDOWN_SIZE,
+        &terrain,
+        TERRAIN_SHADING,
+        &water,
+        WATER_SHADING,
+        &cube,
+        VEHICLE_SHADING,
+    );
+
+    // Top-down camera, altitude 300 m → ~190 m wide frame at 35° FOV.
+    let cam_orient = Quat::from_rotation_x(-core::f32::consts::FRAC_PI_2);
+    let mut snap = SimSnapshot::default();
+    snap.camera.position = Vec3::new(0.0, 300.0, 0.0);
+    snap.camera.orientation = cam_orient;
+    snap.camera.fov_y_radians = 35.0_f32.to_radians();
+    snap.vehicle.position = Vec3::new(0.0, -1000.0, 0.0);
+    snap.vehicle.orientation = Quat::IDENTITY;
+
+    let out_dir = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../target/water_topdown"
+    ));
+    std::fs::create_dir_all(&out_dir).expect("mkdir target/water_topdown");
+
+    for (label, t) in &[("t0", 0.0_f32), ("t10", 10.0), ("t30", 30.0)] {
+        let params = SceneParams {
+            time_seconds: *t,
+            ..SceneParams::default()
+        };
+        renderer.set_scene(&queue, &params);
+        let png = capture_png(&device, &queue, &mut renderer, &snap, TOPDOWN_SIZE);
+        let path = out_dir.join(format!("water_topdown_wide_{label}.png"));
+        std::fs::write(&path, &png).expect("write water_topdown_wide PNG");
+        println!("wrote {}", path.display());
+    }
 }

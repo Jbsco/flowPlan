@@ -128,7 +128,7 @@ pub fn water_height(x: f32, z: f32, t: f32) -> f32 {
 /// strength = 0.65 → factor 1.65).
 #[must_use]
 pub fn max_amplitude() -> f32 {
-    const AMP_MOD_WORST_CASE: f32 = 1.65; // 1 + 0.65 (fine-chop strength)
+    const AMP_MOD_WORST_CASE: f32 = 1.25; // 1 + 0.25 (max strength after retune)
     let mut sum = 0.0_f32;
     let mut i = 0;
     while i < WAVES.len() {
@@ -185,9 +185,8 @@ mod tests {
 
     #[test]
     fn max_amplitude_matches_sum() {
-        // Post 2.5a amp-modulation: sum × (1 + max strength). Worst case for
-        // clearance checks; instantaneous heights typically much lower.
-        // Sum: 0.040+0.030+0.045+0.045+0.040+0.035+0.025 = 0.260; × 1.65 = 0.429.
-        assert!((max_amplitude() - 0.429).abs() < 1e-3);
+        // Post amp-modulation strength reduction: sum × 1.25. Sum:
+        // 0.040+0.030+0.045+0.045+0.040+0.035+0.025 = 0.260; × 1.25 = 0.325.
+        assert!((max_amplitude() - 0.325).abs() < 1e-3);
     }
 }

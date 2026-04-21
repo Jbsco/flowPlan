@@ -67,6 +67,19 @@ mod shader_baked_in_tests {
     }
 
     #[test]
+    fn water_shader_has_domain_warping() {
+        // Domain warping is the critical technique for breaking the regular
+        // Gerstner interference lattice — wave phases must sample at a
+        // noise-perturbed position, not the raw vertex position.
+        assert!(WATER_WGSL_SOURCE.contains("warped_x"));
+        assert!(WATER_WGSL_SOURCE.contains("warped_z"));
+        assert!(
+            WATER_WGSL_SOURCE.contains("dir.x * warped_x + dir.y * warped_z"),
+            "wave phase must use warped position, not world0 directly",
+        );
+    }
+
+    #[test]
     fn water_shader_has_per_component_wave_t() {
         assert!(
             WATER_WGSL_SOURCE.contains("wave_t:      vec2<f32>")

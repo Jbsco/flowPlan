@@ -443,6 +443,133 @@ A plane can be flown, landed on water, taxied, taken off again. Cel-shaded look 
 - [ ] Cache `cargo target/` keyed on `Cargo.lock`
 - [ ] Upload per-phase frame-budget bench results
 
+### Milestone 3.5b: FFT-based ocean water (Tessendorf method)
+
+Replaces the Phase 2.2 sum-of-sinusoids Gerstner water with a spectrum-based FFT
+ocean simulation. Triggered by Phase 3.2 weather landing — FFT ocean naturally
+parameterizes by wind speed + direction (Phillips or JONSWAP spectrum → IFFT →
+height field), so wind-driven sea state becomes physically motivated rather than
+a separate layer on top of fixed-parameter sinusoids.
+
+**Motivation (from 2.5a iteration):**
+
+During Phase 2.5a water contact work, the sum-of-sinusoids water was iterated
+heavily. Techniques explored and documented:
+
+- **Multi-scale wave hierarchy** (2 swells + 3 chop + 2 fine chop = 7 waves)
+- **Per-wave amplitude modulation** (each wave's effective amp varies with two
+  combined sine modulators + spatial noise; "wave-of-waves" approach)
+- **Noise displacement** on top of Gerstner sum (3 octaves of value_noise2 at
+  rotated sampling grids, scales chosen to not overlap wave wavelengths)
+- **Per-wave domain warping** (each wave's phase position perturbed by unique
+  noise offset so crest lines curve rather than running straight)
+- **Camera-follow mesh** (water moves with aircraft, stays tessellated where
+  the aircraft is)
+- **High-tessellation small-extent mesh** (512² vertices over 2 km, ~4 m per
+  vertex — enables 5 m chop to be geometrically visible)
+- **Per-component color tinting** (swell-trough green hue + chop-crest blue lift)
+- **Slope-driven foam** (foam follows wave faces, not just crest peaks)
+- **Subsurface-scattering proxy** (translucent warm glow at back-lit crests)
+
+**Fundamental limitation discovered:** sum-of-sinusoids water produces a visible
+regular interference lattice at 30-40 m spacing (classic "oval lattice" from
+crossing wave crests). Domain warping, noise displacement, and amplitude
+modulation mitigate but don't eliminate the pattern because the sinusoidal wave
+crests themselves are structural. No amount of stylized post-effect stacking on
+top of Gerstner gets past this without replacing the underlying wave model.
+
+The iteration produced the `water_topdown` + `water_topdown_wide` tests (see
+`crates/render/tests/visual_snapshot.rs`) for rapid visual inspection — those
+remain useful for tuning the FFT implementation too.
+
+**FFT ocean scope (Tessendorf 2001 / "Simulating Ocean Water"):**
+
+- [ ] Add compute pipeline support to the renderer (currently vertex+fragment only)
+- [ ] Storage buffer / texture setup for the spectrum + height field
+- [ ] Spectrum generator (compute shader, Phillips or JONSWAP driven by wind
+      direction + speed from Phase 3.2 `WorldState`)
+- [ ] IFFT pass (Cooley-Tukey in-place, 256×256 Rgba16Float recommended starting
+      point; 512² for higher tiers)
+- [ ] Second overlaid FFT at different tile size to break horizon repetition
+      (irrational tile size ratio, e.g., 150 m and 250 m)
+- [ ] Vertex shader samples the resulting height texture instead of computing
+      waves — mesh becomes "just geometry", all dynamics in the FFT pass
+- [ ] Sim-side height sampler mirrors the FFT (or samples a CPU-readback of the
+      height texture each tick) so buoyancy stays consistent
+- [ ] Chop-intensity hook (2.5a.7) becomes "wind speed input to spectrum"
+- [ ] Port the 2.5a visual effects (color tinting, slope foam, SSS glow) to the
+      FFT height field — they're orthogonal to the wave-generation method
+
+**Dependencies / scope amendments:**
+
+- **DESIGN.md amendment:** compute-pipeline support in `wgpu`-facing code. Not
+  currently in the architecture; needs a narrow boundary for the FFT.
+- **Dependency review:** vendoring an FFT compute shader is viable without a
+  new dep (Cooley-Tukey is ~200-400 lines of WGSL); alternative is a crate like
+  `wgfft` which would require DESIGN.md tech-stack amendment.
+- **No runtime FFT on CPU.** Sim-side `water_height` should sample the GPU
+  texture (via a readback path) OR maintain a parallel CPU FFT — pick during
+  implementation based on buoyancy's sample density needs.
+
+**Performance budget (3060 reference tier, 240 Hz target = 4.17 ms budget):**
+
+| Component | Estimated cost |
+|-----------|----------------|
+| Main FFT pass (256² Rgba16Float) | 0.1-0.15 ms (2.5-3.5% of budget) |
+| Overlaid second FFT at different scale | 0.1 ms (2.5% of budget) |
+| Vertex shader texture sampling (replaces current math) | ~0.01 ms (negligible; actually FASTER than current 7-wave vertex shader) |
+| Spectrum generation (pre-FFT) | 0.02 ms (re-run only on wind change) |
+| **Total** | **~0.2-0.3 ms (~5-7% of frame budget)** |
+
+- Memory: ~0.5-2 MB for height textures + scratch buffers.
+- Scales down cleanly for lower-tier hardware: 128² FFT on Steam Deck (~2-3%).
+- Scales up for high-tier: 1024² FFT on RTX 4070+ (~10-15%) for photorealistic
+  ocean scenes if that direction is ever pursued.
+
+**Why this performance is acceptable:**
+
+- Current Gerstner water vertex shader is ~0.2-0.5 ms (7 waves × domain-warp ×
+  modulation × per-vertex). FFT version is similar total cost, with much better
+  visual quality.
+- 5-7% of frame budget is within our 60% GPU utilization cap by a wide margin.
+- Budget headroom exists: frame-budget tests (`benches/frame_budget.rs`)
+  confirm reference-tier scenes hit the target with headroom.
+
+**What FFT water gives us that Gerstner can't:**
+
+- **No visible interference lattice.** Spectrum contains continuous frequencies;
+  patterns emerge stochastically.
+- **Physically-correct wind-driven sea state.** Beaufort scale → wave height
+  statistics flow directly through the spectrum.
+- **Automatic chop/swell mixing.** The spectrum handles both scales naturally.
+- **Matches AAA reference** (Sea of Thieves, Far Cry, commercial flight sims).
+
+**Caveats:**
+
+- Heavier code (roughly 500-1000 lines across compute shaders + setup).
+- Less directly-tunable artistically (spectrum parameters vs. tweaking N sine
+  waves) — wind direction + speed + "peakiness" replace per-wave params.
+- Loses some stylized cel-shading character — FFT ocean LOOKS like realistic
+  ocean. For flowPlan's cel-shaded art direction, the foam + color tinting
+  passes stay the same; only the underlying wave geometry changes.
+
+**Gate (3.5b):**
+
+All of the following, verified on reference hardware:
+1. FFT ocean renders without visible interference lattice (compare
+   `water_topdown_wide` output against the 2.5a snapshots — foam should be
+   scattered, not in a diagonal grid).
+2. Wind speed changes in `WorldState` measurably change sea state (wave
+   heights rise with wind).
+3. Frame-budget bench under `scene_standard` still hits 240 Hz on reference
+   hardware with ≤ 60% GPU utilization.
+4. Buoyancy physics unchanged — the sim-side height sampler produces a match
+   to the GPU FFT output (byte-identical would be ideal; within 1-2 cm RMS
+   would be acceptable given potential float-precision differences).
+5. All Phase 2.5a bench scenarios (water_taxi, water_takeoff,
+   water_takeoff_rotation, water_landing_approach, water_porpoise_emerge)
+   still pass with the new water model.
+
 ### Milestone 3.5: Seeded deterministic soundtrack
 
 - [ ] Master soundtrack seed + derivation function `(seed, season, weather, biome, time-of-day, mission_state) -> Glicol param schedule`
