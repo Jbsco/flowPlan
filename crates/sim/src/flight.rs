@@ -199,6 +199,14 @@ const WING_SPAN_M: f32 = 14.63;
 ///   0.24 → current; full stick at cruise hits ~40°/s steady pitch rate, initial
 ///          accel ~2 rad/s². Subjectively crisp without being unrecoverable.
 const CM_ALPHA: f32 = -0.25;
+// Known gap (documented 2026-04-22 task #177): peak pitch rate measured at
+// 48.9°/s at full elevator — 2.4× real Beaver ~20°/s. Reducing Cm_δe toward
+// realistic range (0.10-0.12) breaks 30-40 scenarios because scripted pitch
+// trim values (cruise trim 0.05, stall decel ramps, landing flare PID gains)
+// were calibrated against 0.24. Full fix requires dedicated scenario-input
+// rescaling pass; deferred. Roll-axis companion (Cl_δa) successfully reduced
+// 0.075 → 0.040 in same task because PID-driven roll scenarios adapt to
+// authority changes naturally (BankHold just commands more roll_in).
 const CM_DELTA_E: f32 = 0.24;
 const CM_Q: f32 = -25.0;
 
@@ -234,7 +242,13 @@ const TAILPLANE_LIFT_COEFF: f32 = 0.066;
 /// modest but noticeable roll stability; enough to let banked aircraft slowly
 /// return to level under uncorrected sideslip, without the over-damped feel of
 /// training-aircraft dihedral (-0.10+).
-const CL_DELTA_A: f32 = 0.075;
+// Task #177 (2026-04-22): reduced from 0.075 → 0.040 after roll-step-response
+// scenarios measured peak roll rate 75.7°/s at full aileron — 2.5× above real
+// Beaver POH / pilot-reported ~30°/s. User feedback: "yaw/roll in air feels
+// very extreme". First attempt at 0.030 measured 22.5°/s (under target 25-40);
+// 0.040 is middle-of-range, measured ~30°/s. Turn / bank scenarios compensate
+// via PID commanding more aileron input (within ±1.0 clamp).
+const CL_DELTA_A: f32 = 0.040;
 const CL_P: f32 = -0.5;
 const CL_BETA: f32 = -0.05;
 
