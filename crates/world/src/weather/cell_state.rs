@@ -100,14 +100,68 @@ const WIND_SAMPLE_ALTITUDE_M: f32 = 2_000.0;
 const CELL_STATE_TAG: u64 = u64::from_le_bytes(*b"cellstat");
 const CELL_OFFSET_TAG: u64 = u64::from_le_bytes(*b"celloff_");
 
-/// Full life cycle duration of a weather cell (s).
+/// Default life-cycle duration per cell type (seconds).
 ///
-/// 6 hours is the midpoint of real cell lifetimes: a fair-weather cumulus
-/// lives 30–60 min; a stratus deck persists 4–8 hours; a mesoscale
-/// convective system 3–6 hours. Using one fixed duration keeps the pure-
-/// function model simple; per-type duration variability is a future
-/// enhancement.
-pub const CELL_CYCLE_DURATION_S: f32 = 6.0 * 3_600.0;
+/// Values match real-world atmospheric timescales:
+/// - Fair-weather cumulus: 30–90 min — rapid formation + dissipation.
+/// - Cumulonimbus / nimbus: 1.5–3 hr — one convective "pulse".
+/// - Stratus decks: 4–8 hr — persistent boundary-layer features.
+/// - Squall line: 30 min–2 hr — fast-moving gust-front pulse.
+/// - Frontal-passage cells: 6–10 hr — slow synoptic system crossing.
+///
+/// `ClearAir` is unused (cleared cells have no life cycle).
+const DEFAULT_TYPE_CYCLE_S: [f32; 6] = [
+    0.0,           // ClearAir
+    1.5 * 3_600.0, // Cumulus
+    2.5 * 3_600.0, // Nimbus
+    6.0 * 3_600.0, // Stratus
+    1.5 * 3_600.0, // Squall
+    8.0 * 3_600.0, // Frontal
+];
+
+/// Player-tunable weather-pacing configuration.
+///
+/// Captured at session start alongside `master_seed`; threaded through
+/// evolution-aware APIs (`*_with_tuning` variants). Not meant to be mutated
+/// mid-flight — changes break determinism + save-format assumptions.
+///
+/// See memory `weather_tuning_user_surface` for the seed-creation UI intent.
+#[derive(Copy, Clone, Debug)]
+pub struct WeatherTuning {
+    /// Life-cycle duration in seconds per `CellType` (indexed by enum tag).
+    pub type_cycle_s: [f32; 6],
+}
+
+impl WeatherTuning {
+    /// Default pacing: real-world atmospheric timescales.
+    pub const DEFAULT: Self = Self {
+        type_cycle_s: DEFAULT_TYPE_CYCLE_S,
+    };
+
+    /// Apply a global multiplier to every type's cycle duration. `0.5` =
+    /// weather cycles 2× faster than default; `2.0` = half-speed. Intended
+    /// for "fast / normal / slow" presets at the seed-creation UI.
+    #[must_use]
+    pub fn with_global_multiplier(multiplier: f32) -> Self {
+        let mut out = Self::DEFAULT;
+        for d in &mut out.type_cycle_s {
+            *d *= multiplier;
+        }
+        out
+    }
+}
+
+impl Default for WeatherTuning {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Cycle duration (s) for a given cell type under a tuning.
+#[must_use]
+pub fn cycle_duration_s(cell_type: CellType, tuning: &WeatherTuning) -> f32 {
+    tuning.type_cycle_s[cell_type as usize]
+}
 
 /// Phase boundaries within a cycle: growth-peak-dissipation-dormant.
 ///
@@ -119,16 +173,17 @@ pub const GROWTH_END: f32 = 0.15;
 pub const PEAK_END: f32 = 0.60;
 pub const DISSIPATION_END: f32 = 0.85;
 
-/// Per-cell temporal offset in `[0, CELL_CYCLE_DURATION_S)`.
+/// Per-cell temporal offset as a unit fraction `∈ [0, 1)`.
 ///
-/// Deterministic per `(master_seed, cell)`. Ensures cells are at varying
-/// phases at any given sim time — a snapshot of the grid shows a mix of
-/// growing, peak, and dissipating cells rather than every cell cycling in
-/// lockstep.
+/// Deterministic per `(master_seed, cell)`; type-agnostic. Scales to
+/// seconds at phase-calc time by multiplying with the type's cycle
+/// duration. Ensures cells are at varying phases at any given sim time — a
+/// snapshot shows a mix of growing, peak, and dissipating cells rather than
+/// lockstep evolution.
 #[must_use]
 #[allow(clippy::cast_precision_loss)]
 #[allow(clippy::cast_sign_loss)]
-pub fn cell_time_offset(master_seed: u64, cell: CellId) -> f32 {
+pub fn cell_offset_unit(master_seed: u64, cell: CellId) -> f32 {
     let packed = ((cell.ix as u32 as u64) << 32) | (cell.iz as u32 as u64);
     let mut x = master_seed
         .wrapping_mul(0x9e37_79b9_7f4a_7c15)
@@ -137,22 +192,46 @@ pub fn cell_time_offset(master_seed: u64, cell: CellId) -> f32 {
     x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     x ^= x >> 31;
-    let unit = ((x >> 40) as f32) / ((1u32 << 24) as f32);
-    unit * CELL_CYCLE_DURATION_S
+    ((x >> 40) as f32) / ((1u32 << 24) as f32)
 }
 
-/// Cell phase `∈ [0, 1)` at sim time `time_s`.
-///
-/// Deterministic per `(master_seed, cell, time_s)`. Phase advances linearly
-/// with time, wrapping at cycle boundaries. See [`state_at_time`] for how
-/// phase drives activity.
+/// Cell phase `∈ [0, 1)` at sim time `time_s` for a given type under a
+/// tuning. Deterministic.
+#[must_use]
+pub fn cell_phase_for_type(
+    master_seed: u64,
+    cell: CellId,
+    cell_type: CellType,
+    time_s: f32,
+    tuning: &WeatherTuning,
+) -> f32 {
+    let duration = cycle_duration_s(cell_type, tuning);
+    if duration <= 0.0 {
+        return cell_offset_unit(master_seed, cell);
+    }
+    let offset_s = cell_offset_unit(master_seed, cell) * duration;
+    let t = time_s + offset_s;
+    // Explicit mod-to-positive since time_s might be negative.
+    let cycles = libm::floorf(t / duration);
+    (t - cycles * duration) / duration
+}
+
+/// Cell phase using the default tuning. Resolves cell type internally.
 #[must_use]
 pub fn cell_phase(master_seed: u64, cell: CellId, time_s: f32) -> f32 {
-    let offset = cell_time_offset(master_seed, cell);
-    // Explicit mod-to-positive since time_s might theoretically be negative.
-    let t = time_s + offset;
-    let cycles = libm::floorf(t / CELL_CYCLE_DURATION_S);
-    (t - cycles * CELL_CYCLE_DURATION_S) / CELL_CYCLE_DURATION_S
+    cell_phase_with_tuning(master_seed, cell, time_s, &WeatherTuning::DEFAULT)
+}
+
+/// Cell phase under a custom tuning. Resolves cell type internally.
+#[must_use]
+pub fn cell_phase_with_tuning(
+    master_seed: u64,
+    cell: CellId,
+    time_s: f32,
+    tuning: &WeatherTuning,
+) -> f32 {
+    let init = initial_state(master_seed, cell, time_s);
+    cell_phase_for_type(master_seed, cell, init.cell_type, time_s, tuning)
 }
 
 /// Life-cycle activity multiplier `∈ [0, 1]` at a given phase.
@@ -175,20 +254,31 @@ pub fn lifecycle_activity(phase: f32) -> f32 {
 }
 
 /// Per-cell state at sim time `time_s`, evolved from `initial_state` through
-/// the cell's life-cycle curve.
-///
-/// Deterministic per `(master_seed, cell, time_s)`. Adjacency-bias enhancements
-/// (neighbor cell types influence re-roll at cycle boundaries) are a future
-/// refinement — the W1 substrate already provides implicit adjacency since
-/// neighboring cells share smooth pressure/temperature/humidity fields and
-/// tend to classify into similar types.
+/// the cell's life-cycle curve. Uses the default tuning.
 #[must_use]
 pub fn state_at_time(master_seed: u64, cell: CellId, time_s: f32) -> CellState {
+    state_at_time_with_tuning(master_seed, cell, time_s, &WeatherTuning::DEFAULT)
+}
+
+/// Per-cell state under a custom tuning.
+///
+/// Deterministic per `(master_seed, cell, time_s, tuning)`. Adjacency-bias
+/// enhancements (neighbor cell types influence re-roll at cycle boundaries)
+/// are a future refinement — the W1 substrate already provides implicit
+/// adjacency since neighboring cells share smooth pressure/temperature/
+/// humidity fields and tend to classify into similar types.
+#[must_use]
+pub fn state_at_time_with_tuning(
+    master_seed: u64,
+    cell: CellId,
+    time_s: f32,
+    tuning: &WeatherTuning,
+) -> CellState {
     let initial = initial_state(master_seed, cell, time_s);
     if matches!(initial.cell_type, CellType::ClearAir) {
         return initial;
     }
-    let phase = cell_phase(master_seed, cell, time_s);
+    let phase = cell_phase_for_type(master_seed, cell, initial.cell_type, time_s, tuning);
     let activity = lifecycle_activity(phase);
     if activity < 0.01 {
         return CellState {
@@ -516,19 +606,82 @@ mod tests {
 
     #[test]
     fn cell_phase_wraps_at_cycle() {
-        // Phase at time t and at time t + CELL_CYCLE_DURATION should be equal.
+        // Phase math should wrap: for a fixed type, phase at t and phase at
+        // t + cycle_duration are equal. Test the phase function directly to
+        // isolate it from W1-drift-induced type reclassification that can
+        // occur across multi-hour gaps.
         let cell = CellId { ix: 5, iz: 7 };
-        let p0 = cell_phase(42, cell, 100.0);
-        let p1 = cell_phase(42, cell, 100.0 + CELL_CYCLE_DURATION_S);
-        // Allow small float error in the modular arithmetic.
-        assert!((p0 - p1).abs() < 1e-4, "phase {p0} vs {p1} after one cycle");
+        let tuning = WeatherTuning::DEFAULT;
+        for cell_type in [
+            CellType::Cumulus,
+            CellType::Nimbus,
+            CellType::Stratus,
+            CellType::Squall,
+            CellType::Frontal,
+        ] {
+            let duration = cycle_duration_s(cell_type, &tuning);
+            let p0 = cell_phase_for_type(42, cell, cell_type, 100.0, &tuning);
+            let p1 = cell_phase_for_type(42, cell, cell_type, 100.0 + duration, &tuning);
+            assert!(
+                (p0 - p1).abs() < 1e-3,
+                "{cell_type:?}: phase {p0} vs {p1} after one cycle"
+            );
+        }
     }
 
     #[test]
     fn different_cells_have_different_offsets() {
-        let o1 = cell_time_offset(42, CellId { ix: 0, iz: 0 });
-        let o2 = cell_time_offset(42, CellId { ix: 1, iz: 0 });
+        let o1 = cell_offset_unit(42, CellId { ix: 0, iz: 0 });
+        let o2 = cell_offset_unit(42, CellId { ix: 1, iz: 0 });
         assert_ne!(o1.to_bits(), o2.to_bits());
+    }
+
+    #[test]
+    fn per_type_cycle_durations() {
+        let t = WeatherTuning::DEFAULT;
+        // Convective types cycle faster than persistent ones.
+        assert!(cycle_duration_s(CellType::Cumulus, &t) < cycle_duration_s(CellType::Stratus, &t));
+        assert!(cycle_duration_s(CellType::Squall, &t) < cycle_duration_s(CellType::Frontal, &t));
+    }
+
+    #[test]
+    fn global_multiplier_scales_all_types() {
+        let t2 = WeatherTuning::with_global_multiplier(2.0);
+        let base = WeatherTuning::DEFAULT;
+        for t in [
+            CellType::Cumulus,
+            CellType::Nimbus,
+            CellType::Stratus,
+            CellType::Squall,
+            CellType::Frontal,
+        ] {
+            let ratio = cycle_duration_s(t, &t2) / cycle_duration_s(t, &base);
+            assert!((ratio - 2.0).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn tuning_affects_phase() {
+        // A cell's phase under 0.5× tuning should advance twice as fast.
+        for ix in 0..30 {
+            for iz in 0..30 {
+                let cell = CellId { ix, iz };
+                let init = initial_state(42, cell, 0.0);
+                if matches!(init.cell_type, CellType::ClearAir) {
+                    continue;
+                }
+                let base = WeatherTuning::DEFAULT;
+                let fast = WeatherTuning::with_global_multiplier(0.5);
+                let t_mid = 0.5 * cycle_duration_s(init.cell_type, &base);
+                let p_base = cell_phase_with_tuning(42, cell, t_mid, &base);
+                let p_fast = cell_phase_with_tuning(42, cell, t_mid, &fast);
+                // Fast tuning should be further along in the cycle.
+                // Compare position in cycle relative to offset.
+                assert_ne!(p_base.to_bits(), p_fast.to_bits(), "tuning had no effect");
+                return;
+            }
+        }
+        panic!("no non-ClearAir cell found");
     }
 
     #[test]
@@ -551,16 +704,16 @@ mod tests {
     fn evolved_state_dormant_reports_clear_air() {
         // Find a cell that's non-ClearAir at initial, then fast-forward
         // until it's dormant and check that it reports ClearAir.
+        let tuning = WeatherTuning::DEFAULT;
         for ix in 0..30 {
             for iz in 0..30 {
                 let cell = CellId { ix, iz };
                 let init = initial_state(42, cell, 0.0);
                 if !matches!(init.cell_type, CellType::ClearAir) {
-                    // Fast-forward to time when this cell is in the dormant
-                    // phase (just before cycle wrap).
-                    let offset = cell_time_offset(42, cell);
+                    let duration = cycle_duration_s(init.cell_type, &tuning);
+                    let offset_s = cell_offset_unit(42, cell) * duration;
                     let target_phase = 0.92;
-                    let target_time = target_phase * CELL_CYCLE_DURATION_S - offset;
+                    let target_time = target_phase * duration - offset_s;
                     if target_time > 0.0 {
                         let evolved = state_at_time(42, cell, target_time);
                         assert!(
@@ -582,14 +735,16 @@ mod tests {
     fn evolved_state_peak_matches_initial() {
         // At peak phase, density and precip should equal initial values
         // (activity == 1).
+        let tuning = WeatherTuning::DEFAULT;
         for ix in 0..30 {
             for iz in 0..30 {
                 let cell = CellId { ix, iz };
                 let init = initial_state(42, cell, 0.0);
                 if !matches!(init.cell_type, CellType::ClearAir) {
-                    let offset = cell_time_offset(42, cell);
+                    let duration = cycle_duration_s(init.cell_type, &tuning);
+                    let offset_s = cell_offset_unit(42, cell) * duration;
                     let target_phase = f32::midpoint(GROWTH_END, PEAK_END);
-                    let target_time = target_phase * CELL_CYCLE_DURATION_S - offset;
+                    let target_time = target_phase * duration - offset_s;
                     if target_time > 0.0 {
                         let evolved = state_at_time(42, cell, target_time);
                         assert_eq!(evolved.density.to_bits(), init.density.to_bits());

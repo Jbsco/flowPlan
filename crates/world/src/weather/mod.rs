@@ -47,8 +47,9 @@ pub mod voronoi;
 pub mod wind;
 
 pub use cell_state::{
-    cell_phase, initial_state as cell_initial_state, state_at_time as cell_state_at_time,
-    CellState, CellType,
+    cell_phase, cell_phase_with_tuning, initial_state as cell_initial_state,
+    state_at_time as cell_state_at_time, state_at_time_with_tuning as cell_state_at_time_with,
+    CellState, CellType, WeatherTuning,
 };
 pub use frontal::{frontal_segments, FrontalSegment};
 pub use humidity::humidity_at;
