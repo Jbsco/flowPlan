@@ -199,15 +199,13 @@ const WING_SPAN_M: f32 = 14.63;
 ///   0.24 → current; full stick at cruise hits ~40°/s steady pitch rate, initial
 ///          accel ~2 rad/s². Subjectively crisp without being unrecoverable.
 const CM_ALPHA: f32 = -0.25;
-// Known gap (documented 2026-04-22 task #177): peak pitch rate measured at
-// 48.9°/s at full elevator — 2.4× real Beaver ~20°/s. Reducing Cm_δe toward
-// realistic range (0.10-0.12) breaks 30-40 scenarios because scripted pitch
-// trim values (cruise trim 0.05, stall decel ramps, landing flare PID gains)
-// were calibrated against 0.24. Full fix requires dedicated scenario-input
-// rescaling pass; deferred. Roll-axis companion (Cl_δa) successfully reduced
-// 0.075 → 0.040 in same task because PID-driven roll scenarios adapt to
-// authority changes naturally (BankHold just commands more roll_in).
-const CM_DELTA_E: f32 = 0.24;
+// Task #178 (2026-04-22): reduced 0.24 → 0.15 after converting cruise /
+// climb / glide trim scenarios to PID-driven. Chose 0.15 over 0.12 (closer
+// to real-Beaver target ~0.10) because stall / landing-flare scenarios
+// have scripted pitch values calibrated against the original authority;
+// going to 0.12 broke 30 scenarios, 0.15 reduces the cascade while still
+// bringing peak pitch rate toward real ~20°/s.
+const CM_DELTA_E: f32 = 0.15;
 const CM_Q: f32 = -25.0;
 
 /// Tailplane lift coefficient (wing-area-referenced, per unit elevator).
