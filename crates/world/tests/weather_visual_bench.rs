@@ -95,6 +95,9 @@ impl Crop {
 
 const CROPS: &[Crop] = &[Crop::FULL, Crop::QUADRANT, Crop::PLAYER];
 
+/// Synoptic-overlay wind-arrow grid density (arrows per side).
+const ARROW_COUNT: u32 = 24;
+
 /// Map normalized `[0, 1]` → RGB via a perceptually-flat cool→warm ramp.
 fn ramp_rgb(t: f32) -> [u8; 3] {
     let t = t.clamp(0.0, 1.0);
@@ -391,6 +394,196 @@ fn emit_voronoi_partition_artifacts() {
             }
         }
         write_png(&img, &dir, &format!("voronoi_{}.png", crop.name));
+    }
+}
+
+/// Alpha-blend `src` over `dst` at `alpha` ∈ `[0, 1]`.
+fn blend(dst: [u8; 3], src: [u8; 3], alpha: f32) -> [u8; 3] {
+    let a = alpha.clamp(0.0, 1.0);
+    [
+        (f32::from(dst[0]) * (1.0 - a) + f32::from(src[0]) * a) as u8,
+        (f32::from(dst[1]) * (1.0 - a) + f32::from(src[1]) * a) as u8,
+        (f32::from(dst[2]) * (1.0 - a) + f32::from(src[2]) * a) as u8,
+    ]
+}
+
+/// Desaturate an RGB color toward mid-gray by `factor` ∈ `[0, 1]`. 0 = no
+/// change; 1 = fully gray.
+fn desaturate(rgb: [u8; 3], factor: f32) -> [u8; 3] {
+    let f = factor.clamp(0.0, 1.0);
+    let gray =
+        (f32::from(rgb[0]) * 0.30 + f32::from(rgb[1]) * 0.59 + f32::from(rgb[2]) * 0.11) as u8;
+    [
+        (f32::from(rgb[0]) * (1.0 - f) + f32::from(gray) * f) as u8,
+        (f32::from(rgb[1]) * (1.0 - f) + f32::from(gray) * f) as u8,
+        (f32::from(rgb[2]) * (1.0 - f) + f32::from(gray) * f) as u8,
+    ]
+}
+
+/// Draw a Bresenham line, painting a `thickness × thickness` square at each
+/// step for visibility on complex backgrounds.
+fn draw_line_thick(
+    img: &mut ImageBuffer<Rgb<u8>, Vec<u8>>,
+    (x0, y0): (i32, i32),
+    (x1, y1): (i32, i32),
+    color: [u8; 3],
+    thickness: i32,
+) {
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    let (mut x, mut y) = (x0, y0);
+    let (w, h) = (RESOLUTION as i32, RESOLUTION as i32);
+    let half = thickness / 2;
+    loop {
+        for dx2 in -half..=half {
+            for dy2 in -half..=half {
+                let (px, py) = (x + dx2, y + dy2);
+                if (0..w).contains(&px) && (0..h).contains(&py) {
+                    img.put_pixel(px as u32, py as u32, Rgb(color));
+                }
+            }
+        }
+        if x == x1 && y == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
+    }
+}
+
+/// Draw an arrow from `origin` to `tip`, with a short arrowhead back from the
+/// tip at ±30° from the shaft direction.
+fn draw_arrow(
+    img: &mut ImageBuffer<Rgb<u8>, Vec<u8>>,
+    origin: (i32, i32),
+    tip: (i32, i32),
+    color: [u8; 3],
+) {
+    draw_line(img, origin, tip, color);
+    let dx = (tip.0 - origin.0) as f32;
+    let dy = (tip.1 - origin.1) as f32;
+    let len = libm::sqrtf(dx * dx + dy * dy);
+    if len < 1.0 {
+        return;
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let head = (len * 0.35).min(6.0);
+    // ±30° rotation of the reversed unit vector.
+    let c30 = 0.866;
+    let s30 = 0.5;
+    let (rx1, ry1) = (-ux * c30 - (-uy) * s30, -uy * c30 + (-ux) * s30);
+    let (rx2, ry2) = (-ux * c30 + (-uy) * s30, -uy * c30 - (-ux) * s30);
+    let head_end_1 = (tip.0 + (rx1 * head) as i32, tip.1 + (ry1 * head) as i32);
+    let head_end_2 = (tip.0 + (rx2 * head) as i32, tip.1 + (ry2 * head) as i32);
+    draw_line(img, tip, head_end_1, color);
+    draw_line(img, tip, head_end_2, color);
+}
+
+#[test]
+#[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
+fn emit_synoptic_overlay_artifacts() {
+    // Weather-map-style composite: pressure field (desaturated) as background,
+    // cell-type tint in active cells, Voronoi edges, frontal segments, and
+    // sparse wind arrows.
+    let dir = output_dir();
+    let p_lo = pressure::BASELINE_HPA - pressure::SYNOPTIC_AMPLITUDE_HPA;
+    let p_hi = pressure::BASELINE_HPA + pressure::SYNOPTIC_AMPLITUDE_HPA;
+    let p_span = p_hi - p_lo;
+
+    // Arrow grid density — 24 × 24 arrows per image (~43 px spacing).
+    let arrow_stride = RESOLUTION / ARROW_COUNT;
+    let arrow_len_px = (arrow_stride as f32) * 0.45;
+
+    for &crop in CROPS {
+        let mut img = ImageBuffer::new(RESOLUTION, RESOLUTION);
+
+        // Background: desaturated pressure + cell-type tint + Voronoi edge.
+        for py in 0..RESOLUTION {
+            for px in 0..RESOLUTION {
+                let (x, z) = crop.world_coord(px, py);
+                let p = pressure::sea_level_pressure(CANONICAL_SEED, x, z, 0.0);
+                let pressure_rgb =
+                    desaturate(ramp_rgb(((p - p_lo) / p_span).clamp(0.0, 1.0)), 0.55);
+
+                let lookup = voronoi::cell_at(CANONICAL_SEED, x, z);
+                let state = cell_state::initial_state(CANONICAL_SEED, lookup.cell_id, 0.0);
+                let mut out = if matches!(state.cell_type, cell_state::CellType::ClearAir) {
+                    pressure_rgb
+                } else {
+                    // Blend cell-type color over pressure background at 40% alpha.
+                    blend(pressure_rgb, cell_type_color(state.cell_type), 0.40)
+                };
+
+                // Subtle Voronoi-edge darkening (only where cells are large
+                // enough on-screen to distinguish).
+                let edge_pixels = (300.0 / crop.extent_m) * RESOLUTION as f32;
+                if lookup.distance_to_edge < 300.0 && edge_pixels > 1.0 {
+                    let t = lookup.distance_to_edge / 300.0;
+                    for c in &mut out {
+                        *c = (f32::from(*c) * (0.5 + 0.5 * t)) as u8;
+                    }
+                }
+
+                img.put_pixel(px, py, Rgb(out));
+            }
+        }
+
+        // Frontal segments: white halo + black core for readability against
+        // any background.
+        let segs = frontal::frontal_segments(
+            CANONICAL_SEED,
+            crop.center_x_m,
+            crop.center_z_m,
+            crop.extent_m / 2.0,
+            crop.extent_m / 25.0,
+            0.0,
+        );
+        for s in &segs {
+            if let (Some(p0), Some(p1)) = (
+                world_to_pixel(crop, s.start.x, s.start.y),
+                world_to_pixel(crop, s.end.x, s.end.y),
+            ) {
+                draw_line_thick(&mut img, p0, p1, [255, 255, 255], 5);
+                draw_line_thick(&mut img, p0, p1, [0, 0, 0], 2);
+            }
+        }
+
+        // Wind arrows on a sparse regular grid. Arrow length scales with
+        // magnitude so calm regions show short stubs, jet-stream cores show
+        // long arrows.
+        let max_mag = 25.0;
+        for ay in 0..ARROW_COUNT {
+            for ax in 0..ARROW_COUNT {
+                let px = ax * arrow_stride + arrow_stride / 2;
+                let py = ay * arrow_stride + arrow_stride / 2;
+                let (x, z) = crop.world_coord(px, py);
+                // Sample wind aloft (2 km) so surface friction isn't the
+                // dominant visual signal.
+                let w = wind::wind_at(CANONICAL_SEED, x, 2_000.0, z, 0.0);
+                let mag = libm::sqrtf(w.x * w.x + w.z * w.z);
+                let scale = (mag / max_mag).clamp(0.1, 1.0) * arrow_len_px;
+                // World axes: +x east, +z north. Image +y is south.
+                let tip_px = (
+                    px as i32 + (w.x * scale / mag.max(0.01)) as i32,
+                    py as i32 - (w.z * scale / mag.max(0.01)) as i32,
+                );
+                // Halo + core.
+                draw_arrow(&mut img, (px as i32, py as i32), tip_px, [255, 255, 255]);
+                draw_arrow(&mut img, (px as i32, py as i32), tip_px, [30, 30, 30]);
+            }
+        }
+
+        write_png(&img, &dir, &format!("synoptic_{}.png", crop.name));
     }
 }
 
