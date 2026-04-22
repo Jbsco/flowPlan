@@ -37,6 +37,7 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+pub mod cell_state;
 pub mod frontal;
 pub mod humidity;
 pub mod pressure;
@@ -45,6 +46,7 @@ pub mod turbulence;
 pub mod voronoi;
 pub mod wind;
 
+pub use cell_state::{initial_state as cell_initial_state, CellState, CellType};
 pub use frontal::{frontal_segments, FrontalSegment};
 pub use humidity::humidity_at;
 pub use pressure::pressure_at;

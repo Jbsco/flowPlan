@@ -30,7 +30,7 @@ use std::path::Path;
 
 use flowplan_world::terrain::Terrain;
 use flowplan_world::weather::{
-    frontal, humidity, pressure, temperature, turbulence, voronoi, wind,
+    cell_state, frontal, humidity, pressure, temperature, turbulence, voronoi, wind,
 };
 use image::{ImageBuffer, Rgb};
 
@@ -325,6 +325,45 @@ fn cell_color(cell_id: voronoi::CellId) -> [u8; 3] {
     let g = ((h >> 32) & 0xff) as u8;
     let b = ((h >> 48) & 0xff) as u8;
     [r, g, b]
+}
+
+/// Canonical palette for cell types — mnemonic weather-map conventions.
+fn cell_type_color(t: cell_state::CellType) -> [u8; 3] {
+    match t {
+        cell_state::CellType::ClearAir => [180, 200, 230], // pale sky blue
+        cell_state::CellType::Cumulus => [240, 240, 240],  // white
+        cell_state::CellType::Nimbus => [70, 70, 90],      // dark slate
+        cell_state::CellType::Stratus => [170, 170, 180],  // light gray
+        cell_state::CellType::Squall => [220, 180, 40],    // amber
+        cell_state::CellType::Frontal => [200, 50, 80],    // magenta-red
+    }
+}
+
+#[test]
+#[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
+fn emit_cell_type_artifacts() {
+    let dir = output_dir();
+    for &crop in CROPS {
+        let mut img = ImageBuffer::new(RESOLUTION, RESOLUTION);
+        for py in 0..RESOLUTION {
+            for px in 0..RESOLUTION {
+                let (x, z) = crop.world_coord(px, py);
+                let lookup = voronoi::cell_at(CANONICAL_SEED, x, z);
+                let state = cell_state::initial_state(CANONICAL_SEED, lookup.cell_id, 0.0);
+                let mut color = cell_type_color(state.cell_type);
+                // Feather cell edges 500 m toward black to reveal partition.
+                let edge_pixels = (500.0 / crop.extent_m) * RESOLUTION as f32;
+                if lookup.distance_to_edge < 500.0 && edge_pixels > 1.0 {
+                    let t = lookup.distance_to_edge / 500.0;
+                    for c in &mut color {
+                        *c = (f32::from(*c) * t) as u8;
+                    }
+                }
+                img.put_pixel(px, py, Rgb(color));
+            }
+        }
+        write_png(&img, &dir, &format!("cell_type_{}.png", crop.name));
+    }
 }
 
 #[test]
