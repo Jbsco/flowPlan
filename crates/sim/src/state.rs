@@ -6,7 +6,7 @@
 //! Phase 2 replaces `tick_dynamics` with the DHC-2 Beaver flight model.
 
 use flowplan_core::{Rng, TickCount};
-use glam::Quat;
+use glam::{Quat, Vec3};
 
 use crate::aircraft_spec::AircraftSpec;
 use crate::buoyancy;
@@ -16,6 +16,33 @@ use crate::flight;
 use crate::ground_contact;
 use crate::input::{InputEvent, InputEvents};
 use crate::vehicle::VehicleState;
+
+/// Per-tick weather inputs.
+///
+/// The sim's view of the airmass at the aircraft's current position.
+/// Populated by the app from `world::weather` samplers; left at
+/// `Default::default()` for headless / bench scenarios that run in still air.
+///
+/// Semantics:
+/// - `wind` is the airmass velocity in world frame (m/s). The aircraft's
+///   aero forces see `vehicle.velocity - wind` as relative airflow, so
+///   tailwinds reduce airspeed, headwinds boost it, crosswinds produce
+///   sideslip.
+/// - `turbulence_intensity` is a non-dimensional scalar matching the
+///   `world::weather::turbulence_at_with_weather` output (0 = calm,
+///   1 = moderate, 3+ = severe). Drives stochastic angular-velocity jitter
+///   proportional to the magnitude.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct WeatherInputs {
+    pub wind: Vec3,
+    pub turbulence_intensity: f32,
+}
+
+/// Gain for converting `turbulence_intensity` into per-tick angular-velocity
+/// jitter (rad/s per unit intensity per second, roughly). Tuned so moderate
+/// turbulence (intensity ≈ 1.0) produces noticeable but controllable buffet
+/// and severe (≥ 3) is aggressively destabilizing.
+const TURBULENCE_ANGULAR_JITTER_GAIN: f32 = 0.15;
 
 /// The fixed simulation timestep. 120 Hz per [`DESIGN.md § Invariants`](../../../DESIGN.md#invariants).
 pub const FIXED_DT: f32 = 1.0 / 120.0;
@@ -114,19 +141,42 @@ impl SimState {
         }
     }
 
-    /// Advance the simulation by one fixed step.
+    /// Advance the simulation by one fixed step under still-air conditions.
     ///
-    /// Deterministic for a given `(seed, input trace, difficulty state, tick count,
-    /// min_altitude)`. See [`DESIGN.md § Invariants`](../../../DESIGN.md#invariants).
-    /// `min_altitude` is the floor the CG must not cross: for the game it's
-    /// `max(terrain.height(x, z), mean_water_level) + float_offset` (computed by the
-    /// app). For pure-sim tests use any constant (e.g., `0.5`).
+    /// Convenience wrapper around [`SimState::tick_with_weather`] that passes
+    /// `WeatherInputs::default()` (no wind, no turbulence). Preserves the
+    /// pre-3.2.3 signature so existing tests / scenarios that don't model
+    /// weather continue to work unchanged.
     pub fn tick(
+        &mut self,
+        inputs: &InputEvents,
+        difficulty: &DifficultyDials,
+        dt: f32,
+        min_altitude: f32,
+    ) {
+        self.tick_with_weather(
+            inputs,
+            difficulty,
+            dt,
+            min_altitude,
+            WeatherInputs::default(),
+        );
+    }
+
+    /// Advance the simulation by one fixed step with explicit weather inputs.
+    ///
+    /// Deterministic for a given `(seed, input trace, difficulty state, tick
+    /// count, min_altitude, weather trace)`. See [`DESIGN.md § Invariants`](../../../DESIGN.md#invariants).
+    /// Weather inputs affect aero (wind on relative airflow) and attitude
+    /// (turbulence buffet); they do not affect the integration path directly
+    /// (which remains world-frame).
+    pub fn tick_with_weather(
         &mut self,
         inputs: &InputEvents,
         _difficulty: &DifficultyDials,
         dt: f32,
         min_altitude: f32,
+        weather: WeatherInputs,
     ) {
         apply_inputs(&mut self.vehicle, &mut self.camera, inputs);
         let (flight_out, strikes) = tick_dynamics(
@@ -136,6 +186,8 @@ impl SimState {
             min_altitude,
             self.wave_time,
             self.chop_intensity,
+            weather,
+            &mut self.rng,
         );
         self.last_flight = flight_out;
         self.last_strikes = strikes;
@@ -205,6 +257,8 @@ fn tick_dynamics(
     min_altitude: f32,
     wave_time: f32,
     chop_intensity: f32,
+    weather: WeatherInputs,
+    rng: &mut Rng,
 ) -> (flight::FlightOutputs, ground_contact::StrikeFlags) {
     // AGL approximation for ground effect (2.4.6). `min_altitude` is the app-supplied
     // surface clamp that includes the float offset + a small margin; for ground
@@ -213,7 +267,16 @@ fn tick_dynamics(
     // 14.6 m wingspan, so the induced-drag reduction is slightly overstated near
     // the surface but converges to the right value above a few meters.
     let agl = (v.position.y - min_altitude).max(0.0);
+
+    // Weather wind: aero sees `vehicle_velocity - wind` as relative airflow.
+    // Temporarily swap the vehicle's velocity for airmass-relative before
+    // calling the flight model, then restore. Forces computed at airflow
+    // velocity are applied to world-frame velocity — a tailwind reduces
+    // airspeed + lift, a headwind boosts both.
+    let ground_velocity = v.velocity;
+    v.velocity = ground_velocity - weather.wind;
     let forces = flight::compute_forces(v, spec, dt, agl);
+    v.velocity = ground_velocity;
 
     // Per-pontoon buoyancy (Phase 2.5a.1). Short-circuits to zero above water,
     // when no aircraft spec is loaded, or when the aircraft is configured with
@@ -237,6 +300,18 @@ fn tick_dynamics(
     // naturally match the same storage convention — no further flips needed when
     // summing.
     v.angular_velocity += (forces.angular_accel + buoy.angular_accel + gc.angular_accel) * dt;
+
+    // Turbulence buffet: stochastic angular-velocity jitter scaled by
+    // intensity. Deterministic via the sim RNG (folded into state_hash
+    // automatically since we mutate the shared `rng`). Zero when
+    // intensity = 0, so still-air scenarios are unaffected.
+    if weather.turbulence_intensity > 0.0 {
+        let scale = weather.turbulence_intensity * TURBULENCE_ANGULAR_JITTER_GAIN * dt;
+        let jx = (rng.next_f32() * 2.0 - 1.0) * scale;
+        let jy = (rng.next_f32() * 2.0 - 1.0) * scale;
+        let jz = (rng.next_f32() * 2.0 - 1.0) * scale;
+        v.angular_velocity += Vec3::new(jx, jy, jz);
+    }
 
     // Residual rotational damping: a small airspeed-independent decay so angular
     // velocity bleeds off even at V=0 (where all q-based damping vanishes). Stands
@@ -275,6 +350,7 @@ fn tick_dynamics(
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)] // Deterministic float compares via `.to_array()` or to_bits-equivalent.
 mod tests {
     use glam::Vec3;
 
@@ -565,6 +641,124 @@ mod tests {
             s.vehicle.velocity.y.abs() < 1.0,
             "expected bounded vertical velocity at 30 s, got {} m/s",
             s.vehicle.velocity.y
+        );
+    }
+
+    // ---- Weather wiring (3.2.3b) ------------------------------------------
+
+    #[test]
+    fn tick_with_weather_default_equals_tick() {
+        // Default WeatherInputs (zero wind, zero turbulence) must produce
+        // byte-identical state to plain `tick()` — the new API doesn't
+        // perturb still-air behavior.
+        let mut a = SimState::new(42);
+        let mut b = SimState::new(42);
+        let d = DifficultyDials::default();
+        for _ in 0..30 {
+            a.tick(&InputEvents::empty(), &d, FIXED_DT, 0.5);
+            b.tick_with_weather(
+                &InputEvents::empty(),
+                &d,
+                FIXED_DT,
+                0.5,
+                WeatherInputs::default(),
+            );
+        }
+        assert_eq!(a.vehicle.position.to_array(), b.vehicle.position.to_array());
+        assert_eq!(a.vehicle.velocity.to_array(), b.vehicle.velocity.to_array());
+    }
+
+    #[test]
+    fn headwind_reduces_horizontal_ground_track() {
+        // Two simulations identical except for a 10 m/s headwind. After a
+        // short cruise with throttle, the aircraft in the headwind should
+        // travel LESS distance over the ground than the still-air case.
+        let mut calm = SimState::new(1);
+        let mut headwind = SimState::new(1);
+        let d = DifficultyDials::default();
+        // Give both a forward velocity in the air (nose aligned with -Z per
+        // flowplan's forward convention).
+        calm.vehicle.velocity = Vec3::new(0.0, 0.0, -30.0);
+        headwind.vehicle.velocity = Vec3::new(0.0, 0.0, -30.0);
+        // Headwind blows from -Z toward +Z at 10 m/s (opposing the aircraft).
+        let wind = Vec3::new(0.0, 0.0, 10.0);
+        let inputs = InputEvents::default();
+        // Run for a second.
+        for _ in 0..120 {
+            calm.tick(&inputs, &d, FIXED_DT, -1000.0);
+            headwind.tick_with_weather(
+                &inputs,
+                &d,
+                FIXED_DT,
+                -1000.0,
+                WeatherInputs {
+                    wind,
+                    turbulence_intensity: 0.0,
+                },
+            );
+        }
+        // Headwind case: airspeed is higher (30 + 10 = 40 m/s relative
+        // airflow), which means more drag; ground-frame velocity decays
+        // faster. Over-ground distance traveled is less.
+        let calm_dz = calm.vehicle.position.z;
+        let headwind_dz = headwind.vehicle.position.z;
+        // Both moved in -Z; magnitude comparison.
+        assert!(
+            headwind_dz.abs() < calm_dz.abs(),
+            "headwind dz {headwind_dz} should have smaller magnitude than calm dz {calm_dz}",
+        );
+    }
+
+    #[test]
+    fn turbulence_induces_angular_velocity_jitter() {
+        // Calm-air sim should keep angular velocity at zero (idle).
+        // Turbulent sim should accumulate angular velocity jitter.
+        let mut calm = SimState::new(1);
+        let mut turb = SimState::new(1);
+        let d = DifficultyDials::default();
+        let inputs = InputEvents::default();
+        let weather_turb = WeatherInputs {
+            wind: Vec3::ZERO,
+            turbulence_intensity: 2.0,
+        };
+        for _ in 0..30 {
+            calm.tick(&inputs, &d, FIXED_DT, -1000.0);
+            turb.tick_with_weather(&inputs, &d, FIXED_DT, -1000.0, weather_turb);
+        }
+        // Calm air: angular velocity stays near zero (damping + no injection).
+        assert!(
+            calm.vehicle.angular_velocity.length() < 0.01,
+            "calm angular velocity should stay near zero; got {}",
+            calm.vehicle.angular_velocity.length()
+        );
+        // Turbulence: some angular velocity should be present.
+        assert!(
+            turb.vehicle.angular_velocity.length() > 0.001,
+            "turbulence should produce angular velocity jitter; got {}",
+            turb.vehicle.angular_velocity.length()
+        );
+    }
+
+    #[test]
+    fn weather_tick_deterministic() {
+        // Same seed + same weather trace must produce bit-identical state.
+        let mut a = SimState::new(12345);
+        let mut b = SimState::new(12345);
+        let d = DifficultyDials::default();
+        let weather = WeatherInputs {
+            wind: Vec3::new(3.0, 0.0, -7.0),
+            turbulence_intensity: 1.5,
+        };
+        let inputs = InputEvents::default();
+        for _ in 0..60 {
+            a.tick_with_weather(&inputs, &d, FIXED_DT, -1000.0, weather);
+            b.tick_with_weather(&inputs, &d, FIXED_DT, -1000.0, weather);
+        }
+        assert_eq!(a.vehicle.position.to_array(), b.vehicle.position.to_array());
+        assert_eq!(a.vehicle.velocity.to_array(), b.vehicle.velocity.to_array());
+        assert_eq!(
+            a.vehicle.angular_velocity.to_array(),
+            b.vehicle.angular_velocity.to_array()
         );
     }
 }

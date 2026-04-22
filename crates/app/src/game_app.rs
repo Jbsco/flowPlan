@@ -751,8 +751,37 @@ impl Runtime {
                     flowplan_sim::VehicleConfig::Wheels => terrain_here + SURFACE_MARGIN,
                 }
             };
+            // Sample weather at the aircraft's current position and feed it
+            // to the sim. Scenario-playback mode uses still air (weather is
+            // a real-world-distraction for deterministic scenario benching);
+            // free-flight mode gets the full W1 + W2 + W3 composed state.
+            let weather = if self.scenario_playback.is_some() {
+                flowplan_sim::WeatherInputs::default()
+            } else {
+                let pos = self.sim.vehicle.position;
+                let wind = flowplan_world::weather::wind_at_with_weather(
+                    WORLD_SEED,
+                    &self.terrain,
+                    pos.x,
+                    pos.y,
+                    pos.z,
+                    self.sim.wave_time,
+                );
+                let turbulence = flowplan_world::weather::turbulence_at_with_weather(
+                    WORLD_SEED,
+                    &self.terrain,
+                    pos.x,
+                    pos.y,
+                    pos.z,
+                    self.sim.wave_time,
+                );
+                flowplan_sim::WeatherInputs {
+                    wind,
+                    turbulence_intensity: turbulence,
+                }
+            };
             self.sim
-                .tick(&batch, &self.difficulty, FIXED_DT, min_altitude);
+                .tick_with_weather(&batch, &self.difficulty, FIXED_DT, min_altitude, weather);
             // Post-tick terrain-aware camera clamp: prevents chase camera from
             // clipping through hills. Kept outside `sim.tick` so sim stays pure.
             let cam_ground = self
