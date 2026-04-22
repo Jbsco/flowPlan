@@ -283,19 +283,29 @@ impl ControlLaw {
                 kd,
             } => {
                 let airspeed = sim.vehicle.velocity.length();
-                let climb_output = {
-                    let error = climb_vs_mps - sim.vehicle.velocity.y;
-                    pid_step(state, error, dt, kp, ki, kd).clamp(-1.0, 1.0)
-                };
-                let output = if airspeed < rotation_airspeed_mps - transition_band_mps {
+                let lower_bound = rotation_airspeed_mps - transition_band_mps;
+                let upper_bound = rotation_airspeed_mps + transition_band_mps;
+                // Pre-rotation phase: hold `pre_rotation_pitch` WITHOUT running
+                // the PID. If we integrated error during the long pre-rotation
+                // taxi/plow (vs ≈ 0, target = climb_vs_mps positive), integral
+                // would wind up to the clamp limit and saturate the output at
+                // +1.0 the instant rotation begins — producing 20+°/s pitch
+                // rate (real Beaver rotation is 5-10°/s). Keeping the PID
+                // frozen until transition avoids the windup and gives a
+                // realistic ramp.
+                let output = if airspeed < lower_bound {
                     pre_rotation_pitch
-                } else if airspeed > rotation_airspeed_mps + transition_band_mps {
-                    climb_output
                 } else {
-                    // Smooth lerp through the transition band.
-                    let t = (airspeed - (rotation_airspeed_mps - transition_band_mps))
-                        / (2.0 * transition_band_mps);
-                    pre_rotation_pitch + (climb_output - pre_rotation_pitch) * t.clamp(0.0, 1.0)
+                    // Transition or climb phase: PID now drives toward climb vs.
+                    let error = climb_vs_mps - sim.vehicle.velocity.y;
+                    let climb_output = pid_step(state, error, dt, kp, ki, kd).clamp(-1.0, 1.0);
+                    if airspeed > upper_bound {
+                        climb_output
+                    } else {
+                        // Smooth lerp through the transition band.
+                        let t = (airspeed - lower_bound) / (2.0 * transition_band_mps);
+                        pre_rotation_pitch + (climb_output - pre_rotation_pitch) * t.clamp(0.0, 1.0)
+                    }
                 };
                 InputEvent::SetPitch(output.clamp(-1.0, 1.0))
             },
@@ -325,16 +335,33 @@ impl ControlLaw {
 
 /// Advance a PID controller one tick. Pure function; only mutates `state`.
 ///
-/// Standard textbook form: `output = kp·e + ki·∫e + kd·de/dt`.
+/// Standard textbook form: `output = kp·e + ki·∫e + kd·de/dt`. Includes
+/// **conditional-integration anti-windup**: the integral only accumulates
+/// when the current output is within its clamp range (`-OUTPUT_LIMIT`,
+/// `+OUTPUT_LIMIT`). This prevents the integral from winding up while the
+/// output is saturated — a failure mode observed in `TakeoffClimb` during
+/// the long on-step phase, where the plant physically cannot close the
+/// vs-error until aircraft leaves the surface. Without anti-windup, the
+/// integral hit its ±100 clamp over ~37 seconds, keeping the output at
+/// +1.0 well past the point the physics began responding, producing a
+/// 21°/s rotation rate (vs real Beaver ~5-10°/s).
+///
+/// Integral clamp (±100) stays as a belt-and-suspenders bound.
 fn pid_step(state: &mut ControlLawState, error: f32, dt: f32, kp: f32, ki: f32, kd: f32) -> f32 {
-    state.integral += error * dt;
-    // Clamp integral to prevent wind-up during long error periods.
-    state.integral = state.integral.clamp(-100.0, 100.0);
+    // Conditional integration: only accumulate error while output is within
+    // its normal operating range (|tentative| < 1.0 on a ±1.0-clamped control).
+    const OUTPUT_LIMIT: f32 = 1.0;
+    // Tentative output without updating integral — used for saturation check.
     let derivative = if dt > 0.0 {
         (error - state.prev_error) / dt
     } else {
         0.0
     };
+    let tentative = kp * error + ki * state.integral + kd * derivative;
+    if tentative.abs() < OUTPUT_LIMIT {
+        state.integral += error * dt;
+        state.integral = state.integral.clamp(-100.0, 100.0);
+    }
     state.prev_error = error;
     kp * error + ki * state.integral + kd * derivative
 }

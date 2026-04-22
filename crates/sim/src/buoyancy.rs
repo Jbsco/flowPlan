@@ -145,6 +145,20 @@ const INSIDE_FLOAT_STICK_COEFF: f32 = 70_000.0;
 /// nose-up — exactly the characteristic on-step posture.
 const PLANING_LIFT_CENTROID_Z_FWD_M: f32 = -1.5;
 
+/// Trim-angle (body pitch) dependence of planing lift.
+///
+/// Real planing hulls generate additional lift at nose-up attitudes — the trim
+/// angle between the pontoon bottom and water surface determines hydrodynamic
+/// lift coefficient (Savitsky planing-hull theory). Form:
+/// `lift_multiplier = 1 + k × sin(pitch).max(0)` — multiplier ≥ 1 (never less
+/// than baseline). Only boosts for nose-up attitudes; at level the factor is
+/// exactly 1 so existing level-start scenarios are unchanged.
+///
+/// Value chosen via triage (task #174). At k=1.5: 5° pitch → 1.13×, 10° → 1.26×,
+/// 15° → 1.39×. Rewards pilot-commanded rotation during on-step with real
+/// hydrodynamic lift growth.
+const ALPHA_PLANING_LIFT_GAIN: f32 = 1.5;
+
 /// Water rudder yaw coefficient.
 ///
 /// Produces directional control at low water speed where air rudder is
@@ -297,6 +311,11 @@ pub fn compute_buoyancy(
     // cross-product contributions to pontoon velocity are in the right frame.
     let angular_velocity_world = v.orientation * v.angular_velocity;
 
+    // Body pitch (trim-angle proxy) for α-dependent planing lift boost.
+    // YXZ Euler decomposition: X component = pitch (+nose-up).
+    let (_, pitch_rad, _) = v.orientation.to_euler(glam::EulerRot::YXZ);
+    let pitch_lift_multiplier = 1.0 + ALPHA_PLANING_LIFT_GAIN * pitch_rad.sin().max(0.0);
+
     // Per-section normalization factor: force coefficients are specified per-pontoon
     // (whole-pontoon effective strength); divided across sections so summing all
     // sections returns the original per-pontoon total when fully wet. Max displacement
@@ -390,11 +409,16 @@ pub fn compute_buoyancy(
             let v_sample_body = v.orientation.inverse() * v_sample_world;
             let v_body_forward = -v_sample_body.z;
             let planing_lift_world = if v_body_forward > 0.0 {
+                // α-dependent boost (Savitsky planing-hull theory): nose-up
+                // trim angles raise hydrodynamic lift coefficient. Multiplier
+                // is clamped ≥ 1.0, so level/nose-down attitudes behave as
+                // before and only nose-up gets the benefit.
                 let lift_magnitude = PLANING_LIFT_N_PER_MPS2
                     * per_section_scale
                     * v_body_forward
                     * v_body_forward
-                    * wetted_fraction;
+                    * wetted_fraction
+                    * pitch_lift_multiplier;
                 Vec3::new(0.0, lift_magnitude, 0.0)
             } else {
                 Vec3::ZERO

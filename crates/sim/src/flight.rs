@@ -202,6 +202,26 @@ const CM_ALPHA: f32 = -0.25;
 const CM_DELTA_E: f32 = 0.24;
 const CM_Q: f32 = -25.0;
 
+/// Tailplane lift coefficient (wing-area-referenced, per unit elevator).
+///
+/// Real tailplane surfaces contribute a small vertical force when the elevator
+/// is deflected — distinct from the pitching moment already modeled via
+/// `CM_DELTA_E`. Missing this physics contributed to restrictive on-step
+/// rotation failures (task #174): elevator commanded pitch-up but couldn't
+/// kickstart rotation from level attitude because no force component existed
+/// to help raise the aircraft; rotation only began once buoyancy asymmetry
+/// developed, and buoyancy asymmetry only develops AFTER some pitch exists.
+///
+/// Coefficient derivation: moment from tail lift × `tail_arm` = existing
+/// `CM_DELTA_E` moment; so `TAILPLANE_LIFT_COEFF = CM_DELTA_E × c / tail_arm`.
+/// For Beaver: 0.24 × 1.52 / 5.5 ≈ 0.066 (theoretical value).
+///
+/// At 0.066, the tail lift is sufficient to kickstart rotation from level
+/// attitude in the restrictive glassy-water takeoff scenario (task #174 key
+/// success criterion — real Beaver CAN take off from glassy water, and our
+/// model now matches). Lower values (0.033) don't unblock glassy rotation.
+const TAILPLANE_LIFT_COEFF: f32 = 0.066;
+
 /// Roll: aileron command (`Cl_δa > 0`) rolls right wing down for positive stick;
 /// damping (`Cl_p < 0`) opposes roll rate. Dihedral effect (`Cl_β < 0`) provides
 /// static roll stability: when aircraft sideslips (β ≠ 0), the lower wing gets
@@ -843,7 +863,26 @@ pub fn compute_forces(
             } else {
                 body_up
             };
-            let lift_vec = lift_dir * (lift_force_n / mass_kg);
+            // Tailplane lift: elevator deflection creates a small vertical force
+            // at the tail, in addition to the pitching moment modeled via
+            // CM_DELTA_E. Real tailplane surfaces contribute ~5-8% of
+            // wing-equivalent lift per unit elevator deflection — a small
+            // force individually, but load-bearing at low airspeed where the
+            // main wing + buoyancy margin is thin (on-step plateau, rotation
+            // from level attitude on floats). Missing this physics contributed
+            // to the restrictive glassy-water takeoff failure (task #174):
+            // elevator moment alone couldn't produce the pitch-up rotation
+            // because it relied on buoyancy asymmetry that only appears
+            // AFTER some pitch has developed (chicken-and-egg).
+            //
+            // Coefficient derivation: the moment from tail lift = L_tail ×
+            // tail_arm. The existing Cm_δe already captures this moment;
+            // so the tail lift magnitude is Cm_δe × c / tail_arm, referenced
+            // to wing area. For Beaver: 0.24 × 1.52 / 5.5 ≈ 0.066.
+            // Uses freestream q only (skipping slipstream boost — simplification
+            // that under-estimates force by ~5-10% at high power).
+            let tailplane_lift_n = q * wing_area * TAILPLANE_LIFT_COEFF * state.controls.pitch;
+            let lift_vec = lift_dir * ((lift_force_n + tailplane_lift_n) / mass_kg);
 
             let drag_vec = if speed > 1e-3 {
                 -state.velocity.normalize_or_zero() * (drag_force_n / mass_kg)
