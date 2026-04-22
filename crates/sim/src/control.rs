@@ -136,6 +136,40 @@ pub enum ControlLaw {
         ki: f32,
         kd: f32,
     },
+
+    /// Airspeed-aware takeoff + initial climb controller.
+    ///
+    /// Mirrors `GlideToTouchdown` on the departure side: holds a pre-rotation
+    /// pitch attitude while airspeed is below `rotation_airspeed_mps`, then
+    /// progressively rotates to hold a positive climb rate once Vr is passed.
+    /// Output drives `SetPitch` via PID on vs-error in the climb phase; a
+    /// fixed `pre_rotation_pitch` output during the ground/water roll.
+    ///
+    /// Phase logic (airspeed-based):
+    /// - `V < rotation_airspeed_mps - transition_band_mps`: output = `pre_rotation_pitch`
+    /// - `V > rotation_airspeed_mps + transition_band_mps`: PID on `(climb_vs_mps - current_vs)`
+    /// - in-between: linear lerp between the two outputs (smooths rotation onset)
+    ///
+    /// Tuning: `rotation_airspeed_mps` typically Vs clean + 2–4 m/s (Beaver
+    /// floats: 22–23); `climb_vs_mps` typically Vy climb rate (Beaver: 4–5);
+    /// `pre_rotation_pitch` usually 0.0 or very small; `transition_band_mps`
+    /// 2–4 to smooth rotation onset. PID gains start `kp = 0.10, ki = 0.01,
+    /// kd = 0.03`.
+    ///
+    /// Future hooks: same as `GlideToTouchdown` — configurable tuning =
+    /// NPC skill levels, airspeed-observable = external mode detection,
+    /// composes with `CoordinationHold` (yaw) and `HeadingHold` (departure
+    /// path) for a coupled NPC takeoff behavior. Pairs with
+    /// `GlideToTouchdown` as the complete departure + arrival controller set.
+    TakeoffClimb {
+        rotation_airspeed_mps: f32,
+        climb_vs_mps: f32,
+        pre_rotation_pitch: f32,
+        transition_band_mps: f32,
+        kp: f32,
+        ki: f32,
+        kd: f32,
+    },
 }
 
 /// Per-instance state for a single `ControlLaw`. PID needs to remember the
@@ -154,6 +188,7 @@ impl ControlLaw {
     /// The `dt` argument is the sim tick duration (`FIXED_DT`), NOT wall-clock
     /// time. Keeps the loop deterministic.
     #[must_use]
+    #[allow(clippy::too_many_lines)] // large match over ControlLaw variants; each arm is cohesive.
     pub fn step(self, state: &mut ControlLawState, sim: &SimState, dt: f32) -> InputEvent {
         match self {
             Self::BankHold {
@@ -237,6 +272,32 @@ impl ControlLaw {
                 let error = target_vs - sim.vehicle.velocity.y;
                 let output = pid_step(state, error, dt, kp, ki, kd).clamp(-1.0, 1.0);
                 InputEvent::SetPitch(output)
+            },
+            Self::TakeoffClimb {
+                rotation_airspeed_mps,
+                climb_vs_mps,
+                pre_rotation_pitch,
+                transition_band_mps,
+                kp,
+                ki,
+                kd,
+            } => {
+                let airspeed = sim.vehicle.velocity.length();
+                let climb_output = {
+                    let error = climb_vs_mps - sim.vehicle.velocity.y;
+                    pid_step(state, error, dt, kp, ki, kd).clamp(-1.0, 1.0)
+                };
+                let output = if airspeed < rotation_airspeed_mps - transition_band_mps {
+                    pre_rotation_pitch
+                } else if airspeed > rotation_airspeed_mps + transition_band_mps {
+                    climb_output
+                } else {
+                    // Smooth lerp through the transition band.
+                    let t = (airspeed - (rotation_airspeed_mps - transition_band_mps))
+                        / (2.0 * transition_band_mps);
+                    pre_rotation_pitch + (climb_output - pre_rotation_pitch) * t.clamp(0.0, 1.0)
+                };
+                InputEvent::SetPitch(output.clamp(-1.0, 1.0))
             },
             Self::HeadingHold {
                 target_heading_deg,

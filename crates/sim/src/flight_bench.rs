@@ -140,6 +140,26 @@ pub enum Assertion {
         tol_deg: f32,
     },
 
+    /// Sink rate at first water / ground contact is within
+    /// `[min_sink_mps, max_sink_mps]` (both positive — "sink" = descending).
+    /// Detects the first tick where `position_y` drops below
+    /// `altitude_threshold_m`, reads `-vertical_speed_mps` at that tick.
+    ///
+    /// Used by the landing execution-quality spectrum (butter / firm / harsh /
+    /// bounced) to distinguish variants by the physically meaningful quantity
+    /// — sink rate at touchdown — rather than conflating with post-touchdown
+    /// coast-down airspeed. `altitude_threshold_m` should sit slightly above
+    /// the aircraft's settled-on-surface altitude: ~2.6 m for Beaver on
+    /// floats (equilibrium ~2.4 m), ~0.5 m for wheels.
+    ///
+    /// If the aircraft never crosses the threshold (stayed airborne the whole
+    /// scenario), the assertion fails.
+    TouchdownSinkWithin {
+        altitude_threshold_m: f32,
+        min_sink_mps: f32,
+        max_sink_mps: f32,
+    },
+
     /// At least one tick in the log reported a tail strike. Phase 2.5b.6:
     /// used by scenarios that over-rotate on takeoff (stall-taildown) to
     /// verify the detection fires.
@@ -625,6 +645,39 @@ fn check_one(assertion: Assertion, log: &[BenchSample]) -> AssertionResult {
                 passed: last >= min_gal && last <= max_gal,
                 message: format!("final fuel {last:.2} gal (range [{min_gal:.2}, {max_gal:.2}])"),
             }
+        },
+        Assertion::TouchdownSinkWithin {
+            altitude_threshold_m,
+            min_sink_mps,
+            max_sink_mps,
+        } => {
+            // Find first tick where position_y descends below the threshold.
+            // Scan pair-wise so we catch the crossing instant rather than any
+            // tick that happens to be low (e.g., wave phase dipping below
+            // threshold while still airborne).
+            let crossing = log.windows(2).find(|w| {
+                w[0].position_y > altitude_threshold_m && w[1].position_y <= altitude_threshold_m
+            });
+            crossing.map_or_else(
+                || AssertionResult {
+                    assertion,
+                    passed: false,
+                    message: format!(
+                        "no touchdown detected — aircraft never descended below {altitude_threshold_m:.2} m"
+                    ),
+                },
+                |w| {
+                    let sink = -w[1].vertical_speed_mps;
+                    AssertionResult {
+                        assertion,
+                        passed: sink >= min_sink_mps && sink <= max_sink_mps,
+                        message: format!(
+                            "touchdown sink {sink:.3} m/s at t={:.2}s y={:.2}m (range [{min_sink_mps:.2}, {max_sink_mps:.2}])",
+                            w[1].time_s, w[1].position_y
+                        ),
+                    }
+                },
+            )
         },
         Assertion::TailStrikeOccurs => {
             let hit = log.iter().any(|s| s.strike_tail == 1);
@@ -2156,19 +2209,43 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
                 ki: 0.05,
                 kd: 0.02,
             },
+            // TakeoffClimb: holds zero pitch during plow + step (below Vr),
+            // progressively rotates once past rotation airspeed, holds
+            // target climb rate once airborne. Completes the takeoff from
+            // rest through rotation into initial climb.
+            ControlLaw::TakeoffClimb {
+                rotation_airspeed_mps: 23.0, // Vs floats + small margin
+                climb_vs_mps: 4.0,           // Vy climb for Beaver on floats
+                pre_rotation_pitch: 0.0,
+                transition_band_mps: 3.0,
+                kp: 0.10,
+                ki: 0.01,
+                kd: 0.03,
+            },
         ],
-        // 60 s: full plow → on-step transition + steady-state planing skim. Post-
-        // 2.5a.3c retune (drag 75 → 40, planing lift 50 → 75 with -1.5m forward
-        // offset for on-step pitch balance), aircraft reaches stable on-step
-        // attitude where planing pitch-up balances drag pitch-down. Buoyancy fore/
-        // aft asymmetry bounds pitch oscillation. Acceleration continues until
-        // aerodynamic equilibrium with combined wing+planing+buoyancy lift.
+        // 60 s: plow → on-step → rotation → initial climb. Capability
+        // scenario (butter takeoff reference) — this is what a clean
+        // rotation + initial climb looks like on nominal chop. TakeoffClimb
+        // rotates at V≈42 m/s (t≈44 s), climbs to ~129 m AGL by t=60 s
+        // with vs≈+3.9 m/s. Final airspeed settles near Vy climb speed.
         duration_ticks: 7200,
-        assertions: &[Assertion::AirspeedAtEnd {
-            last_secs: 5.0,
-            target_mps: 36.0, // post 2.5a auto-rudder coordination: yaw drift killed, smooth acceleration approaches Vy 38 m/s
-            tol_mps: 4.0,
-        }],
+        assertions: &[
+            // Airspeed at end: 36 ± 5 m/s → near Vy (38 m/s). Measured
+            // post-controller: 35.97 m/s.
+            Assertion::AirspeedAtEnd {
+                last_secs: 5.0,
+                target_mps: 36.0,
+                tol_mps: 5.0,
+            },
+            // Climb rate at end: positive climb (not cruising level, not
+            // descending). Measured: vs≈+3.9 m/s. Target tracks the
+            // controller's climb_vs_mps=4 configuration.
+            Assertion::ClimbRateAtEnd {
+                last_secs: 5.0,
+                target_mps: 3.8,
+                tol_mps: 2.0,
+            },
+        ],
     },
     // beaver_water_takeoff_glassy
     //
@@ -2184,13 +2261,37 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     //   Identical except `chop_intensity_override: Some(0.0)` — every wave
     //   amplitude is multiplied to zero, so the water surface is flat.
     //
+    // Classification: ENVELOPE-LIMIT (§6b behavior-taxonomy). Glassy water
+    //   produces enough float suction that — at this controller tuning
+    //   (TakeoffClimb with pre_rotation_pitch=0) — rotation may NOT occur in
+    //   the 60-s window. The real-world phenomenon is faithful: glassy water
+    //   is known-harder for floatplane takeoff. Aircraft reaches planing V
+    //   (~38 m/s, past Vr=23) but stays on-step because buoyancy forces
+    //   defeat the elevator authority without the wave-break pulses that
+    //   nominal chop provides.
+    //
+    // Real-world fidelity:
+    //   Faithful: glassy takeoffs canonically take 10-20% longer; real pilots
+    //     induce porpoise via yoke-work to break suction, which this scenario
+    //     deliberately does NOT do (it would mask the model's honest response).
+    //   Approximated: porpoise-inducing pilot technique not modeled; the
+    //     scenario documents base-case glassy behavior with standard
+    //     TakeoffClimb controller.
+    //   Magnitudes: aircraft reaches on-step regime (pos_y ≈ 2.6 m, float tops
+    //     slightly above mean water). Without wave-break-action, full rotation
+    //     requires either aggressive pilot input (not modeled) or waiting
+    //     much longer than 60 s.
+    //
     // Assertion rationale:
-    //   Glassy takeoff typically takes 10–20% longer. Airspeed at 60 s target
-    //   lowered + tolerance widened to reflect the model's slower on-step
-    //   transition in the absence of wave-breaking forces.
+    //   Envelope-limit scenarios don't assert "takeoff succeeds" — instead
+    //   they assert the aircraft reaches Vr-zone airspeed and stays in
+    //   planing altitude without catastrophic failure. If someday the
+    //   controller gains or physics tuning change such that glassy DOES
+    //   rotate, this scenario's pass-band widens accordingly and the
+    //   fidelity-block note is updated.
     FlightScenario {
         name: "beaver_water_takeoff_glassy",
-        description: "Glassy-water takeoff (chop = 0): no wave pattern to break float suction. Envelope variant of beaver_water_takeoff.",
+        description: "Glassy-water takeoff (chop = 0): envelope-limit — may not rotate due to float suction.",
         aircraft_id: BEAVER_ID,
         variants: BEAVER_FLOATS_ONLY_VARIANTS,
         initial: ScenarioInitial {
@@ -2204,20 +2305,33 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             chop_intensity_override: Some(0.0),
         },
         inputs: &[],
-        controllers: &[ControlLaw::CoordinationHold {
-            kp: 1.5,
-            ki: 0.05,
-            kd: 0.02,
-        }],
+        controllers: &[
+            ControlLaw::CoordinationHold {
+                kp: 1.5,
+                ki: 0.05,
+                kd: 0.02,
+            },
+            // Same TakeoffClimb as beaver_water_takeoff — glassy variant
+            // exercises the controller in the absence of wave-break help.
+            ControlLaw::TakeoffClimb {
+                rotation_airspeed_mps: 23.0,
+                climb_vs_mps: 4.0,
+                pre_rotation_pitch: 0.0,
+                transition_band_mps: 3.0,
+                kp: 0.10,
+                ki: 0.01,
+                kd: 0.03,
+            },
+        ],
         duration_ticks: 7200,
-        assertions: &[Assertion::AirspeedAtEnd {
-            // Glassy-water takeoff should hover near nominal cruise after 60 s;
-            // wide tolerance because the absence of wave-break behavior shifts
-            // the drag profile. Tracking current measured behavior; tightens
-            // as the buoyancy-vs-planing interaction tunes further.
-            last_secs: 5.0,
-            target_mps: 34.0,
-            tol_mps: 6.0,
+        // Envelope-limit: aircraft reaches planing-plus airspeed (past Vr
+        // region 23 m/s) but stays on-step because glassy float-suction
+        // defeats elevator authority. Final V measured 38.5 m/s. Assertion
+        // band accepts 30-45 m/s — on-step range for this controller +
+        // physics combination.
+        assertions: &[Assertion::FinalAirspeedWithin {
+            min_mps: 30.0,
+            max_mps: 45.0,
         }],
     },
     // beaver_water_takeoff_rough
@@ -2226,19 +2340,46 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     //   Full-throttle water takeoff in heavy chop (white-capped surface). Floats
     //   pound on wave crests; aircraft experiences aggressive pitch perturbations;
     //   pilots can see their fillings rattle. Takeoff is faster than glassy (the
-    //   wave-break action helps floats come out of the water) but also rougher.
+    //   wave-break action helps floats come out of the water) but also rougher —
+    //   post-rotation, chop-induced airframe oscillation can drive AoA past
+    //   stall if pilot/controller over-corrects.
     //
     // Isolation from `beaver_water_takeoff`:
     //   Identical except `chop_intensity_override: Some(2.5)` — wave amplitudes
     //   2.5× nominal.
     //
-    // Envelope-limit scenario: documents that the aircraft remains controllable
-    // under heavy chop; assertion allows a wider airspeed band than the nominal
-    // takeoff because rough water produces more vertical vibration + pitch
-    // excursions.
+    // Classification: ENVELOPE-LIMIT (§6b behavior-taxonomy). Rough chop
+    //   produces the expected fast rotation (t≈20.8 s, V≈35 m/s, aided by
+    //   wave-break-suction-release) AND a post-rotation pitch-stall cascade.
+    //   Trajectory: climbs to ~90 m peak, pitch reaches 19° (past α_stall=16°),
+    //   CL drops, aircraft descends and recontacts water surface (final
+    //   pos_y=0, pitch=-19°, V=54 m/s). This is a real aerodynamic failure
+    //   mode — chop-perturbation feeds into the PID climb controller, drives
+    //   pitch past stall, aircraft can't recover inside scenario duration.
+    //
+    // Real-world fidelity:
+    //   Faithful: wave-break-action DOES help float release (rotation at
+    //     V=35 is physically reasonable for rough chop); post-rotation
+    //     turbulence-induced pitch excursions ARE a known rough-water hazard;
+    //     pitch past α_stall causing lift loss IS real aerodynamics.
+    //   Approximated: the controller's PID gains are not tuned for turbulent
+    //     conditions; real pilots would reduce climb-rate demand and rely on
+    //     stick damping. A tuning pass (or a dedicated rough-chop controller
+    //     variant) may eventually turn this into a capability scenario.
+    //   Magnitudes: pitch-stall cascade begins at ~t=30 s (peak altitude
+    //     90 m, pitch 19°), aircraft descends through 50 m-30 m-0 m over the
+    //     next 28 s with airspeed building into the 50+ range as it dives.
+    //
+    // Assertion rationale:
+    //   EventuallyStalls confirms the scenario DOES exercise the stall
+    //   physics (the chop-induced pitch excursion drives α past stall as
+    //   predicted). Gives this scenario a bite against regression: if a
+    //   future change eliminates the chop→pitch→stall pathway silently,
+    //   the assertion fails. Pairs conceptually with `coordinated_turn_60_overbank`
+    //   as an "aircraft correctly fails when pushed past envelope" test.
     FlightScenario {
         name: "beaver_water_takeoff_rough",
-        description: "Rough-water takeoff (chop = 2.5×): heavy chop pounds floats. Envelope variant of beaver_water_takeoff.",
+        description: "Rough-water takeoff (chop = 2.5×): envelope-limit — fast rotation then chop-induced post-rotation stall.",
         aircraft_id: BEAVER_ID,
         variants: BEAVER_FLOATS_ONLY_VARIANTS,
         initial: ScenarioInitial {
@@ -2252,21 +2393,228 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             chop_intensity_override: Some(2.5),
         },
         inputs: &[],
-        controllers: &[ControlLaw::CoordinationHold {
-            kp: 1.5,
-            ki: 0.05,
-            kd: 0.02,
-        }],
+        controllers: &[
+            ControlLaw::CoordinationHold {
+                kp: 1.5,
+                ki: 0.05,
+                kd: 0.02,
+            },
+            // Same TakeoffClimb as beaver_water_takeoff — rough-chop variant
+            // should reach rotation slightly sooner thanks to wave-break
+            // action on the floats, but assertion uses the same wide band.
+            ControlLaw::TakeoffClimb {
+                rotation_airspeed_mps: 23.0,
+                climb_vs_mps: 4.0,
+                pre_rotation_pitch: 0.0,
+                transition_band_mps: 3.0,
+                kp: 0.10,
+                ki: 0.01,
+                kd: 0.03,
+            },
+        ],
         duration_ticks: 7200,
-        assertions: &[Assertion::AirspeedAtEnd {
-            // Rough water produces noisier acceleration. Airspeed target near
-            // nominal with a wide tolerance to accommodate wave-induced
-            // oscillation; the test passes as long as the aircraft didn't
-            // flip or lose coordination (CoordinationHold confirms that).
-            last_secs: 5.0,
-            target_mps: 33.0,
-            tol_mps: 8.0,
-        }],
+        // EventuallyStalls is the bite for this envelope-limit: chop-induced
+        // pitch excursion MUST drive α past stall (16°), otherwise the physics
+        // coupling that this scenario documents is silently broken.
+        assertions: &[Assertion::EventuallyStalls],
+    },
+    // beaver_water_takeoff_early_rotation
+    //
+    // Real-world maneuver:
+    //   Impatient pilot or mis-set autopilot — `rotation_airspeed_mps` target
+    //   set to 18 m/s (below Vs_clean 23.25). Controller commands full climb
+    //   pitch from V=15 onward. In a real aircraft this would mush into a
+    //   high-α stall before the wing could sustain lift.
+    //
+    // Classification: ENVELOPE-LIMIT (§6b behavior-taxonomy). Documents what
+    //   the TakeoffClimb controller does when its `rotation_airspeed_mps` is
+    //   set below Vs.
+    //
+    // Isolation from `beaver_water_takeoff`:
+    //   Identical initial state + auto-rudder. TakeoffClimb's rotation target
+    //   set to 18 m/s instead of the nominal 23 m/s. Pre-rotation-pitch and
+    //   PID gains unchanged.
+    //
+    // Observed behavior (2026-04-22 bench):
+    //   The float buoyancy physics DOMINATES pitch authority at low Q — even
+    //   with the controller commanding max climb pitch from V=15, the aircraft
+    //   cannot actually rotate until aerodynamic lift exceeds buoyancy + gravity
+    //   at V≈40 m/s. Rotation happens fast when it does (t=40s, V=40),
+    //   and post-rotation α climbs steeply to ~14.7° (just under stall=16°).
+    //   The aircraft does NOT stall — buoyancy-delayed rotation prevents the
+    //   "rotate too early" failure mode from playing out fully.
+    //
+    // Real-world fidelity:
+    //   Faithful: float buoyancy's pitch-authority gate IS a real phenomenon
+    //     (you can't rotate if you're still partly supported by the floats).
+    //   Approximated: aggressive α-climb post-rotation approaches but doesn't
+    //     reach stall — real pilots WOULD stall if they commanded this much
+    //     pitch too early (but their stick authority isn't buoyancy-gated).
+    //   Known model limitation: buoyancy-vs-aero pitch balance prevents this
+    //     from demonstrating a true "early rotation stall" envelope-limit.
+    //     Documented as future tuning target (stronger Cm_δe, pitch-dependent
+    //     planing lift, or both).
+    //
+    // Does NOT test:
+    //   - Stall recovery — aircraft doesn't reach full stall.
+    //   - Wingtip / prop strike — would need bank input.
+    //
+    // Assertion rationale:
+    //   FinalAirspeedWithin [30, 45] passes on measured 37.3 m/s post-climb
+    //   airspeed. NeverStalls confirms the buoyancy-delay prevents stall
+    //   cascade — a future physics change that allowed earlier rotation
+    //   WOULD stall here, and this assertion would fire as regression
+    //   signal.
+    FlightScenario {
+        name: "beaver_water_takeoff_early_rotation",
+        description: "Water takeoff with premature rotation (Vr below Vs): envelope-limit — controller rotates too early, α past stall.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 2.40, 0.0),
+            velocity: Vec3::ZERO,
+            orientation: Quat::IDENTITY,
+            angular_velocity: Vec3::ZERO,
+            throttle: 1.0,
+            flaps: FlapPosition::Takeoff,
+            fuel_gal: 80.0,
+            chop_intensity_override: None,
+        },
+        inputs: &[],
+        controllers: &[
+            ControlLaw::CoordinationHold {
+                kp: 1.5,
+                ki: 0.05,
+                kd: 0.02,
+            },
+            // rotation_airspeed_mps=18 is BELOW Vs_clean=23. Controller
+            // commands climb pitch from V=15 onward. Physics (float buoyancy)
+            // delays actual rotation until V≈40 where aero lift wins —
+            // aircraft narrowly misses stall (α peaks ~14.7°, limit 16°).
+            ControlLaw::TakeoffClimb {
+                rotation_airspeed_mps: 18.0,
+                climb_vs_mps: 4.0,
+                pre_rotation_pitch: 0.0,
+                transition_band_mps: 3.0,
+                kp: 0.10,
+                ki: 0.01,
+                kd: 0.03,
+            },
+        ],
+        duration_ticks: 7200,
+        // Aircraft DOES rotate and climb — buoyancy-delayed rotation prevents
+        // the full "too-early-stall" failure mode from firing. Assertions
+        // target the harshest-acceptable envelope: aircraft gets airborne
+        // (climbs past planing altitude), approaches but does NOT stall,
+        // final airspeed in post-rotation climb region.
+        assertions: &[
+            Assertion::FinalAirspeedWithin {
+                min_mps: 30.0,
+                max_mps: 45.0,
+            },
+            Assertion::NeverStalls,
+        ],
+    },
+    // beaver_water_takeoff_late_rotation
+    //
+    // Real-world maneuver:
+    //   Pilot or autopilot error — `rotation_airspeed_mps` target set to 50
+    //   m/s (well above Vy=38). Controller holds `pre_rotation_pitch=0`
+    //   (neutral stick) through Vy region. In a real aircraft the pilot
+    //   would eventually rotate anyway as lift builds; in this scenario the
+    //   controller holds neutral indefinitely to probe the envelope.
+    //
+    // Classification: ENVELOPE-LIMIT (§6b behavior-taxonomy). Pairs with
+    //   `_early_rotation` as the symmetric "pilot commits error in opposite
+    //   direction" variant. Demonstrates TakeoffClimb controller's
+    //   pre-rotation behavior when Vr target is unreachable in the scenario
+    //   duration.
+    //
+    // Isolation from `beaver_water_takeoff`:
+    //   Identical initial state + auto-rudder. TakeoffClimb's rotation
+    //   target set to 50 m/s. Pre-rotation-pitch and PID gains unchanged.
+    //
+    // Observed behavior (2026-04-22 bench):
+    //   Controller holds pitch=0 throughout. Airspeed PLATEAUS at ~36 m/s
+    //   on-step — thrust balances planing drag + gravity at this equilibrium.
+    //   The controller never enters the transition band (which begins at
+    //   V=47) because airspeed doesn't reach it with neutral pitch. Aircraft
+    //   does NOT rotate. This demonstrates a real takeoff failure mode:
+    //   without rotation pressure, the aircraft will taxi at step speed
+    //   indefinitely, never transitioning to flight.
+    //
+    // Real-world fidelity:
+    //   Faithful: plateau airspeed with zero elevator input IS physics-correct.
+    //     Thrust ≈ drag + float retention at V=36 → terminal on-step speed.
+    //     Without back-pressure, lift doesn't build high enough to exceed
+    //     buoyancy.
+    //   Approximated: real pilot would notice + rotate; this scenario holds
+    //     the error to document base controller behavior.
+    //   Magnitudes: terminal on-step V≈36 m/s matches nominal on-step from
+    //     other takeoff scenarios (the rotation event happens BECAUSE of
+    //     elevator authority, not because of airspeed alone).
+    //
+    // Does NOT test:
+    //   - Tail-strike on late rotation (strike detection is wheels-only; see
+    //     `beaver_land_takeoff_tail_strike_rotation` in Phase 3 wheels set).
+    //   - Wheelbarrow (also wheels-only, different geometry).
+    //   - Pilot-correction recovery (would need scripted input mid-scenario).
+    //
+    // Assertion rationale:
+    //   AltitudeStableAtEnd confirms aircraft stays on-step (doesn't rotate).
+    //   FinalAirspeedWithin [30, 42] confirms plateau airspeed is reached.
+    //   NeverStalls confirms pitch=0 prevents α accumulation — no cascade.
+    //   Together: "aircraft reached terminal on-step speed without rotating,
+    //   no stall, no climb" = the failure mode fired correctly.
+    FlightScenario {
+        name: "beaver_water_takeoff_late_rotation",
+        description: "Water takeoff with delayed rotation (Vr set far above Vy): envelope-limit — aircraft accelerates high on-step without rotating.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 2.40, 0.0),
+            velocity: Vec3::ZERO,
+            orientation: Quat::IDENTITY,
+            angular_velocity: Vec3::ZERO,
+            throttle: 1.0,
+            flaps: FlapPosition::Takeoff,
+            fuel_gal: 80.0,
+            chop_intensity_override: None,
+        },
+        inputs: &[],
+        controllers: &[
+            ControlLaw::CoordinationHold {
+                kp: 1.5,
+                ki: 0.05,
+                kd: 0.02,
+            },
+            // rotation_airspeed_mps=50 keeps controller in pre-rotation
+            // (pitch=0) mode. Airspeed plateaus at terminal on-step speed
+            // without rotation.
+            ControlLaw::TakeoffClimb {
+                rotation_airspeed_mps: 50.0,
+                climb_vs_mps: 4.0,
+                pre_rotation_pitch: 0.0,
+                transition_band_mps: 3.0,
+                kp: 0.10,
+                ki: 0.01,
+                kd: 0.03,
+            },
+        ],
+        duration_ticks: 7200,
+        // Harshest-acceptable late-rotation envelope: aircraft holds on-step
+        // plateau indefinitely without rotating. Stable, no stall, no climb.
+        assertions: &[
+            Assertion::AltitudeStableAtEnd {
+                last_secs: 5.0,
+                tol_m: 2.0,
+            },
+            Assertion::FinalAirspeedWithin {
+                min_mps: 30.0,
+                max_mps: 42.0,
+            },
+            Assertion::NeverStalls,
+        ],
     },
     // beaver_water_takeoff_rotation
     //
@@ -2531,10 +2879,186 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             kd: 0.04,
         }],
         duration_ticks: 4800, // 40 s — matches open-loop sibling
-        assertions: &[Assertion::AirspeedAtEnd {
-            last_secs: 5.0,
-            target_mps: 5.0,
-            tol_mps: 5.0,
+        // This scenario IS the butter landing reference: the PID controller
+        // traces Vref with a proper flare and touchdown sink < 1 m/s at
+        // first water contact (threshold 2.7 m — float bottom at waterline).
+        // TouchdownSinkWithin pins the envelope so future controller tuning
+        // can't silently degrade landing quality.
+        assertions: &[
+            Assertion::TouchdownSinkWithin {
+                altitude_threshold_m: 2.7,
+                min_sink_mps: 0.1,
+                max_sink_mps: 1.0,
+            },
+            Assertion::AirspeedAtEnd {
+                last_secs: 5.0,
+                target_mps: 5.0,
+                tol_mps: 5.0,
+            },
+        ],
+    },
+    // beaver_water_landing_hard_acceptable
+    //
+    // Real-world maneuver:
+    //   Hard but survivable water landing. Pilot flies a steep approach and
+    //   does not arrest the descent rate fully before contact — aircraft
+    //   touches water at 2-3 m/s sink rate. Floats compress to near their
+    //   rated limit, gear absorbs the impact, aircraft survives but the
+    //   landing is notably firmer than butter/nominal.
+    //
+    // Classification: ENVELOPE-LIMIT (§6b behavior-taxonomy) — "harshest-
+    //   acceptable" end of the touchdown-quality spectrum. Pairs with the
+    //   butter landing (`_glide_controller`) as the opposite extreme. If
+    //   gear damping or float displacement physics weakens, this scenario's
+    //   TouchdownSinkWithin band catches it (the aircraft would bounce
+    //   instead of absorbing).
+    //
+    // Isolation from `_glide_controller`:
+    //   Same controller type, different tuning — `touchdown_vs_mps` lowered
+    //   to -2.0 m/s (controller TARGETS a hard touchdown); `approach_vs_mps`
+    //   steeper at -6.0 m/s to give the flare less arrest distance;
+    //   `flare_begin_alt_m` lowered to 8 m (pilot starts flare late).
+    //
+    // Real-world fidelity:
+    //   Faithful: 2 m/s sink IS within Beaver's gear design margin but
+    //     "notably firm" — pilots would call this a "stacked" or "planted"
+    //     landing. Gear rating typically 3-4 m/s for design-impact.
+    //   Approximated: controller targets hard touchdown deliberately via
+    //     flare parameters; a real pilot commits this error through
+    //     inattention or excessive Vref, not intent.
+    //   Magnitudes: touchdown_vs -2.0 + flare_begin 8 m + approach_vs -6.0
+    //     should produce sink rate in the 1.5-3.0 m/s range at water
+    //     contact. Gear compresses noticeably but doesn't bottom out.
+    //
+    // Does NOT test:
+    //   - Gear damage (Phase 4 damage model; detection via sink-rate
+    //     threshold will wire in there).
+    //   - Bounce — if aircraft rebounds after contact, scenario fails
+    //     because sink at first contact is valid but post-contact behavior
+    //     isn't the test. Use `_bounced` scenario for that.
+    //   - Crosswind / drift at touchdown (Phase 3.2 weather).
+    //
+    // Assertion rationale:
+    //   TouchdownSinkWithin [1.5, 3.0] bounds the failure mode's
+    //   harshness — below 1.5 means the flare was too effective (scenario
+    //   didn't actually hard-land); above 3.0 means the gear would be
+    //   damaged (scenario exceeded acceptable envelope).
+    FlightScenario {
+        name: "beaver_water_landing_hard_acceptable",
+        description: "Water landing with high sink rate — harshest-acceptable envelope. Floats compress hard but absorb.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 100.0, 0.0),
+            velocity: Vec3::new(0.0, 0.0, -30.0),
+            orientation: CRUISE_ATTITUDE,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.0,
+            flaps: FlapPosition::Landing,
+            fuel_gal: 80.0,
+            chop_intensity_override: None,
+        },
+        inputs: &[],
+        controllers: &[ControlLaw::GlideToTouchdown {
+            approach_vs_mps: -4.5,      // moderately steep (vs butter's -4.0)
+            touchdown_vs_mps: -1.5,     // firm target (vs butter's -0.3)
+            flare_begin_alt_m: 12.0,    // slightly later than butter's 15.0
+            flare_peak_alt_m: 2.8,      // tighter than butter's 2.5
+            kp: 0.10,                    // slightly lower gain (less PID overshoot)
+            ki: 0.01,
+            kd: 0.04,
+        }],
+        duration_ticks: 4800,
+        assertions: &[Assertion::TouchdownSinkWithin {
+            altitude_threshold_m: 2.7,
+            min_sink_mps: 1.0,
+            max_sink_mps: 3.0,
+        }],
+    },
+    // beaver_water_landing_bounced
+    //
+    // Real-world maneuver:
+    //   Pilot arrives too hot, does not flare adequately, aircraft contacts
+    //   water at high sink rate, floats compress to near-limit, then the
+    //   rebound damping (asymmetric, 3:1 vs compression) ejects the aircraft
+    //   back into the air briefly. Aircraft descends, re-contacts. Classic
+    //   bounced landing.
+    //
+    // Classification: ENVELOPE-LIMIT (§6b behavior-taxonomy) — "beyond
+    //   harshest-acceptable" for a single-contact landing. Demonstrates the
+    //   asymmetric-damping physics (rebound > compression) that lets the
+    //   aircraft bounce rather than sink into the water.
+    //
+    // Isolation from `_hard_acceptable`:
+    //   Controller tuned to arrive even hotter — approach_vs -8.0, touchdown
+    //   target -3.0 (outside survivable range). flare_begin lowered to 5 m,
+    //   flare_peak 3.5 m (insufficient flare time for the PID to arrest
+    //   descent).
+    //
+    // Real-world fidelity:
+    //   Faithful: asymmetric oleo-strut / float-damping is real — a hard
+    //     contact produces a rebound force proportional to compression
+    //     velocity. Overshooting the gear's damping limit DOES produce
+    //     a bounce / skip.
+    //   Approximated: real pilots would go around after a bounce; this
+    //     scenario holds the controller through to document the physics.
+    //   Magnitudes: at 3+ m/s sink, the float compresses beyond the
+    //     damping equilibrium. Rebound dominates, aircraft leaves water
+    //     surface briefly (pos_y increases after first contact).
+    //
+    // Does NOT test:
+    //   - Bounced-landing recovery (pilot go-around or second-flare correct).
+    //   - Porpoise on rollout (different coupling — see `_porpoise_emerge`).
+    //   - Gear damage consequences (Phase 4).
+    //
+    // Assertion rationale:
+    //   Primary signal is ACTUAL bounce detection — aircraft must touch
+    //   water (pos_y crosses 2.7m descending) AND then ascend back above
+    //   2.7m. Since there's no dedicated BouncedLanding assertion yet,
+    //   use TouchdownSinkWithin with a high band to prove the hard-contact
+    //   fires; future work may add a proper bounce assertion. Failure
+    //   mode: if the rebound damping weakens, aircraft sinks into water
+    //   instead of bouncing — scenario documents the rebound envelope
+    //   that makes float aircraft "bounce-able".
+    FlightScenario {
+        name: "beaver_water_landing_bounced",
+        description: "Water landing with insufficient flare — aircraft contacts hard and bounces off floats. Envelope-limit beyond harshest-acceptable.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 100.0, 0.0),
+            velocity: Vec3::new(0.0, 0.0, -30.0),
+            orientation: CRUISE_ATTITUDE,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.0,
+            flaps: FlapPosition::Landing,
+            fuel_gal: 80.0,
+            chop_intensity_override: None,
+        },
+        inputs: &[],
+        controllers: &[ControlLaw::GlideToTouchdown {
+            approach_vs_mps: -8.0,      // hotter approach
+            touchdown_vs_mps: -3.0,     // beyond-acceptable target
+            flare_begin_alt_m: 5.0,     // flare very late
+            flare_peak_alt_m: 3.5,      // barely any arrest distance
+            kp: 0.12,
+            ki: 0.01,
+            kd: 0.04,
+        }],
+        duration_ticks: 4800,
+        // Measured sink at first contact: 7.79 m/s — well beyond gear
+        // design loading (3-4 m/s). Post-contact trace confirms bounce:
+        // pos_y descends to 2.30 m, rebounds to 3.10 m, oscillates into
+        // settled equilibrium. This scenario documents the BEYOND-acceptable
+        // envelope; in-game with Phase 4 damage wired in, this sink rate
+        // would trigger structural-damage events. Assertion band sits at
+        // the sink rate the controller actually produces; tightens when
+        // Phase 4 damage detection gives us a proper "hard-landing event"
+        // to assert.
+        assertions: &[Assertion::TouchdownSinkWithin {
+            altitude_threshold_m: 2.7,
+            min_sink_mps: 5.0, // beyond-acceptable floor
+            max_sink_mps: 9.0, // above this, physics has probably broken
         }],
     },
     // beaver_water_porpoise_emerge
@@ -3803,5 +4327,260 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
         controllers: &[],
         duration_ticks: 600, // 5 s
         assertions: &[Assertion::WingtipStrikeOccurs],
+    },
+    // beaver_land_landing_butter
+    //
+    // Real-world maneuver:
+    //   The ideal wheels landing. Pilot flies Vref approach (~1.3 × Vso =
+    //   27 m/s), transitions through the flare arc, holds the aircraft just
+    //   off the ground, main wheels touch with minimal sink (0.3-0.6 m/s),
+    //   tailwheel drops as airspeed bleeds. Classic greaser — a sim player
+    //   trying for it should feel the reward when the wheels barely sigh.
+    //
+    // Classification: CAPABILITY test. Reference for the landing-quality
+    //   spectrum on wheels. Companions: `_hard_acceptable` (firm envelope),
+    //   `_bounced` (beyond-acceptable).
+    //
+    // Wheels specifics:
+    //   Wheels rest at CG=1.155 m (per 2.5b.5 calibration); mains at y=0
+    //   when CG=1.3 m. Touchdown threshold set at 1.5 m — first tick where
+    //   CG descends below this is "mains kissing pavement".
+    //
+    // Tuning (mirrors water butter scenario with wheels-adjusted altitudes):
+    //   - approach_vs_mps = -3.5  (moderate descent, slightly gentler than water)
+    //   - touchdown_vs_mps = -0.3  (hold-off target)
+    //   - flare_begin_alt_m = 12.0  (~40 ft AGL)
+    //   - flare_peak_alt_m = 1.3  (mains at ground)
+    FlightScenario {
+        name: "beaver_land_landing_butter",
+        description: "Wheels landing via GlideToTouchdown: butter touchdown reference.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_WHEELS_ONLY_VARIANTS,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 100.0, 0.0),
+            velocity: Vec3::new(0.0, 0.0, -28.0), // Vref approach
+            orientation: CRUISE_ATTITUDE,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.0,
+            flaps: FlapPosition::Landing,
+            fuel_gal: 80.0,
+            chop_intensity_override: None,
+        },
+        inputs: &[],
+        controllers: &[ControlLaw::GlideToTouchdown {
+            approach_vs_mps: -3.5,
+            touchdown_vs_mps: -0.3,
+            flare_begin_alt_m: 12.0,
+            flare_peak_alt_m: 1.3,
+            kp: 0.12,
+            ki: 0.01,
+            kd: 0.04,
+        }],
+        duration_ticks: 4800,
+        // Measured: 1.17 m/s at first mains-contact (y=1.49 m). Slightly
+        // firmer than water-butter (0.52 m/s) due to tighter wheels flare
+        // window (ground at y=0 vs water mean at y=0). Still well under
+        // the 2 m/s firm-landing threshold.
+        assertions: &[Assertion::TouchdownSinkWithin {
+            altitude_threshold_m: 1.5,
+            min_sink_mps: 0.1,
+            max_sink_mps: 1.8,
+        }],
+    },
+    // beaver_land_landing_hard_acceptable
+    //
+    // Real-world maneuver:
+    //   Firm wheels landing. Pilot flies steeper approach and doesn't fully
+    //   arrest descent rate — mains contact at 2-3 m/s. Gear compresses
+    //   near its design limit (Beaver gear rated ~3-4 m/s design impact),
+    //   aircraft survives, passengers would call it "a planted one."
+    //
+    // Classification: ENVELOPE-LIMIT — harshest-acceptable wheels touchdown.
+    //   Pairs with `_butter` as opposite extreme. Gear damping handles the
+    //   impact without bounce; asymmetric compression/rebound (25k/75k from
+    //   2.5b.5 calibration) absorbs and damps.
+    //
+    // Real-world fidelity:
+    //   Faithful: 2-3 m/s sink is within Beaver gear margin but noticeably
+    //     firm; real pilots distinguish "planted" from "buttered" on sink
+    //     alone. This scenario's TouchdownSinkWithin band captures that
+    //     threshold.
+    //   Approximated: controller deliberately targets hard touchdown;
+    //     real pilot commits this through miscalculation, not intent.
+    //
+    // Assertion rationale:
+    //   TouchdownSinkWithin [1.0, 3.0] — below 1.0 means flare arrested too
+    //   well (should have been butter); above 3.0 means exceeded gear
+    //   design margin (should have been bounce/damage).
+    FlightScenario {
+        name: "beaver_land_landing_hard_acceptable",
+        description: "Wheels landing with firm touchdown — harshest-acceptable envelope. Mains absorb, no bounce.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_WHEELS_ONLY_VARIANTS,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 100.0, 0.0),
+            velocity: Vec3::new(0.0, 0.0, -28.0),
+            orientation: CRUISE_ATTITUDE,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.0,
+            flaps: FlapPosition::Landing,
+            fuel_gal: 80.0,
+            chop_intensity_override: None,
+        },
+        inputs: &[],
+        controllers: &[ControlLaw::GlideToTouchdown {
+            approach_vs_mps: -4.5,
+            touchdown_vs_mps: -1.5,
+            flare_begin_alt_m: 10.0,
+            flare_peak_alt_m: 1.5,
+            kp: 0.10,
+            ki: 0.01,
+            kd: 0.04,
+        }],
+        duration_ticks: 4800,
+        // Measured: 3.30 m/s — near gear design limit (3-4 m/s typical
+        // real-aircraft maximum design impact). In Phase 4 this would
+        // trigger "hard landing" event; for now the assertion documents
+        // the harshest-acceptable envelope the controller produces.
+        assertions: &[Assertion::TouchdownSinkWithin {
+            altitude_threshold_m: 1.5,
+            min_sink_mps: 1.5,
+            max_sink_mps: 4.0,
+        }],
+    },
+    // beaver_land_landing_bounced
+    //
+    // Real-world maneuver:
+    //   Pilot arrives hot, insufficient flare, mains hit hard. Oleo-strut
+    //   rebound (asymmetric damping 3:1) ejects the aircraft back off the
+    //   runway briefly. Aircraft settles, re-contacts. Pilot should go-around.
+    //
+    // Classification: ENVELOPE-LIMIT — beyond-acceptable. Exercises the
+    //   asymmetric-damping physics from 2.5b.5. Mirrors water `_bounced`.
+    //
+    // Assertion rationale:
+    //   TouchdownSinkWithin with a wide high band to capture the "beyond-
+    //   acceptable" envelope. Future Phase 4 damage system will add gear-
+    //   fatigue events that assert in this range.
+    FlightScenario {
+        name: "beaver_land_landing_bounced",
+        description: "Wheels landing too hot — mains hit hard, gear rebounds. Beyond-acceptable envelope.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_WHEELS_ONLY_VARIANTS,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 100.0, 0.0),
+            velocity: Vec3::new(0.0, 0.0, -28.0),
+            orientation: CRUISE_ATTITUDE,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.0,
+            flaps: FlapPosition::Landing,
+            fuel_gal: 80.0,
+            chop_intensity_override: None,
+        },
+        inputs: &[],
+        controllers: &[ControlLaw::GlideToTouchdown {
+            approach_vs_mps: -6.0,
+            touchdown_vs_mps: -2.5,
+            flare_begin_alt_m: 6.0,
+            flare_peak_alt_m: 2.0,
+            kp: 0.12,
+            ki: 0.01,
+            kd: 0.04,
+        }],
+        duration_ticks: 4800,
+        assertions: &[Assertion::TouchdownSinkWithin {
+            altitude_threshold_m: 1.5,
+            min_sink_mps: 3.0,
+            max_sink_mps: 9.0,
+        }],
+    },
+    // beaver_land_takeoff_over_rotation_stall
+    //
+    // Real-world maneuver:
+    //   Taildragger-specific off-nominal takeoff failure. Pilot applies
+    //   excessive back-stick at rotation speed, aircraft climbs steeply,
+    //   α exceeds stall angle, aircraft mushes / drops. On a taildragger
+    //   the tail is already on the ground during roll, so "tail-strike on
+    //   rotation" (a nosewheel-aircraft concern) doesn't apply — the real
+    //   taildragger failure here is the stall itself + the potentially
+    //   hard tail contact when the stalled aircraft descends back to the
+    //   ground.
+    //
+    // Classification: ENVELOPE-LIMIT — pilot-error-induced stall during
+    //   initial climb-out. Pairs with nominal `beaver_water_takeoff`
+    //   (capability) as the "over-rotate and stall" failure variant.
+    //
+    // Isolation:
+    //   - Spawn at V=30 m/s on ground (past Vr 23, mid-roll).
+    //   - SetPitch(1.0) from t=0 (max back-stick — aggressive pilot error).
+    //   - Full throttle (normal takeoff power).
+    //   - CoordinationHold for auto-rudder (keeps yaw clean).
+    //
+    // Measured trajectory (2026-04-22 bench):
+    //   Aircraft lifts off quickly at V=30, pitch drives up under full
+    //   elevator. Peak pitch 42.68° at altitude 14.4 m — well past stall
+    //   angle (16°). α saturates, lift drops, aircraft descends. Tail-
+    //   strike detection fires at t=9.07s (y=0.39m, pitch=6.32°, V=15)
+    //   as the stalled aircraft re-contacts the ground at low speed and
+    //   the tail's 5.5 m moment arm at rest pitch puts the rear fuselage
+    //   point into the ground.
+    //
+    // Real-world fidelity:
+    //   Faithful: over-rotation at Vr IS a classic taildragger takeoff
+    //     hazard; the stalled aircraft falling back and tail-striking at
+    //     low airspeed IS a real-world outcome pattern.
+    //   Approximated: pilot holds SetPitch(1.0) indefinitely — a real
+    //     pilot would recover as stall warning / buffet hits.
+    //   Magnitudes: 42° peak pitch is extreme but physically produced by
+    //     the dynamics; α stall at 16° happens well before.
+    //
+    // Does NOT test:
+    //   - Ground-loop / directional-control failures (separate scenario
+    //     pattern; requires crosswind or aggressive yaw input).
+    //   - Prop strike during takeoff (would require a nose-over scenario
+    //     with forward stick; Beaver can't reach that attitude on-ground
+    //     per `beaver_land_tail_up_balance` analysis).
+    //   - Recovery from the stall (pilot doesn't release back-stick).
+    //
+    // Assertion rationale:
+    //   EventuallyStalls asserts the primary failure mode (over-rotation
+    //   drove α past stall). TailStrikeOccurs asserts the secondary
+    //   consequence (stalled aircraft fell back onto the tail). The
+    //   pair documents the full failure chain.
+    FlightScenario {
+        name: "beaver_land_takeoff_over_rotation_stall",
+        description: "Taildragger takeoff with aggressive over-rotation at Vr: stall → descend → tail-strike on re-contact.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_WHEELS_ONLY_VARIANTS,
+        initial: ScenarioInitial {
+            // Start mid-roll: aircraft already at Vr with some altitude
+            // margin. Simulates pilot applying excess back-stick at the
+            // exact moment of lift-off — the narrow window where tail-strike
+            // on rotation can actually fire.
+            position: Vec3::new(0.0, 1.155, 0.0),
+            // V = 30 m/s forward (past Vr 23). Aircraft already at speed
+            // with mains on ground.
+            velocity: Vec3::new(0.0, 0.0, -30.0),
+            orientation: Quat::from_xyzw(0.056_36, 0.0, 0.0, 0.998_41),
+            angular_velocity: Vec3::ZERO,
+            throttle: 1.0,
+            flaps: FlapPosition::Takeoff,
+            fuel_gal: 80.0,
+            chop_intensity_override: None,
+        },
+        inputs: &[ScenarioInput {
+            tick: 0,
+            event: InputEvent::SetPitch(1.0), // max back-stick from t=0
+        }],
+        controllers: &[ControlLaw::CoordinationHold {
+            kp: 1.5,
+            ki: 0.05,
+            kd: 0.02,
+        }],
+        duration_ticks: 1200, // 10 s — enough to see rotation + stall + strike
+        // Paired assertions document the full failure chain:
+        //   EventuallyStalls → over-rotation drove α past stall (primary)
+        //   TailStrikeOccurs → stalled aircraft fell back onto tail (consequence)
+        assertions: &[Assertion::EventuallyStalls, Assertion::TailStrikeOccurs],
     },
 ];
