@@ -79,6 +79,21 @@ const VERTICAL_DAMPING_N_PER_MPS: f32 = 30_000.0;
 /// (see `PLANING_LIFT_CENTROID_Z_FWD_M`) produces stable plow → on-step transition.
 const HORIZONTAL_DRAG_N_PER_MPS2: f32 = 40.0;
 
+/// Lateral (body-X, across-the-float) drag coefficient.
+///
+/// Real floats are long and narrow — their cross-axis hydrodynamic drag is
+/// much higher than longitudinal (along-float) drag, because the wetted
+/// cross-section is a deep hull resisting sideways push. Tuned at ~10× the
+/// longitudinal coefficient to reproduce that anisotropy: aircraft resists
+/// sideslip / lateral drift strongly while still rolling forward freely.
+///
+/// Without this, the aircraft slides sideways under water-rudder push or
+/// crosswind — unphysical, and the "too easy to drift side to side" 3.2.3c
+/// playtest observation. With it, the rudder produces tail-sweep rotation
+/// without an equal amount of lateral translation, matching real float
+/// behavior.
+const LATERAL_HYDRO_DRAG_N_PER_MPS2: f32 = 400.0;
+
 /// Per-pontoon planing lift coefficient (N·s²/m², quadratic in forward velocity),
 /// scaled by wetted fraction. Hydrodynamic lift from water flowing past the pontoon
 /// bottom — provides the physical mechanism by which the aircraft rises onto the
@@ -120,11 +135,12 @@ const PLANING_LIFT_CENTROID_Z_FWD_M: f32 = -1.5;
 /// Must be RETRACTED (control state off) for takeoff or planing-speed
 /// rudder moment would be excessive.
 ///
-/// Tuned 2026-04-22 (32× original 25.0) to match POH water-turn performance
-/// at idle throttle: ~3.3°/s sustained yaw rate, 360° circle in ~110 s.
-/// Within POH "idle no-pulse" range (60–120 s). Tuning is driven by the
-/// `beaver_water_circle_*` bench scenarios; if those assertions drift, this
-/// coefficient is the first knob to revisit.
+/// Tuned 2026-04-22 (32× original 25.0) paired with anisotropic float drag
+/// (see `LATERAL_HYDRO_DRAG_N_PER_MPS2`) to match POH water-turn performance
+/// at idle throttle: **~4°/s sustained yaw rate, 360° circle in ~90 s** —
+/// POH center of range. Tuning is driven by the `beaver_water_circle_*` bench
+/// scenarios; if those assertions drift, this coefficient is the first knob
+/// to revisit (lateral drag is the second).
 const WATER_RUDDER_COEFF: f32 = 800.0;
 
 /// Aft lever arm (m) for water rudder moment, body +Z direction (aft of CG).
@@ -321,19 +337,27 @@ pub fn compute_buoyancy(
                 * v_sample_world.y
                 * wetted_fraction;
 
-            // ── Horizontal drag (quadratic, distributed per section) ──────────
+            // ── Horizontal drag (quadratic, anisotropic, distributed) ─────────
+            // Decompose into body-frame longitudinal (along-float) and lateral
+            // (across-float). Real floats are long-and-narrow → low
+            // longitudinal drag, high lateral drag. Isotropic drag produces
+            // unphysical sideslip during water-rudder turns / crosswind.
             let v_horizontal = Vec3::new(v_sample_world.x, 0.0, v_sample_world.z);
-            let v_h_speed = v_horizontal.length();
-            let horizontal_drag_world = if v_h_speed > 1e-4 {
-                let drag_magnitude = HORIZONTAL_DRAG_N_PER_MPS2
-                    * per_section_scale
-                    * v_h_speed
-                    * v_h_speed
-                    * wetted_fraction;
-                -v_horizontal / v_h_speed * drag_magnitude
-            } else {
-                Vec3::ZERO
-            };
+            let v_horiz_body = v.orientation.inverse() * v_horizontal;
+            let v_long = v_horiz_body.z; // forward-back along float (+Z = aft, –Z = nose-forward)
+            let v_lat = v_horiz_body.x; // sideways across float
+            let drag_long_body = -v_long.abs()
+                * v_long
+                * HORIZONTAL_DRAG_N_PER_MPS2
+                * per_section_scale
+                * wetted_fraction;
+            let drag_lat_body = -v_lat.abs()
+                * v_lat
+                * LATERAL_HYDRO_DRAG_N_PER_MPS2
+                * per_section_scale
+                * wetted_fraction;
+            let horizontal_drag_world =
+                v.orientation * Vec3::new(drag_lat_body, 0.0, drag_long_body);
 
             // ── Planing lift (quadratic in body-forward speed, distributed) ───
             // Body-forward velocity at this sample (body -Z component). Rotate
