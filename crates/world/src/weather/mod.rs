@@ -27,26 +27,29 @@
 //!
 //! # Scope staging
 //!
-//! Phase 3.2.1a (this milestone, v1): climate fields — pressure, temperature,
-//! humidity. Each a separable low-frequency field plus biome-style regional
-//! modulation.
+//! Phase 3.2.1a: climate fields — pressure, temperature, humidity. Each a
+//! separable low-frequency field plus biome-style regional modulation.
 //!
-//! Phase 3.2.1b: wind field (derived from pressure gradient + geostrophic
-//! balance + altitude stratification) + terrain-induced turbulence map.
-//!
-//! Phase 3.2.1c (optional / defer): frontal-boundary graph. May slim to
-//! stub API and ship proper graph alongside 3.2.2 Voronoi cells that consume
-//! it.
+//! Phase 3.2.1b (this milestone): altitude-stratified wind field (geostrophic
+//! balance from pressure gradient), terrain-induced turbulence map, and a
+//! slim frontal-boundary graph. Frontal graph is v1 slim — proper connected
+//! polylines arrive alongside W2 Voronoi cells that consume them.
 
 #![allow(clippy::module_name_repetitions)]
 
+pub mod frontal;
 pub mod humidity;
 pub mod pressure;
 pub mod temperature;
+pub mod turbulence;
+pub mod wind;
 
+pub use frontal::{frontal_segments, FrontalSegment};
 pub use humidity::humidity_at;
 pub use pressure::pressure_at;
 pub use temperature::temperature_at;
+pub use turbulence::turbulence_at;
+pub use wind::wind_at;
 
 /// Master-seed derivation for all weather subsystems.
 ///

@@ -20,19 +20,22 @@
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_possible_wrap)]
+// HSV conversion uses canonical single-letter names (c, x, m, r, g, b).
+#![allow(clippy::many_single_char_names)]
 // Test harness: panicking on I/O error is the appropriate failure mode.
 #![allow(clippy::expect_used)]
 
 use std::path::Path;
 
-use flowplan_world::weather::{humidity, pressure, temperature};
+use flowplan_world::terrain::Terrain;
+use flowplan_world::weather::{frontal, humidity, pressure, temperature, turbulence, wind};
 use image::{ImageBuffer, Rgb};
 
 // Silence unused-crate-dependencies lint for transitive deps the integration
-// test target sees but doesn't itself use.
+// test target sees but doesn't itself name directly.
 use flowplan_core as _;
 use glam as _;
-use libm as _;
 
 /// Full-world-scenario extent (m). 500 km — representative small region.
 const FULL_EXTENT_M: f32 = 500_000.0;
@@ -191,5 +194,151 @@ fn emit_humidity_field_artifacts() {
             humidity::sea_level_humidity(CANONICAL_SEED, x, z, 0.0)
         });
         write_png(&img, &dir, &format!("humidity_{}.png", crop.name));
+    }
+}
+
+/// HSV → RGB. Hue in radians ∈ `(-π, π]`; sat/val in `[0, 1]`.
+fn hsv_to_rgb(hue_rad: f32, sat: f32, val: f32) -> [u8; 3] {
+    let hue_deg = (hue_rad.to_degrees() + 360.0) % 360.0;
+    let sector = hue_deg / 60.0;
+    let c = val * sat;
+    let x = c * (1.0 - ((sector % 2.0) - 1.0).abs());
+    let m = val - c;
+    let (r, g, b) = match sector as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    [
+        ((r + m) * 255.0) as u8,
+        ((g + m) * 255.0) as u8,
+        ((b + m) * 255.0) as u8,
+    ]
+}
+
+/// Render a wind field plot: hue = direction, value = magnitude / `max_mag`.
+fn render_wind(crop: Crop, max_mag: f32) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+    let mut img = ImageBuffer::new(RESOLUTION, RESOLUTION);
+    for py in 0..RESOLUTION {
+        for px in 0..RESOLUTION {
+            let (x, z) = crop.world_coord(px, py);
+            let w = wind::wind_at(CANONICAL_SEED, x, 0.0, z, 0.0);
+            let mag = libm::sqrtf(w.x * w.x + w.z * w.z);
+            let dir = libm::atan2f(w.z, w.x);
+            let value = (mag / max_mag).clamp(0.0, 1.0);
+            let rgb = hsv_to_rgb(dir, 1.0, value);
+            img.put_pixel(px, py, Rgb(rgb));
+        }
+    }
+    img
+}
+
+/// Draw a line segment into the image via Bresenham's algorithm.
+fn draw_line(
+    img: &mut ImageBuffer<Rgb<u8>, Vec<u8>>,
+    (x0, y0): (i32, i32),
+    (x1, y1): (i32, i32),
+    color: [u8; 3],
+) {
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    let (mut x, mut y) = (x0, y0);
+    let (w, h) = (RESOLUTION as i32, RESOLUTION as i32);
+    loop {
+        if (0..w).contains(&x) && (0..h).contains(&y) {
+            img.put_pixel(x as u32, y as u32, Rgb(color));
+        }
+        if x == x1 && y == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
+    }
+}
+
+/// Map world coord to pixel coord within a crop. Returns (px, py) or `None` if outside.
+fn world_to_pixel(crop: Crop, x_m: f32, z_m: f32) -> Option<(i32, i32)> {
+    let u = (x_m - crop.center_x_m) / crop.extent_m + 0.5;
+    let v = 0.5 - (z_m - crop.center_z_m) / crop.extent_m;
+    if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
+        return None;
+    }
+    Some((
+        (u * RESOLUTION as f32) as i32,
+        (v * RESOLUTION as f32) as i32,
+    ))
+}
+
+#[test]
+#[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
+fn emit_wind_field_artifacts() {
+    let dir = output_dir();
+    // Upper bound on synoptic surface wind — chosen to match test-asserted
+    // plausible range (~25 m/s).
+    let max_mag = 25.0;
+    for &crop in CROPS {
+        let img = render_wind(crop, max_mag);
+        write_png(&img, &dir, &format!("wind_{}.png", crop.name));
+    }
+}
+
+#[test]
+#[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
+fn emit_turbulence_field_artifacts() {
+    let dir = output_dir();
+    let terrain = Terrain::from_seed(CANONICAL_SEED);
+    let value_range = (0.0, turbulence::MAX_TURBULENCE_INTENSITY);
+    for &crop in CROPS {
+        let img = render_field(crop, value_range, |x, z| {
+            // Sample at ground level — terrain-turbulence peaks near surface.
+            turbulence::turbulence_at(CANONICAL_SEED, &terrain, x, 100.0, z, 0.0)
+        });
+        write_png(&img, &dir, &format!("turbulence_{}.png", crop.name));
+    }
+}
+
+#[test]
+#[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
+fn emit_frontal_graph_artifacts() {
+    let dir = output_dir();
+    // Underlay the pressure field; overlay frontal segments in black.
+    let value_range = (
+        pressure::BASELINE_HPA - pressure::SYNOPTIC_AMPLITUDE_HPA,
+        pressure::BASELINE_HPA + pressure::SYNOPTIC_AMPLITUDE_HPA,
+    );
+    for &crop in CROPS {
+        let mut img = render_field(crop, value_range, |x, z| {
+            pressure::sea_level_pressure(CANONICAL_SEED, x, z, 0.0)
+        });
+        let segs = frontal::frontal_segments(
+            CANONICAL_SEED,
+            crop.center_x_m,
+            crop.center_z_m,
+            crop.extent_m / 2.0,
+            // Spacing scales with crop so each plot has ~25 × 25 cells.
+            crop.extent_m / 25.0,
+            0.0,
+        );
+        for s in &segs {
+            let start = world_to_pixel(crop, s.start.x, s.start.y);
+            let end = world_to_pixel(crop, s.end.x, s.end.y);
+            if let (Some(p0), Some(p1)) = (start, end) {
+                draw_line(&mut img, p0, p1, [0, 0, 0]);
+            }
+        }
+        write_png(&img, &dir, &format!("frontal_{}.png", crop.name));
     }
 }
