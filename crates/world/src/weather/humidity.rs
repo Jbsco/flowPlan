@@ -73,6 +73,40 @@ pub fn humidity_at(master_seed: u64, x_m: f32, y_altitude_m: f32, z_m: f32, time
     rh_at_alt.clamp(0.0, 1.0)
 }
 
+/// Sea-level humidity with terrain coupling — orographic lift on windward
+/// slopes, rain shadow on lee sides. Delegates to
+/// [`super::orographic::terrain_moisture_modifier`] for the bias shape.
+#[must_use]
+pub fn sea_level_humidity_with_terrain<T: crate::terrain::HeightSampler>(
+    master_seed: u64,
+    terrain: &T,
+    x_m: f32,
+    z_m: f32,
+    time_s: f32,
+) -> f32 {
+    let base = sea_level_humidity(master_seed, x_m, z_m, time_s);
+    let modifier =
+        super::orographic::terrain_moisture_modifier(master_seed, terrain, x_m, z_m, time_s);
+    (base * modifier).clamp(0.0, 1.0)
+}
+
+/// Relative humidity at altitude with orographic terrain coupling applied.
+/// Mirrors [`humidity_at`] structure; adds the terrain sampler parameter.
+#[must_use]
+pub fn humidity_at_with_terrain<T: crate::terrain::HeightSampler>(
+    master_seed: u64,
+    terrain: &T,
+    x_m: f32,
+    y_altitude_m: f32,
+    z_m: f32,
+    time_s: f32,
+) -> f32 {
+    let rh_sea = sea_level_humidity_with_terrain(master_seed, terrain, x_m, z_m, time_s);
+    let altitude = y_altitude_m.max(0.0);
+    let rh_at_alt = rh_sea * libm::expf(-altitude / HUMIDITY_SCALE_HEIGHT_M);
+    rh_at_alt.clamp(0.0, 1.0)
+}
+
 #[must_use]
 #[allow(clippy::cast_precision_loss)]
 fn hash_to_unit(seed: u64, tag: u64) -> f32 {
@@ -128,5 +162,76 @@ mod tests {
         let rh1 = sea_level_humidity(1, 50_000.0, 50_000.0, 0.0);
         let rh2 = sea_level_humidity(2, 50_000.0, 50_000.0, 0.0);
         assert_ne!(rh1.to_bits(), rh2.to_bits());
+    }
+
+    #[test]
+    fn with_terrain_equals_base_on_flat_terrain() {
+        // Flat terrain produces modifier = 1.0, so terrain-aware humidity
+        // matches the flat-humidity path exactly (bit-identical).
+        use crate::terrain::Terrain;
+        let flat = Terrain::flat_land();
+        let seed = 42;
+        for ix in 0..10 {
+            for iz in 0..10 {
+                let x = (ix as f32 - 5.0) * 10_000.0;
+                let z = (iz as f32 - 5.0) * 10_000.0;
+                let base = sea_level_humidity(seed, x, z, 0.0);
+                let with_terrain = sea_level_humidity_with_terrain(seed, &flat, x, z, 0.0);
+                assert_eq!(base.to_bits(), with_terrain.to_bits());
+            }
+        }
+    }
+
+    #[test]
+    fn with_terrain_differs_over_seeded_terrain() {
+        // Over seeded terrain, at least some points should differ from the
+        // flat-humidity path (proves the modifier is actually engaging).
+        use crate::terrain::Terrain;
+        let terrain = Terrain::from_seed(42);
+        let seed = 42;
+        let mut any_diff = false;
+        for ix in 0..30 {
+            for iz in 0..30 {
+                let x = (ix as f32 - 15.0) * 300.0;
+                let z = (iz as f32 - 15.0) * 300.0;
+                let base = sea_level_humidity(seed, x, z, 0.0);
+                let with_terrain = sea_level_humidity_with_terrain(seed, &terrain, x, z, 0.0);
+                if base.to_bits() != with_terrain.to_bits() {
+                    any_diff = true;
+                    break;
+                }
+            }
+            if any_diff {
+                break;
+            }
+        }
+        assert!(any_diff, "terrain-aware humidity never diverged from base");
+    }
+
+    #[test]
+    fn with_terrain_deterministic() {
+        use crate::terrain::Terrain;
+        let terrain = Terrain::from_seed(7);
+        let seed = 42;
+        let a = humidity_at_with_terrain(seed, &terrain, 123.0, 100.0, -456.0, 0.0);
+        let b = humidity_at_with_terrain(seed, &terrain, 123.0, 100.0, -456.0, 0.0);
+        assert_eq!(a.to_bits(), b.to_bits());
+    }
+
+    #[test]
+    fn with_terrain_stays_in_unit_range() {
+        use crate::terrain::Terrain;
+        let terrain = Terrain::from_seed(42);
+        for ix in 0..30 {
+            for iz in 0..30 {
+                let x = (ix as f32 - 15.0) * 500.0;
+                let z = (iz as f32 - 15.0) * 500.0;
+                let rh = sea_level_humidity_with_terrain(42, &terrain, x, z, 0.0);
+                assert!(
+                    (0.0..=1.0).contains(&rh),
+                    "terrain-aware RH {rh} at ({x}, {z}) outside [0, 1]"
+                );
+            }
+        }
     }
 }

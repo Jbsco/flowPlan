@@ -274,7 +274,59 @@ pub fn state_at_time_with_tuning(
     time_s: f32,
     tuning: &WeatherTuning,
 ) -> CellState {
-    let initial = initial_state(master_seed, cell, time_s);
+    evolve_initial(
+        initial_state(master_seed, cell, time_s),
+        master_seed,
+        cell,
+        time_s,
+        tuning,
+    )
+}
+
+/// Per-cell state with terrain-aware humidity (orographic + rain-shadow)
+/// under the default tuning.
+#[must_use]
+pub fn state_at_time_with_terrain<T: crate::terrain::HeightSampler>(
+    master_seed: u64,
+    terrain: &T,
+    cell: CellId,
+    time_s: f32,
+) -> CellState {
+    state_at_time_with_terrain_and_tuning(
+        master_seed,
+        terrain,
+        cell,
+        time_s,
+        &WeatherTuning::DEFAULT,
+    )
+}
+
+/// Per-cell state with terrain-aware humidity + custom tuning.
+#[must_use]
+pub fn state_at_time_with_terrain_and_tuning<T: crate::terrain::HeightSampler>(
+    master_seed: u64,
+    terrain: &T,
+    cell: CellId,
+    time_s: f32,
+    tuning: &WeatherTuning,
+) -> CellState {
+    evolve_initial(
+        initial_state_with_terrain(master_seed, terrain, cell, time_s),
+        master_seed,
+        cell,
+        time_s,
+        tuning,
+    )
+}
+
+/// Shared lifecycle evolution once `initial_state` is known.
+fn evolve_initial(
+    initial: CellState,
+    master_seed: u64,
+    cell: CellId,
+    time_s: f32,
+    tuning: &WeatherTuning,
+) -> CellState {
     if matches!(initial.cell_type, CellType::ClearAir) {
         return initial;
     }
@@ -298,16 +350,40 @@ pub fn state_at_time_with_tuning(
     }
 }
 
-/// Initial per-cell state at `time_s`. Deterministic per `(master_seed, cell,
-/// time_s)`.
+/// Initial per-cell state at `time_s` using flat (no-terrain) humidity.
+/// Deterministic per `(master_seed, cell, time_s)`.
 #[must_use]
 pub fn initial_state(master_seed: u64, cell: CellId, time_s: f32) -> CellState {
     let seed_pos = voronoi::seed_position(master_seed, cell);
+    let rh = humidity::sea_level_humidity(master_seed, seed_pos.x, seed_pos.y, time_s);
+    initial_state_from_humidity(master_seed, cell, time_s, rh)
+}
 
-    // Sample W1 at the cell's seed position.
+/// Initial per-cell state at `time_s` with terrain-aware humidity (orographic
+/// lift on windward slopes, rain shadow on lee sides). Deterministic.
+#[must_use]
+pub fn initial_state_with_terrain<T: crate::terrain::HeightSampler>(
+    master_seed: u64,
+    terrain: &T,
+    cell: CellId,
+    time_s: f32,
+) -> CellState {
+    let seed_pos = voronoi::seed_position(master_seed, cell);
+    let rh = humidity::sea_level_humidity_with_terrain(
+        master_seed,
+        terrain,
+        seed_pos.x,
+        seed_pos.y,
+        time_s,
+    );
+    initial_state_from_humidity(master_seed, cell, time_s, rh)
+}
+
+/// Shared internal: classify + parameterize once humidity is known.
+fn initial_state_from_humidity(master_seed: u64, cell: CellId, time_s: f32, rh: f32) -> CellState {
+    let seed_pos = voronoi::seed_position(master_seed, cell);
     let p_hpa = pressure::sea_level_pressure(master_seed, seed_pos.x, seed_pos.y, time_s);
     let t_k = temperature::sea_level_temperature(master_seed, seed_pos.x, seed_pos.y, time_s);
-    let rh = humidity::sea_level_humidity(master_seed, seed_pos.x, seed_pos.y, time_s);
     let w = wind::wind_at(
         master_seed,
         seed_pos.x,

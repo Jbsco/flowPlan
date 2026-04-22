@@ -40,6 +40,7 @@
 pub mod cell_state;
 pub mod frontal;
 pub mod humidity;
+pub mod orographic;
 pub mod pressure;
 pub mod temperature;
 pub mod turbulence;
@@ -48,11 +49,15 @@ pub mod wind;
 
 pub use cell_state::{
     cell_phase, cell_phase_with_tuning, initial_state as cell_initial_state,
-    state_at_time as cell_state_at_time, state_at_time_with_tuning as cell_state_at_time_with,
-    CellState, CellType, WeatherTuning,
+    initial_state_with_terrain as cell_initial_state_with_terrain,
+    state_at_time as cell_state_at_time,
+    state_at_time_with_terrain as cell_state_at_time_with_terrain,
+    state_at_time_with_tuning as cell_state_at_time_with, CellState, CellType, WeatherTuning,
 };
 pub use frontal::{frontal_segments, FrontalSegment};
 pub use humidity::humidity_at;
+pub use humidity::{humidity_at_with_terrain, sea_level_humidity_with_terrain};
+pub use orographic::terrain_moisture_modifier;
 pub use pressure::pressure_at;
 pub use temperature::temperature_at;
 pub use turbulence::turbulence_at;

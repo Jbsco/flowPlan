@@ -30,7 +30,7 @@ use std::path::Path;
 
 use flowplan_world::terrain::Terrain;
 use flowplan_world::weather::{
-    cell_state, frontal, humidity, pressure, temperature, turbulence, voronoi, wind,
+    self, cell_state, frontal, humidity, pressure, temperature, turbulence, voronoi, wind,
 };
 use image::{ImageBuffer, Rgb};
 
@@ -211,6 +211,47 @@ fn emit_humidity_field_artifacts() {
             humidity::sea_level_humidity(CANONICAL_SEED, x, z, 0.0)
         });
         write_png(&img, &dir, &format!("humidity_{}.png", crop.name));
+    }
+}
+
+#[test]
+#[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
+fn emit_humidity_terrain_field_artifacts() {
+    // Humidity with orographic + rain-shadow coupling applied. Compare
+    // side-by-side against `humidity_*.png` to see windward boosts / lee
+    // desiccation over mountainous terrain.
+    let dir = output_dir();
+    let terrain = Terrain::from_seed(CANONICAL_SEED);
+    let value_range = (0.0, 1.0);
+    for &crop in CROPS {
+        let img = render_field(crop, value_range, |x, z| {
+            humidity::sea_level_humidity_with_terrain(CANONICAL_SEED, &terrain, x, z, 0.0)
+        });
+        write_png(&img, &dir, &format!("humidity_terrain_{}.png", crop.name));
+    }
+}
+
+#[test]
+#[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
+fn emit_orographic_modifier_field_artifacts() {
+    // The raw multiplicative modifier — centered at 1.0. Blue (<1) = lee-side
+    // dry bias, red (>1) = windward-side moist bias. Gray (≈1) = no terrain
+    // effect (low elevation, flat, or calm wind).
+    let dir = output_dir();
+    let terrain = Terrain::from_seed(CANONICAL_SEED);
+    let value_range = (
+        1.0 - weather::orographic::MAX_BIAS,
+        1.0 + weather::orographic::MAX_BIAS,
+    );
+    for &crop in CROPS {
+        let img = render_field(crop, value_range, |x, z| {
+            weather::orographic::terrain_moisture_modifier(CANONICAL_SEED, &terrain, x, z, 0.0)
+        });
+        write_png(
+            &img,
+            &dir,
+            &format!("orographic_modifier_{}.png", crop.name),
+        );
     }
 }
 
