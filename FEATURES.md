@@ -1125,6 +1125,25 @@ And **hint lines** offer paths forward:
 
 ---
 
+## NPC Pilots & Ambient World Traffic
+
+- **[sketch]** The world feels alive with other pilots, not empty. NPC-piloted aircraft conduct safe pattern work around the player, with light player-facing interaction and theatrical fallback behaviors. All built on the `ControlLaw` / PID-controller infrastructure already shipped in `crates/sim/src/control.rs` (same infrastructure that backs bench scenarios + Phase 4.7 autopilot modes). **Design anchor: memory `npc_pilots_emergent_experiences`.**
+- **[sketch]** NPC pilots conduct safe landings + takeoffs around the player using stacked ControlLaws: `GlideToTouchdown` (pitch + flare) + `CoordinationHold` (yaw) + `AirspeedHold` (throttle). Per-NPC skill levels via configurable PID gains (novice NPC = sloppier landings; veteran NPC = crisp profile).
+- **[sketch]** **Radio announcements** — NPC transmits text on a radio band; player sees + hears. "flowPlan 42, 3-mile final, runway 27" / "clearing the water, taxiing north dock" / "holding short, one waiting." Eventually voice-synthesized (post-v1 aspiration).
+- **[sketch]** **Lightweight player interaction** via d-pad / quick-response hotkey: yes (affirmative/defer) / no (assert priority) / silence (interpreted as defer → go-ahead). Low-cognitive-load: player can ignore radio and world keeps functioning; richer interactions emerge when player engages.
+- **[sketch]** **Hub-capacity-aware NPC behavior.** Hub catalog (Phase 3.6) gains a runtime occupancy field tracking which aircraft are approaching / parked / taxiing. NPC checks before committing:
+    - If capacity available for both NPC + player → NPC lands as planned.
+    - If player + NPC would exceed hub capacity → NPC performs **single-pontoon skim touch-and-go** as theatrical fallback (touches one float, skims, lifts off, climbs out) then diverts to alternative hub. Emergent spectacle + implicit narrative ("the NPC couldn't land here because of you").
+- **[sketch]** **Per-NPC personality + skill.** Configurable on NPC spec: radio verbosity (chatty / laconic), conflict posture (deferential / assertive), skill (affects ControlLaw gains + reaction time).
+- **[sketch]** **Deterministic per `(master_seed, sim_time)`.** NPC spawns + behaviors replayable — composes with ghost-plane MP (Phase 6.2) where a ghost is `(pilot_id, seed, flight_log)`, and with async NPC "working pilot" rhythms (forest-service tankers at fire sites, medevac runs).
+- **[sketch]** **Candidate NPC roles:** forest-service water bombers looping fires (Rocky alpine biome), medevac hub-to-hub runs, cargo haulers bringing supplies, ambient pattern traffic at tier-1/2 hubs, barn-find solo bush pilots in remote areas, weather-reactive NPCs (diverting around storms, precautionary landings).
+- **[sketch]** **Extended theatrical maneuvers** via ControlLaw chains: `GlideToTouchdown → SingleFloatSkim → TakeoffClimb` for the skim touch-and-go; `CruiseHold → StormAvoidance → AlternateApproach` for weather diverts.
+- **[sketch]** **Broader pattern: NPCs as responsive world texture.** Same controller-composition + world-observation + radio-call mechanism generalizes to mid-air avoidance (TCAS-style), terrain climbs, engine-out forced landings the player can witness or assist. Each is a state-machine + observation + radio call on the shared foundation.
+
+**Status:** design captured in memory + ROADMAP Milestone 5.8. NOT in the v1 critical path; may slip post-v1. The foundation (ControlLaw architecture, bench-validated controllers, deterministic replay) is shipped — actual NPC traffic implementation requires hub-occupancy runtime + NPC streaming + audio/radio system + per-NPC persistence, all of which build on Phase 3 + Phase 4 foundations.
+
+---
+
 ## On-Foot / Character
 
 ### Art direction — Metal Slug-inspired, integrated with the cel-shaded world

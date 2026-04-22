@@ -3,7 +3,70 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
-Last updated: **2026-04-21** (Phase 2.5 **SHIPPED**; Phase 3.2.1 + 3.2.2 weather W1 + W2 **SHIPPED**; world scope **LOCKED to Option A toroidal**; progression data-model locked; see latest session log below).
+Last updated: **2026-04-22** (Phase 2.5 **SHIPPED**; Phase 3.2.1 + 3.2.2 + 3.2.3 weather W1/W2/W3 + flight coupling + chop wiring **SHIPPED**; world scope **LOCKED to Option A toroidal**; progression data-model locked; **scenario-realism audit Phase 1 COMPLETE**, Phases 2–3 remaining — regression debt paydown before resuming Phase 3 follow-ups).
+
+## 2026-04-22 — Scenario realism audit (Phase 1 COMPLETE; Phases 2–3 remaining)
+
+Triggered during 3.2.3c water-rudder tuning: playtesting surfaced that `beaver_water_landing_approach` is a 28° nose-down 21 m/s-vs crash-dive, not a landing. Investigation revealed **multiple flight-bench scenarios lack realistic pilot inputs** — they pass assertions (AirspeedAtEnd accepts wide post-crash coast-down bands) but test unrealistic trajectories. This is regression debt from earlier phases.
+
+### Phase 1 — Water landing scenarios (COMPLETE)
+
+Five landing scenarios now fully authored with realistic pilot inputs:
+
+- **`beaver_water_landing_approach`** — open-loop tick-based flare inputs (explicit pilot trace). Touchdown vs 0.48 m/s, +8° flare pitch. POH-clean trajectory.
+- **`beaver_water_landing_glide_controller`** (NEW) — controller-driven twin via `ControlLaw::GlideToTouchdown` PID. Touchdown vs 0.53 m/s, level pitch. Cleaner than open-loop (less over-flare).
+- **`beaver_water_landing_glassy_good`** (NEW) — clean-landing reference scenario on chop=0 water. The "this is what a proper touchdown looks like" demo.
+- **`beaver_water_landing_one_pontoon_right`** — now uses `GlideToTouchdown` for pitch + existing roll inputs for bank.
+- **`beaver_water_landing_one_pontoon_left`** — same controller, opposite bank. Asymmetry documented in re-baselined assertion (~11× vs `_right`).
+
+### New sim infrastructure: `ControlLaw::GlideToTouchdown`
+
+Added to `crates/sim/src/control.rs` (follows same pattern as existing `BankHold` / `AltitudeHold` / `CoordinationHold` controllers):
+
+- Altitude-driven vs-target curve: `approach_vs_mps` above `flare_begin_alt_m`, `touchdown_vs_mps` below `flare_peak_alt_m`, linear lerp between.
+- PID on vs-error → `SetPitch` input.
+- Designed forward-compatibly for:
+  - Phase 4.7 autopilot landing modes (same ControlLaw infrastructure powers bench scenarios + in-game autopilot)
+  - Future NPC pilot AI (configurable gains = skill-level variation; altitude-observable = external observability; deterministic state = ghost-plane replayable)
+  - Controller composition (stacks with `CoordinationHold` + `AirspeedHold` for full-coupled approach)
+
+Memory: `npc_pilots_emergent_experiences` captures the NPC-AI / emergent-world-texture direction that consumes this foundation.
+
+### Phase 2 — Water takeoff rotation (IN PROGRESS)
+
+`beaver_water_takeoff` / `_glassy` / `_rough` currently end on-step; need progressive back-pitch flare for rotation into liftoff. Re-baseline airspeed assertion upward (toward Vc cruise) as aircraft becomes airborne.
+
+### Phase 3 — Wheels landing (PENDING)
+
+New `beaver_land_landing_approach` scenario to mirror water-landing pattern for wheels variants. Uses same `GlideToTouchdown` controller.
+
+### Guardrails applied going forward
+
+- **No new scenarios without realistic pilot inputs** (unless explicitly envelope-limit / no-pilot tests).
+- **Assertions must test scenario intent**, not just "aircraft stayed alive." A landing scenario's assertion should verify landing quality (vs at touchdown), not just post-crash coasting airspeed.
+- **Prefer controller-driven scenarios** for capabilities that multiple aircraft / future NPC pilots will share (landings, coordinated turns, hold-altitude cruise).
+
+### Original audit block (reference)
+
+**Audit buckets (38 scenarios):**
+- A — Open-loop with trim/flare inputs ✅ (cruise, climb, glide, stall, vne_dive, endurance_cruise, land_tail_up_balance — 8 scenarios)
+- B — Closed-loop PID controllers ✅ (coordinated_turn × 5)
+- C — Intentionally minimal / envelope-limit inputs ✅ (porpoise, one_pontoon_takeoffs, rudder diagnostics, wingtip_scrape, stall_taildown — ~15 scenarios)
+- D — **Missing pilot inputs where realism requires them** ❌ (water_landing_approach, water_landing_one_pontoon_right/left, water_takeoff + variants missing rotation flare)
+- Gap — No scenario exists (no wheels `beaver_land_landing_approach`, no clean-landing demo)
+
+**Fix plan (in progress, all three phases before resuming Phase 3):**
+- **Phase 1 (water landings):** rewrite `beaver_water_landing_approach` + one-pontoon variants with realistic flare. Add `beaver_water_landing_glassy_good` clean-landing demo. Assert vs < 3 m/s at touchdown, pitch > −5°.
+- **Phase 2 (water takeoff rotation):** add back-pitch rotation flare to water_takeoff / _glassy / _rough. Re-baseline airspeed toward Vc cruise.
+- **Phase 3 (wheels landing):** author new `beaver_land_landing_approach` with descent + flare + touchdown + rollout.
+
+This audit **blocks resuming Phase 3** (audio spine, FFT ocean, volumetric clouds, weather-biome coupling) because those phases will themselves introduce sim-side changes that risk silent regression on the unaudited scenarios.
+
+**Guardrails applied going forward:** no new scenarios without realistic pilot inputs (unless explicitly envelope-limit). Assertions must test scenario INTENT, not just "aircraft stayed alive." Audit at authoring time; backfill whenever bench-CSV plots show a gap.
+
+Memory: `scenario_realism_audit_phase`.
+
+---
 
 ## 2026-04-21 — World-scope lock + Phase 3.2.2 close-out + progression data model
 

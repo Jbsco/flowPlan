@@ -1034,7 +1034,7 @@ Depends on 2.5b physics + 4.3 damage detection hooks. Authors the full comprehen
 - [ ] Full primary + secondary controls (aileron / elevator / rudder / throttle / flaps / trim / mixture)
 - [ ] Switches: parking brake, water rudder, retract, starter, magnetos, fuel selector, carb heat, pitot heat, tire pressure (ground only)
 - [ ] Prop feathering for constant-speed/feathering-equipped aircraft
-- [ ] Autopilot tiers (upgrade-gated): hold altitude, hold vertical speed, hold roll, hold turn, hold heading, hold all, full-auto to waypoint + circle. **Control laws already shipped in `crates/sim/src/control.rs` as the `ControlLaw` enum (shared with the scenario bench — see Milestone 2.4.9c).** Phase 4.7 work is UI (mode select, engage/disengage, readouts), session state (which laws active), and authority limits (turbulence disengage). Bench scenarios validate law behavior by construction.
+- [ ] Autopilot tiers (upgrade-gated): hold altitude, hold vertical speed, hold roll, hold turn, hold heading, hold all, full-auto to waypoint + circle, **approach + land** (uses `GlideToTouchdown` ControlLaw). **Control laws already shipped in `crates/sim/src/control.rs` as the `ControlLaw` enum — `BankHold`, `AltitudeHold`, `AirspeedHold`, `VerticalSpeedHold`, `CoordinationHold`, `HeadingHold`, `GlideToTouchdown` — shared with the scenario bench (Milestones 2.4.9c + 3.2.3c-audit).** Phase 4.7 work is UI (mode select, engage/disengage, readouts), session state (which laws active), and authority limits (turbulence disengage). Bench scenarios validate law behavior by construction.
 - [ ] State for active AP laws lives in `SimState` so determinism hash covers them — AP behavior is replay-identical.
 - [ ] AP authority respects turbulence; graceful disengage with audio cue
 - [ ] Waypoint-nav law (full-auto) — new `ControlLaw` variant needed here.
@@ -1196,6 +1196,35 @@ A full loop is playable. Fuel, cargo, weather, damage, and reputation all matter
 - [ ] Present-mode coverage verified: VRR / Mailbox, VSync / FIFO, No-VSync / Immediate each produce playable output on representative hardware; tearing / input-latency characteristics match documented expectations.
 - [ ] Graphics-settings panel exercised on every platform; config persistence round-trips cleanly across OSes.
 - [ ] Scenario bench re-run at 30 / 60 / 240 Hz confirms byte-identical CSVs at every display rate (proves physics-to-display independence in shipping build).
+
+### Milestone 5.8: NPC pilot AI + ambient world traffic (post-v1 candidate; may slip)
+
+**Goal:** the world feels alive with other pilots, not empty. NPC-piloted aircraft conduct safe pattern work around the player, with light player-facing interaction and theatrical fallback behaviors. Entirely consumes the `ControlLaw` infrastructure shipped in Phase 2.4.9c + 3.2.3c-audit.
+
+**Design anchor:** memory `npc_pilots_emergent_experiences`. Core direction:
+- NPCs conduct **safe landings + takeoffs** around the player using `GlideToTouchdown` + `CoordinationHold` + `AirspeedHold` stacked controllers.
+- **Radio announcements** (text-on-radio-band, eventually synthesized voice) — "flowPlan 42, 3-mile final" etc.
+- **Lightweight player interaction** via d-pad / hotkey: yes/no/silence. Silence = defer/go-ahead. Low-cognitive-load design.
+- **Hub-capacity awareness.** NPC checks hub runway/dock occupancy before committing; if player + NPC would exceed capacity, NPC performs **single-pontoon skim touch-and-go** as theatrical fallback and diverts to an alternative hub.
+- **Per-NPC skill variation** (ControlLaw gains) + personality (chatty vs laconic radio).
+- Deterministic per `(master_seed, sim_time)` so NPC traffic is replayable + composes with ghost-plane MP (Phase 6).
+
+**Scope drivers:**
+- Forest-service tankers looping fire sites
+- Medevac hub-to-hub runs
+- Cargo haulers
+- Ambient pattern traffic at tier-1/2 hubs
+- Barn-find solo pilots in remote areas
+- NPC weather-reactions (diverting around storms, waiting for weather to clear)
+
+**Prerequisites:**
+- Hub-catalog occupancy field (runtime state on top of Phase 3.6 hub catalog) — tracks which aircraft are approaching / parked / taxiing.
+- Per-NPC persistent state (ControlLawState + aircraft spec + mission intent + skill/personality config).
+- Streaming infrastructure for NPCs (they exist + simulate in a radius around the player, not world-wide).
+- Audio system (Phase 3.1+) for radio-call events + distant engine sounds.
+- Controller composition + state-machine for maneuver chaining (GlideToTouchdown → SingleFloatSkim → TakeoffClimb for the theatrical skim).
+
+**Status:** design direction captured; implementation falls outside Phase 5 release but the foundation (ControlLaw architecture, deterministic bench scenarios) is shipped. Whether this lands in v1 or slips post-v1 depends on Phase 5 schedule pressure.
 
 ### Milestone 5.5: Documentation and release
 

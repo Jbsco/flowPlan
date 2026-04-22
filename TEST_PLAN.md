@@ -321,6 +321,21 @@ Tolerances start deliberately wide and tighten as 2.4.8 coefficient tuning dials
 - A new flight-model effect lands → add a scenario that exercises it (e.g., 2.4.7 density altitude → "cruise at 3 km, verify engine power drop within band").
 - A flight-test feedback surfaces a specific numeric gap → encode it as an assertion so it can't silently re-appear.
 
+### Scenario authoring discipline (hardened 2026-04-22 post-realism audit)
+
+Every scenario MUST have realistic pilot inputs — unless it is explicitly an envelope-limit / no-pilot test. Four buckets:
+
+1. **Open-loop with trim/flare inputs.** Explicit `ScenarioInput` events at specific ticks. Realistic when inputs are thoughtful (e.g., cruise trim to null moments, landing flare pitch sequence, climb-power set at t=0 and held).
+2. **Closed-loop PID controllers.** `ControlLaw` entries in `scenario.controllers` that run every tick. Pilot is simulated by construction — `GlideToTouchdown`, `CoordinationHold`, `BankHold`, etc.
+3. **Intentionally minimal / envelope-limit.** Sparse or zero inputs by design. Scenario tests what happens with the WRONG or NO pilot (porpoise_emerge holds `SetPitch(0.4)` deliberately, wingtip_scrape is a 600-tick envelope probe). Comment block must say so explicitly.
+4. **Missing pilot inputs where realism requires them.** ❌ REJECTED. Either move the scenario into bucket 1/2/3 or revise.
+
+**Assertion discipline.** The assertion must test the scenario's INTENT, not just "the aircraft stayed alive." A landing scenario's primary assertion is touchdown quality (vs at water contact, pitch attitude), not post-crash coast-down airspeed. A takeoff scenario's assertion tests rotation + liftoff, not just on-step acceleration. If you find yourself writing `tol_mps: 10.0` just to get the test to pass, the scenario probably lacks the right assertion — not a wider tolerance.
+
+**Prefer controller-driven scenarios** for capabilities multiple aircraft / future NPC pilots share (landings, coordinated turns, hold-altitude cruise). Open-loop tick-timed inputs are best for scenarios whose purpose is capturing an explicit pilot-trace for inspection. Both are valid; pick per-scenario.
+
+**Regression audits.** When a physics change causes existing scenarios to drift in measured values, the drift is a regression-test signal. Re-baseline the assertion with an inline comment explaining the physics change + documenting the NEW value. Silent tolerance-widening masks the regression's story. See `WATER_RUDDER_COEFF` / `LATERAL_HYDRO_DRAG_N_PER_MPS2` / `INSIDE_FLOAT_STICK_COEFF` tuning history in `crates/sim/src/buoyancy.rs` for the pattern.
+
 ### Future integration
 
 Once Phase 5 flight-log / replay lands (`FEATURES.md § Flight Log & Save Format`), the bench's scenario format is the natural seed: a player's captured flight (input trace + seed) becomes a scenario, telemetry is extracted, they share it with another player who replays it bit-identically. The Phase 4 aircraft-description UI can also consume bench output: run the scenario suite at build time, generate per-aircraft performance-envelope plots, commit as cel-shaded content (hand-drawn-feel ROC-vs-airspeed curve on the Beaver's spec page, etc.).

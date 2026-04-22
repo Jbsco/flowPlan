@@ -109,6 +109,28 @@ const LATERAL_HYDRO_DRAG_N_PER_MPS2: f32 = 400.0;
 /// the step and provides the pitch-up balancing moment via `PLANING_LIFT_CENTROID_Z_FWD_M`.
 const PLANING_LIFT_N_PER_MPS2: f32 = 75.0;
 
+/// Inside-float hydrofoil stick coefficient.
+///
+/// Models the real-world hydrofoil effect that pulls the inside float DOWN
+/// during a water turn and (symmetrically) pushes the outside float UP. The
+/// inside float's keel acts as a downward-suction hydrofoil during yawing
+/// motion; the outside float's as an upward-lift one. Combined, these create
+/// a strong roll-restoring moment that keeps float-planes planted in turns
+/// and prevents outward flips at higher throttle.
+///
+/// Force magnitude per sample: `coeff × inside_indicator × forward_body × wetted × per_section_scale`
+/// where `inside_indicator = -pontoon.offset.x × yaw_rate` (positive on
+/// inside of turn, negative on outside). Applied as world-Y (vertical);
+/// accurate for moderate bank angles.
+///
+/// Tuned 2026-04-22 alongside water-rudder / anisotropic-drag pass to
+/// prevent outward flips at 35%+ throttle without over-damping natural
+/// turn dynamics. Tuning is driven by the `beaver_water_circle_*` scenarios
+/// holding sustained 4°/s yaw rate — if the stick force over-damps
+/// rotation, the circle rate drops visibly. If under-damping, free-flight
+/// turns at throttle flip the aircraft.
+const INSIDE_FLOAT_STICK_COEFF: f32 = 70_000.0;
+
 /// Forward body-Z offset (m) where planing lift's center of pressure acts, relative
 /// to each section's geometric center. Real planing-hull lift acts at the bow-wave
 /// region (forward of the wetted area's geometric center) — modeling this with a
@@ -286,6 +308,9 @@ pub fn compute_buoyancy(
     for pontoon in &BEAVER_PONTOONS {
         let section_length = pontoon.length_m * section_length_factor;
         let section_max_displacement = pontoon.max_displacement_m3 * per_section_scale;
+        // Per-pontoon wetted accumulator (for the whole-pontoon hydrofoil
+        // stick force applied once after the sample loop — see below).
+        let mut pontoon_wetted_accum = 0.0_f32;
 
         for i in 0..PONTOON_SAMPLE_COUNT {
             // Sample center fraction along pontoon length, body-Z offset. For N=5:
@@ -375,6 +400,10 @@ pub fn compute_buoyancy(
                 Vec3::ZERO
             };
 
+            // Accumulate per-pontoon wetted for the stick force applied once
+            // after the sample loop at pontoon center — see below.
+            pontoon_wetted_accum += wetted_fraction * per_section_scale;
+
             // Buoyancy + drag + damping all act at the section geometric center.
             let other_force_world = buoyancy_force_world
                 + Vec3::new(horizontal_drag_world.x, v_damp_y, horizontal_drag_world.z);
@@ -393,6 +422,30 @@ pub fn compute_buoyancy(
             total_force_world += other_force_world + planing_lift_world;
             total_moment_body += other_moment_body + planing_moment_body;
         }
+
+        // ── Inside-float hydrofoil stick (per-pontoon, post-sample-loop) ──
+        // Applied once at the pontoon's geometric center — NOT distributed
+        // per-sample — so that per-sample wetted-fraction asymmetry during
+        // pitch oscillation (porpoise) doesn't spawn spurious pitch moments.
+        // Force is world-Y (vertical); moment comes from pontoon offset in
+        // body frame so strong lateral arm → strong roll-restoring moment.
+        //
+        // Quadratic in yaw rate: matches hydrofoil lift ∝ v² physics and
+        // avoids parasitic damping from tiny background yaw drift (e.g.
+        // P-factor residual during straight-line porpoise).
+        let yaw_rate_body = v.angular_velocity.y;
+        let inside_indicator = -pontoon.body_offset.x * yaw_rate_body;
+        let v_cg_body_forward = (-(v.orientation.inverse() * v.velocity).z).max(0.0);
+        let stick_force_world_y = -INSIDE_FLOAT_STICK_COEFF
+            * inside_indicator
+            * yaw_rate_body.abs()
+            * v_cg_body_forward
+            * pontoon_wetted_accum;
+        let stick_force_world = Vec3::new(0.0, stick_force_world_y, 0.0);
+        let stick_force_body = v.orientation.inverse() * stick_force_world;
+        let stick_moment_body = pontoon.body_offset.cross(stick_force_body);
+        total_force_world += stick_force_world;
+        total_moment_body += stick_moment_body;
     }
 
     // Water rudder: deployed state produces BOTH a yaw moment AND a lateral

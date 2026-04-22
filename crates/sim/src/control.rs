@@ -98,6 +98,44 @@ pub enum ControlLaw {
     /// Also acts as the auto-rudder-coordination feature that will be a
     /// Phase 4.9 accessibility assist.
     CoordinationHold { kp: f32, ki: f32, kd: f32 },
+
+    /// Altitude-aware glide-to-touchdown controller.
+    ///
+    /// Tracks a vertical-speed target that varies with altitude: high vs
+    /// during approach, low vs at flare. Output drives `SetPitch` via a PID
+    /// on vs-error. Used by water + ground landing scenarios, and will
+    /// later back Phase 4.7 "approach / land" autopilot modes and NPC
+    /// pilot landing behaviors.
+    ///
+    /// Phase logic (altitude-based):
+    /// - `alt > flare_begin_alt_m`: `target_vs` = `approach_vs_mps`
+    /// - `flare_peak_alt_m < alt < flare_begin_alt_m`: `target_vs` lerps linearly between `approach_vs_mps` and `touchdown_vs_mps`
+    /// - `alt < flare_peak_alt_m`: `target_vs` = `touchdown_vs_mps`
+    ///
+    /// Tuning: `approach_vs` typically -5 to -3 m/s; `touchdown_vs`
+    /// typically -0.5 to -0.2 m/s; `flare_begin` 12–18 m AGL (POH Vref
+    /// approach path); `flare_peak` 1.5–3 m AGL (float top at touchdown).
+    /// PID gains scale pitch input response; start with `kp = 0.08,
+    /// ki = 0.01, kd = 0.03` and adjust per airframe.
+    ///
+    /// Future hooks for autopilot / NPC use:
+    /// - Reference values are configurable — NPC skill levels can vary
+    ///   (novice = higher flare altitude + sloppier gains, veteran =
+    ///   tighter profile).
+    /// - Controller state (mode) is implicit in altitude; external code
+    ///   reads `sim.vehicle.position.y` to know "am I in flare yet?".
+    /// - Composes with `AirspeedHold` (throttle) + `CoordinationHold`
+    ///   (yaw) for a three-law autopilot stack: speed + coordination +
+    ///   descent/flare.
+    GlideToTouchdown {
+        approach_vs_mps: f32,
+        touchdown_vs_mps: f32,
+        flare_begin_alt_m: f32,
+        flare_peak_alt_m: f32,
+        kp: f32,
+        ki: f32,
+        kd: f32,
+    },
 }
 
 /// Per-instance state for a single `ControlLaw`. PID needs to remember the
@@ -172,6 +210,33 @@ impl ControlLaw {
                 let error = beta_rad.to_degrees(); // target β = 0, so error = β
                 let output = pid_step(state, error, dt, kp, ki, kd).clamp(-1.0, 1.0);
                 InputEvent::SetYaw(output)
+            },
+            Self::GlideToTouchdown {
+                approach_vs_mps,
+                touchdown_vs_mps,
+                flare_begin_alt_m,
+                flare_peak_alt_m,
+                kp,
+                ki,
+                kd,
+            } => {
+                // Altitude-driven vs target: flat approach_vs above
+                // flare_begin, flat touchdown_vs below flare_peak, linear
+                // ramp in between. Captures real pilot flare technique —
+                // pilot reads altitude (visual + instruments) and adjusts
+                // target descent rate accordingly.
+                let alt = sim.vehicle.position.y;
+                let target_vs = if alt >= flare_begin_alt_m {
+                    approach_vs_mps
+                } else if alt <= flare_peak_alt_m {
+                    touchdown_vs_mps
+                } else {
+                    let t = (alt - flare_peak_alt_m) / (flare_begin_alt_m - flare_peak_alt_m);
+                    touchdown_vs_mps + (approach_vs_mps - touchdown_vs_mps) * t
+                };
+                let error = target_vs - sim.vehicle.velocity.y;
+                let output = pid_step(state, error, dt, kp, ki, kd).clamp(-1.0, 1.0);
+                InputEvent::SetPitch(output)
             },
             Self::HeadingHold {
                 target_heading_deg,
