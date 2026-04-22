@@ -342,9 +342,65 @@ fn cell_type_color(t: cell_state::CellType) -> [u8; 3] {
     }
 }
 
+/// Shared cell-type rendering helper: resolves each pixel to a cell state and
+/// renders via the weather-map palette with edge feathering. `time_s` selects
+/// between "initial" (pass 0.0) and "evolved" (pass a future time) semantics —
+/// `state_source` decides which API to query.
+fn render_cell_type_map(
+    crop: Crop,
+    time_s: f32,
+    state_source: fn(u64, voronoi::CellId, f32) -> cell_state::CellState,
+) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+    let mut img = ImageBuffer::new(RESOLUTION, RESOLUTION);
+    for py in 0..RESOLUTION {
+        for px in 0..RESOLUTION {
+            let (x, z) = crop.world_coord(px, py);
+            let lookup = voronoi::cell_at(CANONICAL_SEED, x, z);
+            let state = state_source(CANONICAL_SEED, lookup.cell_id, time_s);
+            let mut color = cell_type_color(state.cell_type);
+            let edge_pixels = (500.0 / crop.extent_m) * RESOLUTION as f32;
+            if lookup.distance_to_edge < 500.0 && edge_pixels > 1.0 {
+                let t = lookup.distance_to_edge / 500.0;
+                for c in &mut color {
+                    *c = (f32::from(*c) * t) as u8;
+                }
+            }
+            img.put_pixel(px, py, Rgb(color));
+        }
+    }
+    img
+}
+
 #[test]
 #[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
 fn emit_cell_type_artifacts() {
+    let dir = output_dir();
+    for &crop in CROPS {
+        let img = render_cell_type_map(crop, 0.0, cell_state::initial_state);
+        write_png(&img, &dir, &format!("cell_type_{}.png", crop.name));
+    }
+}
+
+#[test]
+#[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
+fn emit_cell_type_evolved_artifacts() {
+    // Snapshot at t = 3 hours (half a cycle). Cells with different temporal
+    // offsets will be in different life-cycle phases, and some initially-active
+    // cells will have dissipated (showing clear air through the Voronoi tint).
+    let dir = output_dir();
+    let time_3h = 3.0 * 3_600.0;
+    for &crop in CROPS {
+        let img = render_cell_type_map(crop, time_3h, cell_state::state_at_time);
+        write_png(&img, &dir, &format!("cell_type_evolved_{}.png", crop.name));
+    }
+}
+
+#[test]
+#[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
+fn emit_cell_phase_artifacts() {
+    // Phase field at t=0: each cell's current position in its life-cycle.
+    // Dark = start of growth, bright = peak, dark-red = dissipating, black
+    // = dormant. Reveals the temporal offset distribution across cells.
     let dir = output_dir();
     for &crop in CROPS {
         let mut img = ImageBuffer::new(RESOLUTION, RESOLUTION);
@@ -352,20 +408,19 @@ fn emit_cell_type_artifacts() {
             for px in 0..RESOLUTION {
                 let (x, z) = crop.world_coord(px, py);
                 let lookup = voronoi::cell_at(CANONICAL_SEED, x, z);
-                let state = cell_state::initial_state(CANONICAL_SEED, lookup.cell_id, 0.0);
-                let mut color = cell_type_color(state.cell_type);
-                // Feather cell edges 500 m toward black to reveal partition.
-                let edge_pixels = (500.0 / crop.extent_m) * RESOLUTION as f32;
-                if lookup.distance_to_edge < 500.0 && edge_pixels > 1.0 {
-                    let t = lookup.distance_to_edge / 500.0;
-                    for c in &mut color {
-                        *c = (f32::from(*c) * t) as u8;
-                    }
-                }
+                let init = cell_state::initial_state(CANONICAL_SEED, lookup.cell_id, 0.0);
+                let color = if matches!(init.cell_type, cell_state::CellType::ClearAir) {
+                    // W1-clear cells: always dark gray (no lifecycle).
+                    [40, 40, 45]
+                } else {
+                    let phase = cell_state::cell_phase(CANONICAL_SEED, lookup.cell_id, 0.0);
+                    let activity = cell_state::lifecycle_activity(phase);
+                    ramp_rgb(activity)
+                };
                 img.put_pixel(px, py, Rgb(color));
             }
         }
-        write_png(&img, &dir, &format!("cell_type_{}.png", crop.name));
+        write_png(&img, &dir, &format!("cell_phase_{}.png", crop.name));
     }
 }
 

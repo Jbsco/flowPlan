@@ -98,6 +98,115 @@ pub const CLEAR_AIR_PRIOR: f32 = 2.5;
 const WIND_SAMPLE_ALTITUDE_M: f32 = 2_000.0;
 
 const CELL_STATE_TAG: u64 = u64::from_le_bytes(*b"cellstat");
+const CELL_OFFSET_TAG: u64 = u64::from_le_bytes(*b"celloff_");
+
+/// Full life cycle duration of a weather cell (s).
+///
+/// 6 hours is the midpoint of real cell lifetimes: a fair-weather cumulus
+/// lives 30–60 min; a stratus deck persists 4–8 hours; a mesoscale
+/// convective system 3–6 hours. Using one fixed duration keeps the pure-
+/// function model simple; per-type duration variability is a future
+/// enhancement.
+pub const CELL_CYCLE_DURATION_S: f32 = 6.0 * 3_600.0;
+
+/// Phase boundaries within a cycle: growth-peak-dissipation-dormant.
+///
+/// At `phase < GROWTH_END`, activity ramps from 0 to 1.
+/// At `phase < PEAK_END`, activity is 1.
+/// At `phase < DISSIPATION_END`, activity ramps from 1 to 0.
+/// Otherwise the cell is dormant (clear air).
+pub const GROWTH_END: f32 = 0.15;
+pub const PEAK_END: f32 = 0.60;
+pub const DISSIPATION_END: f32 = 0.85;
+
+/// Per-cell temporal offset in `[0, CELL_CYCLE_DURATION_S)`.
+///
+/// Deterministic per `(master_seed, cell)`. Ensures cells are at varying
+/// phases at any given sim time — a snapshot of the grid shows a mix of
+/// growing, peak, and dissipating cells rather than every cell cycling in
+/// lockstep.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::cast_sign_loss)]
+pub fn cell_time_offset(master_seed: u64, cell: CellId) -> f32 {
+    let packed = ((cell.ix as u32 as u64) << 32) | (cell.iz as u32 as u64);
+    let mut x = master_seed
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .wrapping_add(CELL_OFFSET_TAG)
+        .wrapping_add(packed);
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^= x >> 31;
+    let unit = ((x >> 40) as f32) / ((1u32 << 24) as f32);
+    unit * CELL_CYCLE_DURATION_S
+}
+
+/// Cell phase `∈ [0, 1)` at sim time `time_s`.
+///
+/// Deterministic per `(master_seed, cell, time_s)`. Phase advances linearly
+/// with time, wrapping at cycle boundaries. See [`state_at_time`] for how
+/// phase drives activity.
+#[must_use]
+pub fn cell_phase(master_seed: u64, cell: CellId, time_s: f32) -> f32 {
+    let offset = cell_time_offset(master_seed, cell);
+    // Explicit mod-to-positive since time_s might theoretically be negative.
+    let t = time_s + offset;
+    let cycles = libm::floorf(t / CELL_CYCLE_DURATION_S);
+    (t - cycles * CELL_CYCLE_DURATION_S) / CELL_CYCLE_DURATION_S
+}
+
+/// Life-cycle activity multiplier `∈ [0, 1]` at a given phase.
+///
+/// Piecewise-linear: 0→1 during growth, 1 at peak, 1→0 during dissipation,
+/// 0 during dormant phase. A cell's density and precipitation are scaled by
+/// this factor.
+#[must_use]
+pub fn lifecycle_activity(phase: f32) -> f32 {
+    let p = phase.clamp(0.0, 1.0);
+    if p < GROWTH_END {
+        p / GROWTH_END
+    } else if p < PEAK_END {
+        1.0
+    } else if p < DISSIPATION_END {
+        1.0 - (p - PEAK_END) / (DISSIPATION_END - PEAK_END)
+    } else {
+        0.0
+    }
+}
+
+/// Per-cell state at sim time `time_s`, evolved from `initial_state` through
+/// the cell's life-cycle curve.
+///
+/// Deterministic per `(master_seed, cell, time_s)`. Adjacency-bias enhancements
+/// (neighbor cell types influence re-roll at cycle boundaries) are a future
+/// refinement — the W1 substrate already provides implicit adjacency since
+/// neighboring cells share smooth pressure/temperature/humidity fields and
+/// tend to classify into similar types.
+#[must_use]
+pub fn state_at_time(master_seed: u64, cell: CellId, time_s: f32) -> CellState {
+    let initial = initial_state(master_seed, cell, time_s);
+    if matches!(initial.cell_type, CellType::ClearAir) {
+        return initial;
+    }
+    let phase = cell_phase(master_seed, cell, time_s);
+    let activity = lifecycle_activity(phase);
+    if activity < 0.01 {
+        return CellState {
+            cell_type: CellType::ClearAir,
+            base_altitude_m: 0.0,
+            top_altitude_m: 0.0,
+            density: 0.0,
+            precip_rate_mm_per_hr: 0.0,
+            storm_phase: phase,
+        };
+    }
+    CellState {
+        density: initial.density * activity,
+        precip_rate_mm_per_hr: initial.precip_rate_mm_per_hr * activity,
+        storm_phase: phase,
+        ..initial
+    }
+}
 
 /// Initial per-cell state at `time_s`. Deterministic per `(master_seed, cell,
 /// time_s)`.
@@ -396,6 +505,128 @@ mod tests {
             }
         }
         assert!(any_diff, "seeds 1 vs 2 produced identical cell-state grids");
+    }
+
+    #[test]
+    fn cell_phase_deterministic() {
+        let a = cell_phase(42, CellId { ix: 3, iz: -2 }, 1_000.0);
+        let b = cell_phase(42, CellId { ix: 3, iz: -2 }, 1_000.0);
+        assert_eq!(a.to_bits(), b.to_bits());
+    }
+
+    #[test]
+    fn cell_phase_wraps_at_cycle() {
+        // Phase at time t and at time t + CELL_CYCLE_DURATION should be equal.
+        let cell = CellId { ix: 5, iz: 7 };
+        let p0 = cell_phase(42, cell, 100.0);
+        let p1 = cell_phase(42, cell, 100.0 + CELL_CYCLE_DURATION_S);
+        // Allow small float error in the modular arithmetic.
+        assert!((p0 - p1).abs() < 1e-4, "phase {p0} vs {p1} after one cycle");
+    }
+
+    #[test]
+    fn different_cells_have_different_offsets() {
+        let o1 = cell_time_offset(42, CellId { ix: 0, iz: 0 });
+        let o2 = cell_time_offset(42, CellId { ix: 1, iz: 0 });
+        assert_ne!(o1.to_bits(), o2.to_bits());
+    }
+
+    #[test]
+    fn lifecycle_activity_shape() {
+        // Zero at phase 0 (start of growth).
+        assert_eq!(lifecycle_activity(0.0).to_bits(), 0.0_f32.to_bits());
+        // One at mid-peak.
+        assert_eq!(lifecycle_activity(0.4).to_bits(), 1.0_f32.to_bits());
+        // Zero in dormant phase.
+        assert_eq!(lifecycle_activity(0.95).to_bits(), 0.0_f32.to_bits());
+        // Partial during growth.
+        let mid_growth = lifecycle_activity(GROWTH_END / 2.0);
+        assert!(mid_growth > 0.0 && mid_growth < 1.0);
+        // Partial during dissipation.
+        let mid_dissipation = lifecycle_activity(f32::midpoint(PEAK_END, DISSIPATION_END));
+        assert!(mid_dissipation > 0.0 && mid_dissipation < 1.0);
+    }
+
+    #[test]
+    fn evolved_state_dormant_reports_clear_air() {
+        // Find a cell that's non-ClearAir at initial, then fast-forward
+        // until it's dormant and check that it reports ClearAir.
+        for ix in 0..30 {
+            for iz in 0..30 {
+                let cell = CellId { ix, iz };
+                let init = initial_state(42, cell, 0.0);
+                if !matches!(init.cell_type, CellType::ClearAir) {
+                    // Fast-forward to time when this cell is in the dormant
+                    // phase (just before cycle wrap).
+                    let offset = cell_time_offset(42, cell);
+                    let target_phase = 0.92;
+                    let target_time = target_phase * CELL_CYCLE_DURATION_S - offset;
+                    if target_time > 0.0 {
+                        let evolved = state_at_time(42, cell, target_time);
+                        assert!(
+                            matches!(evolved.cell_type, CellType::ClearAir),
+                            "cell {:?} at phase {} should be dormant, got {:?}",
+                            cell,
+                            cell_phase(42, cell, target_time),
+                            evolved.cell_type
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+        panic!("no non-ClearAir cell found in sample grid");
+    }
+
+    #[test]
+    fn evolved_state_peak_matches_initial() {
+        // At peak phase, density and precip should equal initial values
+        // (activity == 1).
+        for ix in 0..30 {
+            for iz in 0..30 {
+                let cell = CellId { ix, iz };
+                let init = initial_state(42, cell, 0.0);
+                if !matches!(init.cell_type, CellType::ClearAir) {
+                    let offset = cell_time_offset(42, cell);
+                    let target_phase = f32::midpoint(GROWTH_END, PEAK_END);
+                    let target_time = target_phase * CELL_CYCLE_DURATION_S - offset;
+                    if target_time > 0.0 {
+                        let evolved = state_at_time(42, cell, target_time);
+                        assert_eq!(evolved.density.to_bits(), init.density.to_bits());
+                        assert_eq!(
+                            evolved.precip_rate_mm_per_hr.to_bits(),
+                            init.precip_rate_mm_per_hr.to_bits()
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+        panic!("no non-ClearAir cell found in sample grid");
+    }
+
+    #[test]
+    fn lifecycle_cannot_activate_clear_cells() {
+        // At any time t: if the W1 classifier resolves a cell to ClearAir,
+        // state_at_time must also report ClearAir. The life-cycle only
+        // dissipates active cells — it cannot conjure weather out of air that
+        // the W1 substrate classifies as clear.
+        for ix in 0..30 {
+            for iz in 0..30 {
+                let cell = CellId { ix, iz };
+                for t_hr in [0.0, 1.0, 2.0, 5.0] {
+                    let t = t_hr * 3_600.0;
+                    let init = initial_state(42, cell, t);
+                    let evolved = state_at_time(42, cell, t);
+                    if matches!(init.cell_type, CellType::ClearAir) {
+                        assert!(
+                            matches!(evolved.cell_type, CellType::ClearAir),
+                            "state_at_time activated a W1-clear cell at t={t_hr}h"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

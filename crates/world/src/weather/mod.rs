@@ -46,7 +46,10 @@ pub mod turbulence;
 pub mod voronoi;
 pub mod wind;
 
-pub use cell_state::{initial_state as cell_initial_state, CellState, CellType};
+pub use cell_state::{
+    cell_phase, initial_state as cell_initial_state, state_at_time as cell_state_at_time,
+    CellState, CellType,
+};
 pub use frontal::{frontal_segments, FrontalSegment};
 pub use humidity::humidity_at;
 pub use pressure::pressure_at;
