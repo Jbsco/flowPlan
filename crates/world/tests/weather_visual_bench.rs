@@ -233,6 +233,79 @@ fn emit_humidity_terrain_field_artifacts() {
 
 #[test]
 #[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
+fn emit_cloud_density_field_artifacts() {
+    // Cloud density sampled at 2 km altitude (typical cumulus mid-layer).
+    // Dark = clear air / below cell base / above top; bright = inside a
+    // cloud column.
+    let dir = output_dir();
+    let terrain = Terrain::from_seed(CANONICAL_SEED);
+    let value_range = (0.0, 1.0);
+    let sample_altitude = 2_000.0;
+    for &crop in CROPS {
+        let img = render_field(crop, value_range, |x, z| {
+            weather::deltas::cloud_density_at(CANONICAL_SEED, &terrain, x, sample_altitude, z, 0.0)
+        });
+        write_png(&img, &dir, &format!("cloud_density_{}.png", crop.name));
+    }
+}
+
+#[test]
+#[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
+fn emit_precipitation_field_artifacts() {
+    // Precipitation rate at ground (50 m AGL — "below cloud base" for any
+    // precipitating cell). Dark = dry; bright = heavy rain.
+    let dir = output_dir();
+    let terrain = Terrain::from_seed(CANONICAL_SEED);
+    let value_range = (0.0, 15.0); // 0 to heavy-rain reference
+    for &crop in CROPS {
+        let img = render_field(crop, value_range, |x, z| {
+            weather::deltas::precipitation_rate_at(CANONICAL_SEED, &terrain, x, 50.0, z, 0.0)
+        });
+        write_png(&img, &dir, &format!("precipitation_{}.png", crop.name));
+    }
+}
+
+#[test]
+#[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
+fn emit_visibility_field_artifacts() {
+    // Horizontal visibility at 500 m AGL. Bright = clear baseline ~50 km;
+    // dark = inside cloud / heavy precip. Clamped to the cloud-interior floor.
+    let dir = output_dir();
+    let terrain = Terrain::from_seed(CANONICAL_SEED);
+    let value_range = (
+        weather::deltas::CLOUD_INTERIOR_VISIBILITY_M,
+        weather::deltas::BASELINE_VISIBILITY_M,
+    );
+    for &crop in CROPS {
+        let img = render_field(crop, value_range, |x, z| {
+            weather::deltas::visibility_at(CANONICAL_SEED, &terrain, x, 500.0, z, 0.0)
+        });
+        write_png(&img, &dir, &format!("visibility_{}.png", crop.name));
+    }
+}
+
+#[test]
+#[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
+fn emit_turbulence_composed_field_artifacts() {
+    // W1 + W3 composed turbulence. Comparable to `turbulence_*.png`
+    // (W1 baseline); active weather cells add visible peaks.
+    let dir = output_dir();
+    let terrain = Terrain::from_seed(CANONICAL_SEED);
+    let value_range = (0.0, turbulence::MAX_TURBULENCE_INTENSITY);
+    for &crop in CROPS {
+        let img = render_field(crop, value_range, |x, z| {
+            weather::deltas::turbulence_at_with_weather(CANONICAL_SEED, &terrain, x, 500.0, z, 0.0)
+        });
+        write_png(
+            &img,
+            &dir,
+            &format!("turbulence_composed_{}.png", crop.name),
+        );
+    }
+}
+
+#[test]
+#[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
 fn emit_orographic_modifier_field_artifacts() {
     // The raw multiplicative modifier — centered at 1.0. Blue (<1) = lee-side
     // dry bias, red (>1) = windward-side moist bias. Gray (≈1) = no terrain
