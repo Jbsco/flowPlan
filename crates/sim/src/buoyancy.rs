@@ -125,11 +125,19 @@ const PLANING_LIFT_N_PER_MPS2: f32 = 75.0;
 ///
 /// Tuned 2026-04-22 alongside water-rudder / anisotropic-drag pass to
 /// prevent outward flips at 35%+ throttle without over-damping natural
-/// turn dynamics. Tuning is driven by the `beaver_water_circle_*` scenarios
-/// holding sustained 4°/s yaw rate — if the stick force over-damps
-/// rotation, the circle rate drops visibly. If under-damping, free-flight
-/// turns at throttle flip the aircraft.
-const INSIDE_FLOAT_STICK_COEFF: f32 = 70_000.0;
+/// turn dynamics.
+///
+/// **Task #179 (2026-04-22) — reduced 70,000 → 15,000.** Playtest revealed
+/// inward flip at takeoff power (user report: "plane flips underwater
+/// toward the inside"). Reproducible in bench via
+/// `beaver_water_takeoff_no_coord` and `beaver_water_circle_right_powered`.
+/// Root cause: the force scales as `yaw_rate²` (via `inside_indicator ×
+/// |yaw_rate|`), creating positive feedback — small yaw perturbation
+/// (spiral slipstream) → stick down-force on inside pontoon → roll into
+/// turn → more yaw (via dihedral β-coupling) → MORE stick → runaway.
+/// Reduced coefficient 4.7× to eliminate the feedback divergence while
+/// preserving the stabilizing effect in normal taxi turns.
+const INSIDE_FLOAT_STICK_COEFF: f32 = 15_000.0;
 
 /// Forward body-Z offset (m) where planing lift's center of pressure acts, relative
 /// to each section's geometric center. Real planing-hull lift acts at the bow-wave

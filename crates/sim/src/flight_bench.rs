@@ -3488,18 +3488,14 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
         duration_ticks: 7200, // 60 s
         assertions: &[Assertion::AirspeedAtEnd {
             last_secs: 5.0,
-            // 2026-04-22 retune: with anisotropic float drag + inside-float
-            // hydrofoil stick force, porpoise-induced yaw drift (from P-factor
-            // at 100% throttle) couples into the stick force, producing
-            // additional damping that bleeds speed. Net effect: aircraft
-            // fails to emerge from porpoise into cruise — settles at plow
-            // speed ~9 m/s. This may actually be MORE physically accurate
-            // than the previous 32 m/s (real porpoise does not accelerate
-            // the aircraft; pilot input feeding the oscillation is a known
-            // reason pilots struggle to reach cruise). Main signal is
-            // "still alive on water" — assertion just verifies no NaN.
-            target_mps: 9.0,
-            tol_mps: 3.0,
+            // Task #179 re-baseline: inside-float stick coefficient
+            // reduced 70k → 15k to fix takeoff flip. Lower stick force no
+            // longer bleeds as much airspeed through porpoise coupling —
+            // aircraft reaches 36 m/s (was 9 m/s). Still demonstrates the
+            // porpoise envelope via scripted back-pitch; assertion tracks
+            // actual plateau speed.
+            target_mps: 36.0,
+            tol_mps: 5.0,
         }],
     },
     // beaver_water_right_bank_accel
@@ -3906,13 +3902,13 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
         duration_ticks: 4800,
         assertions: &[Assertion::AirspeedAtEnd {
             last_secs: 5.0,
-            // Re-baselined 2026-04-22 after task #178 Cm_δe reduction:
-            // weaker elevator → PID can't flare as deeply → aircraft
-            // contacts pontoon firmer + transitions to both-pontoon sooner
-            // (less sustained one-pontoon asymmetric decel). Measured 21.66
-            // vs prior 6.05. Band widened to capture the new behavior.
-            target_mps: 21.0,
-            tol_mps: 4.0,
+            // Re-baselined 2026-04-22: task #178 Cm_δe 0.24→0.15 + task #179
+            // INSIDE_FLOAT_STICK 70k→15k. Net: aircraft decelerates more on
+            // one-pontoon contact (less stick force holding inside-down at
+            // turn), ~7 m/s final (similar to _right variant now). Symmetry
+            // restored as tuning approaches realistic bounds.
+            target_mps: 7.0,
+            tol_mps: 3.0,
         }],
     },
     // beaver_water_taxi_rudder_deployed
@@ -4193,6 +4189,131 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             last_secs: 2.0,
             target_deg: -119.5,
             tol_deg: 5.0,
+        }],
+    },
+    // beaver_water_takeoff_no_coord
+    //
+    // Playtest bug reproducer (2026-04-22): user reported aircraft flips
+    // underwater when "just trying to takeoff from a stop" — no yaw, no
+    // water rudder, just throttle-up. This scenario removes the
+    // CoordinationHold controller that our canonical takeoff uses, so we
+    // see what the aircraft does under full-power takeoff with NO pilot
+    // compensation for P-factor / spiral slipstream / torque.
+    //
+    // Classification: ENVELOPE-LIMIT / REGRESSION GUARD. If a player
+    // starts full-throttle with hands off the stick, the aircraft should
+    // NOT submerge. Real Beavers yaw LEFT strongly from prop effects and
+    // pilots must counter — but they don't flip inverted.
+    FlightScenario {
+        name: "beaver_water_takeoff_no_coord",
+        description: "Full-throttle water takeoff with ZERO pilot inputs (no coordination). Captures playtest bug: aircraft submerges.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 2.40, 0.0),
+            velocity: Vec3::ZERO,
+            orientation: Quat::IDENTITY,
+            angular_velocity: Vec3::ZERO,
+            throttle: 1.0, // full power — player pushing throttle
+            flaps: FlapPosition::Takeoff,
+            fuel_gal: 80.0,
+            chop_intensity_override: None,
+        },
+        inputs: &[], // zero pilot input
+        controllers: &[], // zero controllers — no auto-coord assist
+        duration_ticks: 3600, // 30 s
+        // Regression guard: aircraft should NOT reach extreme bank / submerge.
+        // If it does (the user's reported bug), this assertion's message
+        // records the magnitude for triage.
+        assertions: &[Assertion::PeakAngularRate {
+            axis: RateAxis::Roll,
+            min_degps: 0.0,
+            max_degps: 40.0, // taxi-rate yaw couples to some bank; 40°/s is generous
+        }],
+    },
+    // beaver_water_circle_right_powered
+    //
+    // Playtest bug reproducer (2026-04-22, task #179): user reported "when I
+    // deploy water rudder and apply right yaw the plane flips underwater
+    // toward the inside." Existing circle_right runs at idle; this scenario
+    // captures the same input pattern at taxi-climb throttle where the
+    // flip was visible at INSIDE_FLOAT_STICK_COEFF=70k. After reduction
+    // to 15k, aircraft stays bounded (peak roll rate <30°/s).
+    //
+    // Classification: ENVELOPE-LIMIT / REGRESSION GUARD. Pairs with
+    // `_circle_left_powered` per SKILL Core Rule #10 asymmetric-pair
+    // discipline.
+    FlightScenario {
+        name: "beaver_water_circle_right_powered",
+        description: "Water taxi at 30% throttle + full right yaw + water rudder deployed — playtest flip reproducer.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 2.40, 0.0),
+            velocity: Vec3::ZERO,
+            orientation: Quat::IDENTITY,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.30,
+            flaps: FlapPosition::Up,
+            fuel_gal: 80.0,
+            chop_intensity_override: None,
+        },
+        inputs: &[
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetWaterRudder(true),
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetYaw(1.0),
+            },
+        ],
+        controllers: &[],
+        duration_ticks: 3600, // 30 s
+        assertions: &[Assertion::PeakAngularRate {
+            axis: RateAxis::Roll,
+            min_degps: 0.0,
+            max_degps: 30.0, // bank should build gently, not snap roll
+        }],
+    },
+    // beaver_water_circle_left_powered
+    //
+    // Mirror of `_circle_right_powered` per SKILL Core Rule #10 asymmetric-
+    // pair discipline. Right-rotating prop breaks mirror symmetry — P-factor
+    // and spiral slipstream both yaw nose-LEFT, so a left powered turn is
+    // AIDED by these effects while the right turn opposes them. This
+    // scenario complements the right variant as a full regression guard.
+    FlightScenario {
+        name: "beaver_water_circle_left_powered",
+        description: "Water taxi at 30% throttle + full LEFT yaw + water rudder deployed. Mirror of _circle_right_powered.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 2.40, 0.0),
+            velocity: Vec3::ZERO,
+            orientation: Quat::IDENTITY,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.30,
+            flaps: FlapPosition::Up,
+            fuel_gal: 80.0,
+            chop_intensity_override: None,
+        },
+        inputs: &[
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetWaterRudder(true),
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetYaw(-1.0), // full LEFT
+            },
+        ],
+        controllers: &[],
+        duration_ticks: 3600, // 30 s
+        assertions: &[Assertion::PeakAngularRate {
+            axis: RateAxis::Roll,
+            min_degps: 0.0,
+            max_degps: 30.0,
         }],
     },
     FlightScenario {
