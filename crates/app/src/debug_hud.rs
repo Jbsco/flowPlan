@@ -186,8 +186,20 @@ fn build_ui(
                 t.flap_position.label(),
                 t.flap_position.deflection_deg(),
             ));
+            // Water rudder state indicator. Green when deployed, red-tinted
+            // when retracted. Only meaningful on float variants; wheels
+            // variants leave this permanently retracted.
+            let (wr_color, wr_state) = if t.water_rudder_deployed {
+                (egui::Color32::from_rgb(120, 220, 120), "DEPLOYED")
+            } else {
+                (egui::Color32::from_rgb(220, 120, 120), "retracted")
+            };
+            ui.horizontal(|ui| {
+                ui.label("water rudder (T)");
+                ui.colored_label(wr_color, wr_state);
+            });
             ui.separator();
-            ui.small("W/S throttle  |  stick: ↑ dive / ↓ climb  |  ←/→ roll  |  Q/E yaw  |  F/C flaps ext/ret  |  1/2/3 view  |  V cycle  |  R reset  |  Esc quit");
+            ui.small("W/S throttle  |  stick: ↑ dive / ↓ climb  |  ←/→ roll  |  Q/E yaw  |  F/C flaps ext/ret  |  T water rudder  |  B brakes  |  1/2/3 view  |  V cycle  |  R reset  |  Esc quit");
         });
 
     // Top-right: flight-model dynamics breakdown. Same Telemetry source as the left

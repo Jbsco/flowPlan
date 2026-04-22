@@ -135,6 +135,12 @@ pub struct Telemetry {
     /// Current flap detent.
     pub flap_position: FlapPosition,
 
+    // --- Controls state toggles (Phase 2.5 / 3.2.3c) ---
+    /// Water-rudder deployment latch (floats variants). `true` = extended
+    /// into water + active; `false` = retracted + no-op. Drives the HUD
+    /// indicator so the pilot sees whether pressing `T` took effect.
+    pub water_rudder_deployed: bool,
+
     // --- Density altitude (Phase 2.4.7) ---
     /// Air density at the aircraft's current altitude (kg/m³). Exponential ISA
     /// approximation; 1.225 at sea level, ~0.69 at 5 km.
@@ -223,6 +229,7 @@ impl Telemetry {
             stall_state: f.stall_state,
 
             flap_position: ControlsSnapshot::flap_position_from_u32(veh.controls.flap_position),
+            water_rudder_deployed: veh.controls.water_rudder != 0,
 
             air_density_kg_m3: flowplan_sim::flight::air_density(veh.position.y),
             density_ratio: flowplan_sim::flight::density_ratio(veh.position.y),

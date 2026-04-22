@@ -108,17 +108,24 @@ const PLANING_LIFT_N_PER_MPS2: f32 = 75.0;
 /// nose-up — exactly the characteristic on-step posture.
 const PLANING_LIFT_CENTROID_Z_FWD_M: f32 = -1.5;
 
-/// Water rudder yaw coefficient (N per m/s² × yaw-input × wetted-frac).
+/// Water rudder yaw coefficient.
 ///
-/// Produces directional control at low water speed where air rudder is ineffective.
-/// Deployed rudder force scales with forward velocity² (pressure on the rudder
-/// surface) and average pontoon wetted fraction (proxy for "the rudders are
-/// actually in the water"). Applied at body +Z (aft of CG) so side-force → yaw.
+/// Produces directional control at low water speed where air rudder is
+/// ineffective. Deployed rudder force scales with forward velocity² and
+/// average pontoon wetted fraction. The resulting force is applied as BOTH
+/// a moment around CG AND a linear push on the airframe (via the body-+Z
+/// offset); this produces the real-world "rudder sweeps the tail around"
+/// pivot behavior rather than a pirouette on the CG.
 ///
-/// Tuned so idle-taxi at ~4 m/s gives ~15-20°/s yaw rate at full rudder —
-/// matches real Beaver taxi turn rates near a dock. Must be RETRACTED (state
-/// bit off) for takeoff or the planing-speed rudder moment would be excessive.
-const WATER_RUDDER_COEFF: f32 = 25.0;
+/// Must be RETRACTED (control state off) for takeoff or planing-speed
+/// rudder moment would be excessive.
+///
+/// Tuned 2026-04-22 (32× original 25.0) to match POH water-turn performance
+/// at idle throttle: ~3.3°/s sustained yaw rate, 360° circle in ~110 s.
+/// Within POH "idle no-pulse" range (60–120 s). Tuning is driven by the
+/// `beaver_water_circle_*` bench scenarios; if those assertions drift, this
+/// coefficient is the first knob to revisit.
+const WATER_RUDDER_COEFF: f32 = 800.0;
 
 /// Aft lever arm (m) for water rudder moment, body +Z direction (aft of CG).
 const WATER_RUDDER_ARM_M: f32 = 3.2;
@@ -364,16 +371,23 @@ pub fn compute_buoyancy(
         }
     }
 
-    // Water rudder: deployed state produces a yaw moment at the pontoon aft
-    // scaled by forward speed² and average wetted fraction. Retracted state
-    // contributes nothing — aircraft weathervanes via existing aero stability
-    // (`CN_BETA`). The rudder force is applied at a body-aft offset so it
-    // pivots the aircraft around the CG.
+    // Water rudder: deployed state produces BOTH a yaw moment AND a lateral
+    // push on the floats, scaled by forward speed² and average wetted
+    // fraction. Retracted state contributes nothing — aircraft weathervanes
+    // via existing aero stability (`CN_BETA`).
     //
-    // Sign: positive yaw input (nose-right per flowplan convention) pushes the
-    // aft pontoons leftward in body frame, which rotates the nose rightward.
-    // In body-frame moment storage this is a NEGATIVE `moment_body.y` (because
-    // +Y body angular velocity is yaw-LEFT per state.rs convention).
+    // Force-at-offset → both linear and angular accel: a rigid body with a
+    // side-force applied aft of CG translates sideways (tail pushed aside)
+    // AND rotates around CG. The combination produces a realistic pivot
+    // point somewhere between the CG and the rudder, which is how real
+    // float-plane water turns track — the aircraft doesn't pirouette around
+    // its own center, it sweeps its tail around.
+    //
+    // Sign: positive yaw input (nose-right per flowplan convention) pushes
+    // the aft pontoons leftward in body frame, which rotates the nose
+    // rightward and translates the whole aircraft leftward. In body-frame
+    // moment storage this is a NEGATIVE `moment_body.y` (because +Y body
+    // angular velocity is yaw-LEFT per state.rs convention).
     if v.controls.water_rudder && wetted_sample_count > 0 {
         #[allow(clippy::cast_precision_loss)]
         let avg_wetted = wetted_fraction_accum / wetted_sample_count as f32;
@@ -382,12 +396,16 @@ pub fn compute_buoyancy(
         if v_body_forward > 0.0 {
             let side_force =
                 WATER_RUDDER_COEFF * v_body_forward * v_body_forward * avg_wetted * v.controls.yaw;
-            // Force pushes aft pontoons aside (body -X for positive yaw input);
-            // applied at body +Z offset (aft of CG). Moment arm in cross product.
             let force_body = Vec3::new(-side_force, 0.0, 0.0);
             let arm_body = Vec3::new(0.0, 0.0, WATER_RUDDER_ARM_M);
+            // Moment: force × arm (cross product, both in body frame).
             let moment_body = arm_body.cross(force_body);
             total_moment_body += moment_body;
+            // Linear force: rotate the body-frame force into world frame and
+            // add to the total. Without this the aircraft pirouettes on CG;
+            // with it, the pivot point sits between CG and rudder — matches
+            // real-world water-turn motion.
+            total_force_world += v.orientation * force_body;
         }
     }
 

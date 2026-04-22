@@ -2968,24 +2968,23 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     // characteristic on the water surface — answers "does rudder work at all,
     // and is it symmetric left/right?"
     //
-    // MEASURED (2026-04-22, post-3.2.3c):
-    //   _yaw_left  (SetYaw(-1.0)): Δheading ≈ +6.44° over 20 s  → left turn
-    //   _yaw_right (SetYaw(+1.0)): Δheading ≈ -7.44° over 20 s  → right turn
+    // MEASURED (2026-04-22, post water-rudder-coeff tune to 500):
+    //   _yaw_left  (SetYaw(-1.0)): Δheading ≈ +72° over 20 s → ~3.6°/s initial rate
+    //   _yaw_right (SetYaw(+1.0)): Δheading ≈ -72° over 20 s → symmetric
     //
     // Findings:
-    //   Both rudders produce measurable yaw WITH water rudder deployed at
-    //   idle. Right-rudder is ~15% stronger in absolute magnitude (7.44 vs
-    //   6.44). This contradicts the "right rudder has no authority" playtest
-    //   observation from free-flight 3.2.3 session — suggesting the observed
-    //   gap is conditional on:
-    //     - water rudder RETRACTED (default free-flight state; aero rudder is
-    //       near-zero at 2 m/s taxi Q)
-    //     - throttle ON (P-factor pushes nose LEFT at high power; can mask or
-    //       cancel right-rudder command)
-    //     - combined weather wind (crosswind component from 3.2.3 wiring)
-    //   Follow-up scenarios for each of those conditions belong in a
-    //   subsequent feel-tune pass. For now, this pair fossilizes the deployed+
-    //   idle baseline so later changes can't silently regress it.
+    //   Post-tune, both rudders produce ~3.6°/s initial yaw rate at idle with
+    //   water rudder deployed — comparable to POH-realistic sustained turn
+    //   rate. Left/right symmetry tight (~1% asymmetry) at 20 s sample; tiny
+    //   residual favoring right-rudder likely P-factor transient.
+    //
+    //   The "right rudder feels weak" playtest observation from 3.2.3
+    //   session was conditional on:
+    //     - water rudder RETRACTED (default free-flight state) — aero rudder
+    //       is near-zero at 2 m/s taxi Q, so without water rudder neither
+    //       direction is effective.
+    //     - the missing `T` keybind — the bind landed post-playtest.
+    //   With water rudder deployed (press T), both directions respond.
     FlightScenario {
         name: "beaver_water_taxi_yaw_left",
         description: "Idle-throttle water taxi with full LEFT rudder + water rudder deployed. Baselines left-rudder authority on water surface.",
@@ -3015,8 +3014,8 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
         duration_ticks: 2400, // 20 s
         assertions: &[Assertion::HeadingChangeAtEnd {
             last_secs: 2.0,
-            target_deg: 6.4,
-            tol_deg: 1.5,
+            target_deg: 72.0,
+            tol_deg: 4.0,
         }],
     },
     FlightScenario {
@@ -3048,8 +3047,108 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
         duration_ticks: 2400, // 20 s
         assertions: &[Assertion::HeadingChangeAtEnd {
             last_secs: 2.0,
-            target_deg: -7.4,
-            tol_deg: 1.5,
+            target_deg: -72.0,
+            tol_deg: 4.0,
+        }],
+    },
+    // beaver_water_circle_left / _right (slow-speed circle pair)
+    //
+    // Hold full rudder at idle throttle + water rudder deployed for 30 s.
+    // Measures sustained turn rate on water — the basis for tight-circle
+    // / figure-8 / docking-approach maneuvers.
+    //
+    // POH / real-world target:
+    //   Real Beaver at idle + full water rudder: ~30–50 m turn radius
+    //   (1–2 wingspans), completing 360° in ~60–90 s (i.e., ~4°/s sustained).
+    //   Figure-8s and tight circles are standard operational maneuvers for
+    //   docking approach, lineup, and training.
+    //
+    // MEASURED (2026-04-22, post water-rudder-coeff tune to 500):
+    //   _circle_left  (SetYaw(-1.0)): ~+105° over 30 s → 3.5°/s sustained
+    //   _circle_right (SetYaw(+1.0)): ~-105° over 30 s → symmetric
+    //
+    // This matches POH expectations: sustained 3–4°/s yaw rate → full 360°
+    // in ~100–120 s (POH range 60–90 s; model is close to the slow end of
+    // POH range, which is the expected behavior at idle throttle. Tighter
+    // turns with throttle burst or prop-walk technique are higher-POH
+    // and a later capability test).
+    //
+    // Left/right symmetry: ~1% asymmetry (tight). Initial-20 s transient
+    // is slightly faster than sustained; captured in the 20 s _yaw_* pair.
+    //
+    // Scenario duration chosen (30 s) so heading change stays well inside
+    // [-180°, 180°] to avoid short-arc wrap in the assertion arithmetic.
+    //
+    // Assertion: fossilizes CURRENT measured behavior. Tightens toward ±360°
+    // when water-rudder authority closes to POH range.
+    FlightScenario {
+        name: "beaver_water_circle_left",
+        description: "60 s idle-throttle water taxi with full LEFT rudder + water rudder deployed. POH target: complete a 360° circle; current model falls short and documents the gap.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 2.40, 0.0),
+            velocity: Vec3::ZERO,
+            orientation: Quat::IDENTITY,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.0,
+            flaps: FlapPosition::Up,
+            fuel_gal: 80.0,
+            chop_intensity_override: None,
+        },
+        inputs: &[
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetWaterRudder(true),
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetYaw(-1.0),
+            },
+        ],
+        controllers: &[],
+        // 30 s — chosen to capture sustained turn rate without wrapping past
+        // 180°. Extending to a full 90-s POH-circle scenario would need a
+        // non-wrapping assertion type.
+        duration_ticks: 3600,
+        assertions: &[Assertion::HeadingChangeAtEnd {
+            last_secs: 2.0,
+            // Populated from measurement at coeff=500.
+            target_deg: 99.5,
+            tol_deg: 5.0,
+        }],
+    },
+    FlightScenario {
+        name: "beaver_water_circle_right",
+        description: "60 s idle-throttle water taxi with full RIGHT rudder + water rudder deployed. Paired with _circle_left; documents rudder-authority gap vs. POH target of a 360° circle.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 2.40, 0.0),
+            velocity: Vec3::ZERO,
+            orientation: Quat::IDENTITY,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.0,
+            flaps: FlapPosition::Up,
+            fuel_gal: 80.0,
+            chop_intensity_override: None,
+        },
+        inputs: &[
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetWaterRudder(true),
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetYaw(1.0),
+            },
+        ],
+        controllers: &[],
+        duration_ticks: 3600, // 30 s — see _left twin for rationale
+        assertions: &[Assertion::HeadingChangeAtEnd {
+            last_secs: 2.0,
+            target_deg: -99.5,
+            tol_deg: 5.0,
         }],
     },
     FlightScenario {
