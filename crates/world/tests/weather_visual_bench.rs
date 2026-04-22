@@ -29,7 +29,9 @@
 use std::path::Path;
 
 use flowplan_world::terrain::Terrain;
-use flowplan_world::weather::{frontal, humidity, pressure, temperature, turbulence, wind};
+use flowplan_world::weather::{
+    frontal, humidity, pressure, temperature, turbulence, voronoi, wind,
+};
 use image::{ImageBuffer, Rgb};
 
 // Silence unused-crate-dependencies lint for transitive deps the integration
@@ -307,6 +309,49 @@ fn emit_turbulence_field_artifacts() {
             turbulence::turbulence_at(CANONICAL_SEED, &terrain, x, 100.0, z, 0.0)
         });
         write_png(&img, &dir, &format!("turbulence_{}.png", crop.name));
+    }
+}
+
+/// Hash a `CellId` to a stable RGB color.
+fn cell_color(cell_id: voronoi::CellId) -> [u8; 3] {
+    #[allow(clippy::cast_sign_loss)]
+    let mut h = (cell_id.ix as u32 as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    #[allow(clippy::cast_sign_loss)]
+    let h2 = (cell_id.iz as u32 as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    h = (h ^ h2).wrapping_mul(0x94d0_49bb_1331_11eb);
+    h ^= h >> 31;
+    // Extract 3 bytes for RGB.
+    let r = ((h >> 16) & 0xff) as u8;
+    let g = ((h >> 32) & 0xff) as u8;
+    let b = ((h >> 48) & 0xff) as u8;
+    [r, g, b]
+}
+
+#[test]
+#[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
+fn emit_voronoi_partition_artifacts() {
+    let dir = output_dir();
+    for &crop in CROPS {
+        let mut img = ImageBuffer::new(RESOLUTION, RESOLUTION);
+        for py in 0..RESOLUTION {
+            for px in 0..RESOLUTION {
+                let (x, z) = crop.world_coord(px, py);
+                let lookup = voronoi::cell_at(CANONICAL_SEED, x, z);
+                let mut color = cell_color(lookup.cell_id);
+                // Darken within ~500 m of a cell edge to reveal the partition
+                // structure; crops smaller than the cell size benefit most from
+                // this edge overlay.
+                let edge_pixels = (500.0 / crop.extent_m) * RESOLUTION as f32;
+                if lookup.distance_to_edge < 500.0 && edge_pixels > 1.0 {
+                    let t = lookup.distance_to_edge / 500.0;
+                    for c in &mut color {
+                        *c = (f32::from(*c) * t) as u8;
+                    }
+                }
+                img.put_pixel(px, py, Rgb(color));
+            }
+        }
+        write_png(&img, &dir, &format!("voronoi_{}.png", crop.name));
     }
 }
 

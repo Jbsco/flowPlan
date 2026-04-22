@@ -17,8 +17,9 @@ pub use sky::sun_direction;
 pub use terrain::{HeightSampler, Terrain};
 pub use water::{max_amplitude as water_max_amplitude, water_height};
 pub use weather::{
-    frontal_segments, humidity_at, pressure_at, temperature_at, turbulence_at, wind_at,
-    FrontalSegment,
+    cell_at as weather_cell_at, cell_at_drifted as weather_cell_at_drifted, frontal_segments,
+    humidity_at, pressure_at, temperature_at, turbulence_at, wind_at, CellId as WeatherCellId,
+    CellLookup as WeatherCellLookup, FrontalSegment,
 };
 
 // Dev-dep used only by `tests/weather_visual_bench.rs`; marker silences the

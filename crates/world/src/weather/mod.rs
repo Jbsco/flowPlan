@@ -42,6 +42,7 @@ pub mod humidity;
 pub mod pressure;
 pub mod temperature;
 pub mod turbulence;
+pub mod voronoi;
 pub mod wind;
 
 pub use frontal::{frontal_segments, FrontalSegment};
@@ -49,6 +50,7 @@ pub use humidity::humidity_at;
 pub use pressure::pressure_at;
 pub use temperature::temperature_at;
 pub use turbulence::turbulence_at;
+pub use voronoi::{cell_at, cell_at_drifted, CellId, CellLookup};
 pub use wind::wind_at;
 
 /// Master-seed derivation for all weather subsystems.
