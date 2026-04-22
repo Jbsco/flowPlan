@@ -221,21 +221,25 @@ Three-layer composition paralleling terrain — W1 atmospheric base × W2 Vorono
 
 [FEATURES.md § Flight Model](FEATURES.md#flight-model)
 
-### Aircraft categories (broader catalog — post-MVP expansion)
+### Aircraft categories (planned catalog)
 
-- ✓ **MVP reference:** DHC-2 Beaver analogue — radial engine, high-wing strut-braced, floats + wheels variants
-- ⧖ Classic puddle-jumpers — Cessna 172 / 180, Piper Cub, Beaver, Otter
-- ⧖ Flying boats — Catalina, amphibious large-hull
-- ⧖ Ultralights + microlights — trikes, powered parachutes, LSA
-- ⧖ Cargo haulers — Twin Otter, Caribou, bush C-47 analogues
-- ⧖ Water bombers + forestry — CL-215 / -415, single-engine tankers
-- ⧖ Gliders + motorgliders — altitude-gated, thermal riding (ties to weather)
-- ⧖ Agricultural applicators — Air Tractor analogues, crop-duster patterns
-- ⧖ Ski-planes — snow + glacier operations
-- ⧖ Amphibians — gear-down water landings locked out
-- ⧖ Turbine utility — PC-6 Porter, Kodiak, Caravan analogues
+Categories follow [AIRCRAFT.md](AIRCRAFT.md)'s organization. Representative examples per category; the full living catalog lists ~35+ airframes across these buckets.
 
-Each aircraft has **floats / wheels / skis / amphib** variants where physically applicable. Placeholder third-party meshes get replaced with project-owner-authored originals before v1. [AIRCRAFT.md](AIRCRAFT.md)
+- ✓ **MVP reference** — DHC-2 Beaver analogue ("Northlander"): radial, high-wing strut-braced, taildragger; floats + wheels variants shipped
+- ⧖ **Light bushplanes — taildragger** — Super Cub, Husky, Carbon Cub, Aeronca Champ / Citabria / Scout, Stinson 108, Yak-12 / Gawron
+- ⧖ **Mid / heavy bushplanes — taildragger** — Maule MX/MT, Helio Courier (slat-wing), SM-92 Finist, PC-6 Porter (turbine)
+- ⧖ **Bushplanes & utility — nosewheel** — Cessna 172, 180, 185, 206 / 207, 208 Grand Caravan, 210 Centurion, GA8 Airvan
+- ⧖ **Floatplanes (dedicated water-first)** — DHC-3 Otter, Noorduyn Norseman, Daher Kodiak 100, Found Bush Hawk
+- ⧖ **Flying boats (hull + retract amphibs)** — Grumman Goose, Widgeon, Mallard, Albatross, Catalina PBY, Republic Seabee, Icon A5, Dornier Do 24, Sikorsky S-38
+- ⧖ **Light modern amphibs (LSA tier)** — Chaika L-42 / L-44 / L-45 family, Sea Bear L-65 (twin Rotax, V-tail composite)
+- ⧖ **Ultralights & homebuilt STOL** — SeaRey, Aventura, Kitfox, Zenith STOL CH 701 / CH 750 Super Duty, Just SuperSTOL (auto-slats)
+- ⧖ **Military conversions — civilian use** — Short Sunderland / Sandringham, Grumman J2F Duck (biplane + hull + lower-wing-float), Martin PBM Mariner (gull-wing twin)
+- ⧖ **Twins & turbines** — DHC-6 Twin Otter, GAF Nomad, Pilatus PC-12
+- ⧖ **Golden age / historic** — Ford Trimotor, Lockheed Vega, Sikorsky S-42 / Boeing 314 Clippers, Pilatus SB-2 Pelican
+- ⧖ **Fire / rescue specialty** — Canadair CL-415 Super Scooper, Air Tractor AT-802F Fire Boss
+- ⧖ **Media / bonus tier** — Porco Rosso Savoia, TaleSpin Sea Duck homage ("Sea Drake"), Indiana Jones Sikorsky S-43 homage
+
+**Variants:** each aircraft ships with whichever **wheels-TD / wheels-NW / floats / amphib-floats / hull / hull+retract / skis / tundra** configurations the real airframe supports, per the AIRCRAFT.md configuration matrix. **Gear-down water interactions — wheel skimming, planing on amphib tires, shallow-water shore runs — are intentional gameplay surface**, not failure states; damage graduates with prolonged contact rather than snapping to a binary crash. Placeholder third-party meshes get replaced with project-owner-authored originals before v1.
 
 ### Upgrades — 5 categories × 3 tiers (branching, not linear)
 
