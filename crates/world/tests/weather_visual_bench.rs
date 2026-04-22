@@ -489,6 +489,152 @@ fn draw_arrow(
     draw_line(img, tip, head_end_2, color);
 }
 
+/// Dewpoint depression (temperature minus dewpoint) at sea level, Kelvin.
+///
+/// Uses a Magnus-formula approximation: `Td = (b · α) / (a - α)` with
+/// `α = ln(RH) + a·T_C / (b + T_C)`, `a = 17.625`, `b = 243.04`. Returns
+/// `T - Td` — small values (< 3 K) indicate saturation risk / fog; large
+/// values (> 15 K) indicate arid air.
+fn dewpoint_spread_k(t_k: f32, rh: f32) -> f32 {
+    let t_c = t_k - 273.15;
+    let rh_clamped = rh.clamp(0.01, 1.0);
+    let a = 17.625_f32;
+    let b = 243.04_f32;
+    let alpha = libm::logf(rh_clamped) + a * t_c / (b + t_c);
+    let td_c = (b * alpha) / (a - alpha);
+    t_c - td_c
+}
+
+/// Lifting condensation level (m AGL) via Espy's rule: `LCL ≈ 125 × spread`.
+///
+/// Physical meaning: altitude at which a rising parcel reaches saturation.
+/// 0 m = fog at ground; 1–2 km = typical cumulus base; 3 km+ = dry convective
+/// air (high-desert or elevated boundary layer).
+fn lcl_altitude_m(t_k: f32, rh: f32) -> f32 {
+    125.0 * dewpoint_spread_k(t_k, rh)
+}
+
+#[test]
+#[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
+fn emit_dewpoint_spread_artifacts() {
+    // 0 K (saturated, fog) → 20 K (arid). Blue = moist, red = dry.
+    let dir = output_dir();
+    let value_range = (0.0, 20.0);
+    for &crop in CROPS {
+        let img = render_field(crop, value_range, |x, z| {
+            let t = temperature::sea_level_temperature(CANONICAL_SEED, x, z, 12.0 * 3_600.0);
+            let rh = humidity::sea_level_humidity(CANONICAL_SEED, x, z, 0.0);
+            dewpoint_spread_k(t, rh)
+        });
+        write_png(&img, &dir, &format!("dewpoint_spread_{}.png", crop.name));
+    }
+}
+
+#[test]
+#[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
+fn emit_lcl_altitude_artifacts() {
+    // 0 m (ground-level condensation = fog) → 4 km (arid convective air).
+    // Blue = low cloud base (stratus country), red = high base (desert-like).
+    let dir = output_dir();
+    let value_range = (0.0, 4_000.0);
+    for &crop in CROPS {
+        let img = render_field(crop, value_range, |x, z| {
+            let t = temperature::sea_level_temperature(CANONICAL_SEED, x, z, 12.0 * 3_600.0);
+            let rh = humidity::sea_level_humidity(CANONICAL_SEED, x, z, 0.0);
+            lcl_altitude_m(t, rh)
+        });
+        write_png(&img, &dir, &format!("lcl_altitude_{}.png", crop.name));
+    }
+}
+
+#[test]
+#[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
+fn emit_moisture_overlay_artifacts() {
+    // Moisture-focused composite: dewpoint-spread ramp as background,
+    // cell-type tint over cloud-bearing cells, frontal segments, wind arrows.
+    let dir = output_dir();
+    let spread_lo = 0.0;
+    let spread_hi = 20.0;
+    let spread_span = spread_hi - spread_lo;
+
+    let arrow_stride = RESOLUTION / ARROW_COUNT;
+    let arrow_len_px = (arrow_stride as f32) * 0.45;
+
+    for &crop in CROPS {
+        let mut img = ImageBuffer::new(RESOLUTION, RESOLUTION);
+
+        for py in 0..RESOLUTION {
+            for px in 0..RESOLUTION {
+                let (x, z) = crop.world_coord(px, py);
+                let t = temperature::sea_level_temperature(CANONICAL_SEED, x, z, 12.0 * 3_600.0);
+                let rh = humidity::sea_level_humidity(CANONICAL_SEED, x, z, 0.0);
+                let spread = dewpoint_spread_k(t, rh);
+                // Invert the ramp so moist (low spread) is blue, dry is red.
+                let spread_rgb = desaturate(
+                    ramp_rgb(((spread - spread_lo) / spread_span).clamp(0.0, 1.0)),
+                    0.45,
+                );
+
+                let lookup = voronoi::cell_at(CANONICAL_SEED, x, z);
+                let state = cell_state::initial_state(CANONICAL_SEED, lookup.cell_id, 0.0);
+                let mut out = if matches!(state.cell_type, cell_state::CellType::ClearAir) {
+                    spread_rgb
+                } else {
+                    blend(spread_rgb, cell_type_color(state.cell_type), 0.40)
+                };
+
+                let edge_pixels = (300.0 / crop.extent_m) * RESOLUTION as f32;
+                if lookup.distance_to_edge < 300.0 && edge_pixels > 1.0 {
+                    let t_edge = lookup.distance_to_edge / 300.0;
+                    for c in &mut out {
+                        *c = (f32::from(*c) * (0.5 + 0.5 * t_edge)) as u8;
+                    }
+                }
+
+                img.put_pixel(px, py, Rgb(out));
+            }
+        }
+
+        let segs = frontal::frontal_segments(
+            CANONICAL_SEED,
+            crop.center_x_m,
+            crop.center_z_m,
+            crop.extent_m / 2.0,
+            crop.extent_m / 25.0,
+            0.0,
+        );
+        for s in &segs {
+            if let (Some(p0), Some(p1)) = (
+                world_to_pixel(crop, s.start.x, s.start.y),
+                world_to_pixel(crop, s.end.x, s.end.y),
+            ) {
+                draw_line_thick(&mut img, p0, p1, [255, 255, 255], 5);
+                draw_line_thick(&mut img, p0, p1, [0, 0, 0], 2);
+            }
+        }
+
+        let max_mag = 25.0;
+        for ay in 0..ARROW_COUNT {
+            for ax in 0..ARROW_COUNT {
+                let px = ax * arrow_stride + arrow_stride / 2;
+                let py = ay * arrow_stride + arrow_stride / 2;
+                let (x, z) = crop.world_coord(px, py);
+                let w = wind::wind_at(CANONICAL_SEED, x, 2_000.0, z, 0.0);
+                let mag = libm::sqrtf(w.x * w.x + w.z * w.z);
+                let scale = (mag / max_mag).clamp(0.1, 1.0) * arrow_len_px;
+                let tip_px = (
+                    px as i32 + (w.x * scale / mag.max(0.01)) as i32,
+                    py as i32 - (w.z * scale / mag.max(0.01)) as i32,
+                );
+                draw_arrow(&mut img, (px as i32, py as i32), tip_px, [255, 255, 255]);
+                draw_arrow(&mut img, (px as i32, py as i32), tip_px, [30, 30, 30]);
+            }
+        }
+
+        write_png(&img, &dir, &format!("moisture_{}.png", crop.name));
+    }
+}
+
 #[test]
 #[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
 fn emit_synoptic_overlay_artifacts() {
