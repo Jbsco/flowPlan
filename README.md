@@ -44,6 +44,8 @@ In-window controls:
 | ← / → | roll left / right |
 | Q / E | yaw left / right |
 | F / C | flaps extend / retract (4 detents: UP → CLIMB → TAKEOFF → LANDING) |
+| T | toggle water rudder (float variants only; starts retracted) |
+| B | brakes (momentary while held) |
 | 1 / 2 / 3 | view: first-person / chase / exterior orbit |
 | V | cycle view |
 | L | reset POV look |

@@ -159,6 +159,10 @@ pub struct SimSnapshot {
     /// read the exact tick-boundary forces that produced the vehicle state, without
     /// reaching into live `SimState`.
     pub flight: FlightOutputs,
+    /// Current chop-intensity scalar (`SimState.chop_intensity`). Mirrored here so the
+    /// renderer can feed it to `SceneParams.chop_intensity` for visual-wave amplitude
+    /// without reaching into the live sim.
+    pub chop_intensity: f32,
 }
 
 impl SimSnapshot {
@@ -170,6 +174,7 @@ impl SimSnapshot {
             camera: CameraSnapshot::from_state(&s.camera),
             time_of_day: s.time_of_day,
             flight: s.last_flight,
+            chop_intensity: s.chop_intensity,
         }
     }
 }
@@ -178,6 +183,7 @@ impl Default for SimSnapshot {
     fn default() -> Self {
         Self {
             tick: 0,
+            chop_intensity: 1.0,
             vehicle: VehicleSnapshot {
                 position: Vec3::ZERO,
                 pad0: 0.0,

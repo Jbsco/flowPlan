@@ -775,6 +775,12 @@ impl Runtime {
                     pos.z,
                     self.sim.wave_time,
                 );
+                // Chop scalar from horizontal surface-wind magnitude. Drives
+                // physics wave-amplitude multiplier (buoyancy) and visual
+                // wave-amplitude via SceneParams below. Closes the 2.5a.7
+                // chop hook.
+                let wind_mag = wind.x.hypot(wind.z);
+                self.sim.chop_intensity = flowplan_world::chop_intensity_from_wind(wind_mag);
                 flowplan_sim::WeatherInputs {
                     wind,
                     turbulence_intensity: turbulence,
@@ -844,6 +850,9 @@ impl Runtime {
         let scene_params = SceneParams {
             sun_dir: sun_direction(curr.time_of_day),
             time_seconds: self.start_time.elapsed().as_secs_f32(),
+            // Mirror sim-side chop on the visual waves so buoyancy response
+            // and rendered surface amplitude stay aligned.
+            chop_intensity: curr.chop_intensity,
             ..SceneParams::default()
         };
         self.renderer.set_scene(&self.queue, &scene_params);

@@ -120,13 +120,42 @@ pub fn water_height(x: f32, z: f32, t: f32) -> f32 {
     y
 }
 
+/// Wind speed (m/s) at which chop intensity reaches the nominal baseline of 1.0.
+///
+/// Below this, the water is progressively glassier; above, chop amplifies.
+/// 5 m/s (~10 knots) is a typical "light breeze" that generates visible
+/// ripples + small chop on a protected lake — the canonical nominal state.
+pub const CHOP_NOMINAL_WIND_MPS: f32 = 5.0;
+
+/// Upper cap on the chop multiplier.
+///
+/// Matches what the scalar physics model can absorb without producing
+/// pathological float response; above this the water is effectively
+/// unflyable regardless of the exact value.
+pub const CHOP_MAX_MULTIPLIER: f32 = 3.0;
+
+/// Scalar chop-intensity from wind magnitude (m/s).
+///
+/// Linear ramp from 0 (calm) to 1.0 at [`CHOP_NOMINAL_WIND_MPS`], clamped to
+/// [`CHOP_MAX_MULTIPLIER`]. Consumed by [`water_height`] scaling (sim-side
+/// buoyancy) and by the water shader (visual wave amplitude). v1 model is a
+/// pure function of wind magnitude — fetch distance, water-body size, and
+/// spectral structure come with the FFT ocean rework (3.5b second pass).
+///
+/// **TODO(post-3.5b):** replace scalar with spectral wave-energy modulation
+/// per water body. Keep this function as the fallback path for headless /
+/// telemetry-only contexts.
+#[must_use]
+pub fn chop_intensity_from_wind(wind_mps: f32) -> f32 {
+    (wind_mps.max(0.0) / CHOP_NOMINAL_WIND_MPS).clamp(0.0, CHOP_MAX_MULTIPLIER)
+}
+
 /// Upper bound on `|water_height|` anywhere. Used for conservative clearance checks.
 ///
 /// Includes the amp-modulation worst case: each wave's effective amplitude can
 /// reach `base_amp × (1 + strength)`, so the bound multiplies by the per-class
 /// `(1 + strength)` factor (taking the largest, which is the fine-chop bin's
 /// strength = 0.65 → factor 1.65).
-#[must_use]
 pub fn max_amplitude() -> f32 {
     const AMP_MOD_WORST_CASE: f32 = 1.25; // 1 + 0.25 (max strength after retune)
     let mut sum = 0.0_f32;
@@ -188,5 +217,37 @@ mod tests {
         // Post amp-modulation strength reduction: sum × 1.25. Sum:
         // 0.040+0.030+0.045+0.045+0.040+0.035+0.025 = 0.260; × 1.25 = 0.325.
         assert!((max_amplitude() - 0.325).abs() < 1e-3);
+    }
+
+    #[test]
+    fn chop_from_zero_wind_is_zero() {
+        assert!(chop_intensity_from_wind(0.0) < 1e-6);
+    }
+
+    #[test]
+    fn chop_from_nominal_wind_is_unit() {
+        let c = chop_intensity_from_wind(CHOP_NOMINAL_WIND_MPS);
+        assert!((c - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn chop_clamps_at_max() {
+        let c_high = chop_intensity_from_wind(100.0);
+        assert!((c_high - CHOP_MAX_MULTIPLIER).abs() < 1e-6);
+    }
+
+    #[test]
+    fn chop_monotonic_in_wind() {
+        let a = chop_intensity_from_wind(2.0);
+        let b = chop_intensity_from_wind(7.0);
+        let c = chop_intensity_from_wind(12.0);
+        assert!(a < b);
+        assert!(b < c);
+    }
+
+    #[test]
+    fn chop_negative_wind_clamps_to_zero() {
+        // Defensive: negative input shouldn't produce negative chop.
+        assert!((chop_intensity_from_wind(-3.0)).abs() < 1e-6);
     }
 }

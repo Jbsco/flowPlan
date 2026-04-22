@@ -243,8 +243,11 @@ fn vs_water(in: VsIn) -> VsOut {
 
         // Per-wave amplitude modulation breaks the constant-amplitude periodicity.
         // Same modulation factor used for displacement AND normal accumulator so
-        // lighting matches geometry.
-        let amp = base_amp * amp_modulation(i, t, world_xz);
+        // lighting matches geometry. `scene.time.y` packs the app-driven chop
+        // multiplier (0 = glassy, 1 = nominal, 2+ = heavy) so visual wave
+        // amplitudes track physics chop. Closes the 3.2.3c wiring gap.
+        let chop_mul = scene.time.y;
+        let amp = base_amp * amp_modulation(i, t, world_xz) * chop_mul;
         let wa = k * amp;
 
         offset.x = offset.x + steep * amp * dir.x * c;

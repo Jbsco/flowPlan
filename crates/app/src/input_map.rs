@@ -14,6 +14,8 @@
 //!   R                   reset vehicle
 //!   F                   flaps extend one notch (UP→CLIMB→TAKEOFF→LANDING)
 //!   C                   flaps retract one notch (LANDING→TAKEOFF→CLIMB→UP)
+//!   T                   toggle water rudder (float variants only — no-op on wheels)
+//!   B                   brakes (momentary while held)
 //!   Esc                 quit (handled in `game_app`)
 //!
 //! # Keyboard axis ramp (Phase 2.4.4a)
@@ -61,6 +63,12 @@ pub struct KeyState {
     pub current_roll: f32,
     /// Current slewed yaw pedal position in `[-1, 1]`. Updated each tick.
     pub current_yaw: f32,
+    /// Latched water-rudder deployment state. `T` toggles this; each toggle
+    /// emits a `SetWaterRudder(new_state)` event. Starts retracted to match
+    /// `Controls::default()`; if a scenario or save overrides the sim-side
+    /// state, the two may drift until the user presses `T` again. Gamepad /
+    /// remap UI in Phase 4.7b resolves this properly.
+    pub water_rudder_deployed: bool,
 }
 
 impl KeyState {
@@ -110,6 +118,14 @@ impl KeyState {
             },
             KeyCode::KeyC if pressed && !ev.repeat => {
                 let _ = queue.push(InputEvent::RetractFlaps);
+            },
+            // Water rudder toggle (float variants). Starts retracted; `T`
+            // toggles deploy ↔ retract, emitting the corresponding
+            // `SetWaterRudder` event. Wheels variants have no water rudder,
+            // so the event is a no-op there — harmless to leave bound.
+            KeyCode::KeyT if pressed && !ev.repeat => {
+                self.water_rudder_deployed = !self.water_rudder_deployed;
+                let _ = queue.push(InputEvent::SetWaterRudder(self.water_rudder_deployed));
             },
             // Momentary brakes: hold B = brakes applied; release = off. Ignore
             // auto-repeat so the release edge isn't swallowed by repeated

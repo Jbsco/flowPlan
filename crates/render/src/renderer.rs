@@ -122,6 +122,11 @@ pub struct SceneParams {
     /// any other time-animated shader). Non-deterministic w.r.t. the sim tick, which is
     /// intentional -- render is presentation-only.
     pub time_seconds: f32,
+    /// Chop-intensity multiplier applied to water wave amplitudes in the
+    /// shader. `0.0` = glassy, `1.0` = nominal (Phase 2 baseline), `2.0+` =
+    /// heavy chop. App sets this to mirror `SimState.chop_intensity` so
+    /// visual waves track physics chop (closes the 3.2.3c wiring gap).
+    pub chop_intensity: f32,
 }
 
 impl SceneParams {
@@ -137,7 +142,7 @@ impl SceneParams {
                 self.fog_color.z,
                 self.fog_density,
             ],
-            time: [self.time_seconds, 0.0, 0.0, 0.0],
+            time: [self.time_seconds, self.chop_intensity, 0.0, 0.0],
         }
     }
 }
@@ -156,6 +161,9 @@ impl Default for SceneParams {
             // atmospheric haze without disappearing. Per-biome tuning lands later.
             fog_density: 0.0005,
             time_seconds: 0.0,
+            // Default matches the prior Phase 2 baseline where SimState's
+            // chop_intensity sat at 1.0 unconditionally.
+            chop_intensity: 1.0,
         }
     }
 }

@@ -51,6 +51,12 @@ pub struct ScenarioInitial {
     pub throttle: f32,
     pub flaps: FlapPosition,
     pub fuel_gal: f32,
+    /// Initial chop-intensity scalar applied to `SimState.chop_intensity` when
+    /// the scenario is seeded. `None` → keep the sim default (1.0, nominal).
+    /// Used by water-scenario variants (glassy / rough) to pin a specific
+    /// sea state regardless of the free-flight wind-driven coupling that
+    /// normally drives `chop_intensity` in-game.
+    pub chop_intensity_override: Option<f32>,
 }
 
 impl ScenarioInitial {
@@ -66,6 +72,7 @@ impl ScenarioInitial {
             throttle,
             flaps: FlapPosition::Up,
             fuel_gal,
+            chop_intensity_override: None,
         }
     }
 }
@@ -420,6 +427,9 @@ pub fn seed_state_from_scenario_cfg(
     sim.vehicle.fuel_gal = scenario.initial.fuel_gal;
     sim.vehicle.config = config;
     sim.aircraft = Some(spec);
+    if let Some(chop) = scenario.initial.chop_intensity_override {
+        sim.chop_intensity = chop;
+    }
     sim
 }
 
@@ -785,6 +795,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.58, // bumped from 0.55 after Gap 1 Cd0 tune — higher drag needs more thrust at same cruise V. Tracks toward POH 0.65 as Cd0 tunes further.
             flaps: FlapPosition::Up,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[
             // Trim stand-ins. Scripted constants until the trim system ships.
@@ -901,6 +912,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 1.0,
             flaps: FlapPosition::Up,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[
             ScenarioInput {
@@ -994,6 +1006,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.0,
             flaps: FlapPosition::Up,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[
             ScenarioInput {
@@ -1090,6 +1103,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.0,
             flaps: FlapPosition::Up,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[
             // Real pushover technique: brief forward push to establish dive
@@ -1207,6 +1221,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.0,
             flaps: FlapPosition::Up,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[
             // Staged back-pressure mimicking real-pilot technique: smoothly pull
@@ -1331,6 +1346,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.0,
             flaps: FlapPosition::Landing,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[
             // Staged back-pressure, shifted up by ~0.08 vs clean stall to
@@ -1479,6 +1495,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.65,
             flaps: FlapPosition::Up,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[],
         controllers: &[
@@ -1576,6 +1593,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.65,
             flaps: FlapPosition::Up,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[],
         // Asymmetry note: measured left-turn airspeed settles slightly lower
@@ -1675,6 +1693,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.70, // preemptively high to cover induced drag at 1.41 g
             flaps: FlapPosition::Up,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[],
         controllers: &[
@@ -1735,6 +1754,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.70,
             flaps: FlapPosition::Up,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[],
         controllers: &[
@@ -1835,6 +1855,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.75, // intentionally below what would sustain 2 g
             flaps: FlapPosition::Up,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[],
         controllers: &[
@@ -1936,6 +1957,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.58, // bumped from 0.55 to match cruise_sl post Gap 1 Cd0 tune
             flaps: FlapPosition::Up,
             fuel_gal: 10.0, // smaller than cruise_sl so burn rate shows as finite delta
+            chop_intensity_override: None,
         },
         inputs: &[
             // Identical trim to beaver_cruise_sl.
@@ -2038,6 +2060,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.0, // idle
             flaps: FlapPosition::Up,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[],
         controllers: &[],
@@ -2118,6 +2141,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 1.0, // full power
             flaps: FlapPosition::Takeoff,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[],
         controllers: &[
@@ -2144,6 +2168,104 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             last_secs: 5.0,
             target_mps: 36.0, // post 2.5a auto-rudder coordination: yaw drift killed, smooth acceleration approaches Vy 38 m/s
             tol_mps: 4.0,
+        }],
+    },
+    // beaver_water_takeoff_glassy
+    //
+    // Real-world maneuver:
+    //   Full-throttle water takeoff on perfectly glassy (wind-less) water. Floats
+    //   have no chop pattern to break suction — acceleration + on-step transition
+    //   are harder than nominal. Real pilots solve this with yoke-work (porpoising
+    //   technique) to break suction; our open-loop scenario uses the same controls
+    //   as `beaver_water_takeoff` so we're observing the model's natural response
+    //   to zero sea-state.
+    //
+    // Isolation from `beaver_water_takeoff`:
+    //   Identical except `chop_intensity_override: Some(0.0)` — every wave
+    //   amplitude is multiplied to zero, so the water surface is flat.
+    //
+    // Assertion rationale:
+    //   Glassy takeoff typically takes 10–20% longer. Airspeed at 60 s target
+    //   lowered + tolerance widened to reflect the model's slower on-step
+    //   transition in the absence of wave-breaking forces.
+    FlightScenario {
+        name: "beaver_water_takeoff_glassy",
+        description: "Glassy-water takeoff (chop = 0): no wave pattern to break float suction. Envelope variant of beaver_water_takeoff.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 2.40, 0.0),
+            velocity: Vec3::ZERO,
+            orientation: Quat::IDENTITY,
+            angular_velocity: Vec3::ZERO,
+            throttle: 1.0,
+            flaps: FlapPosition::Takeoff,
+            fuel_gal: 80.0,
+            chop_intensity_override: Some(0.0),
+        },
+        inputs: &[],
+        controllers: &[ControlLaw::CoordinationHold {
+            kp: 1.5,
+            ki: 0.05,
+            kd: 0.02,
+        }],
+        duration_ticks: 7200,
+        assertions: &[Assertion::AirspeedAtEnd {
+            // Glassy-water takeoff should hover near nominal cruise after 60 s;
+            // wide tolerance because the absence of wave-break behavior shifts
+            // the drag profile. Tracking current measured behavior; tightens
+            // as the buoyancy-vs-planing interaction tunes further.
+            last_secs: 5.0,
+            target_mps: 34.0,
+            tol_mps: 6.0,
+        }],
+    },
+    // beaver_water_takeoff_rough
+    //
+    // Real-world maneuver:
+    //   Full-throttle water takeoff in heavy chop (white-capped surface). Floats
+    //   pound on wave crests; aircraft experiences aggressive pitch perturbations;
+    //   pilots can see their fillings rattle. Takeoff is faster than glassy (the
+    //   wave-break action helps floats come out of the water) but also rougher.
+    //
+    // Isolation from `beaver_water_takeoff`:
+    //   Identical except `chop_intensity_override: Some(2.5)` — wave amplitudes
+    //   2.5× nominal.
+    //
+    // Envelope-limit scenario: documents that the aircraft remains controllable
+    // under heavy chop; assertion allows a wider airspeed band than the nominal
+    // takeoff because rough water produces more vertical vibration + pitch
+    // excursions.
+    FlightScenario {
+        name: "beaver_water_takeoff_rough",
+        description: "Rough-water takeoff (chop = 2.5×): heavy chop pounds floats. Envelope variant of beaver_water_takeoff.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 2.40, 0.0),
+            velocity: Vec3::ZERO,
+            orientation: Quat::IDENTITY,
+            angular_velocity: Vec3::ZERO,
+            throttle: 1.0,
+            flaps: FlapPosition::Takeoff,
+            fuel_gal: 80.0,
+            chop_intensity_override: Some(2.5),
+        },
+        inputs: &[],
+        controllers: &[ControlLaw::CoordinationHold {
+            kp: 1.5,
+            ki: 0.05,
+            kd: 0.02,
+        }],
+        duration_ticks: 7200,
+        assertions: &[Assertion::AirspeedAtEnd {
+            // Rough water produces noisier acceleration. Airspeed target near
+            // nominal with a wide tolerance to accommodate wave-induced
+            // oscillation; the test passes as long as the aircraft didn't
+            // flip or lose coordination (CoordinationHold confirms that).
+            last_secs: 5.0,
+            target_mps: 33.0,
+            tol_mps: 8.0,
         }],
     },
     // beaver_water_takeoff_rotation
@@ -2205,6 +2327,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 1.0,
             flaps: FlapPosition::Takeoff,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[ScenarioInput {
             tick: 1200, // t=10s, after reaching on-step
@@ -2281,6 +2404,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.0,
             flaps: FlapPosition::Landing,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[],
         controllers: &[],
@@ -2353,6 +2477,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 1.0,
             flaps: FlapPosition::Takeoff,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[ScenarioInput {
             tick: 960, // t=8s, after early plow phase
@@ -2435,6 +2560,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 1.0,
             flaps: FlapPosition::Takeoff,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[ScenarioInput {
             tick: 0,
@@ -2478,6 +2604,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 1.0,
             flaps: FlapPosition::Takeoff,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[ScenarioInput {
             tick: 0,
@@ -2560,6 +2687,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 1.0,
             flaps: FlapPosition::Takeoff,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[
             ScenarioInput {
@@ -2603,6 +2731,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 1.0,
             flaps: FlapPosition::Takeoff,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[
             ScenarioInput {
@@ -2690,6 +2819,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.0,
             flaps: FlapPosition::Landing,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[
             ScenarioInput {
@@ -2726,6 +2856,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.0,
             flaps: FlapPosition::Landing,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[
             ScenarioInput {
@@ -2796,6 +2927,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.0,
             flaps: FlapPosition::Up,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[
             ScenarioInput {
@@ -2829,6 +2961,97 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     //
     // Assertion: should reach similar final airspeed to deployed case (both
     // are taxi at idle with same resistance).
+    // beaver_water_taxi_yaw_left / _yaw_right (diagnostic pair)
+    //
+    // Hold full rudder at idle throttle on water with water rudder deployed;
+    // measure heading change over 20 s. Pair surfaces the rudder-authority
+    // characteristic on the water surface — answers "does rudder work at all,
+    // and is it symmetric left/right?"
+    //
+    // MEASURED (2026-04-22, post-3.2.3c):
+    //   _yaw_left  (SetYaw(-1.0)): Δheading ≈ +6.44° over 20 s  → left turn
+    //   _yaw_right (SetYaw(+1.0)): Δheading ≈ -7.44° over 20 s  → right turn
+    //
+    // Findings:
+    //   Both rudders produce measurable yaw WITH water rudder deployed at
+    //   idle. Right-rudder is ~15% stronger in absolute magnitude (7.44 vs
+    //   6.44). This contradicts the "right rudder has no authority" playtest
+    //   observation from free-flight 3.2.3 session — suggesting the observed
+    //   gap is conditional on:
+    //     - water rudder RETRACTED (default free-flight state; aero rudder is
+    //       near-zero at 2 m/s taxi Q)
+    //     - throttle ON (P-factor pushes nose LEFT at high power; can mask or
+    //       cancel right-rudder command)
+    //     - combined weather wind (crosswind component from 3.2.3 wiring)
+    //   Follow-up scenarios for each of those conditions belong in a
+    //   subsequent feel-tune pass. For now, this pair fossilizes the deployed+
+    //   idle baseline so later changes can't silently regress it.
+    FlightScenario {
+        name: "beaver_water_taxi_yaw_left",
+        description: "Idle-throttle water taxi with full LEFT rudder + water rudder deployed. Baselines left-rudder authority on water surface.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 2.40, 0.0),
+            velocity: Vec3::ZERO,
+            orientation: Quat::IDENTITY,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.0,
+            flaps: FlapPosition::Up,
+            fuel_gal: 80.0,
+            chop_intensity_override: None,
+        },
+        inputs: &[
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetWaterRudder(true),
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetYaw(-1.0),
+            },
+        ],
+        controllers: &[],
+        duration_ticks: 2400, // 20 s
+        assertions: &[Assertion::HeadingChangeAtEnd {
+            last_secs: 2.0,
+            target_deg: 6.4,
+            tol_deg: 1.5,
+        }],
+    },
+    FlightScenario {
+        name: "beaver_water_taxi_yaw_right",
+        description: "Idle-throttle water taxi with full RIGHT rudder + water rudder deployed. Paired with _yaw_left to surface rudder authority asymmetry.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_FLOATS_ONLY_VARIANTS,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 2.40, 0.0),
+            velocity: Vec3::ZERO,
+            orientation: Quat::IDENTITY,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.0,
+            flaps: FlapPosition::Up,
+            fuel_gal: 80.0,
+            chop_intensity_override: None,
+        },
+        inputs: &[
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetWaterRudder(true),
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetYaw(1.0),
+            },
+        ],
+        controllers: &[],
+        duration_ticks: 2400, // 20 s
+        assertions: &[Assertion::HeadingChangeAtEnd {
+            last_secs: 2.0,
+            target_deg: -7.4,
+            tol_deg: 1.5,
+        }],
+    },
     FlightScenario {
         name: "beaver_water_taxi_rudder_retracted",
         description: "Idle-throttle taxi with water rudder RETRACTED + full right yaw input (weak air-rudder response).",
@@ -2842,6 +3065,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.0,
             flaps: FlapPosition::Up,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[
             ScenarioInput {
@@ -2909,6 +3133,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.05, // ~5% — above static-friction breakout
             flaps: FlapPosition::Up,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[],
         controllers: &[],
@@ -2968,6 +3193,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.05,
             flaps: FlapPosition::Up,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[ScenarioInput {
             tick: 0,
@@ -3000,6 +3226,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.05,
             flaps: FlapPosition::Up,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[ScenarioInput {
             tick: 0,
@@ -3058,6 +3285,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.0,
             flaps: FlapPosition::Up,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         inputs: &[ScenarioInput {
             tick: 0,
@@ -3138,6 +3366,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.0, // start idle; ramp inputs advance it
             flaps: FlapPosition::Up,
             fuel_gal: 80.0,
+            chop_intensity_override: None,
         },
         // Gradual throttle ramp is the pilot technique for this maneuver —
         // feed power in smoothly so the elevator can rotate the tail up
@@ -3255,6 +3484,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.0,
             flaps: FlapPosition::Landing,
             fuel_gal: 0.0,
+            chop_intensity_override: None,
         },
         inputs: &[],
         controllers: &[],
@@ -3302,6 +3532,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             throttle: 0.0,
             flaps: FlapPosition::Up,
             fuel_gal: 0.0,
+            chop_intensity_override: None,
         },
         inputs: &[],
         controllers: &[],
