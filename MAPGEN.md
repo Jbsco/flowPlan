@@ -8,6 +8,7 @@
 
 - [Core principles](#core-principles)
 - [World scope decision](#world-scope-decision)
+- [World topology](#world-topology)
 - [Chunk model](#chunk-model)
 - [Seed topology](#seed-topology)
 - [Layered generation](#layered-generation)
@@ -34,17 +35,98 @@
 
 ## World scope decision
 
-The world-scope decision (single large map / 4 regional maps / fresh-per-session procedural / hybrid persistent-hubs + procedural surroundings) is open per [FEATURES.md § World Scope & Map Layout](FEATURES.md#world-scope--map-layout) and must lock before Phase 4.
+**LOCKED (2026-04-21):** Option A — **one continuous procedural world per seed, toroidal wrap on all edges.** Closes the prior Candidates A–D open question. Resolved jointly with the weather-W2 close-out once the pure-function architecture proved it naturally supports Option A; the remaining candidates (B, C, D) would have required retrofitting.
 
-**MAPGEN.md's position:** this document is written to support **Candidate D (hybrid persistent hubs + procedural exterior)** as the most-flexible-but-tractable option. Under Candidate D:
+**What Option A means in practice:**
 
-- Hubs + their immediate zones (~5–10 km radius) are authored or seed-locked per save.
-- Distant terrain regenerates from seed on approach via flight-log memory.
-- Hydrology is pre-baked once at world-seed time; chunks query it.
+- **One seamless procedural world.** No regional map-transitions, no loading screens between regions, no "4 separate worlds per seed" abstraction.
+- **Wraps in both axes.** Flying off the east edge returns you at the west edge with the same orientation; same for north/south. The world is topologically a torus.
+- **Size is configurable.** Strawman: 5000 km per side (`WORLD_EXTENT_M = 5_000_000.0`). Traversal time at ferry speed (~50 m/s) is ~28 hours; at bush cruise, ~46 hours. Large enough that organic play never hits the edge unless the player deliberately traverses.
+- **Procedural per master_seed, persistence per event-log.** Terrain, weather, hydrology, biomes, hub-catalog — all regenerate from `master_seed` deterministically. Player-caused deltas (built waypoints, discovered hubs, storm events witnessed) persist in the world event log.
+- **Hub catalog is pre-baked at world-bake time** (not streaming-dependent): ~50–80K hubs in a 5000 km world. Hubs have stable IDs + approximate coords at bake time; the hub late-binding (fuzz + resolve) pattern snaps hubs to nearest-compatible Voronoi cell when streaming catches up.
+- **Puddle-jumper emphasis.** Inland seas (great-lake-scale, few hundred km across) + fjord/lake networks + rivers provide water-flying gameplay. Large continuous oceans aren't the focus; circumnavigable-by-land paths exist if you pick the right heading.
 
-Under Candidate C (fresh-per-session), MAPGEN.md applies directly — each session is a new master seed. Under Candidate B (4 regional maps), each region is its own deterministic generated world with its own seed. Under Candidate A (single large authored map), MAPGEN.md is mostly moot except for the biome-classification and hydrology-authoring parts.
+**What Option A *doesn't* mean:**
 
-**The rest of this doc reads most cleanly under Candidate D assumptions** but should apply with minor edits to C, and partial edits to B.
+- Not "infinite streaming into random noise" — the world has a finite size and wraps. Players can complete discovery.
+- Not "single authored map" — content is procedural from seed, not hand-placed per asset.
+- Not "spherical geometry" — the world is a flat torus. Compass rules and day/night cycle are defined under [World topology](#world-topology) below, not derived from latitude/longitude on a sphere.
+
+The pre-Phase-3 world-scope prototype remains valuable, now re-scoped to **validate toroidal wrap mechanics** (terrain + weather + Voronoi + hydrology all wrap cleanly at the seam without artifacts) rather than pick between candidates.
+
+---
+
+## World topology
+
+The world is a **flat square torus** of side `WORLD_EXTENT_M` (strawman 5000 km). All world-gen samplers operate on world coordinates `(x, z)` that conceptually wrap: `sample(x, z) ≡ sample(x + WORLD_EXTENT_M, z) ≡ sample(x, z + WORLD_EXTENT_M)`.
+
+### Sampler-wrap requirements
+
+For samplers to produce continuous output at the seam, every noise/harmonic wavelength must **divide `WORLD_EXTENT_M` evenly.** At 5000 km:
+
+| Field | Current wavelength | Cycles per world | Action |
+|---|---|---|---|
+| Temperature climate | 500 km | 10 ✓ | Keep |
+| Temperature synoptic | 350 km | 14.29 ✗ | Adjust to 357.14 km (14 cycles) or 333.33 km (15) |
+| Humidity regional | 200 km | 25 ✓ | Keep |
+| Humidity synoptic | 350 km | 14.29 ✗ | Same adjustment as temperature synoptic |
+| Pressure synoptic | 350 km | 14.29 ✗ | Same |
+| Terrain octaves | various (~21 m to ~1047 m) | non-integer | Quantize frequencies to `1/WORLD_EXTENT_M × k` for some integer `k`; quantization error < 0.1% at finest octaves |
+| Water harmonics | (Phase 1 placeholder) | — | Quantize when 3.5b FFT ocean replaces them |
+
+These adjustments are drop-in and do not change the character of the fields — wavelengths shift by < 2% to land on integer cycle counts.
+
+### Voronoi-wrap mechanics
+
+Voronoi cell lookup wraps via mod-N indexing: `cell_id(ix, iz) ≡ cell_id((ix + N) % N, (iz + N) % N)` where `N = WORLD_EXTENT_M / GRID_SPACING_M` is integer.
+
+At 5000 km + 25 km grid spacing → N = 200 exactly. Weather-Voronoi (3.2.2) runs 30 km spacing → choose between 20 km / 25 km (fits N=250 / 200) or adjust `WORLD_EXTENT_M` to match 30 km. Terrain-Voronoi (3.6.2) at ~2 km spacing → N = 2500.
+
+Neighbor search at a query point near the seam: when resolving the 3×3 grid neighborhood, wrap grid indices through mod-N. Seed positions for wrapped cells are computed relative to the query point (subtract `WORLD_EXTENT_M` as appropriate so the distance calculation doesn't span the whole world). This is a 5-line modification to the current `cell_at` implementation.
+
+### Hydrology-wrap mechanics
+
+River continuity must respect wrap: a river flowing east eventually returns from the west. Hydrology graph nodes are keyed by mod-N cell identity; downslope traversal wraps at the seam. When the hydrology bake produces a catchment basin, the basin may span the seam (visually appears as two disjoint regions on a flat-map projection; is actually one on the torus).
+
+### Compass orientation
+
+**Compass is locked to world-north**, independent of wrap:
+
+- Fly due north indefinitely: compass continues to read "N"; the world just wraps under you.
+- Wrapping an edge does **not** flip compass orientation. Exiting the top edge and re-entering at the bottom preserves the heading.
+- No true pole exists (torus has none); no "compass goes crazy at the pole" edge case.
+
+Tradeoff accepted: no spherical great-circle effects (shortest path between two points is always the straight line, possibly wrapping). For puddle-jumper local-navigation gameplay — relative bearings, heading holds, intercept courses — this is a clean win. The realism payoff of great-circle navigation doesn't outweigh the edge-case complexity at flowPlan's scale.
+
+### Day/night cycle
+
+**Accelerated east-to-west.** Sun progresses across the sky faster than real-time wall-clock:
+
+- Placeholder acceleration: **24:1** (1 sim-hour = ~2.5 real-minutes → full day = ~1 real-hour). Tunable at playtest; the right number falls out of "how many in-game days per typical play session feels right."
+- **Time-of-day varies with longitude.** Local time at world-x coordinate `x` is `sim_time_of_day - (x / WORLD_EXTENT_M) × DAY_LENGTH_S`. Different longitudes see different local time simultaneously — you can fly east to "chase the sunset" or west to "race the sunrise."
+- **Wrap:** crossing the east edge keeps the time-of-day progression continuous — it's just another 5000 km of longitude.
+- **No polar extremes.** A flat torus has no analog for midnight sun or polar night. High-latitude-style aesthetics (aurora, extended twilight) are per-biome visual overlays, not derived from spherical math.
+
+### Inland seas
+
+Water-flying gameplay is served by **inland seas + lake networks + rivers**, not oceanic geography:
+
+- **Great-lake-scale inland seas** (few hundred km across) in major biome regions: delivers long water landings, sea-state variability, coastal-to-offshore flight variety.
+- **Fjord / lake networks** in coastal sub-biomes: narrow-water landings, shore-following navigation.
+- **River systems** everywhere hydrology permits: hub placement, float-plane downwind landings, white-water spray.
+
+Circumnavigable-by-land paths exist if a pilot picks the right heading. This matches the bush-flying ethos — the world isn't structured around trans-oceanic crossings.
+
+### World-bake parameters
+
+The world is parameterized by:
+
+- `master_seed: u64` — entry seed for all derived sub-seeds.
+- `WeatherTuning` — per-type weather cell cycle durations (see [FEATURES.md § Weather State](FEATURES.md#weather-state)).
+- `WORLD_EXTENT_M` — strawman 5000 km; locked at world creation, stored with the seed.
+- Future additions: biome palette choices, hydrology density factor, hub density factor — all player-facing at seed creation.
+
+Together these form the "seed bundle" that uniquely identifies a world. Two worlds are byte-identical if and only if all bundle parameters match.
 
 ---
 
@@ -812,38 +894,57 @@ The save file holds the **event log** that generated the current state, per [FEA
 ## Determinism & save-format implications
 
 - **State hash extension.** The per-tick `state_hash` currently covers `(tick, seed, vehicle, camera, time_of_day, wave_time, chop_intensity)` per [crates/sim/src/hash.rs]. When world generation gets state that changes during play (e.g. player-built sandbar markers, hub discovery flags), those must join the hash.
-- **Save-format versioning.** Save format carries `(game_version, save_schema_version, master_seed, world_scope, dial_state_history, event_log)`. Migrations are documented per [FEATURES.md § Flight Log & Save Format](FEATURES.md#flight-log--save-format).
-- **Cross-platform determinism.** Hashing function choice + IEEE float discipline per [ROADMAP Milestone 6.1](ROADMAP.md#milestone-61-determinism-hardening-cross-platform) extends here. The world-bake hydrology graph must be bit-identical across Linux / Windows / macOS / Steam Deck.
+- **Save-format directory structure** (locked 2026-04-21 with world-scope Option A):
+
+  ```
+  saves/
+    pilots/
+      <pilot_uuid>.save          # global pilot data (identity, fleet, currency, career stats)
+      <pilot_uuid>/
+        <seed_hex>.progress      # per-(pilot, seed): fog-of-war, hubs, missions, resume-point
+    worlds/
+      <seed_hex>.world           # per-seed world event log (storms, hydrology changes, shared across pilots)
+  ```
+
+  `<seed_hex>` = hex of `master_seed XOR hash(WeatherTuning)` so seeds with different tuning are distinct worlds. Deleting a pilot cleanly removes all their per-seed progress.
+
+- **Persistence entities are orthogonal.** Pilot profile (global), world seed (global, shared across pilots), per-(pilot, seed) progress (intersection). Each versions independently via `(game_version, pilot_schema, world_schema, progress_schema)`.
+- **Save footprint estimate.** Pilot globals <1 MB; world event log 10–100 KB per seed; per-(pilot, seed) progress ~50–100 KB (fog-of-war bitmap dominates, compresses to 5–20 KB RLE). Worst-case install (10 pilots × 100 seeds): ~100 MB total.
+- **NG+ definition.** Any pilot with prior progression entering an unvisited seed. Not gated on completion threshold. "Fresh pilot" is an opt-in at pilot-creation time.
+- **Sharing model.** Seeds are shareable by value — `(u64 master_seed, WeatherTuning)`. Joining a friend's game loads their world event log + your pilot + a fresh per-(you, their-seed) progress file. Your pilot brings career, starts fresh on their specific seed.
+- **Cross-platform determinism.** Hashing function choice + IEEE float discipline per [ROADMAP Milestone 6.1](ROADMAP.md#milestone-61-determinism-hardening-cross-platform) extends here. The world-bake hydrology graph must be bit-identical across Linux / Windows / macOS / Steam Deck. **With Option A torus**, every sampler must wrap correctly — add per-sampler wrap-continuity tests to the determinism battery.
 - **Scenario bench compatibility.** Flight-bench scenarios pin a master seed explicitly; they do not depend on hub placement or biome layout unless the scenario explicitly positions the aircraft at a specific hub. Most scenarios use flat terrain (`Terrain::flat()` / `Terrain::flat_land()`) and are unaffected.
 
 ---
 
 ## Open questions
 
-Grouped by urgency to Phase 4 lock-before milestone.
+Grouped by urgency to Phase 4 lock-before milestone. Resolved items migrated to [World scope decision](#world-scope-decision) and [World topology](#world-topology).
 
-### Before world-scope decision locks (pre-Phase-4)
+### ✓ Resolved in 2026-04-21 world-scope lock
 
-1. **Chunk shape**: square / hexagonal / world-centered Voronoi / other? (See [Chunk model](#chunk-model).)
-2. **Chunk size**: 1 km² vs 4 km² vs adaptive. Prototype with target frame budget.
-3. **Heightfield representation**: ridged multifractal + domain warp sufficient, or does the terrain rebuild want something more exotic (erosion simulation, gradient-conditioned noise, machine-learned biome exemplars)?
-4. **Hydrology graph size**: can the world-bake produce a < 100 MB graph for a 1000 × 1000 km world, or do we need a sparser representation / on-disk cache?
-5. **Circular chunks with player-center indexing**: the user asked. Answer is probably "no for persistence reasons, yes for rendering LOD rings"; document clearly.
-6. **World scope candidates**: prototype Candidate C and D in Phase 1 scratch branch per FEATURES.md; apply this doc's architecture to both.
+- World scope candidates: **locked Option A (continuous toroidal world per seed).** Pre-Phase-3 prototype re-scoped to validate wrap mechanics.
+- Circular chunks with player-center indexing: **no for persistence** (Voronoi is the chunk shape); **yes for rendering** (streaming disk is circular by design).
+- Save-format directory structure: **locked to pilots × seeds matrix** (see above).
 
 ### Before terrain rebuild lands (during Phase 3.6)
 
-7. **Biome spatial generator**: Voronoi vs climate-field vs hand-authored mask. Proposed climate-field with adjacency rejection; verify computationally.
-8. **Hub placement strategy**: authored chunks vs procedural. Proposed: Option 2 for major, Option 3 for regional, Option 1 for remote. Validate at first hub-generation pass.
-9. **Seam blending algorithm**: which edge-matching technique handles authored↔procedural cleanly at the boundaries the playtest will actually traverse?
-10. **Hydrology bake time budget**: seconds is fine at load; but can it become real-time at world-scope lock if a player changes dial-state mid-game? (Probably not; dial changes don't invalidate the hydrology graph.)
+1. **Chunk size**: 1 km² vs 4 km² vs adaptive. Prototype with target frame budget.
+2. **Heightfield representation**: ridged multifractal + domain warp sufficient, or does the terrain rebuild want something more exotic (erosion simulation, gradient-conditioned noise, machine-learned biome exemplars)?
+3. **Hydrology graph size**: can the world-bake produce a < 100 MB graph for a 5000 × 5000 km toroidal world, or do we need a sparser representation / on-disk cache?
+4. **Biome spatial generator**: Voronoi vs climate-field vs hand-authored mask. Proposed climate-field with adjacency rejection; verify computationally.
+5. **Hub placement strategy**: authored chunks vs procedural. Proposed: Option 2 for major, Option 3 for regional, Option 1 for remote. Validate at first hub-generation pass.
+6. **Seam blending algorithm**: which edge-matching technique handles authored↔procedural cleanly at the boundaries the playtest will actually traverse? Note: with toroidal wrap, the seam-blend problem also applies at the world-edge wrap itself.
+7. **Hydrology bake time budget**: seconds is fine at load; but can it become real-time at world-scope lock if a player changes dial-state mid-game? (Probably not; dial changes don't invalidate the hydrology graph.)
+8. **Sampler wrap quantization**: terrain octave frequencies need quantization to `1/WORLD_EXTENT_M × integer` so wrap is clean. Test quantization error at finest octaves — expected negligible but verify.
 
 ### Before save format locks (pre-Phase-4.10)
 
-11. **Delta schema**: per-category event formats finalized.
-12. **Delta compaction**: append-only during play, compact at save time; what's the compaction algorithm?
-13. **Cross-version save migration**: how much forward/backward compatibility is promised?
-14. **Shared-seed hash compatibility**: if two players share a master seed for async ghosts, the hydrology-graph bake must produce byte-identical output on their machines.
+9. **Delta schema**: per-category event formats finalized (per-pilot-per-seed progress deltas + per-world event log entries).
+10. **Delta compaction**: append-only during play, compact at save time; what's the compaction algorithm?
+11. **Cross-version save migration**: how much forward/backward compatibility is promised per-entity (pilot / world / progress)?
+12. **Shared-seed hash compatibility**: if two players share a master seed for async ghosts, the hydrology-graph bake must produce byte-identical output on their machines.
+13. **Day/night acceleration ratio**: placeholder 24:1. Playtest to lock the right number. Too fast = arcade-y; too slow = single-session only ever sees one daytime.
 
 ### Deferrals (post-Phase-4)
 

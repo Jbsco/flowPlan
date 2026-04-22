@@ -111,10 +111,12 @@ Each phase has a testable gate that must pass before the next phase begins. No p
 
 Live questions that shape the design but are not yet resolved. The authoritative list is in [FEATURES.md § Remaining Open Questions](FEATURES.md#remaining-open-questions); a brief snapshot:
 
-- **World scope.** Single large map with regional biomes, ~4 separate regional maps, fresh-per-session procedural, or hybrid persistent-hubs-plus-procedural-surroundings. Prototype in Phase 1; locked before Phase 4.
-- **Fourth region** (if multi-map path chosen). Candidates: Pacific Northwest, subarctic, tropical, high-desert. High-desert currently favored.
-- **Procedural persistence cost.** Can flight-log memory bound the save size enough to make a procedural path feasible in v1? Prototype and measure.
-- **Biome-seam continuity** (hybrid-candidate specific). How to blend persistent hubs into procedural surroundings without a visible seam.
+- **Biome catalog identity.** Alaska/Canada baseline, high desert, Mediterranean archipelago, PNW, Rocky alpine, subarctic, and tropical are all in the planned set; relative sizes + spatial layout on the torus remain open. Playtest to decide the mix.
+- **Day/night acceleration ratio.** Strawman 24:1 (1 sim-hour ≈ 2.5 real-minutes). Playtest to lock — too fast reads arcade-y; too slow means one session only ever sees one daylight regime.
+- **Inland-sea authoring** — procedurally placed great-lake-scale bodies, or part of biome-region authoring? Hydrology sub-system answers some of this.
+- **Biome-seam continuity** within the procedural world. Blending between neighboring biomes without visible seams. Sub-biome feature palette adaptation is the current plan.
+
+Resolved: **world scope locked 2026-04-21** to one continuous procedural world per seed with toroidal wrap (strawman 5000 km per side). See [MAPGEN.md § World scope decision](MAPGEN.md#world-scope-decision).
 
 Resolved creative questions (flight-model depth, mission style, multiplayer posture, platform, damage weight, economy shape) have moved into their authoritative docs. Follow the links in the table above.
 

@@ -3,7 +3,56 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
-Last updated: **2026-04-21** (Phase 2.5 **SHIPPED**; stock-take session committed to docs — see 2026-04-21 design-decisions log below).
+Last updated: **2026-04-21** (Phase 2.5 **SHIPPED**; Phase 3.2.1 + 3.2.2 weather W1 + W2 **SHIPPED**; world scope **LOCKED to Option A toroidal**; progression data-model locked; see latest session log below).
+
+## 2026-04-21 — World-scope lock + Phase 3.2.2 close-out + progression data model
+
+Session-captured design decisions during Phase 3.2.2 weather-Voronoi close-out and world-scope resolution. Flow into doc amendments (MAPGEN / ROADMAP / FEATURES / DESIGN / this file) and the agent-memory store.
+
+### World scope — LOCKED to Option A (one continuous toroidal world per seed)
+
+Resolves the MAPGEN.md "Candidates A–D" open question + the Option A vs Option B discussion surfaced during 3.2.2. **Locked decisions:**
+
+- **One continuous procedural world per seed** (not ~4 regional maps, not multiple separate worlds).
+- **Toroidal wrap on all edges.** The world loops in both axes; flying off one edge returns you at the opposite edge seamlessly.
+- **Strawman size: 5000 km per side.** ~28 h ferry-speed traversal; organic play never reaches the edge unless deliberately traversing. Configurable constant, retunable during playtest.
+- **World size = divisor of harmonic wavelengths.** Every sum-of-sines noise field (terrain octaves, weather, water) must use wavelengths that divide `WORLD_EXTENT_M` evenly for clean wrap. At 5000 km: temperature-climate 500 km (10 cycles ✓), humidity-regional 200 km (25 ✓); pressure-synoptic 350 km → adjust to 357.14 km (14 cycles).
+- **Voronoi lookup wraps via `((ix + N) % N)` indexing.** Grid spacing chosen so `N = WORLD_EXTENT_M / GRID_SPACING_M` is integer. At 5000 km + 25 km spacing → N=200.
+- **Compass locked to world-north.** No true pole (torus has none); compass always reads correctly; wrapping an edge does not flip orientation. Tradeoff: no spherical-geometry / great-circle effects. For puddle-jumper local-nav gameplay this is a clear win.
+- **Day/night accelerated + east-to-west.** Sun moves with longitude; time-of-day at position `x` = `sim_time_of_day - (x / WORLD_EXTENT_M) × DAY_LENGTH_S`. Placeholder acceleration ratio 24:1 (1 sim-hour ≈ 2.5 real-minutes, full day ≈ 1 real-hour), tunable at playtest.
+- **Inland seas preferred over ocean crossings.** Puddle-jumper planes drive the design; great-lake-scale inland seas + fjord/lake networks + river systems cover water-flying gameplay. Circumnavigable-by-land paths exist if you pick the right heading.
+
+### Progression data model — pilots × seeds matrix
+
+- **Pilot profiles (global, per pilot):** identity + skills/XP/unlocks + fleet inventory + total currency + career stats. Seed-independent.
+- **World seeds (global, per seed):** master_seed + WeatherTuning + world-level event log (weather storms, hydrology changes). Shared across all pilots on that seed.
+- **Per-(pilot, seed) progress:** fog-of-war, discovered hubs, per-seed mission completions, resume-point. One file per (pilot, seed) pair.
+- **Unlimited pilots + unlimited seeds per install.** Seeds shareable by value (`u64 master_seed + WeatherTuning`).
+- **NG+ = any pilot with prior progression entering an unvisited seed.** Not gated on completion threshold. "Fresh pilot" is a deliberate choice at pilot creation, not at seed creation.
+- **Storage: light.** ~100 MB save footprint worst case (10 pilots × 100 seeds each). Fog-of-war bitmap (~125 KB per pair, compresses to 5–20 KB). Save-format directory: `saves/pilots/<uuid>.save` + `saves/pilots/<uuid>/<seed_hex>.progress` + `saves/worlds/<seed_hex>.world`. `<seed_hex>` = `master_seed XOR hash(WeatherTuning)` so tuning changes distinguish worlds.
+- **Save-format scaffolding is a Phase 3 deliverable** (earliest natural point: after 3.2.3; first real consumer is hub-catalog persistence in 3.6).
+
+### Weather milestone completed (3.2.1 + 3.2.2 + evolution)
+
+- **3.2.1 W1 atmospheric base:** pressure, temperature, humidity, altitude-stratified wind, slim frontal-boundary graph, terrain-induced turbulence. Exposes `world::wind_at`, `world::turbulence_at`, `world::frontal_segments`.
+- **3.2.2 W2 weather Voronoi partition:** infinite jittered-grid cell lookup, altitude-stratified wind-drift, per-cell state classification (ClearAir / Cumulus / Nimbus / Stratus / Squall / Frontal) with W1 placement-constraint gating, adjacency-implicit temporal evolution via per-type life-cycle phases.
+- **`WeatherTuning` struct** captures per-type cycle durations + global multiplier. Default values match real atmospheric timescales (cumulus 1.5 h, nimbus 2.5 h, stratus 6 h, squall 1.5 h, frontal 8 h). Designed to be user-facing sliders at seed creation.
+- **Visual-bench: 12 artifact families × 3 crops + continental 2000 km synoptic** = 37 deterministic PNGs per seed. Pressure / temperature / humidity / wind / turbulence / frontal / voronoi / cell_type (initial + evolved at t=3h + phase) / synoptic composite / moisture composite / dewpoint-spread / LCL-altitude.
+
+### Design gaps encoded (deferred implementations)
+
+Not shipped this session but encoded as project memories + doc placeholders for future phases:
+
+- **Orographic + rain-shadow coupling** (memory: `weather_orographic_rain_shadow`): ~80-line addition for windward humidity boost / lee-side desiccation. Land pre-3.2.3 or alongside.
+- **Water-body humidity coupling** (memory: `weather_biome_couplings_3_6`): requires hydrology API from 3.6. Inland seas + lake-effect fog fall out naturally.
+- **Per-biome weather ranges** (same memory): each biome has characteristic humidity/temperature/LCL biases; wires in once biomes exist in 3.6.
+- **Orientation + day/night overlay** — accelerated-longitude time-of-day math lives in a Phase 3.2.3 or 3.6 sub-milestone.
+
+### Agent-memory additions this session
+
+`weather_tuning_user_surface`, `world_scope_option_a_toroidal` (updated with compass + day/night + inland seas), `weather_orographic_rain_shadow`, `weather_biome_couplings_3_6`, `progression_ng_plus_carryover` (updated with pilots × seeds matrix + save directory structure).
+
+---
 
 ## 2026-04-21 — Pre-Phase-3 stock-take design decisions
 

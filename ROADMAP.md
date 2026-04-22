@@ -603,6 +603,18 @@ Weather is architected as a three-layer composable subsystem paralleling the ter
 - [ ] **Visual-bench artifacts:** weather Voronoi partition snapshots at t₀ / t+10min / t+1h / t+6h; verifies drift + evolution + adjacency bias.
 - [ ] **Determinism + cross-platform:** byte-identical partition + cell state trajectory across platforms given same master seed + tick count.
 
+### Milestone 3.2.2b: Orographic + rain-shadow humidity coupling (near-term addition)
+
+**Small realism win before wiring weather into flight. Windward slopes see boosted humidity → lower cloud base, more convective cells; lee sides desiccate → high LCL, clear-air-biased. Source of every high-desert-next-to-snowy-range biome.**
+
+- [ ] `terrain_moisture_modifier(terrain: &T, wind: Vec3, x, z) -> f32` returning humidity bias in ~`[0.5, 1.5]`. Pattern mirrors `turbulence_at` lee-side factor: terrain-gradient dotted with wind direction; scaled by terrain elevation.
+- [ ] New `humidity_at_with_terrain` variant (keep old API for tests); cell-state classification consumes the terrain-aware humidity.
+- [ ] Visual-bench artifact: humidity-with-terrain heatmap alongside existing humidity-sea-level.
+- [ ] Unit tests: flat terrain → no bias; windward of high peak → boost; lee of high peak → reduce.
+- [ ] Determinism: bit-identical modifier given same `(master_seed, terrain, wind, x, z)`.
+
+Memory: `weather_orographic_rain_shadow` captures the rationale + implementation template.
+
 ### Milestone 3.2.3: Layer W3 — Cell atmospheric deltas + weather-affects-flight
 
 **Adds W3 deltas + wires weather into flight physics. Weather is now functionally present in the sim — turbulence, visibility, icing all respond to cloud density + storm state.**
@@ -827,11 +839,27 @@ All of the following, verified on reference hardware:
 - [ ] Landing / takeoff musical flourishes at milestones
 - [ ] No pre-recorded music stems
 
+### Milestone 3.7: Save-format scaffolding (late-Phase-3)
+
+**Data-model deliverable for the pilots × seeds progression matrix locked 2026-04-21. First concrete consumer is weather event logs (3.2.3) + hub catalog persistence (3.6.1).**
+
+- [ ] **Three orthogonal persistence entities** per [MAPGEN.md § Determinism & save-format implications](MAPGEN.md#determinism--save-format-implications):
+  - `pilots/<uuid>.save` — global pilot data (identity, fleet, currency, career stats)
+  - `pilots/<uuid>/<seed_hex>.progress` — per-(pilot, seed): fog-of-war, hubs, missions, resume-point
+  - `worlds/<seed_hex>.world` — per-seed world event log (shared across pilots)
+- [ ] `<seed_hex>` = hex of `master_seed XOR hash(WeatherTuning)` so tuning changes distinguish worlds.
+- [ ] Versioning: `(game_version, pilot_schema, world_schema, progress_schema)` — each entity versions independently.
+- [ ] **Append-only event log format** for world-level events (weather storms initiated, hydrology changes, etc.). Replay reconstructs world state exactly.
+- [ ] **Fog-of-war representation:** 1 km × 1 km discovery bitmap for a 5000 × 5000 km world = 125 KB uncompressed per (pilot, seed) pair; RLE compression to 5–20 KB typical.
+- [ ] **Load path:** session start reads `pilot.save` + `pilot/<this-seed>.progress` + `worlds/<this-seed>.world`. Sub-second cold read, <10 MB peak.
+- [ ] **Save path:** append deltas during play, compact on clean session close.
+- [ ] Determinism: save + reload → byte-identical world state continuation.
+
 ### Deliverable
 
-The plane has a voice (engine, wind, water, splash). Weather actively shapes flight. Sim runs on its own thread. CI runs on every push.
+The plane has a voice (engine, wind, water, splash). Weather actively shapes flight. Sim runs on its own thread. CI runs on every push. Save format scaffolded with pilots × seeds matrix.
 
-> **Gate:** Phase 3 is complete when the quality gate passes in CI, the determinism test passes with the sim worker thread active, the audio callback passes the no-alloc/no-log verification, and the Phase 3 scene benches hold within the frame budget on reference hardware.
+> **Gate:** Phase 3 is complete when the quality gate passes in CI, the determinism test passes with the sim worker thread active, the audio callback passes the no-alloc/no-log verification, save/load round-trips deterministically, and the Phase 3 scene benches hold within the frame budget on reference hardware.
 
 ---
 
@@ -850,6 +878,22 @@ The plane has a voice (engine, wind, water, splash). Weather actively shapes fli
 **Prerequisite (gated):** the **world-scope prototype** (pre-Phase-3 prerequisite, see [Pre-Phase-3 prerequisites](#pre-phase-3-prerequisites)) must be complete before Phase 3.6 starts. The prototype's outputs — world-scope decision + chunk-shape decision + persistence footprint measurement — drive this phase's implementation path.
 
 Each milestone below corresponds to **one layer** of the three-layer composition (see [MAPGEN.md § Layered generation](MAPGEN.md#layered-generation--three-layer-composition-pinned)): Layer 1 = Topographic base; Layer 2 = Voronoi partition; Layer 3 = Feature-delta heightfield modifications + flora. Each layer ships playable on its own.
+
+### Milestone 3.6.0: Toroidal wrap + sampler quantization (pre-Layer-1 foundation)
+
+**Lands the Option A toroidal world-topology contract across every sampler, as a foundation for the Layer-1/2/3 milestones that follow. Short milestone; wide touch surface.**
+
+- [ ] `WORLD_EXTENT_M` constant added to `flowplan_core` (strawman 5000 km, adjustable). Threaded through all world-gen samplers + Voronoi + hydrology bake.
+- [ ] **Terrain octave frequencies quantized** to `k / WORLD_EXTENT_M` for integer `k` so sum-of-sines wraps cleanly. Verify quantization error < 0.1% at finest octaves (visually indistinguishable from current).
+- [ ] **Weather harmonic wavelengths quantized** to integer-cycle-per-world. Adjust pressure-synoptic 350 km → 357.14 km (14 cycles at 5000 km); temperature-synoptic + humidity-synoptic likewise. Temperature-climate 500 km (10 cycles) and humidity-regional 200 km (25 cycles) already fit.
+- [ ] **Voronoi lookup wraps** via mod-N indexing: `cell_at(x, z)` and `cell_at_drifted` both resolve neighbors through `((ix + N) % N, (iz + N) % N)` where `N = WORLD_EXTENT_M / GRID_SPACING_M` is exact integer. Weather W2 spacing adjusted to 20 km or 25 km so N divides evenly (N=250 or N=200 at 5000 km).
+- [ ] **Hydrology graph** (3.6.1 scope) bakes wrap-respecting: rivers flowing east return from west; catchment basins may span the seam.
+- [ ] **Compass rules locked to world-north** regardless of wrap (no edge-flip). Implementation: compass reads heading directly from state quaternion, no coordinate transformation at edges.
+- [ ] **Day/night cycle accelerated + east-to-west.** `sim_time_of_day_at(x)` = `sim_time_of_day - (x / WORLD_EXTENT_M) × DAY_LENGTH_S`. Placeholder acceleration ratio 24:1 (tunable).
+- [ ] **Visual-bench wrap-continuity tests:** emit each sampler's PNG at a crop straddling the seam; assert pixels at `x=WORLD_EXTENT_M - ε` match pixels at `x=ε`.
+- [ ] **Determinism-bench wrap tests:** `sample(x)` == `sample(x + WORLD_EXTENT_M)` bit-for-bit across every sampler. Adds to the existing determinism CI battery.
+
+This milestone slots between Phase 3 close and Phase 3.6.1 so Layer-1 hydrology is wrap-aware from birth. Can also absorb the orographic + rain-shadow (3.2.2b) in parallel if resources allow.
 
 ### Milestone 3.6.1: Layer 1 — Topographic base + hydrology
 

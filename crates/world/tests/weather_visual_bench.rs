@@ -42,6 +42,11 @@ use glam as _;
 /// Full-world-scenario extent (m). 500 km — representative small region.
 const FULL_EXTENT_M: f32 = 500_000.0;
 
+/// Continental-scale extent (m). 2000 km — previews Option A world-scale weather
+/// seamlessness; emitted only for the synoptic overlay as a cheap "does this
+/// stay continuous?" sanity check.
+const CONTINENTAL_EXTENT_M: f32 = 2_000_000.0;
+
 /// Player-local crop extent (m). Matches ~10 km streaming disk outer radius.
 const PLAYER_EXTENT_M: f32 = 10_000.0;
 
@@ -78,6 +83,13 @@ impl Crop {
     const PLAYER: Self = Self {
         name: "player",
         extent_m: PLAYER_EXTENT_M,
+        center_x_m: 0.0,
+        center_z_m: 0.0,
+    };
+
+    const CONTINENTAL: Self = Self {
+        name: "continental",
+        extent_m: CONTINENTAL_EXTENT_M,
         center_x_m: 0.0,
         center_z_m: 0.0,
     };
@@ -695,7 +707,8 @@ fn emit_moisture_overlay_artifacts() {
 fn emit_synoptic_overlay_artifacts() {
     // Weather-map-style composite: pressure field (desaturated) as background,
     // cell-type tint in active cells, Voronoi edges, frontal segments, and
-    // sparse wind arrows.
+    // sparse wind arrows. Continental crop (2000 km) appended as a
+    // seamlessness preview for the pinned Option A toroidal world.
     let dir = output_dir();
     let p_lo = pressure::BASELINE_HPA - pressure::SYNOPTIC_AMPLITUDE_HPA;
     let p_hi = pressure::BASELINE_HPA + pressure::SYNOPTIC_AMPLITUDE_HPA;
@@ -705,7 +718,8 @@ fn emit_synoptic_overlay_artifacts() {
     let arrow_stride = RESOLUTION / ARROW_COUNT;
     let arrow_len_px = (arrow_stride as f32) * 0.45;
 
-    for &crop in CROPS {
+    let synoptic_crops: &[Crop] = &[Crop::FULL, Crop::QUADRANT, Crop::PLAYER, Crop::CONTINENTAL];
+    for &crop in synoptic_crops {
         let mut img = ImageBuffer::new(RESOLUTION, RESOLUTION);
 
         // Background: desaturated pressure + cell-type tint + Voronoi edge.

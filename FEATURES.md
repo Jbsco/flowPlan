@@ -96,6 +96,27 @@ Decisions recorded from the feature discussion. Items marked *amend* have been a
 
 ## World Scope & Map Layout
 
+**LOCKED 2026-04-21:** Option A — one continuous procedural world per seed, **toroidal wrap on all edges**, strawman 5000 km per side. See [MAPGEN.md § World scope decision](MAPGEN.md#world-scope-decision) for the full spec and [PROGRESS.md 2026-04-21 entry](PROGRESS.md) for the decision context. Candidates B / C / D below preserved as historical design-space record only.
+
+### Option A locked details
+
+- **Size:** 5000 km × 5000 km square torus (configurable `WORLD_EXTENT_M`). Traversal: ~28 h at ferry speed, ~46 h at bush cruise. Organic play never hits the edge.
+- **Wrap mechanics:** every noise/harmonic wavelength divides world size evenly. Voronoi lookup wraps via `mod-N` indexing. Hydrology graph respects wrap (rivers flowing east return from west).
+- **Compass locked to world-north.** No pole weirdness; wrapping preserves orientation.
+- **Day/night cycle: accelerated + east-to-west.** Sun position varies with longitude; placeholder 24:1 acceleration (1 sim-hour ≈ 2.5 real-minutes).
+- **Inland seas, not oceans.** Great-lake-scale inland seas + fjord/lake networks + rivers. Circumnavigable-by-land paths exist.
+- **Progression: pilots × seeds matrix.** Unlimited pilots (global state) × unlimited seeds (shareable by value) × per-(pilot, seed) progress (fog-of-war, hubs, missions). NG+ triggers on any pilot progression entering an unvisited seed. Save directory: `saves/pilots/<uuid>.save` + `saves/pilots/<uuid>/<seed_hex>.progress` + `saves/worlds/<seed_hex>.world`.
+- **Sharing:** seeds are `(u64 master_seed, WeatherTuning)`; shareable by value, no file transfer needed.
+
+### Open questions within Option A
+
+- Day/night acceleration ratio lock (24:1 placeholder; playtest to decide).
+- Fog-of-war discovery resolution (currently 1 km² cells).
+- "World atlas" UI behavior at the torus wrap (distance = `min(direct, wrap_via_east, wrap_via_west, wrap_via_north, wrap_via_south)`).
+- Inland-sea authoring: procedurally placed great-lake-scale bodies, or are they part of biome-region authoring?
+
+### Historical candidates (superseded by Option A lock)
+
 **Candidate A: one large single map with diverse regional locales**
 
 - Single contiguous landmass + water covering multiple recognizable seaplane/floatplane/bushplane regions as neighboring biomes.
@@ -1580,8 +1601,18 @@ Wide-network RTT means lockstep at 120 Hz needs a multi-tick input buffer — pe
 
 Narrowed since the last pass. Each will close into an amendment or a deferral by phase end.
 
-1. **World scope** -- Candidates A (single large map) / B (4 regional maps) / C (fresh-per-session, no persistence) / D (hybrid persistent hubs + procedural surroundings). Prototype C and D in Phase 1 scratch branch; measure performance, persistence size, and subjective appeal. Locked before Phase 4. The bigger philosophical question *"does it matter that the region is the same across sessions if the experience is consistently good?"* is preserved here and will be answered by the prototype subjective-appeal check.
-2. **Procedural cost** -- flight-log-memory feasibility for Candidates B and D. Prototype and measure.
-3. **Fourth region identity** in Candidate B -- all four candidates retained; high-desert currently favored (author affinity, reference material, and natural pairing with the astrophotography night-sky aesthetic). Pick during Phase 2. Others may ship as post-v1 region packs.
-4. **Biome continuity at the procedural/persistent seam** (Candidate D specific) -- how to blend without visible seam. Phase 1/2 prototype concern.
-5. **Helicopter support ever** -- probable non-goal; reconsidered only with clear justification. Not a roadmap blocker.
+### Resolved 2026-04-21
+
+- **World scope:** LOCKED to Option A — one continuous procedural world per seed with toroidal wrap on all edges (strawman 5000 km per side). See [World Scope & Map Layout](#world-scope--map-layout) above and [MAPGEN.md § World scope decision](MAPGEN.md#world-scope-decision). Supersedes the prior Candidates A–D discussion.
+- **Progression data model:** LOCKED to pilots × seeds matrix — unlimited pilots (global progression) × unlimited seeds (shareable by value) × per-(pilot, seed) progress (fog-of-war + hubs + missions). NG+ triggers on any pilot progression entering an unvisited seed. See [MAPGEN.md § Determinism & save-format implications](MAPGEN.md#determinism--save-format-implications).
+- **Compass on a torus:** locked to world-north (no spherical-pole geometry, wrap preserves orientation).
+- **Day/night topology:** accelerated east-to-west with longitude-varying local time (ratio open; see below).
+
+### Still open
+
+1. **Biome spatial distribution on the torus** — how the 7 planned biomes (Alaska, high desert, Mediterranean archipelago, PNW, Rocky alpine, subarctic, tropical) arrange across 5000 km. Procedural climate-field derivation with adjacency rejection is the working hypothesis; verify computationally.
+2. **Day/night acceleration ratio** — strawman 24:1 (full day ≈ 1 real-hour). Playtest to lock. Too fast = arcade-y; too slow = one daylight regime per session.
+3. **Inland-sea authoring** — procedurally placed great-lake-scale bodies via hydrology, or part of biome-region authoring? Expect hydrology answers most of this.
+4. **Biome continuity** — sub-biome feature palette adaptation (features from biome A appear in biome B with palette shifted to match host). Phase 3.6 prototype concern.
+5. **Fourth-region identity for biome mix emphasis** — all seven biomes are planned; which 2-3 get the most development weight in the MVP biome pass? High-desert currently favored for author affinity. Pick during Phase 3.6 authoring.
+6. **Helicopter support ever** — probable non-goal; reconsidered only with clear justification. Not a roadmap blocker.
