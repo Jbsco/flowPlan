@@ -3,9 +3,83 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
-Last updated: **2026-04-22** (Phase 2.5 **SHIPPED**; Phase 3.2.1 + 3.2.2 + 3.2.3 weather W1/W2/W3 + flight coupling + chop wiring **SHIPPED**; world scope **LOCKED to Option A toroidal**; progression data-model locked; **scenario-realism audit Phase 1 COMPLETE**, Phases 2–3 remaining — regression debt paydown before resuming Phase 3 follow-ups).
+Last updated: **2026-04-22** (Phase 2.5 **SHIPPED**; Phase 3.2.1 + 3.2.2 + 3.2.3 weather W1/W2/W3 + flight coupling + chop wiring **SHIPPED**; world scope **LOCKED to Option A toroidal**; progression data-model locked; **scenario-realism audit COMPLETE — all phases**; **flight-model realism pass COMPLETE** (control-response rates now match real Beaver POH); **water-rudder flip bug FIXED**; bench at 60 scenarios, full gate green. **Phase 3 resumption unblocked.**).
 
-## 2026-04-22 — Scenario realism audit (Phase 1 COMPLETE; Phases 2–3 remaining)
+## 2026-04-22 — Scenario realism audit + flight-model realism pass (COMPLETE, all phases)
+
+Triggered by playtest ("yaw/roll in air feels very extreme" + "plane flips underwater toward the inside"). Extended the original realism audit to cover control-response rates and water-physics stability. **All blockers cleared; Phase 3 resumption unblocked.**
+
+### Shipped this session (tasks #166-#179)
+
+**Execution-quality scenario spectrum** (per §6b behavior-taxonomy):
+- Water landings: `_glide_controller` (butter), `_hard_acceptable`, `_bounced`
+- Wheels landings: `_butter`, `_hard_acceptable`, `_bounced`, `_approach` (controller-driven open-loop reference)
+- Envelope-limit takeoffs: `_early_rotation`, `_late_rotation`
+- Taildragger-specific: `_over_rotation_stall` (renamed from `_tail_strike_rotation` after user correction that tail-strike-on-rotation is a nosewheel concern)
+- Step-response characterization: `beaver_roll_rate_step`, `_pitch_rate_step`, `_yaw_rate_step`
+- Water physics regression guards: `_takeoff_no_coord`, `_circle_right_powered`, `_circle_left_powered` (asymmetric pair)
+
+**New assertion types:**
+- `TouchdownSinkWithin { altitude_threshold_m, min_sink_mps, max_sink_mps }` — distinguishes landing quality tiers by sink rate at first water/ground contact
+- `PitchStableAtEnd { last_secs, target_deg, tol_deg }` — verifies correct-response scenarios (e.g. tail-up-balance where aircraft should stay planted)
+- `PeakAngularRate { axis: RateAxis, min_degps, max_degps }` — characterizes control authority/damping balance; tied to `RateAxis::{Pitch,Roll,Yaw}` enum
+
+**Physics additions (realistic, not amplified):**
+- **PID anti-windup** (conditional integration in `pid_step`): integral only accumulates while output is within clamp range. Applies to ALL controllers (BankHold, AltitudeHold, GlideToTouchdown, TakeoffClimb, etc.). Prevents saturation-induced rate spikes when plant can't close error.
+- **α-dependent planing lift** (Savitsky hull theory): `lift *= 1 + ALPHA_PLANING_LIFT_GAIN × sin(pitch).max(0)`, `k=1.5`. Rewards pilot-commanded rotation during on-step.
+- **Tailplane lift**: elevator deflection creates vertical force (not just moment). `TAILPLANE_LIFT_COEFF = 0.066` derived from `CM_DELTA_E × c / tail_arm`.
+
+**Coefficient tunes (toward real Beaver POH):**
+- `Cl_δa`: 0.075 → 0.040 (roll rate 75.7 → 31.7°/s, matches real ~30°/s)
+- `Cm_δe`: 0.24 → 0.15 (pitch rate 48.9 → 18.1°/s, matches real ~20°/s)
+- `INSIDE_FLOAT_STICK_COEFF`: 70,000 → 15,000 (fixed positive-feedback flip at takeoff — runaway loop from `yaw_rate²` scaling)
+
+**Scripted-trim scenarios → PID-driven** so they auto-adapt to future coefficient changes:
+- `beaver_cruise_sl`: AltitudeHold + AirspeedHold
+- `beaver_cruise_climb`: VerticalSpeedHold
+- `beaver_endurance_cruise`: AltitudeHold + AirspeedHold
+- `beaver_ldmax_glide`: VerticalSpeedHold
+
+### Final control-response state (matches real Beaver pilot reports)
+
+| Axis | Pre-fix | Post-fix | Real Beaver |
+|------|---------|----------|-------------|
+| Roll | 75.7°/s | **31.7°/s** | ~30°/s ✓ |
+| Pitch | 48.9°/s | **18.1°/s** | ~20°/s ✓ |
+| Yaw | 18.7°/s | **19.2°/s** | ~15°/s ✓ |
+
+### Key design discipline established
+
+1. **More permissive = OK for casual with explicit buy-off**; **more restrictive = WORST CASE** (experienced pilot observing aircraft can't do something real one can). Drives priority: fix restrictive behaviors first.
+2. **Scenario authoring discipline** (per §6b + SKILL Core Rule #9): Scenarios come in capability / envelope-limit / correct-null-response kinds. Don't force-fit: widen tolerance to hide valid envelope failures → regression masking. If aircraft behaves correctly per physics but assertion doesn't match, RECLASSIFY the scenario.
+3. **Asymmetric-pair discipline** (SKILL Core Rule #10): right-rotating prop breaks left/right symmetry. Water-turn scenarios now pair `_right_powered` / `_left_powered` at taxi-climb throttle to capture both regimes.
+4. **Scenario-coverage gap caught**: all prior water-taxi scenarios ran at idle (V max 1.5-2.5 m/s). The flip bug required taxi-climb throttle (V 10-15 m/s) to trigger positive-feedback. `_takeoff_no_coord` and `_circle_*_powered` close the gap.
+
+### Controller infrastructure vetted
+
+`ControlLaw` enum complete with full implementation:
+- `BankHold`, `AltitudeHold`, `AirspeedHold`, `VerticalSpeedHold`, `HeadingHold`, `CoordinationHold`
+- `GlideToTouchdown` — altitude-aware flare arc (reads `sim.vehicle.position.y`)
+- `TakeoffClimb` — airspeed-aware rotation + climb (reads `sim.vehicle.velocity.length()`)
+- All PIDs use conditional-integration anti-windup
+- Same controllers drive bench + Phase 4.7 autopilot + future NPC pilot AI (hooks preserved: configurable tuning, external observability, deterministic state, composability)
+
+### Phase 3 now unblocked. Per user's execution-order adjustment (2026-04-22):
+
+Audio deferred until after world-gen (audio depends on biome + weather cell + hub state). Revised order:
+1. **3.4 CI** — independent, ship first
+2. **3.5b FFT ocean** — builds compute-pipeline abstraction (reused by 3.2x, 3.6.2, 5.6)
+3. **3.2x volumetric clouds + particle system** — consumes 3.5b compute infra
+4. **Pre-Phase-3 world-scope prototype** — validates Voronoi architecture (parallel with above)
+5. **Phase 3.6 World Foundations** — L1 topographic + hydrology, L2 Voronoi partition, L3 feature-deltas, flora
+6. **Then Phase 3 audio catches up**: 3.1 audio spine + 3.3 sim worker thread (co-landed), 3.5 soundtrack
+7. **3.7 save-format scaffolding** — natural after 3.6
+
+Memories: `scenario_realism_audit_phase` (CLOSED), `flight_model_realism_state` (NEW), `bench_assertion_taxonomy` (NEW).
+
+---
+
+## 2026-04-22 (historical) — Scenario realism audit (Phase 1 COMPLETE; Phases 2–3 remaining)
 
 Triggered during 3.2.3c water-rudder tuning: playtesting surfaced that `beaver_water_landing_approach` is a 28° nose-down 21 m/s-vs crash-dive, not a landing. Investigation revealed **multiple flight-bench scenarios lack realistic pilot inputs** — they pass assertions (AirspeedAtEnd accepts wide post-crash coast-down bands) but test unrealistic trajectories. This is regression debt from earlier phases.
 

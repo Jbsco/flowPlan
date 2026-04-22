@@ -199,13 +199,16 @@ const WING_SPAN_M: f32 = 14.63;
 ///   0.24 → current; full stick at cruise hits ~40°/s steady pitch rate, initial
 ///          accel ~2 rad/s². Subjectively crisp without being unrecoverable.
 const CM_ALPHA: f32 = -0.25;
-// Task #178 (2026-04-22): reduced 0.24 → 0.15 after converting cruise /
-// climb / glide trim scenarios to PID-driven. Chose 0.15 over 0.12 (closer
-// to real-Beaver target ~0.10) because stall / landing-flare scenarios
-// have scripted pitch values calibrated against the original authority;
-// going to 0.12 broke 30 scenarios, 0.15 reduces the cascade while still
-// bringing peak pitch rate toward real ~20°/s.
-const CM_DELTA_E: f32 = 0.15;
+// Task #178 + playtest follow-up (2026-04-22): tuned 0.24 → 0.22 (8%
+// reduction). Iterated toward playability: 0.15 gave realistic pitch rate
+// (18°/s) but required 22s of saturated stick for water takeoff —
+// unreachable by human pilot. 0.20 still needed 15s saturated. 0.22
+// leaves enough elevator authority for realistic water-takeoff rotation.
+// Pitch rate 35-40°/s — above real ~20 but within the permissive band
+// the user OK'd for playability. Further reduction blocks on water-physics
+// pitch-restoring moment being too strong (buoyancy asymmetry at small
+// pitch angle creates ~3× elevator moment).
+const CM_DELTA_E: f32 = 0.22;
 const CM_Q: f32 = -25.0;
 
 /// Tailplane lift coefficient (wing-area-referenced, per unit elevator).
@@ -1014,8 +1017,30 @@ pub fn compute_forces(
     // the right-rotating prop; scales linearly with shaft power AND by the
     // airspeed-ramp factor so it doesn't accumulate rotation at V=0.
     // `coupling_airspeed_factor` already computed above (pitch-block precursor).
-    let wing_drop_moment =
-        wing_drop_roll_moment(alpha, roll_rate, v_damp, q_dyn, wing_area_moments);
+    // β-gate + alpha-clamp wing_drop aerodynamics: when sideslip is extreme
+    // (|β| > ~30°) the aircraft is mostly flying sideways — the alpha computed
+    // via atan2 becomes a coordinate-frame artifact (forward_speed collapses)
+    // and the wing-drop model produces spurious huge moments from bogus
+    // "past-stall" alpha values (up to ±56° observed in abusive-input traces).
+    // Real wings don't generate asymmetric stall at 90° beta; they just stall
+    // evenly into a bluff-body drag regime, and post-stall Cl flattens rather
+    // than growing with alpha. Two guards:
+    //   1. Scale by cos⁴(β) — sharper falloff than cos² so moment vanishes
+    //      quickly past β=30°.
+    //   2. Clamp alpha input to ±25° — past deep stall the non-linear Cl
+    //      differential saturates; no physical basis for unbounded growth.
+    // Added 2026-04-22 after abusive-input flip scenario revealed wing_drop was
+    // the dominant flip driver at extreme β + bogus alpha.
+    let beta_aero_scale = libm::cosf(beta).powi(4).max(0.0);
+    let alpha_for_wing_drop = alpha.clamp(-0.436, 0.436); // ±25° in radians
+    let wing_drop_moment = beta_aero_scale
+        * wing_drop_roll_moment(
+            alpha_for_wing_drop,
+            roll_rate,
+            v_damp,
+            q_dyn,
+            wing_area_moments,
+        );
     let torque_roll_moment =
         -TORQUE_ROLL_NM_PER_KW * engine_power_kw_out * coupling_airspeed_factor;
     // Dihedral effect: sideslip β produces a roll moment. Cl_β < 0 makes this
@@ -1023,7 +1048,17 @@ pub fn compute_forces(
     // reducing any right bank that caused the sideslip). This is the canonical
     // GA "banked aircraft rolls back to level" behavior. Combined with the
     // wing-drop moment (past-stall differential Cl) into the stability slot.
-    let dihedral_roll_moment = q_dyn * wing_area_moments * WING_SPAN_M * CL_BETA * beta;
+    //
+    // β CLAMP (post-playtest 2026-04-22): at extreme sideslip (|β| > ~20°)
+    // the dihedral effect stalls aerodynamically — real wings can't produce
+    // unbounded roll moments from sideways flight. Without clamp, abusive
+    // inputs on water (full rudder + full throttle) drive β > 40° which
+    // produces catastrophic roll moment, flipping the aircraft. Physical
+    // maximum for dihedral lateral-flow sensitivity is ~20° β; beyond that,
+    // effective sensitivity drops to zero.
+    let beta_for_dihedral = beta.clamp(-0.35, 0.35); // ±20° in radians
+    let dihedral_roll_moment =
+        q_dyn * wing_area_moments * WING_SPAN_M * CL_BETA * beta_for_dihedral;
     let roll_moment = MomentBreakdown {
         control: q_dyn * wing_area_moments * WING_SPAN_M * CL_DELTA_A * state.controls.roll,
         stability: wing_drop_moment + dihedral_roll_moment,

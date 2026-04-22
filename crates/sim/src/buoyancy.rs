@@ -127,17 +127,21 @@ const PLANING_LIFT_N_PER_MPS2: f32 = 75.0;
 /// prevent outward flips at 35%+ throttle without over-damping natural
 /// turn dynamics.
 ///
-/// **Task #179 (2026-04-22) — reduced 70,000 → 15,000.** Playtest revealed
-/// inward flip at takeoff power (user report: "plane flips underwater
-/// toward the inside"). Reproducible in bench via
-/// `beaver_water_takeoff_no_coord` and `beaver_water_circle_right_powered`.
-/// Root cause: the force scales as `yaw_rate²` (via `inside_indicator ×
-/// |yaw_rate|`), creating positive feedback — small yaw perturbation
-/// (spiral slipstream) → stick down-force on inside pontoon → roll into
-/// turn → more yaw (via dihedral β-coupling) → MORE stick → runaway.
-/// Reduced coefficient 4.7× to eliminate the feedback divergence while
-/// preserving the stabilizing effect in normal taxi turns.
-const INSIDE_FLOAT_STICK_COEFF: f32 = 15_000.0;
+/// **Task #179 iteration 3 (2026-04-22): reduced 70k → 15k → 3k** after
+/// multiple flip-bug reports.
+/// - 70k (original): `yaw_rate²` positive feedback → flip at any throttle with yaw
+/// - 15k: better but abusive inputs (full throttle + full yaw) still flip
+/// - 3k + hard clamp: bounded under all tested abusive inputs
+///
+/// Also clamped to `STICK_FORCE_MAX_N`. The "inside-float hydrofoil stick"
+/// effect is now modest — a gentle turn-tightening, not a primary
+/// restoring mechanism. Normal dihedral + lateral drag provide the
+/// dominant roll stability.
+const INSIDE_FLOAT_STICK_COEFF: f32 = 3_000.0;
+
+/// Absolute-magnitude clamp on per-pontoon hydrofoil stick force.
+/// Reduced 5000 → 2000 N alongside coefficient reduction.
+const STICK_FORCE_MAX_N: f32 = 2_000.0;
 
 /// Forward body-Z offset (m) where planing lift's center of pressure acts, relative
 /// to each section's geometric center. Real planing-hull lift acts at the bow-wave
@@ -162,10 +166,13 @@ const PLANING_LIFT_CENTROID_Z_FWD_M: f32 = -1.5;
 /// than baseline). Only boosts for nose-up attitudes; at level the factor is
 /// exactly 1 so existing level-start scenarios are unchanged.
 ///
-/// Value chosen via triage (task #174). At k=1.5: 5° pitch → 1.13×, 10° → 1.26×,
-/// 15° → 1.39×. Rewards pilot-commanded rotation during on-step with real
-/// hydrodynamic lift growth.
-const ALPHA_PLANING_LIFT_GAIN: f32 = 1.5;
+/// Task #174 iteration + playtest follow-up (2026-04-22):
+/// - k=1.5: aircraft unblocked glassy takeoff but needed 15s saturated
+///   elevator to rotate (unplayable for human pilot)
+/// - k=3.0: stronger nose-up planing lift accelerates rise-out-of-water,
+///   should reduce rotation authority demand without amplifying coefficient
+///   values elsewhere. At k=3.0: 5° → 1.26×, 10° → 1.52×, 15° → 1.78×.
+const ALPHA_PLANING_LIFT_GAIN: f32 = 3.0;
 
 /// Water rudder yaw coefficient.
 ///
@@ -185,10 +192,26 @@ const ALPHA_PLANING_LIFT_GAIN: f32 = 1.5;
 /// POH center of range. Tuning is driven by the `beaver_water_circle_*` bench
 /// scenarios; if those assertions drift, this coefficient is the first knob
 /// to revisit (lateral drag is the second).
-const WATER_RUDDER_COEFF: f32 = 800.0;
+///
+/// Retuned 800 → 500 in post-playtest 2026-04-22 (iteration 3) after
+/// removing the spurious linear-lateral-force-at-CG component (player
+/// feedback: "a lot of side sliding when pontoons should enforce mostly
+/// forward motion"). Without lateral push at CG, the yaw moment converts
+/// more efficiently to heading change, so coefficient drops ~38% to hold
+/// POH 4°/s equilibrium turn rate (`circle_right`/`circle_left` bench scenarios
+/// targeting 119.5° over 30s).
+const WATER_RUDDER_COEFF: f32 = 450.0;
 
 /// Aft lever arm (m) for water rudder moment, body +Z direction (aft of CG).
 const WATER_RUDDER_ARM_M: f32 = 3.2;
+
+/// Maximum side force (N) the water rudder may produce. The raw coefficient
+/// × v² scaling is unbounded: tuned at taxi speed (~3 m/s → ~3.6 kN) but
+/// grows to >100 kN at 20 m/s, which drives the abusive-input flip bug. Real
+/// water rudders stall / cavitate long before that. 5000 N is taxi peak plus
+/// headroom — enough for the POH-matching 4°/s yaw at idle, bounded at any
+/// velocity so abusive inputs can't flip the aircraft.
+const WATER_RUDDER_FORCE_MAX_N: f32 = 5_000.0;
 
 /// Number of sample points along each pontoon's longitudinal axis. 5 gives good
 /// pitch stability (fore / fore-mid / mid / aft-mid / aft) without excessive compute
@@ -199,6 +222,73 @@ const WATER_RUDDER_ARM_M: f32 = 3.2;
 /// `(i + 0.5) / N - 0.5` for i ∈ [0, N). With N=5, sample offsets along pontoon
 /// length are `{-0.4, -0.2, 0, 0.2, 0.4}` × `length_m`.
 const PONTOON_SAMPLE_COUNT: usize = 5;
+
+/// Submerged airframe surface interaction point. When a wingtip, nose, or
+/// tail extremum goes below the water surface (typically during extreme
+/// bank or pitch), it experiences buoyancy + drag like the pontoons do.
+/// Models the "wingtip digs into water, aircraft levels back out" physics.
+#[derive(Clone, Copy, Debug)]
+struct AirframeFloatPoint {
+    /// Body-frame offset from CG (m).
+    body_offset: Vec3,
+    /// Max submersion depth for buoyancy integration — beyond this the
+    /// surface is fully submerged and buoyancy plateaus. Approximates
+    /// the surface's effective volume contribution.
+    max_depth_m: f32,
+    /// Buoyancy coefficient (N per meter of submersion depth).
+    buoyancy_n_per_m: f32,
+    /// Quadratic drag coefficient (N·s²/m² per m of submersion depth).
+    drag_coeff: f32,
+    /// Drag force magnitude clamp (N) to prevent divergence at extreme v.
+    drag_max_n: f32,
+}
+
+/// Beaver airframe float points. Wingtips at ±7.3 m lateral × 1.0 m below
+/// CG match the strike detection geometry. Tail and nose extrema also
+/// modeled for pitch extrema (tail strike on hard flare, nose dig on
+/// porpoise over-push). Coefficients tuned so that at 30°+ bank (wingtip
+/// ~2m underwater) the resulting restoring moment overwhelms the water-
+/// rudder-driven banking cascade but doesn't over-restore at light bank.
+///
+/// Tuning rationale:
+/// - `buoyancy_n_per_m` 5000: at 1m submersion wingtip → 5 kN buoyancy
+///   × 7.3m arm = 36 kNm restoring moment.
+/// - `drag_coeff` 5000 + `drag_max_n` 15000: at extreme submersion and
+///   velocity, each wingtip contributes max ~110 kNm counter-rotation.
+/// - Tail and nose have smaller arms (5.5 m and 3 m) but still substantial.
+///   These engage on pitch extremes.
+const BEAVER_AIRFRAME_FLOAT_POINTS: [AirframeFloatPoint; 4] = [
+    AirframeFloatPoint {
+        body_offset: Vec3::new(-7.3, -1.0, 0.0), // left wingtip
+        max_depth_m: 1.5,
+        buoyancy_n_per_m: 8_000.0,
+        drag_coeff: 8_000.0,
+        drag_max_n: 25_000.0,
+    },
+    AirframeFloatPoint {
+        body_offset: Vec3::new(7.3, -1.0, 0.0), // right wingtip
+        max_depth_m: 1.5,
+        buoyancy_n_per_m: 8_000.0,
+        drag_coeff: 8_000.0,
+        drag_max_n: 25_000.0,
+    },
+    AirframeFloatPoint {
+        body_offset: Vec3::new(0.0, -0.3, 5.5), // tail end
+        max_depth_m: 1.0,
+        buoyancy_n_per_m: 3_000.0,
+        drag_coeff: 3_000.0,
+        drag_max_n: 10_000.0,
+    },
+    AirframeFloatPoint {
+        body_offset: Vec3::new(0.0, -1.0, -3.0), // nose / prop area
+        max_depth_m: 1.0,
+        buoyancy_n_per_m: 3_000.0,
+        drag_coeff: 3_000.0,
+        drag_max_n: 10_000.0,
+    },
+];
+
+const AIRFRAME_FLOAT_POINTS: &[AirframeFloatPoint] = &BEAVER_AIRFRAME_FLOAT_POINTS;
 
 /// Per-pontoon geometry. One entry per float.
 #[derive(Clone, Copy, Debug)]
@@ -414,9 +504,21 @@ pub fn compute_buoyancy(
             // ── Planing lift (quadratic in body-forward speed, distributed) ───
             // Body-forward velocity at this sample (body -Z component). Rotate
             // sample velocity into body frame; forward component is -z.
+            //
+            // Applied in BODY +Y (perpendicular to float deck), NOT world +Y.
+            // Hydrodynamic lift on a planing hull acts normal to the hull
+            // surface (approximately body-Y for a floatplane's roughly-
+            // horizontal pontoon bottom). World-vertical framing introduced
+            // a bank-angle coupling: when banked, world-Y lift developed a
+            // body-lateral component which combined with pontoon offset to
+            // produce spurious roll moment that positive-fed bank angle at
+            // high-throttle + high-yaw. Body-Y framing keeps lift aligned
+            // with hull normal so asymmetric wetted-side lift produces
+            // restoring roll moment (toward level), not destabilizing.
+            // Added 2026-04-22 after abusive-input flip regression guard.
             let v_sample_body = v.orientation.inverse() * v_sample_world;
             let v_body_forward = -v_sample_body.z;
-            let planing_lift_world = if v_body_forward > 0.0 {
+            let planing_lift_body_vec = if v_body_forward > 0.0 {
                 // α-dependent boost (Savitsky planing-hull theory): nose-up
                 // trim angles raise hydrodynamic lift coefficient. Multiplier
                 // is clamped ≥ 1.0, so level/nose-down attitudes behave as
@@ -431,6 +533,7 @@ pub fn compute_buoyancy(
             } else {
                 Vec3::ZERO
             };
+            let planing_lift_world = v.orientation * planing_lift_body_vec;
 
             // Accumulate per-pontoon wetted for the stick force applied once
             // after the sample loop at pontoon center — see below.
@@ -462,18 +565,37 @@ pub fn compute_buoyancy(
         // Force is world-Y (vertical); moment comes from pontoon offset in
         // body frame so strong lateral arm → strong roll-restoring moment.
         //
-        // Quadratic in yaw rate: matches hydrofoil lift ∝ v² physics and
-        // avoids parasitic damping from tiny background yaw drift (e.g.
-        // P-factor residual during straight-line porpoise).
+        // Quadratic in yaw rate: matches hydrofoil lift ∝ v² physics.
+        //
+        // **HARD CLAMPED** to STICK_FORCE_MAX_N post playtest (task #179+):
+        // unbounded quadratic scaling let any yaw input (even at 16%
+        // throttle) drive runaway flips when players sent abusive inputs
+        // — rapid rudder reversal, sustained max yaw at any throttle.
+        // Physical max wetted-hydrofoil lift IS bounded by wetted area ×
+        // max lift coefficient; clamp enforces that bound. Real physics
+        // doesn't produce unbounded forces.
         let yaw_rate_body = v.angular_velocity.y;
         let inside_indicator = -pontoon.body_offset.x * yaw_rate_body;
         let v_cg_body_forward = (-(v.orientation.inverse() * v.velocity).z).max(0.0);
-        let stick_force_world_y = -INSIDE_FLOAT_STICK_COEFF
+        let stick_force_raw = -INSIDE_FLOAT_STICK_COEFF
             * inside_indicator
             * yaw_rate_body.abs()
             * v_cg_body_forward
             * pontoon_wetted_accum;
-        let stick_force_world = Vec3::new(0.0, stick_force_world_y, 0.0);
+        let stick_force_world_y = stick_force_raw.clamp(-STICK_FORCE_MAX_N, STICK_FORCE_MAX_N);
+        // Roll-angle gate: the stick force is physically meaningful only in
+        // near-level taxi attitudes. Applied in world-Y, at high bank angles
+        // it acquires a body-lateral component which — combined with the
+        // pontoon's longitudinal offset — produces a spurious ROLL moment that
+        // positive-feeds into more bank. Fade linearly from full authority at
+        // |roll| ≤ 30° to zero at |roll| ≥ 60°. Beyond 60° the aircraft is in
+        // an out-of-normal-operating-envelope state where this "nominal taxi
+        // stabilization" force has no physical basis and only drives flip.
+        // Added 2026-04-22 after abusive-input regression scenario.
+        let (_yaw, _pitch, roll_rad) = v.orientation.to_euler(glam::EulerRot::YXZ);
+        let roll_abs_deg = roll_rad.to_degrees().abs();
+        let stick_roll_gate = ((60.0 - roll_abs_deg) / 30.0).clamp(0.0, 1.0);
+        let stick_force_world = Vec3::new(0.0, stick_force_world_y * stick_roll_gate, 0.0);
         let stick_force_body = v.orientation.inverse() * stick_force_world;
         let stick_moment_body = pontoon.body_offset.cross(stick_force_body);
         total_force_world += stick_force_world;
@@ -503,19 +625,82 @@ pub fn compute_buoyancy(
         let v_body = v.orientation.inverse() * v.velocity;
         let v_body_forward = -v_body.z;
         if v_body_forward > 0.0 {
-            let side_force =
+            let side_force_raw =
                 WATER_RUDDER_COEFF * v_body_forward * v_body_forward * avg_wetted * v.controls.yaw;
+            let side_force =
+                side_force_raw.clamp(-WATER_RUDDER_FORCE_MAX_N, WATER_RUDDER_FORCE_MAX_N);
             let force_body = Vec3::new(-side_force, 0.0, 0.0);
             let arm_body = Vec3::new(0.0, 0.0, WATER_RUDDER_ARM_M);
-            // Moment: force × arm (cross product, both in body frame).
+            // YAW-ONLY framing: in real water, the rudder's lateral force
+            // is resisted by the pontoon hull's enormous lateral drag (long/
+            // narrow hulls act like keels). The aircraft rotates in place
+            // more than it slides — then apparent sideslip emerges from
+            // velocity-vector lag behind the rotating heading. Earlier we
+            // added both the yaw moment AND a linear lateral push at CG,
+            // which double-counted and produced visible side-sliding
+            // (playtest feedback 2026-04-22). Pure moment framing: rudder
+            // contributes yaw only, lateral motion comes from pontoon
+            // lateral drag balance + centripetal response to forward motion.
             let moment_body = arm_body.cross(force_body);
             total_moment_body += moment_body;
-            // Linear force: rotate the body-frame force into world frame and
-            // add to the total. Without this the aircraft pirouettes on CG;
-            // with it, the pivot point sits between CG and rudder — matches
-            // real-world water-turn motion.
-            total_force_world += v.orientation * force_body;
         }
+    }
+
+    // ── Submerged-surface flotation+drag (wingtips, fuselage ends) ────────
+    // When the aircraft banks past ~30° or pitches past ~20° on water, a
+    // wingtip or fuselage end will dip below the water surface. Without
+    // modeling that surface's interaction with water, nothing stops the
+    // aircraft from continuing to rotate further — the pontoon-only model
+    // is blind to below-pontoon geometry.
+    //
+    // This section adds per-point "drag + buoyancy" force at key airframe
+    // extrema (wingtips, tail, nose). For each point: if submerged, produce
+    //   - Buoyancy ~ submersion_depth × coeff (upward in world frame)
+    //   - Quadratic drag ~ v² × submersion_depth × coeff opposing motion
+    // The force is applied at the point's body offset so it produces both
+    // linear and angular (restoring) effects. Models the physical
+    // "wingtip digs into water and lifts aircraft back to level" mechanism.
+    //
+    // Added 2026-04-22 after abusive-input flip diagnostic: user correctly
+    // identified that we had realistic ACTIVE forces (water rudder, stick)
+    // but insufficient RESISTING forces at high-bank attitudes. Pontoon
+    // lateral drag alone can't overwhelm sustained water-rudder push, but
+    // wingtip-water drag at 30°+ bank is enormous and provides the missing
+    // restoring torque that bounds the flip.
+    for point in AIRFRAME_FLOAT_POINTS {
+        let world_offset = v.orientation * point.body_offset;
+        let world_pos = v.position + world_offset;
+        let water_y = water_height(world_pos.x, world_pos.z, wave_time) * chop_intensity;
+        let submersion = (water_y - world_pos.y).max(0.0);
+        if submersion <= 0.0 {
+            continue;
+        }
+        let submersion_clamped = submersion.min(point.max_depth_m);
+        // Velocity at this point (CG velocity + rotational contribution).
+        let v_point_world = v.velocity + angular_velocity_world.cross(world_offset);
+
+        // Buoyancy: proportional to submersion depth × coefficient.
+        let buoyancy_world = Vec3::new(0.0, submersion_clamped * point.buoyancy_n_per_m, 0.0);
+
+        // Quadratic drag opposing velocity. Apply only horizontal + vertical
+        // components; clamped magnitude per dimension to prevent explosion
+        // in degenerate high-speed scenarios.
+        let v_mag_sq = v_point_world.length_squared();
+        let drag_world = if v_mag_sq > 1e-6 {
+            let v_mag = v_mag_sq.sqrt();
+            let drag_magnitude = point.drag_coeff * v_mag_sq * submersion_clamped;
+            let drag_magnitude_clamped = drag_magnitude.min(point.drag_max_n);
+            -v_point_world * (drag_magnitude_clamped / v_mag)
+        } else {
+            Vec3::ZERO
+        };
+
+        let total_point_force_world = buoyancy_world + drag_world;
+        let force_body = v.orientation.inverse() * total_point_force_world;
+        let moment_body = point.body_offset.cross(force_body);
+
+        total_force_world += total_point_force_world;
+        total_moment_body += moment_body;
     }
 
     let linear_accel = total_force_world / mass_kg;
@@ -603,19 +788,23 @@ mod tests {
     #[test]
     fn submerged_aircraft_sees_capped_buoyancy() {
         // CG at y=0 → floats centered at -0.5m, fully submerged (bottom at -0.88m,
-        // top at -0.12m, both below water level y=0). Expect the displacement cap.
+        // top at -0.12m, both below water level y=0). Expect the displacement cap
+        // PLUS contribution from airframe float points (wingtips, nose, tail) which
+        // are now also modeled as flotation surfaces when submerged (post-2026-04-22
+        // abusive-input fix — see BEAVER_AIRFRAME_FLOAT_POINTS).
         let v = level_vehicle_at(0.0);
         let spec = beaver_spec();
         let out = compute_buoyancy(&v, Some(&spec), 0.0, 1.0);
 
-        // Max force = 2 pontoons × 2.236 m³ × 1000 kg/m³ × 9.81 m/s² ≈ 43,870 N.
-        let expected_max = 2.0 * 2.236 * WATER_DENSITY_KG_M3 * GRAVITY.length();
+        // Pontoon cap = 2 × 2.236 m³ × 1000 × 9.81 ≈ 43,870 N.
+        let pontoon_cap = 2.0 * 2.236 * WATER_DENSITY_KG_M3 * GRAVITY.length();
+        // Upward force must exceed pontoon cap (airframe points add buoyancy when
+        // submerged) and must exceed weight.
         assert!(
-            (out.total_force_n - expected_max).abs() < 50.0,
-            "expected fully-submerged cap ~{expected_max:.0} N, got {:.0} N",
+            out.total_force_n >= pontoon_cap - 50.0,
+            "expected at least pontoon cap ~{pontoon_cap:.0} N, got {:.0} N",
             out.total_force_n,
         );
-        // Upward force > weight → plane would accelerate up.
         let weight_n = spec.max_mass_wheels_kg * GRAVITY.length();
         assert!(
             out.total_force_n > weight_n,
@@ -652,10 +841,13 @@ mod tests {
         // phase asymmetry that correctly creates real (non-zero) roll moments — a
         // physically faithful behavior that would have been hidden by single-point
         // sampling when the centroid hits the displacement cap. To verify no
-        // systematic bias in the buoyancy code itself, deeply submerge the aircraft
-        // so every section saturates at its displacement cap; wave phase then
-        // doesn't affect per-section buoyancy, and symmetric port/starboard geometry
-        // must give zero roll and yaw moments.
+        // systematic bias in the port/starboard-symmetric buoyancy code, deeply
+        // submerge the aircraft so every section saturates at its displacement cap;
+        // wave phase then doesn't affect per-section buoyancy, and symmetric
+        // port/starboard geometry must give zero roll and yaw moments. Pitch is
+        // NOT symmetric because the airframe is fore/aft asymmetric (tail further
+        // back than prop, wingtip ahead of tail) — pitch at deep submersion
+        // reflects real airframe mass/buoyancy distribution.
         let v = level_vehicle_at(-1.0);
         let spec = beaver_spec();
         let out = compute_buoyancy(&v, Some(&spec), 0.0, 1.0);
@@ -668,12 +860,6 @@ mod tests {
             out.angular_accel.y.abs() < 1e-4,
             "expected zero yaw accel at deep submersion, got {}",
             out.angular_accel.y,
-        );
-        // Pitch should also be zero: fore and aft sections contribute symmetric r × F.
-        assert!(
-            out.angular_accel.x.abs() < 1e-4,
-            "expected zero pitch accel at deep submersion, got {}",
-            out.angular_accel.x,
         );
     }
 
@@ -951,20 +1137,25 @@ mod tests {
 
     #[test]
     fn water_rudder_scales_with_forward_speed_squared() {
+        // Test v² scaling at speeds BELOW the WATER_RUDDER_FORCE_MAX_N clamp.
+        // At 1 m/s, raw side force ≈ 800 × 1 × 0.5 = 400 N (below 5000 N cap).
+        // At 2 m/s, raw side force ≈ 800 × 4 × 0.5 = 1600 N (still below cap).
+        // Ratio should be ~4× for clean v² verification. Post-2026-04-22 clamp
+        // saturates high speeds, so the test uses low speeds to verify formula.
         let spec = beaver_spec();
         let mut v_slow = level_vehicle_at(2.40);
-        v_slow.velocity = Vec3::new(0.0, 0.0, -3.0);
+        v_slow.velocity = Vec3::new(0.0, 0.0, -1.0);
         v_slow.controls.yaw = 1.0;
         v_slow.controls.water_rudder = true;
         let slow = compute_buoyancy(&v_slow, Some(&spec), 0.0, 1.0);
 
         let mut v_fast = level_vehicle_at(2.40);
-        v_fast.velocity = Vec3::new(0.0, 0.0, -6.0); // 2× speed
+        v_fast.velocity = Vec3::new(0.0, 0.0, -2.0); // 2× speed
         v_fast.controls.yaw = 1.0;
         v_fast.controls.water_rudder = true;
         let fast = compute_buoyancy(&v_fast, Some(&spec), 0.0, 1.0);
 
-        // 2× speed → ~4× moment (quadratic scaling).
+        // 2× speed → ~4× moment (quadratic scaling, pre-clamp regime).
         let ratio = fast.angular_accel.y / slow.angular_accel.y;
         assert!(
             ratio > 3.0 && ratio < 5.0,
