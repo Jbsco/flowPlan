@@ -17,3 +17,8 @@ glam = { workspace = true }
 libm = { workspace = true }
 # world depends on core only. Sim queries world's pure samplers for buoyancy
 # (Phase 2.5a) and ground effect (Phase 2.4.6); that's the sim -> world direction.
+
+[dev-dependencies]
+# Visual-bench harness writes PNG artifacts for world-gen validation.
+# Integration tests only; not linked into the runtime crate.
+image = "0.25"

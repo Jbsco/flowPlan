@@ -11,7 +11,14 @@
 pub mod sky;
 pub mod terrain;
 pub mod water;
+pub mod weather;
 
 pub use sky::sun_direction;
 pub use terrain::{HeightSampler, Terrain};
 pub use water::{max_amplitude as water_max_amplitude, water_height};
+pub use weather::{humidity_at, pressure_at, temperature_at};
+
+// Dev-dep used only by `tests/weather_visual_bench.rs`; marker silences the
+// unused-crate-dependencies lint on other test targets.
+#[cfg(test)]
+use image as _;
