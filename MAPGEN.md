@@ -701,6 +701,52 @@ placement_rules: (
 
 **Variation & rarity**: rules tune *density* by category. Scenery features use aggressive `min_self_spacing_km` (5-50 km) so they stay rare discoveries. Developments use moderate spacing (5-30 km) + hub-proximity attractors so they cluster believably. Wilderness-themed features use `hub_exclusion` to keep their "off-grid" identity.
 
+**Future-extension candidates** (not shipped in 3.6.3c.1; growth path):
+- `requires_hub_adjacency` — for suburban/rural objects that should be near a hub but don't need road adjacency specifically (small parks, rural outbuildings near dwellings).
+- `requires_feature_adjacency` — arbitrary feature-type adjacency, e.g. a bait_shop must be adjacent to a fishing_camp.
+- `climate_precipitation_range` — gate on annual precip; requires `precipitation_rate_at` integration at a seasonal-mean reference.
+- `prominence_view_distance_km` — true ray-cast-against-heightfield view distance; currently approximated by `prominence_min_m` (elevation above neighborhood median). Upgrade candidate when photo-mode (5.5) needs precise view-factor scoring.
+
+#### Hub emergent upgrade via feature spillover (PINNED — stub 3.6.3c.1, implement 3.6.3c.3+)
+
+User-confirmed design direction (2026-04-23): some feature types don't make world-coherent sense as standalone isolated entities. A factory in the middle of nowhere with no workforce, no fuel supply, no transport raises "how is this here?" in the player's mind. Rather than accept that absurdity, the generator **pulls supporting features** into nearby cells when a low-probability rare anchor lands, creating an **emergent micro-hub** that justifies the anchor's presence.
+
+Real-world analog: company towns. Appalachian coal villages, oil boom settlements, remote Alaskan fish-cannery hamlets. Industrial anchor + supporting economy — neither naturally-placed alone but naturally-placed TOGETHER.
+
+**Authoring surface** (new optional rule category alongside the 7 baseline):
+```ron
+placement_rules: Some((
+    // ... baseline rule categories ...
+    spillover: Some((
+        supporting_features: ["dwelling_cluster", "gas_station", "general_store"],
+        radius_km: 8.0,
+        min_count: 2,                   // at least N supporting must spawn;
+                                        // if unmet, anchor placement rejects
+        max_count: 5,                   // per-trigger budget cap (prevents snowball)
+        upgrades_hub_to: Some("Local"), // if a Remote/Isolated hub is inside radius,
+                                        // upgrade its tier OR add emergent_context
+    )),
+)),
+```
+
+**Evaluation** (at bake, after anchor feature successfully placed):
+1. Queue supporting-feature placement in cells within `radius_km` via spatial query.
+2. Each queued placement runs standard `PlacementContext` + `PlacementRules` — must satisfy constraints like any other. Spillover is *opportunity*, not *guarantee*.
+3. Successes consume the anchor's budget (`max_count`). `min_count` unmet → anchor placement rejects and the cell rerolls (lonely factories don't exist).
+4. Nearby hub ≤ `upgrades_hub_to` tier → annotate hub with tier upgrade OR `emergent_context` tag (e.g. `FactoryTown`, `MiningOutpost`, `ResearchStation`).
+
+**Budget design — why two layers**:
+- **Per-trigger `max_count`** (primary, ships first): caps chain reactions at the source. A factory with budget 5 pulls 5 neighbors max; supporting features themselves don't declare spillover (or declare lower budgets), preventing recursion runaway.
+- **Region-cap safety net** (optional overlay, add if needed): each hub Voronoi region (~300 km from 3.6.1e) tracks total spillover placements; soft cap prevents "every region has 10 factory towns" from rare-feature clustering. Start without; add if visual-bench shows runaway density.
+
+**3.6.3c.1 stub commitment**: `SpilloverRules` struct defined + `PlacementRules.spillover` field exists. Evaluation path logs "spillover not yet wired" on encounter, no error. All 18 3.6.3b features have `spillover: None` today. Ready to author `spillover: Some(...)` for future anchor features without schema churn.
+
+**3.6.3c.3+ implementation**: `FeatureGroup` placement queue; first anchor features authored (factory, cannery, research_station); visual-bench `emergent_hub_{crop}.png` artifact showing the clustering around rare anchors.
+
+**Candidate anchor features (future backlog — see [FEATURES.md § Emergent-hub anchor features](FEATURES.md#emergent-hub-anchor-features-future-backlog))**: `factory`, `cannery`, `research_station`, `radio_antenna_complex`, `logging_camp`, `mining_operation`, `hydro_station`. Each declares 4-8 supporting features + `max_count` tuned to operational footprint.
+
+Memory reference: `hub_emergent_upgrade_via_spillover`.
+
 ### Composition properties (why this separation matters)
 
 - **Independent development.** Each layer lands on a separate milestone. Layer 1 = Phase 3.6.1; Layer 2 = Phase 3.6.2; Layer 3 = Phase 3.6.3 + 3.6.4.

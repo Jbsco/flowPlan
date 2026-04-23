@@ -266,6 +266,28 @@ Notation: distances in km; tier is the minimum hub tier the rule references; `�
 
 Full schema + evaluation-order spec: [MAPGEN.md § Placement rule vocabulary (PINNED)](MAPGEN.md#placement-rule-vocabulary-pinned) + agent-memory `feature_delta_expansion_3_6_3`.
 
+#### Emergent-hub anchor features (future backlog)
+
+Separate feature class from the 21 cross-biome categories above. **Anchor features** are low-probability industrial / research / logistics landmarks that don't make world-coherent sense as isolated entities — they pull **supporting features** (housing, fuel, resupply) into nearby cells via the spillover mechanism, creating emergent micro-hubs. Full spec: [MAPGEN.md § Hub emergent upgrade via feature spillover](MAPGEN.md#hub-emergent-upgrade-via-feature-spillover-pinned--stub-363c1-implement-363c3). Agent-memory: `hub_emergent_upgrade_via_spillover`.
+
+**Schema stub ships 3.6.3c.1** (`SpilloverRules` struct + `PlacementRules.spillover` field). **Implementation ships 3.6.3c.3+** (placement queue + hub-tier upgrade). Anchor authoring phase TBD — likely a 3.6.3c.4 or 3.6.4 sub-milestone.
+
+Candidates for authoring (not yet in RON):
+
+| Feature | Home biome | Spillover candidates | Notes |
+|---|---|---|---|
+| `factory` | HighDesert / CoastalBoreal | `dwelling_cluster`, `gas_station`, `general_store`, `rail_corridor_segment` | Industrial anchor; railhead + power needs justify rail + roads |
+| `cannery` | CoastalBoreal (water-adjacent) | `dwelling_cluster`, `fishing_camp`, `general_store`, `ferry_dock` | Processes imports from `fishing_grounds` (Oceanic); coastal-only |
+| `research_station` | RockyAlpine (high-altitude) | `dwelling_cluster`, `gas_station`, `radio_antenna_complex` | Meteo / astro / glaciology; remote-by-design but needs logistics |
+| `radio_antenna_complex` | any | `dwelling_cluster`, `gas_station` | Emergency / long-range comms; can be emergent-supporting for other anchors OR primary |
+| `logging_camp` | CoastalBoreal / RockyAlpine | `dwelling_cluster`, `general_store`, `dirt_road_segment` | Temporary anchor; regrowth-visible years after in flora (3.6.4+) |
+| `mining_operation` | HighDesert / RockyAlpine | `dwelling_cluster`, `gas_station`, `general_store`, `rail_corridor_segment` | Extractive; rail or road supply depending on scale |
+| `hydro_station` | RockyAlpine | `dwelling_cluster`, `gas_station`, `road_segment` | Dam + turbine + maintenance village |
+
+Each anchor will declare `radius_km` (~5-15 km), `min_count` (typically 2-3), `max_count` (typically 4-8), and an `upgrades_hub_to` target. Per-trigger budget caps chain reactions; optional region-cap safety net (in `MAPGEN.md`) layers on if playtest shows runaway density.
+
+**Mission-system hook (Phase 4.5)**: emergent hubs have richer service catalogs than their baseline tier suggests. "Factory town" delivers industrial cargo; "cannery village" routes fish product to regional hubs; "research station" generates personnel / supply runs. Creates memorable unique destinations that emerge from generation rather than being hand-authored.
+
 ### Sub-biome feature overlap with palette adaptation
 
 Sub-biome features can **overlap into neighboring parent biomes** — producing organic, natural-feeling transitions without hard biome boundaries:
