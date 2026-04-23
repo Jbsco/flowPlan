@@ -5397,7 +5397,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             event: InputEvent::SetYaw(-1.0),
         }],
         controllers: &[],
-        duration_ticks: 1200, // 10s — enough to reach β equilibrium (real Beaver: ~3s)
+        duration_ticks: 3600, // 30s — full spiral-mode envelope; CL_β = -0.025 should keep this bounded
         assertions: &[
             Assertion::SideslipBoundedThroughout { max_abs_deg: 60.0 },
             Assertion::BodyForwardSpeedAbove { min_mps: 0.0 },
@@ -5405,7 +5405,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     },
     FlightScenario {
         name: "beaver_air_abusive_yaw_right",
-        description: "Cruise + full RIGHT rudder held 10s — asymmetric pair to _yaw_left.",
+        description: "Cruise + full RIGHT rudder held 30s — asymmetric pair to _yaw_left.",
         aircraft_id: BEAVER_ID,
         variants: BEAVER_SHARED_FLIGHT_VARIANTS,
         initial: ScenarioInitial {
@@ -5423,7 +5423,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             event: InputEvent::SetYaw(1.0),
         }],
         controllers: &[],
-        duration_ticks: 1200,
+        duration_ticks: 3600,
         assertions: &[
             Assertion::SideslipBoundedThroughout { max_abs_deg: 60.0 },
             Assertion::BodyForwardSpeedAbove { min_mps: 0.0 },
@@ -5529,6 +5529,127 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
         duration_ticks: 1200,
         assertions: &[
             Assertion::SideslipBoundedThroughout { max_abs_deg: 30.0 },
+            Assertion::BodyForwardSpeedAbove { min_mps: 0.0 },
+        ],
+    },
+    FlightScenario {
+        name: "beaver_air_abusive_pitch_up",
+        description: "Cruise + full BACK stick held 10s — aircraft pitches up, stalls, tumbles into classic departure. Physics realism: real aircraft experience transient reverse flow during tumble; bound body-forward to prevent unbounded reverse flight without suppressing realistic tumble transient.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_SHARED_FLIGHT_VARIANTS,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 2000.0, 0.0),
+            velocity: Vec3::new(0.0, 0.0, -55.0),
+            orientation: CRUISE_ATTITUDE,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.58,
+            flaps: FlapPosition::Up,
+            fuel_gal: 80.0,
+            chop_intensity_override: None,
+        },
+        inputs: &[ScenarioInput {
+            tick: 0,
+            event: InputEvent::SetPitch(1.0),
+        }],
+        controllers: &[],
+        duration_ticks: 1200,
+        // Departure/tumble physics: aircraft stalls past 30° pitch, falls
+        // backward briefly (body-forward ≈ -17 m/s observed), rolls inverted,
+        // dives. Assertion bounds body-forward at -25 m/s — generous enough
+        // for realistic tumble transient but catches unbounded growth
+        // (e.g. if the aircraft kept "flying backwards" instead of recovering
+        // via gravity + pitch). Actual measured peak transient: ~-17 m/s.
+        assertions: &[Assertion::BodyForwardSpeedAbove { min_mps: -25.0 }],
+    },
+    FlightScenario {
+        name: "beaver_air_abusive_throttle_cut",
+        description: "Cruise + throttle cut 0.58 → 0 at t=0 — sudden thrust loss. Aircraft should glide cleanly, not diverge in any axis.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_SHARED_FLIGHT_VARIANTS,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 2000.0, 0.0),
+            velocity: Vec3::new(0.0, 0.0, -55.0),
+            orientation: CRUISE_ATTITUDE,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.58,
+            flaps: FlapPosition::Up,
+            fuel_gal: 80.0,
+            chop_intensity_override: None,
+        },
+        inputs: &[ScenarioInput {
+            tick: 0,
+            event: InputEvent::SetThrottle(0.0),
+        }],
+        controllers: &[],
+        duration_ticks: 3600, // 30s — full glide envelope
+        assertions: &[
+            Assertion::SideslipBoundedThroughout { max_abs_deg: 15.0 }, // no control input → tight β
+            Assertion::BodyForwardSpeedAbove { min_mps: 0.0 },
+        ],
+    },
+    FlightScenario {
+        name: "beaver_air_abusive_crossed_controls",
+        description: "Cruise + full RIGHT aileron + full LEFT rudder (fully crossed controls) — classic student-pilot 'skidding stall' setup. Must not produce unbounded response.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_SHARED_FLIGHT_VARIANTS,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 2000.0, 0.0),
+            velocity: Vec3::new(0.0, 0.0, -55.0),
+            orientation: CRUISE_ATTITUDE,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.58,
+            flaps: FlapPosition::Up,
+            fuel_gal: 80.0,
+            chop_intensity_override: None,
+        },
+        inputs: &[
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetRoll(1.0),
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetYaw(-1.0),
+            },
+        ],
+        controllers: &[],
+        duration_ticks: 1200,
+        // Crossed controls at cruise: aircraft will skid + bank + dive. Bound β
+        // (weathervane stays engaged) and body_forward (no reverse flight in 10s).
+        assertions: &[
+            Assertion::SideslipBoundedThroughout { max_abs_deg: 60.0 },
+            Assertion::BodyForwardSpeedAbove { min_mps: 0.0 },
+        ],
+    },
+    FlightScenario {
+        name: "beaver_air_abusive_full_throttle_full_yaw",
+        description: "Cruise + max throttle + full LEFT rudder together — driveshaft torque + rudder stacks asymmetrically. Test for prop-coupling amplification.",
+        aircraft_id: BEAVER_ID,
+        variants: BEAVER_SHARED_FLIGHT_VARIANTS,
+        initial: ScenarioInitial {
+            position: Vec3::new(0.0, 2000.0, 0.0),
+            velocity: Vec3::new(0.0, 0.0, -55.0),
+            orientation: CRUISE_ATTITUDE,
+            angular_velocity: Vec3::ZERO,
+            throttle: 0.58,
+            flaps: FlapPosition::Up,
+            fuel_gal: 80.0,
+            chop_intensity_override: None,
+        },
+        inputs: &[
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetThrottle(1.0),
+            },
+            ScenarioInput {
+                tick: 0,
+                event: InputEvent::SetYaw(-1.0),
+            },
+        ],
+        controllers: &[],
+        duration_ticks: 1200,
+        assertions: &[
+            Assertion::SideslipBoundedThroughout { max_abs_deg: 60.0 },
             Assertion::BodyForwardSpeedAbove { min_mps: 0.0 },
         ],
     },
