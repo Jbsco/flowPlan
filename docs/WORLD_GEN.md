@@ -14,6 +14,7 @@
 - [Altitude envelope (real-world-possible gate)](#altitude-envelope-real-world-possible-gate)
 - [Biome classification + soft weighting](#biome-classification--soft-weighting)
 - [Per-biome terrain profiles](#per-biome-terrain-profiles)
+- [Hydrology graph (3.6.1d)](#hydrology-graph-361d)
 - [Weather field generation](#weather-field-generation)
 - [Voronoi cells (variable size)](#voronoi-cells-variable-size)
 - [Toroidal world topology](#toroidal-world-topology)
@@ -312,6 +313,76 @@ Defined in `crates/world/src/terrain.rs` as `BiomeProfile` const instances. Curr
 **Background fBm layer** prevents flat-plateau artifacts. Ridged multifractal bottoms out to exactly 0 in valleys, so without the background term you'd see perfectly flat regions at `mean_altitude`. The 30–80 m background variation gives rolling valley floors.
 
 **Altitude envelope** is enforced AFTER primitive composition — see [Altitude envelope (real-world-possible gate)](#altitude-envelope-real-world-possible-gate).
+
+---
+
+## Hydrology graph (3.6.1d)
+
+`crates/world/src/hydrology.rs` bakes a read-only spatial water classification + per-body surface-elevation graph at world-load time. Consumers query via O(1) cell lookup; the bake runs ~2 s on a modern CPU for the 5000 km world at 2.5 km resolution.
+
+### Bake pipeline
+
+1. **Coarse heightfield** at `BAKE_RESOLUTION_M = 2500 m` (`BAKE_GRID_N = 2000`² = 4 M cells). Sampled via `Terrain::height_at_scale(x, z, 2500.0)` — mipmap-aware to suppress sub-cell aliasing.
+
+2. **Priority-flood + D8** (Barnes/Lehman/Mulla 2014). Seeds all sea cells (`raw_elevation ≤ 0`) as sinks, floods outward assigning every non-sea cell a `d8_downstream` pointer + pit-filled elevation. Pit-fill lifts depressions to their spillway level so flow direction is well-defined inside closed pits. Single pass O(N log N). Invariants: `filled_elevation[c] ≥ raw_elevation[c]` everywhere; walking `d8_downstream` from any cell eventually reaches a sea cell.
+
+3. **Flow accumulation** via Kahn's topological sort. Each cell receives upstream contributions via `upstream_count`-decrement; own `precip_index` gets added; total pushes to `d8_downstream`. Elevation-sort doesn't work here — pit-filled flat regions produce ties that a sort handles wrong. Kahn's is O(N) and respects flow topology regardless of elevation.
+
+4. **Wetness equilibrium** replaces "always fill to spillway" with real-world equilibrium: per basin, water surface area `A_w = inflow / evap_index`; binary-search the basin's hypsometric curve for the fill elevation that produces `A_w` cells underwater. Capped at spillway (overflow case). Basins where `A_w < footprint` are partially filled (closed-basin / arid). This is where desert basins stay mostly dry while alpine cirques brim.
+
+5. **Channel classification** via second Kahn's pass computing path-integrated residual flow (inflow minus per-cell evaporation along the downstream path). Cells classified:
+   - `River`: residual ≥ `RIVER_FLOW_THRESHOLD` (400)
+   - `Creek`: residual ≥ `RIVER_TO_CREEK_THRESHOLD` (40)
+   - `DryChannel`: flow_accumulation ≥ `RIVER_TO_CREEK_THRESHOLD` AND residual < it (accumulation existed pre-evap but path evaporation cancelled surface water — desert wadi / wash)
+   - Otherwise: dry land
+
+6. **DeltaFan detection**: River/Creek cells whose `d8_downstream` is sea or lake, plus their immediate upstream 1-step footprint, reclassify as `DeltaFan`. Turns the D8 "parallel-flow on flats" visual artifact into a gameplay feature — 3.6.3 renders these as braided sandbar / mudflat geometry.
+
+7. **Coastline polylines** via Marching Squares at `SEA_LEVEL_M = 0.0` on the coarse grid. Reuses the MS pattern from `terrain_visual_bench`.
+
+### Per-biome hydrology priors (`BiomeHydrology`)
+
+Dimensionless precipitation and evaporation indices driving the wetness model:
+
+| Biome | precip_index | evap_index | typical outcome |
+|---|---|---|---|
+| HighDesert | 0.15 | 1.0 | dry playas + ephemeral wadis; rare filled basin |
+| RockyAlpine | 0.7 | 0.4 | tarns brim, perennial rivers, cirque lakes |
+| CoastalBoreal | 1.0 | 0.3 | many full lakes, dense river network |
+| MediterraneanArchipelago | 0.5 | 0.7 | mid-fill lakes, dry-summer creeks inland |
+
+Channel evaporation per cell: `CHANNEL_EVAP_PER_CELL × evap_index = 0.25 × evap_index`. In high desert (evap 1.0), per-cell loss (0.25) exceeds per-cell precip (0.15) → flow shrinks downstream → DryChannel forms. In boreal (evap 0.3), loss (0.075) << precip (1.0) → flow grows → Rivers form.
+
+### Query API
+
+```rust
+HydrologyGraph::bake(master_seed, &terrain) -> Self
+HydrologyGraph::water_surface_at(x, z) -> Option<WaterSurface>
+HydrologyGraph::lake(id) -> Option<&LakeBasin>
+HydrologyGraph::river(id) -> Option<&RiverEdge>
+HydrologyGraph::coastline_segments() -> &[CoastlineSegment]
+```
+
+`WaterSurface` carries `{class, elevation_m, chop_amplitude_scale, body_id}`. Sea = 0 m; lake = equilibrium fill elevation; river / creek / delta = terrain-flush (render-side offset). `chop_amplitude_scale` is the per-body dispatch parameter that 3.5b FFT ocean will use for wave-model selection (sea → full FFT; lakes → scaled Gerstner; rivers → flow shader).
+
+### Data-layer stats (canonical seed `0xF10_1A11`)
+
+| Class | Coverage | Notes |
+|---|---|---|
+| OpenOcean (sea) | 23.9 % | matches terrain-below-sea-level fraction |
+| Lake | 4.6 % | filled basins (≥ 5 m depth, ≥ 25 km² footprint) |
+| River | 1.9 % | perennial named-river-scale channels |
+| Creek | 3.6 % | smaller perennial flow |
+| DeltaFan | 0.3 % | river-mouth fan footprints |
+| DryChannel | 0 % (this seed) | needs HighDesert biome coverage to activate |
+| Dry land | 65.7 % | the rest |
+
+### Known limitations (deferred)
+
+- **D8 parallel-flow on flats**: simple D8 produces visibly parallel flow lines across large flat regions (filled-pit plateaus). 3.6.1d accepts this via `DeltaFan` tagging as a feature rather than a bug; a future pass can implement Barnes 2014 "flat direction resolution" to route flat cells toward the spillway for more dendritic visual structure.
+- **DryChannel absent in canonical seed**: only High Desert (0.2 % of this seed) activates the desert-evap > desert-precip condition. Will appear more on seeds with higher desert coverage, or if Mediterranean biome constants are tuned drier.
+- **Buoyancy wiring**: `world::water_height` currently returns sea-level-only; passing a HydrologyGraph reference into buoyancy so lakes contribute at their own elevations is a small follow-up (SimState owns the graph + buoyancy reads through it).
+- **FFT coupling** (3.5b second pass): per-body wave-model dispatch inherits from `WaterClass` + `chop_amplitude_scale` — no hydrology rework needed.
 
 ---
 

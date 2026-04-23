@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod biome;
+pub mod hydrology;
 pub mod noise;
 pub mod sky;
 pub mod terrain;
@@ -16,6 +17,10 @@ pub mod water;
 pub mod weather;
 
 pub use biome::{biome_at, biome_weights_at, BiomeClass, BiomeWeights};
+pub use hydrology::{
+    BiomeHydrology, CoastlineSegment, HydrologyGraph, LakeBasin, RiverEdge, WaterClass,
+    WaterSurface,
+};
 pub use sky::{local_time_of_day, sun_direction};
 pub use terrain::{HeightSampler, Terrain};
 pub use water::{chop_intensity_from_wind, max_amplitude as water_max_amplitude, water_height};

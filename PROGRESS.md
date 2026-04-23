@@ -3,7 +3,48 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
-Last updated: **2026-04-23** (Phase 2.5 **SHIPPED**; Phase 3.2.1 + 3.2.2 + 3.2.3 weather W1/W2/W3 + flight coupling + chop wiring **SHIPPED**; world scope **LOCKED to Option A toroidal**; progression data-model locked; **scenario-realism audit COMPLETE**; **flight-model realism pass COMPLETE**; **water-physics hardening + q_chord aero audit COMPLETE**; **Phase 3.6.0 + 3.6.1a + 3.6.1b + 3.6.1c SHIPPED** — Perlin-fBm terrain, per-biome ridged/domain-warped primitives, mipmap-aware sampling, real-world-possible altitude envelope; bench at ~70 scenarios + 135 unit tests, full gate green. **Next: Phase 3.6.1d hydrology D8 drainage.**).
+Last updated: **2026-04-23** (Phase 2.5 **SHIPPED**; Phase 3.2.1 + 3.2.2 + 3.2.3 weather W1/W2/W3 + flight coupling + chop wiring **SHIPPED**; world scope **LOCKED to Option A toroidal**; progression data-model locked; **scenario-realism audit COMPLETE**; **flight-model realism pass COMPLETE**; **water-physics hardening + q_chord aero audit COMPLETE**; **Phase 3.6.0 + 3.6.1a + 3.6.1b + 3.6.1c + 3.6.1d SHIPPED** — Perlin-fBm terrain, per-biome ridged/domain-warped primitives, mipmap-aware sampling, real-world-possible altitude envelope, hydrology bake (priority-flood + D8 + wetness equilibrium + delta fans + coastline); bench at ~70 scenarios + 157 unit tests, full gate green. **Next: Phase 3.6.1e hub catalog bake + magnetic variation.**).
+
+## 2026-04-23 (iteration 2) — Phase 3.6.1d (hydrology graph)
+
+L1 hydrology data layer shipped as a read-only bake produced once at world-load. The graph exposes spatial water classification + per-body surface-elevation so lakes, rivers, creeks, delta fans, dry channels, and coastlines are all deterministic properties of the seed.
+
+- **Bake pipeline**: coarse 2.5 km heightfield (4 M cells) → priority-flood + D8 (Barnes/Lehman/Mulla 2014) → Kahn's topological flow accumulation → wetness equilibrium fill per basin → path-integrated residual-flow channel classification → delta-fan detection at river mouths → Marching Squares coastline at sea level. End-to-end ~2 s.
+- **Wetness model replaces "always fill to spillway"**: each non-sea basin solves `inflow = evap × surface_area` via binary search on the basin's hypsometric curve. Desert basins sit mostly dry, alpine cirques brim, coastal basins overflow into rivers — all from the master seed. Per-biome precip + evap indices (HighDesert 0.15/1.0, RockyAlpine 0.7/0.4, CoastalBoreal 1.0/0.3, Mediterranean 0.5/0.7) calibrate the lake/river density against real-world expectations.
+- **`WaterClass::DeltaFan`** — per user design insight: the D8 parallel-flow artifact on flat regions is the geometric signature of real-world delta formation. We lean into it by tagging river-mouth cells + their immediate upstream fan footprint as `DeltaFan`, hooking 3.6.3 feature-delta renderer for braided-channel / sandbar geometry.
+- **Query API**: `HydrologyGraph::water_surface_at(x, z) -> Option<WaterSurface>` returns `{class, elevation_m, chop_amplitude_scale, body_id}`. `chop_amplitude_scale` pre-dispatches the 3.5b FFT wave-model choice (sea → full FFT; lakes → scaled Gerstner; rivers → flow shader) without needing hydrology rework.
+- **Toroidal wrap** via `wrap_cell_index` — basins, rivers, and deltas cross the world seam transparently.
+- **Visual-bench**: 4 artifact families × 4 crops = 16 PNGs. Composite at player scale overlays per-pixel topo + vector river polylines (Bresenham, toroidal-aware world_to_pixel) to give dense visual information at 10 km crop where 2.5 km cells would otherwise show as 4×4 blocks.
+
+### Bake stats (canonical seed `0xF10_1A11`)
+
+| Class | Coverage |
+|---|---|
+| OpenOcean | 23.9 % |
+| Lake (all variants) | 4.6 % |
+| River | 1.9 % |
+| Creek | 3.6 % |
+| DeltaFan | 0.3 % |
+| DryChannel | 0 % (HighDesert is 0.2 % of this seed) |
+| Dry land | 65.7 % |
+
+### Test state
+
+- **22 hydrology unit tests pass** — scaffold invariants + bake integration (priority-flood downhill-reach, flow-accumulation topological monotonicity, wetness equilibrium bounds, river slope-obey, lake elevation-bounds, delta-fan detection, determinism across seeds, toroidal wrap).
+- **157 total `flowplan-world` tests pass** (up from 135).
+- Full workspace green: fmt + clippy `-D warnings` + cargo test + cargo test --doc.
+
+### Known limitations / deferrals
+
+- **D8 parallel-flow on flats**: classic D8 artifact — flat regions flood from one edge producing parallel downstream vectors. `DeltaFan` tagging turns this into a feature at river mouths; broader Barnes 2014 "flat direction resolution" can land in a future polish pass for more dendritic look.
+- **Buoyancy sim integration**: `world::water_height` still returns sea-level Gerstner only. Passing a `HydrologyGraph` reference through `SimState` → buoyancy so lakes contribute at their own elevations is a small follow-up (~50 LOC).
+- **`DryChannel` coverage**: only activates in HighDesert biome (0.2 % of canonical seed). Biome classification rebalancing is a 3.6.2 concern.
+
+### Next milestone
+
+**Phase 3.6.1e — hub catalog bake + magnetic variation**. Then 3.6.2 (Voronoi partition + sub-biome features).
+
+---
 
 ## 2026-04-23 — Phase 3.6.1a–c (world Layer 1 topographic base)
 
