@@ -39,7 +39,13 @@ L2 of the three-layer world-composition architecture — the semantic layer. "Wh
 
 ### Next milestone
 
-**Phase 3.6.3 — Layer-3 feature-delta heightfield modifications** (basin carving, mesa raising, sandbar deposition, flora placement, shore classification).
+**Phase 3.6.3 — Layer 3 feature-delta heightfield modifications**. Split (pinned 2026-04-23 per user direction) into:
+
+- **3.6.3a** (code): delta engine (`FeatureDelta` trait + registry + bump-function falloff + hydrology continuity check) + ~10 natural signature deltas (lake_cluster, alpine_tarn, cirque, mesa_top, book_cliffs, dune_field, bush_strip_clearing, sandy_beach, cliff_coast, protected_cove) + **hub foundation** tier-adaptive clearing (Major: full flatten + 50 m skirt + cut-and-fill; down to Isolated: no delta) + `world::surface_at -> SurfaceClass` sampler (unblocks 2.5b.7 per-surface friction).
+- **3.6.3b** (design-authoring sprint, no code): expand RON + MAPGEN.md / FEATURES.md with developments (`farmland_parcel`, `dwelling_cluster`, `remote_compound`, `ranch`, `homestead_clearing`), infrastructure (`road_segment`, `highway_intersection`, `rail_corridor_segment`), resupply / interactables (`gas_station`, `bait_shop`, `fishing_camp`, `tackle_shop`, `ferry_dock`), scenery (`natural_meadow`, `creek_valley`, `scenic_overlook`, `river_bend_viewpoint`, `hot_springs`, `abandoned_homestead`). User iterates on placement rules (hub-proximity biases, biome compatibility, scenery prominence weighting).
+- **3.6.3c** (code): `FeatureGroup` engine extension in `voronoi_cells` — cells that belong to connected-feature groups (roads → polylines, residential clusters). Group-aware deltas (road depression runs continuous across group cells). Implements all 3.6.3b-authored features.
+
+`gas_station` provides a Phase 4.5 refuel economy anchor (land near station → refuel). All details encoded in agent-memory `feature_delta_expansion_3_6_3`.
 
 ---
 

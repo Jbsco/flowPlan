@@ -931,14 +931,37 @@ This milestone slots between Phase 3 close and Phase 3.6.1 so Layer-1 hydrology 
 
 **Ships Layer 3 — feature deltas become visible in the heightfield + shore classification + landmark placement. This is where features go from labels to geometry.**
 
-- [ ] **Per-feature-type delta functions** per [MAPGEN.md § Layer 3](MAPGEN.md#layer-3--feature-delta-heightfield-modifications): lakes carve basins, runways flatten strips with skirts, mesas raise plateaus with cliff edges, arches add rock geometry, dune fields add noise undulation, floodplains trough along rivers, etc. Additive composition on top of Layer 1: `final_height = base + Σ feature_deltas`.
+Split (pinned 2026-04-23 per user direction, detail in [MAPGEN.md § Layer 3 phase split](MAPGEN.md#layer-3-phase-split-pinned-2026-04-23) + agent-memory `feature_delta_expansion_3_6_3`):
+
+**3.6.3a — per-cell delta engine + natural features + hub foundation + shore classification (code):**
+
+- [ ] **`FeatureDelta` trait + registry** mapping feature_id → delta implementation. Additive on top of Layer 1: `final_height = base + Σ feature_deltas`.
 - [ ] **Boundary falloff invariant:** each delta smoothly to zero at Voronoi cell edges (bump-function / cosine falloff). Continuous terrain across Voronoi edges by construction.
-- [ ] **Hydrology continuity invariant:** deltas cannot violate the Layer 1 hydrology graph — cannot elevate a river channel, cannot fill a lake basin, cannot dam a drainage network. Mesa / ridgeline / elevation-raising features reject placement where the hydrology graph routes water through the cell.
-- [ ] **Shore classification sampler** (`sand_beach | gravel | rock | cliff | mudflat | delta | ice_edge`) from final heightfield + hydrology graph + biome. Exposes `world::surface_at(x, z) -> SurfaceClass` — **unblocks 2.5b.7**.
-- [ ] Placed landmarks (lighthouses, wrecks, bridges, waterfalls, mesas, arches) via deterministic poisson-disk; per-biome density.
-- [ ] **Feature groups** (cross-cell features): ridgelines spanning multiple cells, salmon-run rivers threading through cells, logging-road systems — coordinated delta functions across a group of adjacent Voronoi cells.
-- [ ] Tier-1 / tier-2 **authored hub chunk** infrastructure: authored chunk format + seam-blending; actual hub authored *content* lands in Phase 4.1. Phase 3.6.3 ships the infrastructure.
-- [ ] **Deterministic / telemetric validation:** assert final heightfield byte-identical across platforms given same master seed + Voronoi partition; assert boundary-falloff continuity between neighboring cells; assert hydrology-graph-violation rejection; assert `surface_at` returns coherent classes along sample transects.
+- [ ] **Hydrology continuity invariant** enforced at query time: deltas that would elevate a river channel / fill a lake basin / dam a drainage network are suppressed.
+- [ ] **~10 natural signature feature deltas**: `lake_cluster`, `alpine_tarn`, `cirque`, `mesa_top`, `book_cliffs`, `dune_field`, `bush_strip_clearing`, `sandy_beach`, `cliff_coast`, `protected_cove`. Covers the major delta-pattern classes (bowl / plateau / cliff / flatten / ramp / dune) so 3.6.3c extensions can match the pattern.
+- [ ] **Hub foundation delta** (tier-adaptive): Major = full flatten + 50 m skirt + cut-and-fill into positive elevation; Regional = flatten + 30 m skirt; Local = partial flatten + natural edges; Remote = minimal smoothing; Isolated = no delta. Cells hosting hubs get this delta instead of their natural feature delta (priority: `hub_foundation` > natural feature > `plain`).
+- [ ] **Shore classification sampler** (`world::surface_at(x, z) -> SurfaceClass`: Sand, Gravel, Rock, Cliff, Mudflat, Delta, IceEdge, Grass, Paved, Dirt, Snow, PowderSnow, DryLake, Water) from final heightfield + hydrology graph + biome + feature tag. **Unblocks 2.5b.7 per-surface friction.**
+- [ ] L3 integration into `Terrain::height_at_scale` (opt-in param).
+- [ ] Visual bench: L1-vs-L3 heightfield comparison, shore classification map, hub foundation effect visualization.
+
+**3.6.3b — design-authoring sprint (no code):**
+
+- [ ] Expand `data/world/sub_biome_features.ron` + MAPGEN.md + FEATURES.md with cross-biome feature categories:
+  - [ ] **Developments**: `farmland_parcel`, `dwelling_cluster`, `remote_compound`, `ranch`, `homestead_clearing` (hub-proximity-biased placement).
+  - [ ] **Infrastructure** (multi-cell groups): `road_segment`, `dirt_road_segment`, `highway_intersection`, `rail_corridor_segment`.
+  - [ ] **Resupply / interactables**: `gas_station` (Phase 4.5 refuel economy anchor), `bait_shop`, `general_store`, `fishing_camp`, `tackle_shop`, `ferry_dock`.
+  - [ ] **Scenery cues** (render-tag-only, no heightfield delta): `natural_meadow`, `alpine_meadow`, `creek_valley`, `scenic_overlook`, `river_bend_viewpoint`, `hot_springs`, `abandoned_homestead`.
+- [ ] Placement rule design: hub-proximity radii per tier (Major: 50 km dwellings / 80 km farmland / 30 km gas stations; down to Remote: single homestead 10 km); biome compatibility per feature; scenery "earned reward" placement using L1 prominence + hydrology.
+- [ ] User review / iteration on the full catalog before 3.6.3c implementation.
+
+**3.6.3c — multi-cell group engine + development/scenery deltas (code):**
+
+- [ ] **`FeatureGroup` concept** in `voronoi_cells`: cells can belong to a group ID. Groups span multiple cells for connected features. Graph construction at bake time (road polylines via adjacency; dwelling clusters via k-nearest-cells).
+- [ ] **Group-aware deltas**: road depression runs continuous across group-member cells via shared centerline polyline. Similar for residential clusters.
+- [ ] Implement all 3.6.3b-authored development / infrastructure / resupply / scenery features.
+- [ ] Flora placement hooks tied to feature type (billboards for remote, instanced for hub-proximate — LOD work in 3.6.4).
+- [ ] Tier-1 / tier-2 **authored hub chunk** seam-blending infrastructure (authored content lands in Phase 4.1).
+- [ ] **Deterministic / telemetric validation:** final heightfield byte-identical across platforms; boundary-falloff continuity between neighboring cells; hydrology-graph-violation rejection; `surface_at` returns coherent classes along sample transects.
 
 ### Milestone 3.6.4: Flora, decoration, seasonal overlay
 

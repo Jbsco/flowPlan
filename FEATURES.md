@@ -198,6 +198,19 @@ Biomes are not monolithic. Each parent biome declares a **sub-biome feature libr
 
 Each sub-biome feature is a first-class Voronoi-cell unit (see [MAPGEN.md § Chunk model](MAPGEN.md#chunk-model) pinned architecture). It carries its own geometry rules, palette, flora, fauna tables, hub-placement compatibility, and inter-biome adaptation rules. Authoring these libraries is the core design work of Phase 3.6.3.
 
+#### Cross-biome feature categories (pinned, 3.6.3b authoring sprint)
+
+In addition to per-biome natural feature libraries, the 3.6.3b design sprint authors cross-biome feature categories. These features appear across all land biomes with biome-compatibility rules:
+
+- **Developments** (hub-proximity-biased): `farmland_parcel` (arable biomes only), `dwelling_cluster`, `remote_compound`, `ranch` (HighDesert / RockyAlpine foothills), `homestead_clearing`.
+- **Infrastructure** (multi-cell groups, implemented 3.6.3c): `road_segment`, `dirt_road_segment`, `highway_intersection`, `rail_corridor_segment`. Roads form polylines via group-adjacency; cut through terrain (continuous delta across group cells).
+- **Resupply / interactables** (Phase 4 gameplay hooks): `gas_station`, `bait_shop`, `general_store`, `fishing_camp`, `tackle_shop`, `ferry_dock`. `gas_station` exposes a Phase 4.5 refuel economy anchor — land within range, refuel available, prices scale with remoteness.
+- **Scenery cues** (earned discovery, render-tag-only — no heightfield modification): `natural_meadow`, `alpine_meadow`, `creek_valley`, `scenic_overlook`, `river_bend_viewpoint`, `hot_springs`, `abandoned_homestead`. Photo-mode + mission anchors.
+
+**Placement rule anchors**: developments cluster by nearest-hub tier radii (Major: dwellings within 50 km, farmland within 80 km, gas stations at road intersections within 30 km; down to Remote: maybe one homestead within 10 km). Scenery uses L1 terrain prominence (`scenic_overlook` at steep cells with big view factor; `river_bend_viewpoint` on outside-bend of high-accumulation rivers).
+
+Full authoring spec: [MAPGEN.md § Layer 3 phase split](MAPGEN.md#layer-3--feature-delta-heightfield-modifications) + agent-memory `feature_delta_expansion_3_6_3`.
+
 ### Sub-biome feature overlap with palette adaptation
 
 Sub-biome features can **overlap into neighboring parent biomes** — producing organic, natural-feeling transitions without hard biome boundaries:

@@ -526,6 +526,39 @@ The hydrology graph is **immutable across layers**. Delta functions respect it o
 
 **Shore classification sampler** (`world::surface_at(x, z) -> SurfaceClass`) derives from the final heightfield + hydrology graph + biome. Unblocks [Milestone 2.5b.7 per-surface friction](ROADMAP.md#milestone-25-ground--water-contact-physics).
 
+#### Layer 3 phase split (pinned 2026-04-23)
+
+3.6.3 splits into three sub-phases because the delta catalog + engine extensions decompose naturally + the design-authoring work for developments/scenery deserves its own iteration pass.
+
+**3.6.3a — per-cell delta engine + natural signature features + hub foundation + shore classification** (code). Ships:
+- `FeatureDelta` trait + registry mapping feature_id → delta function
+- Bump-function falloff at cell edges (boundary-falloff invariant)
+- Hydrology continuity check at query time (suppress deltas that would elevate a river / fill a lake)
+- ~10 signature natural feature deltas (lake_cluster, alpine_tarn, cirque, mesa_top, book_cliffs, dune_field, bush_strip_clearing, sandy_beach, cliff_coast, protected_cove)
+- **Hub foundation delta** (tier-adaptive: Major = full flatten + 50 m skirt + cut-and-fill; down to Isolated = no delta)
+- `SurfaceClass` sampler (`world::surface_at`)
+
+**3.6.3b — design-authoring sprint** (no code). Expands RON feature libraries + this section with the full **development / infrastructure / scenery catalog**, with user iteration. Product:
+- **Developments** (hub-proximity-biased): `farmland_parcel`, `dwelling_cluster`, `remote_compound`, `ranch`, `homestead_clearing`
+- **Infrastructure** (multi-cell groups in 3.6.3c): `road_segment`, `dirt_road_segment`, `highway_intersection`, `rail_corridor_segment`
+- **Resupply / interactables** (Phase 4 gameplay hooks): `gas_station`, `bait_shop`, `general_store`, `fishing_camp`, `tackle_shop`, `ferry_dock`
+- **Scenery cues**: `natural_meadow`, `alpine_meadow`, `creek_valley`, `scenic_overlook`, `river_bend_viewpoint`, `hot_springs`, `abandoned_homestead`
+
+Placement rules authored alongside:
+- Developments cluster within radii scaled by nearest hub tier (Major: 50 km dwellings / 80 km farmland; down to Remote: 10 km single homestead).
+- Biome compatibility (`farmland_parcel` → arable biomes; `ranch` → HighDesert/RockyAlpine foothills; `hot_springs` → subarctic + RockyAlpine).
+- Scenery "earned reward" placement (`scenic_overlook` at high-prominence cells; `river_bend_viewpoint` on outside-bend of high-accumulation rivers — uses L1 hydrology).
+
+**3.6.3c — multi-cell group engine + development/scenery deltas** (code). Extends `voronoi_cells` with `FeatureGroup` — cells that belong to a group ID. Groups span multiple cells for connected features (roads, residential clusters). Group-aware deltas: road depression runs continuous across group-member cells via shared centerline polyline. Implements all 3.6.3b-authored features.
+
+#### Priority when a cell has multiple delta candidates
+
+`hub_foundation` > natural feature delta > `plain` (identity). Cells hosting tier-1/2 hubs get foundation instead of their natural feature; developments win over natural features within their cell; scenery features are render-only (no heightfield delta) but may override flora placement.
+
+#### Refuel economy hook (Phase 4 forward-compat)
+
+`gas_station` cells shipped in 3.6.3b/c expose a gameplay anchor for Phase 4.5 missions: when the player aircraft lands within N m of a `gas_station` cell + road adjacency, refuel is available. Prices scale with remoteness (Major hubs cheap; remote gas stations expensive).
+
 ### Composition properties (why this separation matters)
 
 - **Independent development.** Each layer lands on a separate milestone. Layer 1 = Phase 3.6.1; Layer 2 = Phase 3.6.2; Layer 3 = Phase 3.6.3 + 3.6.4.
