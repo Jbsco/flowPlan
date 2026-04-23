@@ -871,7 +871,16 @@ pub fn compute_forces(
                 ge_factor,
             );
             let q = 0.5 * rho * speed * speed;
-            let lift_force_n = q * wing_area * cl;
+            // Lift uses chord-plane dynamic pressure `q_chord = q × cos²(β)`.
+            // Wing generates lift from forward+vertical body flow, not lateral
+            // crossflow. At β=0 this is identical to q; at high β, lift fades
+            // naturally to zero as the wing enters bluff-body flow regime.
+            // Drag keeps total q — parasite drag IS omnidirectional (fuselage
+            // drags sideways too), and induced drag's correction from sideslip
+            // is second-order. Phase A of the 2026-04-22 q_dyn → q_chord audit.
+            let cos_beta = libm::cosf(beta);
+            let q_chord = q * cos_beta * cos_beta;
+            let lift_force_n = q_chord * wing_area * cl;
             let drag_force_n = q * wing_area * cd;
 
             // Lift direction: perpendicular to velocity, in the plane containing
@@ -948,6 +957,15 @@ pub fn compute_forces(
     // without an AircraftSpec loaded (e.g., in pure-sim tests).
     let wing_area_moments = spec.map_or(23.23_f32, |s| s.wing_area_m2.max(1.0));
     let q_dyn = 0.5 * rho * speed * speed;
+    // Chord-plane dynamic pressure = q_dyn × cos²(β). Used throughout the
+    // aero model for terms where the wing/tail surface responds to
+    // forward-airspeed flow only (not lateral crossflow): lift, wing-drop,
+    // aileron authority, roll damping, adverse yaw, pitch stability and
+    // damping, elevator freestream component. Cross-flow terms (weathervane
+    // CN_β, yaw damping CN_r, parasite drag) continue to use q_dyn.
+    // See docs/physics notes for the 2026-04-22 q_dyn → q_chord audit.
+    let cos_beta_outer = libm::cosf(beta);
+    let q_chord = q_dyn * cos_beta_outer * cos_beta_outer;
     let v_damp = speed.max(MIN_DAMPING_AIRSPEED);
 
     // Angular rates in physics convention: pitch > 0 nose-up, roll > 0 right-wing-down,
@@ -989,7 +1007,12 @@ pub fn compute_forces(
     //   overrides tailwheel steering at taxi speeds.
     let base_slipstream_q =
         RUDDER_SLIPSTREAM_Q_PER_N * thrust_n_this_tick.max(0.0) * spiral_slipstream_factor;
-    let q_local_at_elevator = q_dyn + base_slipstream_q;
+    // Phase D of 2026-04-22 q_chord audit: elevator splits freestream (q_chord,
+    // horizontal surface responds to forward flow) from slipstream (q_prop,
+    // always body-forward regardless of β). Rudder keeps q_dyn because the
+    // vertical fin's effectiveness comes from lateral flow (β × q_total is
+    // the fin's "lift") — same reason CN_β weathervaning uses q_dyn.
+    let q_local_at_elevator = q_chord + base_slipstream_q;
     let q_local_at_rudder = q_dyn + base_slipstream_q * coupling_airspeed_factor;
 
     // Pitch: control (elevator) + α-stability (with post-stall nose-down and flap
@@ -1006,17 +1029,23 @@ pub fn compute_forces(
     let stall_excess = (alpha.abs() - ALPHA_STALL_RAD).max(0.0);
     let stall_pitch_addend = CM_STALL_PITCH_SLOPE * stall_excess * alpha.signum();
     let flap_cm = flap_aero(state.controls.flaps).delta_cm;
+    // Phase B of 2026-04-22 q_chord audit: pitch stability (α-driven) and
+    // pitch damping use q_chord because both depend on chord-plane flow
+    // (tail sees forward airspeed, not crossflow). At high β these fade
+    // naturally. Control stays on q_local_at_elevator (Phase D will split
+    // the q_dyn component of that; for now, slipstream dominates at the
+    // low airspeeds where pitch control is most critical).
     let pitch_moment = MomentBreakdown {
         control: q_local_at_elevator
             * wing_area_moments
             * MEAN_CHORD_M
             * CM_DELTA_E
             * state.controls.pitch,
-        stability: q_dyn
+        stability: q_chord
             * wing_area_moments
             * MEAN_CHORD_M
             * (CM_ALPHA * alpha + stall_pitch_addend + flap_cm),
-        damping: q_dyn * wing_area_moments * MEAN_CHORD_M * CM_Q * pitch_damp_nd,
+        damping: q_chord * wing_area_moments * MEAN_CHORD_M * CM_Q * pitch_damp_nd,
         coupling: 0.0, // Pitch coupling reserved for future slipstream effects.
     };
 
@@ -1028,22 +1057,11 @@ pub fn compute_forces(
     // the right-rotating prop; scales linearly with shaft power AND by the
     // airspeed-ramp factor so it doesn't accumulate rotation at V=0.
     // `coupling_airspeed_factor` already computed above (pitch-block precursor).
-    // Wing-drop uses q_chord (forward-airspeed dynamic pressure) rather than
-    // q_total. Physical basis: a wing produces asymmetric stall Cl differential
-    // from chord-plane flow (forward + vertical body components), not from
-    // lateral crossflow. At pure β=90°, v_forward=0, q_chord=0 → wing_drop
-    // vanishes automatically without clamps.
-    //
-    // q_chord = q_total × cos²(β) because v_forward² = v_total² × cos²(β).
-    //
-    // Replaces the 2026-04-22 hard clamps (cos⁴(β) scalar + alpha ±25° clamp):
-    // at extreme β the bogus alpha from atan2(−v_y, v_forward) with collapsing
-    // v_forward was producing spurious moments. With q_chord gating, the
-    // (q × moment) product naturally vanishes at high β regardless of what
-    // alpha reports, so alpha can stay at its true atan2 value for honest
-    // stall behavior during normal flight.
-    let cos_beta = libm::cosf(beta);
-    let q_chord = q_dyn * cos_beta * cos_beta;
+    // Wing-drop uses q_chord (forward-airspeed dynamic pressure). See the
+    // outer-scope q_chord declaration for the physics rationale. At β=90°
+    // q_chord=0 → wing_drop=0, eliminating the need for hard clamps on
+    // alpha (previously clamped ±25° to avoid bogus atan2 artifacts when
+    // forward_speed collapsed).
     let wing_drop_moment =
         wing_drop_roll_moment(alpha, roll_rate, v_damp, q_chord, wing_area_moments);
     let torque_roll_moment =
@@ -1069,13 +1087,19 @@ pub fn compute_forces(
     // rapid maneuvers). Abusive-input cases that earlier drove β > 40° in
     // water have been fixed at the source (water physics), so smooth
     // aero response is safe here.
+    // Dihedral's `sin(β)·cos(β)` factor already embeds the cross-flow effect;
+    // dihedral moment itself is proportional to q_total because it's a
+    // cross-wind response (the fin/wing sees asymmetric loading from lateral
+    // flow, scaled by total dynamic pressure).
     let dihedral_factor = libm::sinf(beta) * libm::cosf(beta);
-    let dihedral_roll_moment =
-        q_dyn * wing_area_moments * WING_SPAN_M * CL_BETA * dihedral_factor;
+    let dihedral_roll_moment = q_dyn * wing_area_moments * WING_SPAN_M * CL_BETA * dihedral_factor;
+    // Phase C of 2026-04-22 q_chord audit: roll control (aileron), roll
+    // damping (CL_p), and adverse yaw all depend on chord-plane flow at
+    // the wing surface. Use q_chord so these fade naturally at high β.
     let roll_moment = MomentBreakdown {
-        control: q_dyn * wing_area_moments * WING_SPAN_M * CL_DELTA_A * state.controls.roll,
+        control: q_chord * wing_area_moments * WING_SPAN_M * CL_DELTA_A * state.controls.roll,
         stability: wing_drop_moment + dihedral_roll_moment,
-        damping: q_dyn * wing_area_moments * WING_SPAN_M * CL_P * roll_damp_nd,
+        damping: q_chord * wing_area_moments * WING_SPAN_M * CL_P * roll_damp_nd,
         coupling: torque_roll_moment,
     };
 
@@ -1090,8 +1114,9 @@ pub fn compute_forces(
     // high α + high power, the descending blade bites into more air, producing
     // asymmetric thrust that yaws the nose LEFT. Strongest at takeoff climb out
     // (high α, full power); negligible at cruise.
+    // Adverse yaw (Phase C): wing-drag asymmetry from aileron uses q_chord.
     let adverse_yaw_moment =
-        q_dyn * wing_area_moments * WING_SPAN_M * CN_DELTA_A_ADVERSE * state.controls.roll;
+        q_chord * wing_area_moments * WING_SPAN_M * CN_DELTA_A_ADVERSE * state.controls.roll;
     let p_factor_moment =
         -P_FACTOR_ARM_M * thrust_n_this_tick * libm::sinf(alpha) * coupling_airspeed_factor;
     // Spiraling slipstream: nose-left yaw moment from prop-wash swirl hitting
