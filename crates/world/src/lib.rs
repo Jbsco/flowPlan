@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod biome;
+pub mod composed;
 pub mod feature_delta;
 pub mod feature_delta_impls;
 pub mod hub_catalog;
@@ -25,6 +26,7 @@ pub mod water;
 pub mod weather;
 
 pub use biome::{biome_at, biome_weights_at, BiomeClass, BiomeWeights};
+pub use composed::WorldRefs;
 pub use feature_delta::{
     bump_falloff, compute_delta_at, smoothstep, DeltaContext, HubFoundationMap,
 };
