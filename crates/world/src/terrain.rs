@@ -28,7 +28,8 @@
 //! at the 5000 km world scale — seam continuity is maintained to within ~1 m
 //! (well below visual threshold against ±275 m peak amplitudes).
 
-use crate::noise::fbm_2d;
+use crate::biome::{biome_weights_at, BiomeWeights};
+use crate::noise::{domain_warped_fbm_2d, fbm_2d, ridged_multifractal_2d};
 
 /// A sampleable height function.
 pub trait HeightSampler: Send + Sync {
@@ -91,6 +92,154 @@ impl FbmConfig {
             * core::f32::consts::FRAC_1_SQRT_2
             * 1.2
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Per-biome terrain profiles (Phase 3.6.1b)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Noise primitive selection per [MAPGEN.md § Layer 1 noise primitives](../../../MAPGEN.md#layer-1-noise-primitives-reference).
+#[derive(Copy, Clone, Debug)]
+enum PrimitiveType {
+    /// Standard Perlin-fBm (smooth rolling terrain).
+    Fbm,
+    /// Ridged multifractal (sharp crests + valleys). Used for alpine +
+    /// mesa/canyon biomes.
+    Ridged,
+    /// Domain-warped fBm (organic twisted terrain). Used for coastlines
+    /// + archipelagos where grid-alignment would be obvious.
+    DomainWarped,
+}
+
+/// Per-biome terrain parameters. Each biome declares a primary primitive
+/// + scale + amplitude + mean-altitude bias. At sample time the terrain
+/// module computes this biome's contribution and blends all 4 by
+/// [`BiomeWeights`](crate::biome::BiomeWeights).
+#[derive(Copy, Clone, Debug)]
+struct BiomeProfile {
+    /// Noise primitive: fBm, ridged, or domain-warped.
+    primitive: PrimitiveType,
+    /// Biome-primitive base spacing (m). Must divide `WORLD_EXTENT_M`.
+    spacing_m: f32,
+    /// Octave count for the primitive.
+    octaves: u32,
+    /// Primitive amplitude (m) — scales the noise output.
+    amplitude_m: f32,
+    /// Mean altitude bias (m) — biome's "typical altitude" added to its
+    /// noise contribution. Alpine starts ~1500 m; coastal ~-100 m;
+    /// desert plateaus ~800 m; mediterranean ~50 m.
+    mean_altitude_m: f32,
+    /// Octave-offset base (range `[500..600)` reserved for biome primitives
+    /// — disjoint from terrain regional `[0..100)`, fine `[100..200)`,
+    /// weather `[200..240)`, voronoi-weight `[400..500)`).
+    octave_offset_base: u32,
+    /// Ridged-specific: offset (1.0 typical) — sharpness of ridges.
+    ridged_offset: f32,
+    /// Ridged-specific: power (1.5-2.5 typical).
+    ridged_power: f32,
+    /// Domain-warp-specific: displacement amplitude (m).
+    warp_amplitude_m: f32,
+    /// Domain-warp-specific: warp field spacing (m). Should divide
+    /// `WORLD_EXTENT_M`. Typically ~2× `spacing_m` so warp is smoother
+    /// than the base signal.
+    warp_spacing_m: f32,
+}
+
+impl BiomeProfile {
+    /// High Desert / Plateau — ridged multifractal at moderate power
+    /// (mesas + canyons, moderate altitude).
+    const HIGH_DESERT: Self = Self {
+        primitive: PrimitiveType::Ridged,
+        spacing_m: 20_000.0, // 20 km mesa scale
+        octaves: 5,
+        amplitude_m: 400.0, // mesas rise 400 m above mean
+        mean_altitude_m: 800.0, // Colorado Plateau baseline
+        octave_offset_base: 500,
+        ridged_offset: 1.0,
+        ridged_power: 1.8, // moderate ridges — mesas not alpine-sharp
+        warp_amplitude_m: 0.0,
+        warp_spacing_m: 40_000.0,
+    };
+
+    /// Rocky Alpine — ridged multifractal at high power (sharp peaks).
+    const ROCKY_ALPINE: Self = Self {
+        primitive: PrimitiveType::Ridged,
+        spacing_m: 10_000.0, // 10 km individual mountain scale
+        octaves: 5,
+        amplitude_m: 900.0, // peaks rise 900 m above mean
+        mean_altitude_m: 1500.0, // Colorado Rockies baseline
+        octave_offset_base: 520,
+        ridged_offset: 1.0,
+        ridged_power: 2.5, // sharp peaks
+        warp_amplitude_m: 0.0,
+        warp_spacing_m: 20_000.0,
+    };
+
+    /// Coastal Boreal — domain-warped fBm (fjord-like organic coast).
+    const COASTAL_BOREAL: Self = Self {
+        primitive: PrimitiveType::DomainWarped,
+        spacing_m: 10_000.0,
+        octaves: 5,
+        amplitude_m: 300.0, // moderate relief
+        mean_altitude_m: -50.0, // sits near sea level (slight negative so fjords form)
+        octave_offset_base: 540,
+        ridged_offset: 1.0,
+        ridged_power: 1.5,
+        warp_amplitude_m: 3_000.0, // organic fjord distortion
+        warp_spacing_m: 20_000.0,
+    };
+
+    /// Mediterranean Archipelago — strongly domain-warped fBm
+    /// (varied island clusters).
+    const MEDITERRANEAN: Self = Self {
+        primitive: PrimitiveType::DomainWarped,
+        spacing_m: 5_000.0, // 5 km island scale
+        octaves: 5,
+        amplitude_m: 200.0, // low islands
+        mean_altitude_m: 20.0, // just above sea level
+        octave_offset_base: 560,
+        ridged_offset: 1.0,
+        ridged_power: 1.5,
+        warp_amplitude_m: 5_000.0, // strong warp for varied island shapes
+        warp_spacing_m: 15_000.0,
+    };
+}
+
+/// Compute this biome's terrain contribution (m) at `(x, z)`.
+/// Returns `mean_altitude_m + amplitude_m × primitive_output(x, z)`.
+fn biome_contribution(profile: &BiomeProfile, seed: u64, x: f32, z: f32) -> f32 {
+    let primitive_value = match profile.primitive {
+        PrimitiveType::Fbm => fbm_2d(
+            seed,
+            profile.octave_offset_base,
+            x,
+            z,
+            profile.spacing_m,
+            profile.octaves,
+        ),
+        PrimitiveType::Ridged => ridged_multifractal_2d(
+            seed,
+            profile.octave_offset_base,
+            x,
+            z,
+            profile.spacing_m,
+            profile.octaves,
+            profile.ridged_offset,
+            profile.ridged_power,
+        ),
+        PrimitiveType::DomainWarped => domain_warped_fbm_2d(
+            seed,
+            profile.octave_offset_base,
+            x,
+            z,
+            profile.spacing_m,
+            profile.octaves,
+            profile.warp_amplitude_m,
+            profile.warp_spacing_m,
+            3,
+        ),
+    };
+    profile.mean_altitude_m + profile.amplitude_m * primitive_value
 }
 
 /// Procedural heightmap from a seed. See module docs.
@@ -189,9 +338,18 @@ fn beach_flatten(raw: f32, width: f32) -> f32 {
 
 impl HeightSampler for Terrain {
     fn height(&self, x: f32, z: f32) -> f32 {
-        // Two-layer composition: regional + fine. Offset 100 on fine
-        // layer's octave index prevents hash collisions with regional
-        // layer — fine octave 0 ≠ regional octave 0.
+        // Phase 3.6.1b per-biome terrain composition:
+        //
+        //   height = baseline_regional_fbm(x, z)              (continental trend)
+        //          + baseline_fine_fbm(x, z)                  (small-scale texture)
+        //          + Σ biome_weight[i] × biome_contribution[i](x, z)
+        //
+        // The baseline layers provide biome-independent regional variation
+        // so biome transitions don't produce flat-height seams. The
+        // biome-weighted contributions shape mountains, mesas, coastlines,
+        // and islands per-region. Soft biome weights (BiomeWeights sums to
+        // 1.0, smoothstepped across ~2°C temperature transitions) ensure
+        // smooth transitions at biome boundaries — no visible seams.
         let regional = self.config.regional_amplitude_m
             * fbm_2d(
                 self.seed,
@@ -210,9 +368,49 @@ impl HeightSampler for Terrain {
                 self.config.fine_spacing_m,
                 self.config.fine_octaves,
             );
-        let raw = self.amplitude_scale * (regional + fine);
+        let baseline = regional + fine;
+
+        // Skip biome contribution for flat scenarios (amplitude_scale = 0)
+        // or when Terrain::flat_land / flat have been selected.
+        let biome_contribution_total = if self.amplitude_scale > 0.0 {
+            biome_blended_contribution(self.seed, x, z)
+        } else {
+            0.0
+        };
+
+        let raw = self.amplitude_scale * (baseline + biome_contribution_total);
         beach_flatten(raw, BEACH_WIDTH_M) + self.base_height
     }
+}
+
+/// Compute the biome-weighted terrain contribution at `(x, z)`. Queries
+/// [`biome_weights_at`] for soft 4-biome membership, then evaluates each
+/// biome's primitive and blends by weight.
+fn biome_blended_contribution(seed: u64, x: f32, z: f32) -> f32 {
+    let weights = biome_weights_at(seed, x, z);
+    let mut total = 0.0_f32;
+    if weights.high_desert > 1e-4 {
+        total += weights.high_desert * biome_contribution(&BiomeProfile::HIGH_DESERT, seed, x, z);
+    }
+    if weights.rocky_alpine > 1e-4 {
+        total += weights.rocky_alpine * biome_contribution(&BiomeProfile::ROCKY_ALPINE, seed, x, z);
+    }
+    if weights.coastal_boreal > 1e-4 {
+        total +=
+            weights.coastal_boreal * biome_contribution(&BiomeProfile::COASTAL_BOREAL, seed, x, z);
+    }
+    if weights.mediterranean > 1e-4 {
+        total += weights.mediterranean * biome_contribution(&BiomeProfile::MEDITERRANEAN, seed, x, z);
+    }
+    total
+}
+
+/// Silences unused-import warnings when the biome module is compiled
+/// alone during tests. Real callers use `biome_weights_at` via the
+/// `BiomeWeights` return type.
+#[allow(dead_code)]
+fn _unused_weights_check(w: BiomeWeights) -> f32 {
+    w.high_desert + w.rocky_alpine + w.coastal_boreal + w.mediterranean
 }
 
 #[cfg(test)]

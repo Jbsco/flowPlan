@@ -134,6 +134,107 @@ pub fn fbm_2d(
     total
 }
 
+/// Ridged multifractal noise — fBm variant where each octave's Perlin
+/// output is inverted-absolute-valued and raised to a power, producing
+/// sharp crested ridges with smooth valleys. Per `MAPGEN.md § Layer 1
+/// noise primitives`:
+///
+/// ```text
+/// ridged(x, z) = Σ_{i=0..N−1} amp × persist^i × (offset − |perlin_i|)^power
+/// ```
+///
+/// - `offset` (typical 1.0) shifts the absolute-valued Perlin so the
+///   ridge-lines (where |perlin| = 0) map to the maximum output. Lower
+///   offset = narrower ridges; higher offset = broader peaks.
+/// - `power` (typical 1.5–2.5) sharpens the ridges. Power 1.0 = triangle-
+///   wave valleys; power 2.0 = spiky crests; power 3.0+ = cliff-like.
+///
+/// Output is **always non-negative** (returns 0 at valleys, max at
+/// ridge-lines). Typical range `[0, 2.0]` with defaults.
+///
+/// **Use case**: alpine mountain ridges (high power, moderate offset),
+/// mesa/canyon landscapes (moderate power, moderate offset).
+#[allow(clippy::module_name_repetitions)]
+pub fn ridged_multifractal_2d(
+    seed: u64,
+    octave_offset: u32,
+    x: f32,
+    z: f32,
+    base_spacing_m: f32,
+    octaves: u32,
+    offset: f32,
+    power: f32,
+) -> f32 {
+    let mut total = 0.0_f32;
+    let mut amplitude = 1.0_f32;
+    let mut spacing = base_spacing_m;
+    for i in 0..octaves {
+        let p = perlin_2d(seed, octave_offset + i, x, z, spacing);
+        let inverted = (offset - libm::fabsf(p)).max(0.0);
+        let ridged = libm::powf(inverted, power);
+        total += amplitude * ridged;
+        amplitude *= 0.5;
+        spacing *= 0.5;
+    }
+    total
+}
+
+/// Domain-warped fBm — feeds the fBm output back as a coordinate
+/// perturbation before sampling a second fBm. Per `MAPGEN.md § Layer 1
+/// noise primitives`:
+///
+/// ```text
+/// warp_x = warp_amp × fbm_warp(x, z)
+/// warp_z = warp_amp × fbm_warp(x + decorrelate, z + decorrelate)
+/// output = fbm_base(x + warp_x, z + warp_z)
+/// ```
+///
+/// Breaks up straight lines and grid alignment artifacts. Produces
+/// organic wrinkled distortion — suited to fjord-like coastlines,
+/// varied island shapes, and general "terrain that looks geographic".
+///
+/// `warp_amplitude_m` controls distortion strength (500–5000 m typical).
+/// `warp_spacing_m` sets the warp field's coarsest scale (usually
+/// ~2× `base_spacing_m` so warp is smoother than the base signal).
+///
+/// Octave-offset convention: uses `octave_offset + 0..octaves` for the
+/// base fBm, `octave_offset + 100..100+warp_octaves` for warp x,
+/// `octave_offset + 200..200+warp_octaves` for warp z. Caller must leave
+/// a 300-range gap in their offset assignments.
+#[allow(clippy::module_name_repetitions)]
+#[allow(clippy::too_many_arguments)]
+pub fn domain_warped_fbm_2d(
+    seed: u64,
+    octave_offset: u32,
+    x: f32,
+    z: f32,
+    base_spacing_m: f32,
+    octaves: u32,
+    warp_amplitude_m: f32,
+    warp_spacing_m: f32,
+    warp_octaves: u32,
+) -> f32 {
+    let warp_x = warp_amplitude_m
+        * fbm_2d(seed, octave_offset + 100, x, z, warp_spacing_m, warp_octaves);
+    let warp_z = warp_amplitude_m
+        * fbm_2d(
+            seed,
+            octave_offset + 200,
+            x + 31_415.9,
+            z + 27_182.8,
+            warp_spacing_m,
+            warp_octaves,
+        );
+    fbm_2d(
+        seed,
+        octave_offset,
+        x + warp_x,
+        z + warp_z,
+        base_spacing_m,
+        octaves,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,5 +262,52 @@ mod tests {
         let a = fbm_2d(42, 0, 500.0, 500.0, 2000.0, 4);
         let b = fbm_2d(42, 100, 500.0, 500.0, 2000.0, 4);
         assert!((a - b).abs() > 1e-3, "same seed, different offset produced same value");
+    }
+
+    #[test]
+    fn ridged_multifractal_always_nonnegative() {
+        // Ridged output is (offset - |perlin|)^power at each octave, always ≥0.
+        for ix in -5..=5 {
+            for iz in -5..=5 {
+                let x = ix as f32 * 3000.0;
+                let z = iz as f32 * 3000.0;
+                let r = ridged_multifractal_2d(42, 0, x, z, 2000.0, 4, 1.0, 2.0);
+                assert!(r >= 0.0, "ridged returned negative: {r} at ({x}, {z})");
+            }
+        }
+    }
+
+    #[test]
+    fn ridged_multifractal_wraps_toroidally() {
+        let a = ridged_multifractal_2d(42, 0, 123.0, 456.0, 2000.0, 4, 1.0, 2.0);
+        let b = ridged_multifractal_2d(
+            42,
+            0,
+            123.0 + WORLD_EXTENT_M,
+            456.0,
+            2000.0,
+            4,
+            1.0,
+            2.0,
+        );
+        assert!((a - b).abs() < 1e-2, "ridged seam: {a} vs {b}");
+    }
+
+    #[test]
+    fn domain_warped_fbm_wraps_toroidally() {
+        let a = domain_warped_fbm_2d(42, 0, 100.0, 200.0, 2000.0, 4, 500.0, 4000.0, 3);
+        let b = domain_warped_fbm_2d(
+            42,
+            0,
+            100.0 + WORLD_EXTENT_M,
+            200.0,
+            2000.0,
+            4,
+            500.0,
+            4000.0,
+            3,
+        );
+        // Domain warp compounds f32 precision loss; tolerance is higher.
+        assert!((a - b).abs() < 0.1, "warped fbm seam: {a} vs {b}");
     }
 }

@@ -87,6 +87,102 @@ const COASTAL_HUMIDITY_FLOOR: f32 = 0.55;
 /// Kelvin-to-Celsius offset. Subtract from Kelvin-returning APIs.
 const KELVIN_TO_CELSIUS: f32 = 273.15;
 
+/// Edge softness (°C / humidity units) for soft biome classification.
+/// Within ±this distance of a threshold, biome membership transitions
+/// smoothly rather than hard-switching. 2°C temperature + 0.05 humidity
+/// match the natural variance of the fBm fields so transitions are
+/// perceptible but not abrupt.
+const EDGE_SOFTNESS_TEMP_C: f32 = 2.0;
+const EDGE_SOFTNESS_HUMIDITY: f32 = 0.05;
+
+/// Soft biome membership weights — each field in `[0, 1]`, sum to 1.0.
+/// Used by 3.6.1b per-biome terrain blending: terrain at `(x, z)` is
+/// `Σ weight_i × biome_primitive_i(x, z)`, producing smooth biome
+/// transitions without visible seams.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct BiomeWeights {
+    pub high_desert: f32,
+    pub rocky_alpine: f32,
+    pub coastal_boreal: f32,
+    pub mediterranean: f32,
+}
+
+impl BiomeWeights {
+    /// Sum of all weights (should be ~1.0 by normalization).
+    #[must_use]
+    pub fn sum(&self) -> f32 {
+        self.high_desert + self.rocky_alpine + self.coastal_boreal + self.mediterranean
+    }
+}
+
+/// Smoothstep from 0 to 1 as `x` goes from `edge_lo` to `edge_hi`.
+fn smoothstep(edge_lo: f32, edge_hi: f32, x: f32) -> f32 {
+    let t = ((x - edge_lo) / (edge_hi - edge_lo)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Soft biome membership weights at `(x, z)`. Matches the `biome_at`
+/// decision tree but with smoothstep-softened thresholds so weights
+/// transition smoothly across biome boundaries. Always returns
+/// normalized weights summing to 1.0.
+///
+/// Used by 3.6.1b terrain blending. The discrete [`biome_at`]
+/// classifier is retained for L2 feature-type assignment where a
+/// single biome per cell is needed.
+#[must_use]
+pub fn biome_weights_at(master_seed: u64, x_m: f32, z_m: f32) -> BiomeWeights {
+    let temp_k = temperature::sea_level_temperature(master_seed, x_m, z_m, 0.0);
+    let temp_c = temp_k - KELVIN_TO_CELSIUS;
+    let hum = humidity::sea_level_humidity(master_seed, x_m, z_m, 0.0);
+
+    // Cold membership: 1 when very cold, 0 when warm-enough. Smoothed
+    // across ±EDGE_SOFTNESS_TEMP_C around the alpine threshold.
+    let cold = smoothstep(
+        ALPINE_TEMP_C + EDGE_SOFTNESS_TEMP_C,
+        ALPINE_TEMP_C - EDGE_SOFTNESS_TEMP_C,
+        temp_c,
+    );
+    // Hot membership: 1 when hot, 0 when moderate.
+    let hot = smoothstep(
+        HOT_TEMP_C - EDGE_SOFTNESS_TEMP_C,
+        HOT_TEMP_C + EDGE_SOFTNESS_TEMP_C,
+        temp_c,
+    );
+    // Dry membership: 1 when dry, 0 when moist.
+    let dry = smoothstep(
+        DESERT_HUMIDITY_CEILING + EDGE_SOFTNESS_HUMIDITY,
+        DESERT_HUMIDITY_CEILING - EDGE_SOFTNESS_HUMIDITY,
+        hum,
+    );
+    // Humid membership: 1 when moist, 0 when dry.
+    let humid = smoothstep(
+        COASTAL_HUMIDITY_FLOOR - EDGE_SOFTNESS_HUMIDITY,
+        COASTAL_HUMIDITY_FLOOR + EDGE_SOFTNESS_HUMIDITY,
+        hum,
+    );
+
+    // Compose per the discrete decision tree, but preserving partial membership:
+    //   alpine = cold (any humidity, overrides desert/coastal)
+    //   desert = hot × dry × not-alpine
+    //   coastal = humid × not-alpine × not-desert
+    //   mediterranean = everything else (default / moderate climate)
+    let alpine_w = cold;
+    let desert_w = hot * dry * (1.0 - alpine_w);
+    let coastal_w = humid * (1.0 - alpine_w) * (1.0 - desert_w);
+    let mediterranean_w = (1.0 - alpine_w - desert_w - coastal_w).max(0.0);
+
+    // Normalize (defensive — should sum to ≤1 by construction but clamp)
+    let sum = alpine_w + desert_w + coastal_w + mediterranean_w;
+    let inv_sum = if sum > 1e-6 { 1.0 / sum } else { 1.0 };
+
+    BiomeWeights {
+        rocky_alpine: alpine_w * inv_sum,
+        high_desert: desert_w * inv_sum,
+        coastal_boreal: coastal_w * inv_sum,
+        mediterranean: mediterranean_w * inv_sum,
+    }
+}
+
 /// Biome class at world coordinate `(x, z)`. Pure function of climate
 /// fields (sea-level temperature + humidity) — **intentionally independent
 /// of terrain elevation** so 3.6.1b's biome-parameterized terrain can
@@ -174,5 +270,63 @@ mod tests {
         let a = biome_at(42, 0.0, 0.0);
         let b = biome_at(42, 0.0, 0.0);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn biome_weights_sum_to_one() {
+        // Normalization invariant: sum of all weights ≈ 1 everywhere.
+        for ix in 0..20 {
+            for iz in 0..20 {
+                let x = (ix as f32 - 10.0) * 50_000.0;
+                let z = (iz as f32 - 10.0) * 50_000.0;
+                let w = biome_weights_at(42, x, z);
+                assert!(
+                    (w.sum() - 1.0).abs() < 1e-4,
+                    "weights sum to {} at ({x}, {z}), want 1.0: {w:?}",
+                    w.sum()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn biome_weights_all_nonnegative() {
+        for ix in 0..10 {
+            for iz in 0..10 {
+                let x = (ix as f32) * 100_000.0;
+                let z = (iz as f32) * 100_000.0;
+                let w = biome_weights_at(42, x, z);
+                assert!(w.rocky_alpine >= 0.0);
+                assert!(w.high_desert >= 0.0);
+                assert!(w.coastal_boreal >= 0.0);
+                assert!(w.mediterranean >= 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn biome_weights_span_multiple_biomes_over_world() {
+        // Across a wide-range sample, each of the 4 biomes should attain
+        // non-negligible weight SOMEWHERE. Proves the weight function
+        // discriminates rather than collapsing to one biome.
+        let mut max_alpine = 0.0_f32;
+        let mut max_desert = 0.0_f32;
+        let mut max_coastal = 0.0_f32;
+        let mut max_mediterranean = 0.0_f32;
+        for ix in 0..50 {
+            for iz in 0..50 {
+                let x = (ix as f32 - 25.0) * 100_000.0;
+                let z = (iz as f32 - 25.0) * 100_000.0;
+                let w = biome_weights_at(42, x, z);
+                max_alpine = max_alpine.max(w.rocky_alpine);
+                max_desert = max_desert.max(w.high_desert);
+                max_coastal = max_coastal.max(w.coastal_boreal);
+                max_mediterranean = max_mediterranean.max(w.mediterranean);
+            }
+        }
+        assert!(max_alpine > 0.5, "alpine never substantial: max={max_alpine}");
+        assert!(max_desert > 0.3, "desert never substantial: max={max_desert}");
+        assert!(max_coastal > 0.5, "coastal never substantial: max={max_coastal}");
+        assert!(max_mediterranean > 0.3, "mediterranean never substantial: max={max_mediterranean}");
     }
 }
