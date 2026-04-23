@@ -9,6 +9,8 @@
 #![forbid(unsafe_code)]
 
 pub mod biome;
+pub mod feature_delta;
+pub mod feature_delta_impls;
 pub mod hub_catalog;
 pub mod hub_names;
 pub mod hydrology;
@@ -16,12 +18,16 @@ pub mod magnetic_variation;
 pub mod noise;
 pub mod sky;
 pub mod sub_biome;
+pub mod surface_class;
 pub mod terrain;
 pub mod voronoi_cells;
 pub mod water;
 pub mod weather;
 
 pub use biome::{biome_at, biome_weights_at, BiomeClass, BiomeWeights};
+pub use feature_delta::{
+    bump_falloff, compute_delta_at, smoothstep, DeltaContext, HubFoundationMap,
+};
 pub use hub_catalog::{
     HubCatalog, HubEntry, HubId, HubOperationalTags, HubTier, RegionId, RegionSeed,
     RunwayNamingStyle,
@@ -36,6 +42,7 @@ pub use sub_biome::{
     assign_feature, pick_biome_source, BiomeSource, FeatureAssignment, PlacementContext,
     SubBiomeFeature, SubBiomeLibraries, WaterAdjacency, FALLBACK_FEATURE_ID,
 };
+pub use surface_class::{surface_at, SurfaceClass};
 pub use terrain::{HeightSampler, Terrain};
 pub use voronoi_cells::{CellId as SubBiomeCellId, CellSeed, SubBiomeCellCatalog, SEED_SPACING_M};
 pub use water::{chop_intensity_from_wind, max_amplitude as water_max_amplitude, water_height};
