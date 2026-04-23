@@ -9,7 +9,10 @@
 #![forbid(unsafe_code)]
 
 pub mod biome;
+pub mod hub_catalog;
+pub mod hub_names;
 pub mod hydrology;
+pub mod magnetic_variation;
 pub mod noise;
 pub mod sky;
 pub mod terrain;
@@ -17,10 +20,15 @@ pub mod water;
 pub mod weather;
 
 pub use biome::{biome_at, biome_weights_at, BiomeClass, BiomeWeights};
+pub use hub_catalog::{
+    HubCatalog, HubEntry, HubId, HubOperationalTags, HubTier, RegionId, RegionSeed,
+    RunwayNamingStyle,
+};
 pub use hydrology::{
     BiomeHydrology, CoastlineSegment, HydrologyGraph, LakeBasin, RiverEdge, WaterClass,
     WaterSurface,
 };
+pub use magnetic_variation::{magnetic_variation, MAG_VAR_AMPLITUDE_DEG};
 pub use sky::{local_time_of_day, sun_direction};
 pub use terrain::{HeightSampler, Terrain};
 pub use water::{chop_intensity_from_wind, max_amplitude as water_max_amplitude, water_height};

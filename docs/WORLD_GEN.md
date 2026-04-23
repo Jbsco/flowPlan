@@ -15,6 +15,7 @@
 - [Biome classification + soft weighting](#biome-classification--soft-weighting)
 - [Per-biome terrain profiles](#per-biome-terrain-profiles)
 - [Hydrology graph (3.6.1d)](#hydrology-graph-361d)
+- [Hub catalog + magnetic variation (3.6.1e)](#hub-catalog--magnetic-variation-361e)
 - [Weather field generation](#weather-field-generation)
 - [Voronoi cells (variable size)](#voronoi-cells-variable-size)
 - [Toroidal world topology](#toroidal-world-topology)
@@ -383,6 +384,107 @@ HydrologyGraph::coastline_segments() -> &[CoastlineSegment]
 - **DryChannel absent in canonical seed**: only High Desert (0.2 % of this seed) activates the desert-evap > desert-precip condition. Will appear more on seeds with higher desert coverage, or if Mediterranean biome constants are tuned drier.
 - **Buoyancy wiring**: `world::water_height` currently returns sea-level-only; passing a HydrologyGraph reference into buoyancy so lakes contribute at their own elevations is a small follow-up (SimState owns the graph + buoyancy reads through it).
 - **FFT coupling** (3.5b second pass): per-body wave-model dispatch inherits from `WaterClass` + `chop_amplitude_scale` — no hydrology rework needed.
+
+---
+
+## Hub catalog + magnetic variation (3.6.1e)
+
+`crates/world/src/hub_catalog.rs` bakes ~55 K hub entries per master seed. `crates/world/src/magnetic_variation.rs` provides a pure function for the deterministic compass-deviation field. `crates/world/src/hub_names.rs` generates per-biome display names.
+
+### Hub tiers + density
+
+| Tier | Target count | Min spacing | Notes |
+|---|---|---|---|
+| Major | 150 | 200 km | Flat low-altitude + water adjacency required |
+| Regional | 400 | 80 km | Altitude ≤ 1500 m |
+| Local | 1 500 | 20 km | Altitude ≤ 2500 m |
+| Remote | 3 500 | 6 km | Altitude ≤ 3500 m (STOL-required) |
+| Isolated | 50 000 | 1 km | Full altitude range; discovery-gated |
+
+Placement: dart-throwing with rejection on altitude + water adjacency + spatial-hash-accelerated same-tier min-spacing. Nearest-neighbor distances across every tier match Clark-Evans expected value within 2 % — placement is near-optimal blue-noise.
+
+### `HubEntry` data
+
+```rust
+pub struct HubEntry {
+    pub id: HubId,
+    pub approx_world_pos: (f32, f32),  // fuzzed pre-3.6.2, resolved after Voronoi lands
+    pub tier: HubTier,
+    pub parent_biome: BiomeClass,
+    pub region_id: RegionId,
+    pub operational_tags: HubOperationalTags,  // bitfield
+    pub runway_naming_style: RunwayNamingStyle,  // Formal | Informal | NoRunway
+    pub display_name: Option<String>,
+}
+```
+
+### Operational tags
+
+`HubOperationalTags` is a `u32` bitfield set at placement time. Missions (Phase 4.5) filter on these for aircraft-loadout matching.
+
+| Bit | Meaning | Set when |
+|---|---|---|
+| `HIGH_ALTITUDE_OPS` | Density-altitude planning matters | altitude > 1500 m |
+| `SNOW_LANDING` | Ski / snow surface likely | alpine biome OR altitude > 2000 m |
+| `WATER_ONLY` | Floats required | Remote/Isolated + low altitude + water adjacent |
+| `LAND_ONLY` | Wheels required | no water adjacency |
+| `STOL_REQUIRED` | Short runway / tundra tires | Remote + Isolated tiers |
+| `LOW_VIS_COMMON` | Fog + low ceiling common | CoastalBoreal biome |
+| `LONG_RANGE_DESTINATION` | Efficient powerplant wanted | MediterraneanArchipelago |
+| `REMOTE_NO_REFUEL` | Fuel planning critical | Remote + Isolated tiers |
+
+### Runway naming style per tier
+
+| Tier | Style | Example |
+|---|---|---|
+| Major | Formal | "Runway 27L" |
+| Regional | Formal | "Runway 09" |
+| Local | Informal | "Access Road 27" |
+| Remote | Informal | "The 045 approach" |
+| Isolated | NoRunway | No runway reference |
+
+### Region Voronoi + region-density hub placement
+
+Regions are a separate Voronoi layer at ~300 km average spacing (17² = 289 seeds). Power-diagram weights sampled from biome-coherence × Perlin-fBm at 1500 km wavelength. Weight amplitude 6.5 × 10¹⁰ m² ≈ (255 km)² produces organic 2-3× linear region-diameter variation.
+
+**Region-density-weighted hub placement** (per user design note: "large cells provide a density function — one/two very large, several medium, many small, similar to reality"): dart acceptance probability scales with the region's power-diagram weight. Big regions accept up to `REGION_DENSITY_SCALE_MAX` = 2.0× uniform density; small regions drop to `REGION_DENSITY_SCALE_MIN` = 0.6× (floor prevents tiny regions from being empty). Combined with weight amplitude, this gives a **40× hub-count ratio** between smallest and largest regions — California-scale dominance with Austria-to-small-state minimums.
+
+`region_id_at(x, z)` does power-diagram nearest-seed lookup — O(N) over 289 seeds with toroidal-closest-path distance. Fast enough at per-pixel query rate.
+
+### Hub names
+
+Per-biome word lists × per-tier templates. All curated in-module for bush/GA aesthetic:
+
+- **HighDesert** (Colorado Plateau / Grand Mesa): Raven, Sage, Canyon, Mesa, Red, Harrison
+- **RockyAlpine** (Colorado Rockies): Bear, Elk, Peak, Tarn, Silver, Ellsworth
+- **CoastalBoreal** (Alaska / PNW): Eagle, Salmon, Bay, Fjord, Misty, McKenzie
+- **Mediterranean** (Aegean): Olive, Cypress, Isle, Cove, Blue, Castellanos
+
+Sample generated names (canonical seed): "Laurel Point Airport", "Mount Moreno", "Bighorn Strip", "Hayden's Landing", "Lost Seal", "Delfino's Camp". Isolated tier returns `None` — uncharted until player-named at Phase 4.8 cartographer.
+
+### Magnetic variation
+
+`magnetic_variation(master_seed, x, z) -> f32` returns compass deviation from true north in degrees. Two components:
+
+1. **Latitude-proxy bias** via `sin(2π·z/W)` — northern regions (z ~ W/4) lean positive (east variation), southern (z ~ -W/4) lean negative. Matches real-Earth N/S asymmetry.
+2. **Perlin-fBm spatial variation** at ~800 km wavelength for organic per-region variation.
+
+Amplitude ±`MAG_VAR_AMPLITUDE_DEG` (= 15°). Tunable — drop to 5° for soft onboarding, push to 30° for Alaska-brutal. Fed into runway-number authoring (`display_number = round((true_heading - variation) / 10)`) + avionics instruments.
+
+### Bake stats (canonical seed `0xF10_1A11`)
+
+- **55 462 total hubs** baked in ~1-2 s release
+- Per tier: Major 93 / 150 (constraint-limited by flat + water + region-density), Regional 369 / 400, Local 1500, Remote 3500, Isolated 50000
+- Nearest-neighbor matches Clark-Evans expected within 2 % across all tiers
+- Region hub-count ratio **39× (min 11, max 433 per region)** — big-region dominance as designed
+- Regional → nearest Major: mean ~220 km, max ~1200 km
+
+### Known deferrals
+
+- **Authored tier-1/2 hub chunks** → 3.6.3 (once Voronoi feature layers exist)
+- **Late-binding cell resolution** → 3.6.2 (matches Voronoi arrival)
+- **Discovery / cartographer unlock flags** → save format (3.7)
+- **Barn-find attachments** → 3.6.3+
 
 ---
 

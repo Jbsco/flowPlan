@@ -3,7 +3,57 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
-Last updated: **2026-04-23** (Phase 2.5 **SHIPPED**; Phase 3.2.1 + 3.2.2 + 3.2.3 weather W1/W2/W3 + flight coupling + chop wiring **SHIPPED**; world scope **LOCKED to Option A toroidal**; progression data-model locked; **scenario-realism audit COMPLETE**; **flight-model realism pass COMPLETE**; **water-physics hardening + q_chord aero audit COMPLETE**; **Phase 3.6.0 + 3.6.1a + 3.6.1b + 3.6.1c + 3.6.1d SHIPPED** — Perlin-fBm terrain, per-biome ridged/domain-warped primitives, mipmap-aware sampling, real-world-possible altitude envelope, hydrology bake (priority-flood + D8 + wetness equilibrium + delta fans + coastline); bench at ~70 scenarios + 157 unit tests, full gate green. **Next: Phase 3.6.1e hub catalog bake + magnetic variation.**).
+Last updated: **2026-04-23** (Phase 2.5 **SHIPPED**; Phase 3.2.1 + 3.2.2 + 3.2.3 weather W1/W2/W3 + flight coupling + chop wiring **SHIPPED**; world scope **LOCKED to Option A toroidal**; progression data-model locked; **scenario-realism audit COMPLETE**; **flight-model realism pass COMPLETE**; **water-physics hardening + q_chord aero audit COMPLETE**; **Phase 3.6.0 through 3.6.1e SHIPPED** — Perlin-fBm terrain, per-biome ridged/domain-warped primitives, mipmap-aware sampling, real-world-possible altitude envelope, hydrology bake (priority-flood + D8 + wetness equilibrium + delta fans + coastline), hub catalog (~55 K hubs across 5 tiers with operational tags + per-biome names), magnetic variation field; bench at ~70 scenarios + 200 unit tests, full gate green. **Next: Phase 3.6.2 Voronoi partition + sub-biome features.**).
+
+## 2026-04-23 (iteration 3) — Phase 3.6.1e (hub catalog + magnetic variation)
+
+L1 hub catalog bake shipped as a read-only data layer atop the hydrology graph. ~55 K hubs across 5 tiers with operational-gear tags, per-biome procedural display names, and a separate ~300 km Voronoi region-partition for mission-scoping. Companion `magnetic_variation` field provides deterministic compass-deviation for runway-number authoring + avionics.
+
+- **Hub tiers + placement**: Major (150 target, ~200 km spacing, water + flat required) → Regional → Local → Remote → Isolated (50 K target, 1 km spacing). Dart-throwing with spatial-hash acceleration + biome/altitude/water-adjacency constraints. Nearest-neighbor distances across every tier match Clark-Evans expected value within 2 % — placement is near-optimal blue-noise.
+- **Operational tags** (`HubOperationalTags` bitfield): HIGH_ALTITUDE_OPS, SNOW_LANDING, WATER_ONLY, LAND_ONLY, STOL_REQUIRED, LOW_VIS_COMMON, LONG_RANGE_DESTINATION, REMOTE_NO_REFUEL. Set at placement time from biome + altitude + water + tier. Phase 4.5 mission matching will filter on these for aircraft-loadout recommendations (per memory `utility_varying_upgrades` grayed-mission UX).
+- **Runway naming style**: Formal (Major/Regional paved runways), Informal (Local/Remote dirt roads & clearings — "Access Road 27"), NoRunway (Isolated). Magnetic variation still drives the numeric bearing when used.
+- **Region Voronoi** (~280 seeds at 300 km avg) **+ region-density-weighted hub placement** (per user design note): power-diagram weights sampled from biome-coherence field + Perlin-fBm; dart acceptance probability scales with region weight (0.6× floor for small regions, 2.0× peak for big ones). Iteration: (400 km)² amplitude gave 460× hub-count ratio (too extreme) with uniform placement; (200 km)² was too flat (5× ratio, 1.4× diameter); (255 km)² + region-weighted placement lands at **40× hub-count ratio** with 2-3× linear diameter variation — California-scale big regions dominating, Austria-scale small regions still viable. Models real-geography urban concentration: "one/two very large hubs + several medium + many small".
+- **Per-biome display names**: curated word lists + per-tier templates. HighDesert ("Raven", "Mesa", "Harrison"), RockyAlpine ("Bear", "Peak", "Ellsworth"), CoastalBoreal ("Eagle", "Fjord", "McKenzie"), Mediterranean ("Olive", "Cove", "Castellanos"). Sample names land authentically bush/GA — "Laurel Point Airport", "Mount Moreno", "Hayden's Landing", "Delfino's Camp". Tier-5 Isolated returns None (cartographer unlock in 4.8).
+- **Magnetic variation**: `magnetic_variation(seed, x, z) -> f32°`. `sin(2π·z/W)` latitude bias × 0.6 + Perlin-fBm 800 km × 0.4, amplitude ±15°. Runway-number conversion + avionics-instrument consumer.
+- **Visual-bench**: 4 artifact families × 3 crops — hub scatter (color + size by tier), region Voronoi (hashed-hue polygons + white seed dots), magnetic variation (diverging red/blue nautical-chart-style), composite (topo + hillshade + hub overlay).
+
+### Bake stats (canonical seed `0xF10_1A11`)
+
+```
+total_hubs=55_462  regions=289
+  Major:    93  /   150  (62%)  — constraint-limited by flat + water + region density
+  Regional: 369 /   400  (92%)
+  Local:    1500 / 1500 (100%)
+  Remote:   3500 / 3500 (100%)
+  Isolated: 50000 / 50000 (100%)
+tags: high_altitude=28024 water_only=13305 land_only=9296 stol=53500 snow=28709
+sample names:
+  Major: ["Laurel Point Airport", "Big Fjord Airport", "Silver Bay Airport"]
+  Regional: ["Fort Delfino", "North Whale Field", "Bear Col Field"]
+  Local: ["Ellsworth's Landing", "Granite Meadow", "Upper Ridge"]
+  Remote: ["Deep Reach", "Sun Laurel", "Tuna Camp"]
+region hub-count: min=11 max=433 ratio=39.4x — big-region dominance as designed
+```
+
+### Test state
+
+- **27 new unit tests pass** — magnetic variation (5), hub_names (5), hub_catalog (17 including bake integration + distance invariants + min-spacing guarantees + region diameter range).
+- **444 total workspace tests pass** (up from 416).
+- Distance-measurement tests confirm placement matches Clark-Evans uniform-random expected values within 2 % across all tiers (blue-noise is working).
+- Full workspace green: fmt + clippy `-D warnings` + cargo test + cargo test --doc.
+
+### Known deferrals
+
+- **Authored tier-1/2 hub chunks** (hand-crafted geometry for the handful of major hubs) → 3.6.3 Layer-3.
+- **Voronoi late-binding resolution** (snap approx coords to exact cell positions) → 3.6.2 (once terrain-Voronoi exists).
+- **Discovery / cartographer unlock flags** → save-format (3.7).
+- **Mission matching UX** (grayed entries with "requires STOL gear" hints) → 4.5.
+
+### Next milestone
+
+**Phase 3.6.2 — Voronoi partition + sub-biome features** (memory: `voronoi_subbiome_architecture`). Then 3.6.3 (Layer-3 feature deltas: basin shaping, sandbars, authored tier-1/2 hubs).
+
+---
 
 ## 2026-04-23 (iteration 2) — Phase 3.6.1d (hydrology graph)
 
