@@ -404,6 +404,75 @@ This triple gate — world bounds + biome envelope + feature altitude_range — 
 
 If terrain can produce 4,500 m ridges, mission routing must check: does a flyable great-circle-or-optimal-altitude path exist between source and destination hubs for the player's aircraft? If not, the mission doesn't generate. Fleet service ceilings come from AircraftSpec; routing checks Layer 1 heightfield maxima along candidate paths. Easy to layer in once the mission-generation machinery lands at [Milestone 4.5](ROADMAP.md#milestone-45-missions-and-template-progression). Not a 3.6 concern.
 
+### Layer 1 noise primitives (reference)
+
+Layer 1 heightfield composes **noise primitives** per biome. Phase 3.6.0 ships one primitive (Perlin-fBm) applied uniformly; Phase 3.6.1 adds the others and routes them by biome. Each primitive below is specified with the formula, the feel it produces, and the biomes it suits — so biome authoring can pick without re-derivation.
+
+#### Primitive 1: Perlin-fBm (the baseline, Phase 3.6.0)
+
+Sum of 2D Perlin noise octaves at halving spacing + halving amplitude. Natural smooth undulation with no periodic structure. Always the starting layer; other primitives compose on top.
+
+```
+fbm(x, z) = Σ_{i=0..N-1} amp × persist^i × perlin(x, z, spacing / 2^i)
+```
+
+- **Parameters:** `base_spacing_m`, `octaves`, `amplitude_m`, `persistence` (default 0.5)
+- **Feel:** rolling terrain, gentle gradients, no sharp features. Looks like mid-latitude hill country.
+- **Per-biome use:** baseline for every biome. Most biomes add other primitives on top.
+- **Wrap:** periodic by gradient-grid construction; `spacing_m` must divide `WORLD_EXTENT_M` evenly.
+- **Reference implementation:** `crates/world/src/terrain.rs` as of Phase 3.6.0.
+
+#### Primitive 2: Ridged multifractal (for alpine / mesa biomes)
+
+fBm variant where each octave inverts `|perlin|` to produce sharp ridges. Multifractal adjustment scales each octave by the previous octave's output, amplifying amplitude at already-high locations (more dramatic ridges on mountains, gentler on plains).
+
+```
+ridged(x, z) = Σ_{i=0..N-1} amp × persist^i × (offset − |perlin(x, z, spacing/2^i)|)^power
+```
+
+- **Parameters:** `offset` (default 1.0; controls ridge sharpness), `power` (default 2.0; increases = sharper ridges), plus fBm params.
+- **Feel:** crested ridges with valleys. Classic "mountain range" or "canyon mesa" look. At high `power` becomes cliff-like.
+- **Per-biome use:**
+  - **Rocky alpine** — primary primitive. High `power` (~2.5), strong amplitude (250+ m fine layer). Sharp crests.
+  - **High desert / plateau** — secondary primitive. Mid `power` (~1.8) for mesa edges; pair with domain-warping to avoid grid-aligned structure.
+- **Variant:** "hybrid multifractal" scales each octave by the previous iteration's output raw (not absolute-valued), producing flatter lowlands + dramatic highlands. Useful for coastal alpine where plains meet abrupt mountain fronts.
+
+#### Primitive 3: Domain warping (for organic coastlines / varied terrain)
+
+Feed the fBm output back as a perturbation to the input coordinates before sampling a second fBm. Breaks up straight lines and grid alignment, produces organic wrinkled distortion.
+
+```
+warp_x = warp_amplitude × fbm_warp(x, z)
+warp_z = warp_amplitude × fbm_warp(x + 1000, z + 1000)   // decorrelation offset
+terrain(x, z) = fbm_base(x + warp_x, z + warp_z)
+```
+
+- **Parameters:** `warp_amplitude_m` (how far coordinates get pushed; 500–5000 m typical), `fbm_warp` config (usually lower-frequency than `fbm_base`).
+- **Feel:** curved coastlines, swirled mountain patterns, natural-looking distortion. Removes the slight "Perlin-gridness" at octave boundaries.
+- **Per-biome use:**
+  - **Coastal boreal / PNW** — primary primitive. Strong warp (~3000 m) over fBm base for fjord-like coastlines.
+  - **Mediterranean archipelago** — strong warp + shallow fBm base gives varied island shapes without grid pattern.
+  - **Tropical island chain** — warp as second pass over island-specific placement noise.
+
+#### Composition rules
+
+Primitives compose **additively at the heightfield level** (same as Layer 3 feature-deltas). A biome's heightfield is typically:
+
+```
+height(x, z) = regional_fbm(x, z)                       // L1 Phase 3.6.0 baseline
+            + biome_primitive(x, z)                     // ridged or domain-warped fBm
+            + Σ sub-biome-feature-deltas(x, z)          // L3 (lake basins, etc.)
+```
+
+Each biome declares its `(primary_primitive, secondary_primitive, warp_amplitude, ridged_power, amplitude_scales)` tuple at bake time. A catalog of biome noise profiles lives at [`FEATURES.md § Sub-biome feature libraries`](FEATURES.md#sub-biome-feature-libraries-pinned-architecture) alongside the semantic feature data.
+
+#### Implementation notes
+
+- All three primitives are **toroidal-wrap-continuous** when built on Perlin (gradient-grid mod-N). Domain warping preserves wrap as long as the warp itself wraps (which follows automatically since it's fBm).
+- **Determinism** requires fixed octave-offset indices per-primitive per-biome to avoid gradient-hash collisions between layers. Convention: reserve `octave_offset` ranges `[0..100)` baseline, `[100..200)` secondary, `[200..300)` warp displacement x, `[300..400)` warp displacement z, etc.
+- **Performance:** domain warp doubles the sample cost (two fBm passes); ridged is same cost as fBm. Both within budget at Layer 1 coarse (100 m) resolution.
+- **Altitude envelope soft-clamp** applies AFTER all primitive composition, so primitive output can overshoot the biome band and the clamp tames it.
+
 ### Layer 2 — Voronoi partition + sub-biome feature assignment
 
 Purely answers: *"What is where, semantically?"* No heightfield modification.

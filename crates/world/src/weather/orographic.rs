@@ -155,14 +155,17 @@ mod tests {
     #[test]
     fn windward_boosts_lee_reduces() {
         // Over seeded terrain, scan a grid; there should be points where
-        // the modifier is > 1 and points where it is < 1.
+        // the modifier is > 1 and points where it is < 1. Sampling range
+        // widened post 3.6.0 terrain rewrite (Perlin-fBm has gentler local
+        // slopes than old sum-of-sines; need larger area to catch both
+        // windward boost and lee-side reduction).
         let t = Terrain::from_seed(42);
         let mut saw_boost = false;
         let mut saw_reduce = false;
-        for ix in 0..40 {
-            for iz in 0..40 {
-                let x = (ix as f32 - 20.0) * 200.0;
-                let z = (iz as f32 - 20.0) * 200.0;
+        for ix in 0..50 {
+            for iz in 0..50 {
+                let x = (ix as f32 - 25.0) * 2_000.0;
+                let z = (iz as f32 - 25.0) * 2_000.0;
                 let m = terrain_moisture_modifier(42, &t, x, z, 0.0);
                 if m > 1.001 {
                     saw_boost = true;

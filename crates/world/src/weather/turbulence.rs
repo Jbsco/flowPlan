@@ -136,13 +136,16 @@ mod tests {
     #[test]
     fn terrain_slope_produces_nonzero_turbulence() {
         let terrain = Terrain::from_seed(42);
-        // Sample a 10 km × 10 km grid; at least one point should produce
-        // measurable terrain-induced turbulence.
+        // Sample a 100 km × 100 km grid; at least one point should produce
+        // measurable terrain-induced turbulence. Range widened post 3.6.0
+        // terrain rewrite — Perlin-fBm has gentler local slopes than the
+        // old sum-of-sines, so broader area needed to guarantee a
+        // turbulence-triggering gradient.
         let mut any_nonzero = false;
-        for ix in 0..10 {
-            for iz in 0..10 {
-                let x = (ix as f32 - 5.0) * 1_000.0;
-                let z = (iz as f32 - 5.0) * 1_000.0;
+        for ix in 0..20 {
+            for iz in 0..20 {
+                let x = (ix as f32 - 10.0) * 5_000.0;
+                let z = (iz as f32 - 10.0) * 5_000.0;
                 let t = turbulence_at(42, &terrain, x, 200.0, z, 0.0);
                 if t > 0.001 {
                     any_nonzero = true;

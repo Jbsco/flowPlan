@@ -186,14 +186,18 @@ mod tests {
     fn with_terrain_differs_over_seeded_terrain() {
         // Over seeded terrain, at least some points should differ from the
         // flat-humidity path (proves the modifier is actually engaging).
+        // Sampling range widened to 50 km × 50 km post 3.6.0 terrain rewrite:
+        // new Perlin-fBm terrain has gentler local slopes than the old
+        // sum-of-sines, so need broader area to guarantee the modifier
+        // threshold gets crossed somewhere.
         use crate::terrain::Terrain;
         let terrain = Terrain::from_seed(42);
         let seed = 42;
         let mut any_diff = false;
-        for ix in 0..30 {
-            for iz in 0..30 {
-                let x = (ix as f32 - 15.0) * 300.0;
-                let z = (iz as f32 - 15.0) * 300.0;
+        for ix in 0..50 {
+            for iz in 0..50 {
+                let x = (ix as f32 - 25.0) * 2_000.0;
+                let z = (iz as f32 - 25.0) * 2_000.0;
                 let base = sea_level_humidity(seed, x, z, 0.0);
                 let with_terrain = sea_level_humidity_with_terrain(seed, &terrain, x, z, 0.0);
                 if base.to_bits() != with_terrain.to_bits() {
