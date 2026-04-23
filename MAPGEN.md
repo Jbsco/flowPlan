@@ -747,6 +747,40 @@ placement_rules: Some((
 
 Memory reference: `hub_emergent_upgrade_via_spillover`.
 
+#### Bake performance budget (PINNED — 3.6.3c.1c forward)
+
+World-bake is a **one-time cost at world-load**, not a per-frame or per-stream concern. The bake produces immutable inputs (terrain heightfield + hydrology graph + hub catalog + sub-biome `BakedAssignments`) that all subsequent gameplay reads from cheaply. Investment in bake-time correctness pays dividends because gameplay never re-bakes mid-session.
+
+**Current bake-time budget (canonical seed, single-thread)**:
+
+| Phase | Cost | Notes |
+|---|---|---|
+| L1 terrain (Perlin-fBm + biome blending) | <1 s lazy | Pure functions; no precompute |
+| L2 hydrology graph (priority-flood + flow accumulation + wetness) | ~2 s | Eager bake; ~150 MB graph state |
+| L2 hub catalog (5-tier dart-throwing + region Voronoi) | ~3 s | Eager bake; ~55 K entries |
+| L2 sub-biome cells (Bridson Poisson-disk) | ~20 s | Eager bake; ~3.9 M seeds (62 % of theoretical max) |
+| L3 sub-biome `BakedAssignments` (3.6.3c.1c) | TBD measured | Eager bake; ~20 MB cached u16 feature ids + per-feature spatial hashes |
+| L3 feature deltas | <1 s lazy | Per-cell fn; no precompute |
+
+**Total target**: under ~60 s for a full canonical-seed bake on a 4-core machine. Players hit this once when entering a new seed; loading bar acceptable.
+
+**Why eager `BakedAssignments`**: self-spacing rules (`SelfSpacingRules.min_km`) require global "what's already placed where" state during placement. The lazy per-cell evaluator can't satisfy this without recursive dry-runs (expensive) or out-of-band caches. Eager bake centralizes the state, makes self-spacing correct + deterministic, and enables future optimization (parallelization, pre-streaming radius caches).
+
+**Memory budget posture** (user-pinned — flowplan deliberately stays lean vs. bloated open-world games like Minecraft):
+
+| State | Approx | Notes |
+|---|---|---|
+| Per-cell `BakedAssignments` | ~20 MB | u16 interned feature_id × 3.9 M cells + lookup table |
+| Per-feature spatial hashes (18 features w/ self_spacing) | ~5-10 MB | Grid hashing of placed positions |
+| Hub catalog | ~10 MB | 55 K entries × ~180 bytes |
+| Hydrology graph | ~150 MB | 4 M coarse cells × ~40 bytes |
+
+Total world-bake state: **~200 MB**. Well within current-gen RAM budgets, dramatically smaller than typical open-world worlds (Minecraft regions can be GB-scale persisted state).
+
+**Parallelization candidate (future improvement, no current churn)**: the bake's per-cell rule-evaluation phase is read-only against terrain / hydrology / hub_catalog / climate samplers — embarrassingly parallel via `rayon::par_iter`. The self-spacing-check + spatial-hash-insert phase is serial state-mutation. Clean split: parallel evaluation produces `Vec<(CellId, candidate)>`, serial merge in deterministic permuted order does self-spacing checks + retries. Estimated **3-4× speedup** on typical 4-8 core machines. **Posture**: ship serial first, measure actual wall-clock, add `rayon` follow-up if measurement justifies (>30 s threshold). Adding `rayon = "1"` is a single-line dep change with zero refactor cost.
+
+**Scan-order — master-seed-keyed permutation (3.6.3c.1c PINNED)**: cell processing order is a deterministic permutation `splitmix64(master_seed, cell_id)` rather than naive `0..n_cells` ascending. Bridson's depth-first spatial walk produces cell IDs that are spatially correlated (cells near initial seed get low IDs, far cells get high IDs); naive ascending order would give the low-ID region "first pick" on contested high-spacing features (e.g. `hot_springs` with 50 km min_km). The permutation removes geographic bias while preserving full bit-identical determinism per master_seed. Same seed → same permutation → same bake output across all platforms.
+
 ### Composition properties (why this separation matters)
 
 - **Independent development.** Each layer lands on a separate milestone. Layer 1 = Phase 3.6.1; Layer 2 = Phase 3.6.2; Layer 3 = Phase 3.6.3 + 3.6.4.
