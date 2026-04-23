@@ -142,7 +142,7 @@ impl<'a> WorldRefs<'a> {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::cast_precision_loss,
-    clippy::many_single_char_names,
+    clippy::many_single_char_names
 )]
 mod tests {
     use super::*;

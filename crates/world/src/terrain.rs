@@ -231,8 +231,13 @@ impl BiomeProfile {
         primitive: PrimitiveType::DomainWarped,
         spacing_m: 10_000.0,
         octaves: 5,
-        amplitude_m: 300.0,     // moderate relief
-        mean_altitude_m: -50.0, // sits near sea level (slight negative so fjords form)
+        amplitude_m: 300.0,    // moderate relief
+        mean_altitude_m: 50.0, // coastline-with-fjords: mean sits above sea level;
+        // fine-octave variation crosses 0 at shoreline to carve
+        // fjords. Previous −50 m produced a waterworld look —
+        // biome covered ~25% of the world, so mean below sea
+        // dragged much of that area underwater (coastline tuning
+        // pass 2026-04-23).
         octave_offset_base: 540,
         ridged_offset: 1.0,
         ridged_power: 1.5,
@@ -533,6 +538,45 @@ impl Terrain {
 /// shore classification lands in 3.6.1d.
 const BEACH_WIDTH_M: f32 = 20.0;
 
+/// Shore-band width (m) for fine-octave suppression.
+///
+/// Cells whose slow (regional + biome) altitude is within ±this of sea
+/// level have their fine-octave contribution attenuated to
+/// [`SHORE_ATTENUATION_FLOOR`]. Inland cells (`|slow_altitude|` >
+/// this) retain full fine amplitude.
+///
+/// 400 m chosen so the shore smoothing covers the fine-octave peak
+/// amplitude (±150 m × ~1.5 fBm peak ≈ ±225 m) with some margin.
+/// Narrower would leave residual speckle; wider would flatten more
+/// inland terrain unnecessarily.
+const SHORE_BAND_WIDTH_M: f32 = 400.0;
+
+/// Floor for fine-octave amplitude at the exact shoreline.
+///
+/// 0.20 means fine retains 20 % of its amplitude at altitude 0,
+/// attenuating gradually up to 100 % at `|slow_altitude|` =
+/// [`SHORE_BAND_WIDTH_M`]. 20 % preserves enough texture for beach
+/// visual variety without producing the broken-coast speckle at full
+/// amplitude.
+const SHORE_ATTENUATION_FLOOR: f32 = 0.20;
+
+/// Shore-proximity fine-amplitude factor.
+///
+/// Returns 1.0 when `slow_altitude_m` is far from shore (no
+/// suppression), [`SHORE_ATTENUATION_FLOOR`] at exactly shore,
+/// smoothstep between.
+///
+/// Pure function of the slow-varying (regional + `biome_contribution`)
+/// altitude, not the full altitude — we need a value we can compute
+/// BEFORE adding fine to avoid circularity.
+#[inline]
+#[must_use]
+fn shore_attenuation(slow_altitude_m: f32) -> f32 {
+    let t = (slow_altitude_m.abs() / SHORE_BAND_WIDTH_M).clamp(0.0, 1.0);
+    let ramp = t * t * (3.0 - 2.0 * t); // smoothstep(0, 1, t)
+    SHORE_ATTENUATION_FLOOR + (1.0 - SHORE_ATTENUATION_FLOOR) * ramp
+}
+
 /// `raw * smoothstep(0, width, |raw|)^2`. Below `width` heights are
 /// compressed with a cubic curve; at or above `width` the identity
 /// function applies. Sign preserved.
@@ -570,7 +614,7 @@ impl Terrain {
                 self.config.regional_octaves,
                 min_spacing_m,
             );
-        let fine = self.config.fine_amplitude_m
+        let fine_raw = self.config.fine_amplitude_m
             * fbm_2d_at_scale(
                 self.seed,
                 100,
@@ -580,7 +624,6 @@ impl Terrain {
                 self.config.fine_octaves,
                 min_spacing_m,
             );
-        let baseline = regional + fine;
 
         let (biome_contribution_total, envelope) = if self.amplitude_scale > 0.0 {
             let weights = biome_weights_at(self.seed, x, z);
@@ -592,7 +635,17 @@ impl Terrain {
             (0.0, BiomeEnvelope::WORLD_DEFAULT)
         };
 
-        let raw = self.amplitude_scale * (baseline + biome_contribution_total);
+        // Proximity-to-shore fine-octave suppression (coastline-quality
+        // tuning pass, 2026-04-23). Fine fbm at ±150 m amplitude crosses
+        // sea level (altitude 0) many times near shorelines, producing
+        // speckled sub-km islands and "broken" coast. Solution: attenuate
+        // fine amplitude where the slow-varying (regional + biome)
+        // altitude is near 0. Inland cells (|slow_altitude| > shore band
+        // width) retain full fine detail.
+        let slow_altitude = regional + biome_contribution_total;
+        let fine = self.amplitude_scale * fine_raw * shore_attenuation(slow_altitude);
+
+        let raw = self.amplitude_scale * (regional + biome_contribution_total) + fine;
 
         // Per-biome envelope soft-clamp — caps biome-blended raw output
         // into [hard_min, hard_max] band per real-world-possible gate.
