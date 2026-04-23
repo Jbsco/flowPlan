@@ -30,7 +30,12 @@ pub const SYNOPTIC_AMPLITUDE: f32 = 0.10;
 pub const REGIONAL_WAVELENGTH_M: f32 = 200_000.0;
 
 /// Synoptic wavelength (m). Coupled with pressure variation.
-pub const SYNOPTIC_WAVELENGTH_M: f32 = 350_000.0;
+///
+/// Quantized to `WORLD_EXTENT_M / 14` ≈ 357.14 km for clean toroidal-seam
+/// wrap (originally 350 km; 2.04% adjustment). Matches
+/// `pressure::SYNOPTIC_WAVELENGTH_M` so synoptic-scale fields align across
+/// pressure/temperature/humidity.
+pub const SYNOPTIC_WAVELENGTH_M: f32 = flowplan_core::WORLD_EXTENT_M / 14.0;
 
 /// Altitude scale-height for humidity decrease (m).
 ///

@@ -33,8 +33,14 @@ pub const BASELINE_HPA: f32 = 1013.25;
 /// Real weather-system variation is typically ±30 hPa from baseline.
 pub const SYNOPTIC_AMPLITUDE_HPA: f32 = 25.0;
 
-/// Synoptic-scale wavelength (m). ~350 km matches real frontal-system spacing.
-pub const SYNOPTIC_WAVELENGTH_M: f32 = 350_000.0;
+/// Synoptic-scale wavelength (m). Originally 350 km (matches real
+/// frontal-system spacing).
+///
+/// Quantized to `WORLD_EXTENT_M / 14` ≈ 357.14 km for clean toroidal-seam
+/// wrap (integer cycles per world). 2.04% adjustment — well within the
+/// ±15% natural variation of real synoptic systems. Phase 3.6.0
+/// wrap-foundation requirement per `MAPGEN.md § Sampler-wrap requirements`.
+pub const SYNOPTIC_WAVELENGTH_M: f32 = flowplan_core::WORLD_EXTENT_M / 14.0;
 
 /// Exponential scale height for altitude pressure decrease (m). Matches
 /// `flight.rs::ATMOSPHERE_SCALE_HEIGHT_M`.

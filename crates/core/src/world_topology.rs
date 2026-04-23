@@ -127,12 +127,12 @@ pub fn quantize_angular_frequency(omega_raw: f32) -> f32 {
 }
 
 /// Quantize a **wavelength** `λ` (meters) so that the world extent is
-/// an integer multiple of the wavelength. Convenience wrapper around
-/// [`quantize_angular_frequency`] for callers that reason in wavelengths
-/// rather than radians.
+/// an integer multiple of the wavelength.
 ///
-/// Minimum result: `WORLD_EXTENT_M` (single cycle per world). Wavelengths
-/// longer than the world are clamped rather than aliased.
+/// Convenience wrapper around [`quantize_angular_frequency`] for callers
+/// that reason in wavelengths rather than radians. Minimum result:
+/// `WORLD_EXTENT_M` (single cycle per world). Wavelengths longer than the
+/// world are clamped rather than aliased.
 ///
 /// # Examples
 ///

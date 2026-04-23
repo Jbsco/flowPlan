@@ -40,9 +40,19 @@ use super::{field_seed, weather_seed, wind};
 
 /// Average spacing between Voronoi seeds (m).
 ///
-/// Picks the midpoint of the MAPGEN 20–50 km target range — matches weather-
-/// feature sizes (storm cells, frontal-passage regions).
-pub const GRID_SPACING_M: f32 = 30_000.0;
+/// Originally 30 km (midpoint of MAPGEN's 20–50 km target range). Adjusted
+/// to 25 km (Phase 3.6.0) so `WORLD_EXTENT_M / GRID_SPACING_M = 200` is
+/// exactly integer — required for mod-N toroidal Voronoi wrap at the seam.
+/// 17% reduction stays well within the 20–50 km feature-size target range;
+/// cell count world-wide is 200 × 200 = 40,000 (matches MAPGEN's ~11K
+/// scaled up by the lower spacing).
+pub const GRID_SPACING_M: f32 = 25_000.0;
+
+/// Number of Voronoi grid cells per world side. `WORLD_EXTENT_M / GRID_SPACING_M`.
+/// Must be integer for mod-N wrap to produce clean toroidal identity.
+#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::cast_sign_loss)]
+pub const GRID_CELL_COUNT: i32 = (flowplan_core::WORLD_EXTENT_M / GRID_SPACING_M) as i32;
 
 /// Maximum seed jitter as a fraction of [`GRID_SPACING_M`].
 ///
@@ -88,6 +98,12 @@ pub fn seed_position(master_seed: u64, cell: CellId) -> Vec2 {
 }
 
 /// Voronoi cell owning world coordinate `(x, z)`. Static (no drift).
+///
+/// Toroidal-wrap-aware (Phase 3.6.0): cell IDs wrap via mod-N so queries
+/// near the seam correctly identify the same cell whether approached from
+/// `x < 0` or `x > WORLD_EXTENT_M`. Seed positions for wrapped cells are
+/// computed relative to the query point so the distance calc doesn't span
+/// the whole world.
 #[must_use]
 #[allow(clippy::cast_possible_truncation)]
 pub fn cell_at(master_seed: u64, x_m: f32, z_m: f32) -> CellLookup {
@@ -98,16 +114,38 @@ pub fn cell_at(master_seed: u64, x_m: f32, z_m: f32) -> CellLookup {
 
     let mut best = f32::INFINITY;
     let mut second = f32::INFINITY;
-    let mut best_id = CellId { ix: ix0, iz: iz0 };
+    let mut best_id = CellId { ix: 0, iz: 0 };
     let mut best_pos = Vec2::ZERO;
 
-    for dx in -1..=1 {
-        for dz in -1..=1 {
+    let n = i64::from(GRID_CELL_COUNT);
+    let half_world = flowplan_core::WORLD_EXTENT_M * 0.5;
+
+    for dx in -1..=1_i32 {
+        for dz in -1..=1_i32 {
+            // Raw grid indices may be negative or exceed N near the seam;
+            // wrap for canonical cell identity (affects jitter hash), but
+            // keep the raw-index position so seam-adjacent queries see the
+            // "near" representative rather than the canonical far-side one.
+            let ix_raw = ix0 + dx;
+            let iz_raw = iz0 + dz;
             let id = CellId {
-                ix: ix0 + dx,
-                iz: iz0 + dz,
+                ix: flowplan_core::wrap_cell_index(i64::from(ix_raw), n) as i32,
+                iz: flowplan_core::wrap_cell_index(i64::from(iz_raw), n) as i32,
             };
-            let pos = seed_position(master_seed, id);
+            // Canonical seed position uses the wrapped ID (consistent jitter
+            // across all queries for this cell), then we shift by whole-world
+            // increments so the position is the representative near x_m.
+            let mut pos = seed_position(master_seed, id);
+            if pos.x - x_m > half_world {
+                pos.x -= flowplan_core::WORLD_EXTENT_M;
+            } else if pos.x - x_m < -half_world {
+                pos.x += flowplan_core::WORLD_EXTENT_M;
+            }
+            if pos.y - z_m > half_world {
+                pos.y -= flowplan_core::WORLD_EXTENT_M;
+            } else if pos.y - z_m < -half_world {
+                pos.y += flowplan_core::WORLD_EXTENT_M;
+            }
             let d2 = (pos.x - x_m) * (pos.x - x_m) + (pos.y - z_m) * (pos.y - z_m);
             let d = libm::sqrtf(d2);
             if d < best {
@@ -231,9 +269,11 @@ mod tests {
     fn seed_within_jitter_bound_of_grid_center() {
         // For any (master_seed, cell), the seed must lie within
         // ±JITTER_FRACTION * GRID_SPACING_M of the grid-cell center.
+        // Post Phase 3.6.0: cell IDs are canonical in [0, GRID_CELL_COUNT);
+        // test iterates through canonical range rather than negative values.
         let expected_bound = JITTER_FRACTION * GRID_SPACING_M + 1.0;
-        for ix in -5..=5 {
-            for iz in -5..=5 {
+        for ix in 0..11 {
+            for iz in 0..11 {
                 let center_x = (ix as f32 + 0.5) * GRID_SPACING_M;
                 let center_z = (iz as f32 + 0.5) * GRID_SPACING_M;
                 let pos = seed_position(42, CellId { ix, iz });
@@ -250,8 +290,9 @@ mod tests {
     #[test]
     fn cell_contains_its_seed() {
         // Querying at a seed's position should resolve to that cell.
-        for ix in -3..=3 {
-            for iz in -3..=3 {
+        // Post Phase 3.6.0: use canonical [0, N) indices.
+        for ix in 0..7 {
+            for iz in 0..7 {
                 let id = CellId { ix, iz };
                 let pos = seed_position(42, id);
                 let lookup = cell_at(42, pos.x, pos.y);
@@ -262,6 +303,21 @@ mod tests {
                     lookup.distance_to_seed
                 );
             }
+        }
+    }
+
+    #[test]
+    fn cell_at_wraps_across_seam() {
+        // Post Phase 3.6.0: query near x=0 vs x=WORLD_EXTENT_M should
+        // resolve to the SAME canonical cell ID. Verifies toroidal wrap
+        // in the Voronoi partition.
+        use flowplan_core::WORLD_EXTENT_M;
+        for &(x, z) in &[(0.5, 0.5), (123.4, 567.8), (10_000.0, -5_000.0)] {
+            let near_origin = cell_at(42, x, z);
+            let wrapped_east = cell_at(42, x + WORLD_EXTENT_M, z);
+            let wrapped_north = cell_at(42, x, z + WORLD_EXTENT_M);
+            assert_eq!(near_origin.cell_id, wrapped_east.cell_id, "east seam at {x},{z}");
+            assert_eq!(near_origin.cell_id, wrapped_north.cell_id, "north seam at {x},{z}");
         }
     }
 
@@ -294,17 +350,18 @@ mod tests {
     #[test]
     fn drift_shifts_cell_over_time() {
         // Pick a point with nonzero wind; after enough time, a different cell
-        // should own the drifted query.
+        // should own the drifted query. Post Phase 3.6.0: GRID_SPACING_M
+        // reduced 30→25 km but jitter fraction unchanged, so some drift-vs-
+        // jitter edge cases land inside the same cell at 1h. Widen to 3h so
+        // drift clearly exceeds neighbor-distance regardless of jitter.
         let x = 120_000.0;
         let z = 90_000.0;
-        let altitude = 2_000.0; // aloft, full geostrophic
+        let altitude = 2_000.0;
         let lookup_0 = cell_at_drifted(42, x, altitude, z, 0.0);
-        let lookup_1h = cell_at_drifted(42, x, altitude, z, 3_600.0);
-        // After an hour at ~10 m/s wind, drift ≈ 36 km — more than GRID_SPACING_M.
-        // Lookup should fall into a different cell.
+        let lookup_3h = cell_at_drifted(42, x, altitude, z, 10_800.0);
         assert_ne!(
-            lookup_0.cell_id, lookup_1h.cell_id,
-            "drifted cell should change after 1h advection"
+            lookup_0.cell_id, lookup_3h.cell_id,
+            "drifted cell should change after 3h advection"
         );
     }
 

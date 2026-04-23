@@ -47,6 +47,7 @@ pub trait HeightSampler: Send + Sync {
 /// Hash uses Knuth's multiplicative mixing of the inputs followed by
 /// `splitmix64` for thorough bit-diffusion. Adjacent grid cells produce
 /// uncorrelated directions.
+#[allow(clippy::cast_sign_loss)] // wrap_cell_index returns non-negative i64 by contract
 fn gradient(seed: u64, octave: u32, ix: i64, iz: i64, n_cells: i64) -> (f32, f32) {
     use core::f32::consts::TAU;
     let ix_w = wrap_cell_index(ix, n_cells) as u64;
@@ -57,7 +58,11 @@ fn gradient(seed: u64, octave: u32, ix: i64, iz: i64, n_cells: i64) -> (f32, f32
         ^ iz_w.wrapping_mul(0x94D0_49BB_1331_11EB);
     let h = splitmix64(combined);
     #[allow(clippy::cast_precision_loss)]
-    let theta = (h as f64 / u64::MAX as f64) as f32 * TAU;
+    let h_f64 = h as f64;
+    #[allow(clippy::cast_precision_loss)]
+    let u64_max_f64 = u64::MAX as f64;
+    #[allow(clippy::cast_possible_truncation)]
+    let theta = (h_f64 / u64_max_f64) as f32 * TAU;
     (libm::cosf(theta), libm::sinf(theta))
 }
 
@@ -177,6 +182,7 @@ impl FbmConfig {
     };
 
     /// Theoretical max height. Sum of both layers' worst-case peaks.
+    #[allow(clippy::cast_possible_wrap)] // octave counts are small (≤16)
     fn theoretical_max(self) -> f32 {
         let regional_sum: f32 = (0..self.regional_octaves)
             .map(|i| 0.5_f32.powi(i as i32))
@@ -184,10 +190,10 @@ impl FbmConfig {
         let fine_sum: f32 = (0..self.fine_octaves)
             .map(|i| 0.5_f32.powi(i as i32))
             .sum();
-        // 2D Perlin peak ≈ 0.7071; 1.2× fudge for correlated-octave
+        // 2D Perlin peak ≈ 1/√2 ≈ 0.7071; 1.2× fudge for correlated-octave
         // cases that slightly exceed per-octave bounds.
         (self.regional_amplitude_m * regional_sum + self.fine_amplitude_m * fine_sum)
-            * 0.7071
+            * core::f32::consts::FRAC_1_SQRT_2
             * 1.2
     }
 }

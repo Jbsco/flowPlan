@@ -18,7 +18,7 @@ use flowplan_sim::{
     state::FIXED_DT, AircraftSpec, DifficultyDials, InputEvent, InputEvents, SimSnapshot, SimState,
     VehicleState,
 };
-use flowplan_world::{sun_direction, HeightSampler, Terrain};
+use flowplan_world::{local_time_of_day, sun_direction, HeightSampler, Terrain};
 use winit::application::ApplicationHandler;
 use winit::event::{KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -847,8 +847,14 @@ impl Runtime {
         // the day advances. Fog / ambient / sun color stay at render defaults for now;
         // per-biome tuning arrives alongside the weather system. Wall-clock seconds
         // since startup feed water Gerstner phase.
+        //
+        // Phase 3.6.0: longitude-varying local time. Different world-x positions
+        // see different solar phases — fly east to chase sunset, west to race
+        // sunrise. At session start the aircraft is near origin, so the effect
+        // only kicks in after traversal.
+        let local_tod = local_time_of_day(curr.time_of_day, curr.vehicle.position.x);
         let scene_params = SceneParams {
-            sun_dir: sun_direction(curr.time_of_day),
+            sun_dir: sun_direction(local_tod),
             time_seconds: self.start_time.elapsed().as_secs_f32(),
             // Mirror sim-side chop on the visual waves so buoyancy response
             // and rendered surface amplitude stay aligned.

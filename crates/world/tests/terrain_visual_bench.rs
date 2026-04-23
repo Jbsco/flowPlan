@@ -150,11 +150,11 @@ fn write_png(img: &ImageBuffer<Rgb<u8>, Vec<u8>>, dir: &Path, filename: &str) {
 // Determinism tests — run in normal `cargo test` (no `--ignored`)
 // ══════════════════════════════════════════════════════════════════════════
 
-/// Verifies wrap_coord produces bit-identical output across equivalent
+/// Verifies `wrap_coord` produces bit-identical output across equivalent
 /// world positions (the `sample(x) == sample(x + WORLD_EXTENT_M)` invariant
-/// from MAPGEN § Sampler-wrap requirements). This is a primitive test; the
+/// from `MAPGEN § Sampler-wrap requirements`). This is a primitive test; the
 /// quantization work (3.6.0b onwards) is what makes samplers actually obey
-/// the invariant, but wrap_coord itself must at least produce equivalent
+/// the invariant, but `wrap_coord` itself must at least produce equivalent
 /// canonical coordinates for equivalent queries.
 #[test]
 fn wrap_coord_is_periodic_bit_identical() {
@@ -232,7 +232,22 @@ fn terrain_wraps_continuously_across_seam() {
     }
 }
 
-/// Verifies wrap_cell_index produces exact equivalence under periodic
+// NOTE: weather-field seam-continuity test is NOT included here yet.
+// The weather synoptic harmonics (pressure / temperature / humidity) use
+// seed-derived rotated band directions: `sin(k × (x·cos(θ) + z·sin(θ)) + φ)`.
+// Frequency quantization alone doesn't produce clean seam wrap for rotated
+// bands because the axis-aligned wrap requirement `ω × W = 2π·k` must hold
+// in BOTH axes, which requires cos(θ) and sin(θ) to jointly resolve to
+// rational values — impossible for arbitrary θ. Real fix is either:
+//   (a) decompose each harmonic into separable x-component and z-component
+//       sub-harmonics at independently quantized frequencies, OR
+//   (b) switch weather fields to gradient-noise (Perlin) with periodic
+//       gradient grid — same pattern we already use for terrain.
+// Tracked as a known gap; see `3.6.0 wrap rotated-band` memory for status.
+// Wavelength quantization is kept because a future separable-harmonic
+// refactor needs the same quantized wavelengths.
+
+/// Verifies `wrap_cell_index` produces exact equivalence under periodic
 /// shifts. Unlike coord wrap (float), cell index is integer — zero
 /// tolerance required.
 #[test]

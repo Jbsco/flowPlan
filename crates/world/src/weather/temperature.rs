@@ -35,7 +35,9 @@ pub const SYNOPTIC_AMPLITUDE_K: f32 = 3.0;
 pub const CLIMATE_WAVELENGTH_M: f32 = 500_000.0;
 
 /// Synoptic wavelength (m) — same scale as pressure for coupled variation.
-pub const SYNOPTIC_WAVELENGTH_M: f32 = 350_000.0;
+/// Quantized to `WORLD_EXTENT_M / 14` ≈ 357.14 km for clean toroidal-seam
+/// wrap (originally 350 km; 2.04% adjustment).
+pub const SYNOPTIC_WAVELENGTH_M: f32 = flowplan_core::WORLD_EXTENT_M / 14.0;
 
 /// ISA tropospheric lapse rate (K / m). Standard ~6.5 K / km.
 pub const LAPSE_RATE_K_PER_M: f32 = 0.006_5;
