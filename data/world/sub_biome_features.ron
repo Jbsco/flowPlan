@@ -151,6 +151,42 @@
                 selection_weight: 0.3,
                 is_bleed_over_candidate: false,
             ),
+            // Farmland parcel — bench orchards + row crops + farmhouse cluster.
+            // HighDesert home (Western Colorado bench agriculture as
+            // ground-truth reference). Bleeds to CoastalBoreal valley ag +
+            // Mediterranean coastal plain. NOT compatible with RockyAlpine
+            // (no adaptation entry → excluded from RA bleed-over).
+            // 3.6.3c placement rules: hub_proximity Major 80 / Regional 40 /
+            // Local 15 km; self-spacing 10 km; river-valley prominence bias.
+            // Render primitives: terrain coloration (crop rows + dirt) +
+            // 3× box (farmhouse + barn + silo-base) + 2× cylinder (silo +
+            // water tower) + 4× flat quad (fence lines).
+            (
+                id: "farmland_parcel",
+                slope_tolerance_max_deg: 2.0,
+                roughness_tolerance_m: 20.0,
+                water_adjacency: None,
+                altitude_range_m: (400.0, 2200.0),
+                selection_weight: 0.5,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (170, 145, 85),
+                    secondary: (140, 110, 75),
+                    accent: (205, 175, 95),
+                )),
+                adaptation_per_host: {
+                    "CoastalBoreal": (
+                        primary: (130, 150, 95),
+                        secondary: (105, 85, 70),
+                        accent: (180, 160, 105),
+                    ),
+                    "MediterraneanArchipelago": (
+                        primary: (145, 150, 95),
+                        secondary: (175, 100, 75),
+                        accent: (210, 195, 135),
+                    ),
+                },
+            ),
             // Working ranch — barn + outbuildings + corral + dirt yard
             // + dry-grass paddock. Bleed-over enables the "winter ranch"
             // experience (ranch in CoastalBoreal/RockyAlpine) — pinned
@@ -753,6 +789,129 @@
                     accent: (200, 105, 65),
                 )),
                 adaptation_per_host: {},
+            ),
+            // Dwelling cluster — small village: 5-8 houses + yards + trees,
+            // moderate density. CoastalBoreal home (valley settlements);
+            // bleeds widely — villages appear in every biome.
+            // 3.6.3c placement rules: hub_proximity Major 50 / Regional 20 /
+            // Local 10 km; self-spacing 5 km; road-adjacency preferred.
+            // Render primitives: 5-8× box (houses w/ varied colors) +
+            // 4× cone (front-yard trees) + 2× flat quad (road + fence) +
+            // terrain coloration (lawns).
+            (
+                id: "dwelling_cluster",
+                slope_tolerance_max_deg: 6.0,
+                roughness_tolerance_m: 40.0,
+                water_adjacency: None,
+                altitude_range_m: (-10.0, 1500.0),
+                selection_weight: 0.6,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (130, 85, 70),
+                    secondary: (105, 115, 85),
+                    accent: (150, 140, 110),
+                )),
+                adaptation_per_host: {
+                    "HighDesert": (
+                        primary: (165, 125, 85),
+                        secondary: (175, 95, 70),
+                        accent: (195, 175, 130),
+                    ),
+                    "RockyAlpine": (
+                        primary: (110, 95, 80),
+                        secondary: (175, 185, 195),
+                        accent: (135, 125, 105),
+                    ),
+                    "MediterraneanArchipelago": (
+                        primary: (215, 205, 185),
+                        secondary: (90, 130, 175),
+                        accent: (170, 95, 70),
+                    ),
+                },
+            ),
+            // Gas station — small-format fuel stop + convenience store.
+            // Phase 4.5 refuel economy anchor: when player lands within
+            // N m of a gas_station cell, refuel is available; prices
+            // scale with remoteness (Major-hub-area cheap; remote expensive).
+            // CoastalBoreal home; bleeds to all biomes (gas stations are
+            // universal). 3.6.3c placement rules: requires_road_adjacency
+            // (NOT enforced in 3.6.3b — low selection_weight keeps per-cell
+            // rarity reasonable until 3.6.3c road engine activates the
+            // adjacency gate); hub_proximity Major 30 / Regional 10 km;
+            // self-spacing 20 km.
+            // Render primitives: 1× flat quad (canopy roof) + 4× cylinder
+            // (support columns) + 2× box (pump island + shop) + 1× flat
+            // quad (signage with branded red accent).
+            (
+                id: "gas_station",
+                slope_tolerance_max_deg: 3.0,
+                roughness_tolerance_m: 20.0,
+                water_adjacency: None,
+                altitude_range_m: (-10.0, 2500.0),
+                selection_weight: 0.15,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (180, 180, 175),
+                    secondary: (80, 80, 85),
+                    accent: (215, 90, 60),
+                )),
+                adaptation_per_host: {
+                    "HighDesert": (
+                        primary: (195, 170, 130),
+                        secondary: (85, 80, 85),
+                        accent: (215, 90, 60),
+                    ),
+                    "RockyAlpine": (
+                        primary: (190, 195, 200),
+                        secondary: (75, 75, 80),
+                        accent: (215, 90, 60),
+                    ),
+                    "MediterraneanArchipelago": (
+                        primary: (220, 215, 195),
+                        secondary: (110, 165, 180),
+                        accent: (215, 90, 60),
+                    ),
+                },
+            ),
+            // General store — small-town mercantile: groceries + basic
+            // cargo + hardware. Resupply + light-cargo mission anchor
+            // (Phase 4.5). CoastalBoreal home; bleeds widely — general
+            // stores are universal. 3.6.3c placement rules: road-adjacency
+            // preferred (not gated); hub_proximity Regional 10 / Local 5
+            // km; self-spacing 15 km.
+            // Render primitives: 1× box (store building) + 1× flat quad
+            // (awning) + 1× flat quad (signage) + 2× sphere (hanging
+            // flower baskets, 50 % chance) + 1× cylinder (icebox outside).
+            (
+                id: "general_store",
+                slope_tolerance_max_deg: 4.0,
+                roughness_tolerance_m: 25.0,
+                water_adjacency: None,
+                altitude_range_m: (-10.0, 2500.0),
+                selection_weight: 0.2,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (150, 80, 70),
+                    secondary: (95, 115, 85),
+                    accent: (215, 210, 195),
+                )),
+                adaptation_per_host: {
+                    "HighDesert": (
+                        primary: (180, 140, 100),
+                        secondary: (155, 95, 70),
+                        accent: (195, 180, 150),
+                    ),
+                    "RockyAlpine": (
+                        primary: (115, 100, 85),
+                        secondary: (180, 190, 195),
+                        accent: (90, 75, 65),
+                    ),
+                    "MediterraneanArchipelago": (
+                        primary: (215, 205, 185),
+                        secondary: (90, 130, 175),
+                        accent: (160, 95, 70),
+                    ),
+                },
             ),
         ],
 

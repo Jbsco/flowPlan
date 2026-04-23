@@ -219,8 +219,8 @@ Notation: distances in km; tier is the minimum hub tier the rule references; `�
 
 | Feature | Home | Bleed | Hub-proximity (km, tier) | Hub-exclusion (km, tier) | Self-spacing (km) | Other rules |
 |---|---|---|---|---|---|---|
-| `farmland_parcel` | HighDesert / CoastalBoreal / Mediterranean | ✓ | Major 80 / Regional 40 / Local 15 | ∅ | 10 | Not in RockyAlpine (not arable); river-valley L1 prominence bias |
-| `dwelling_cluster` | CoastalBoreal | ✓ | Major 50 / Regional 20 / Local 10 | ∅ | 5 | Road-adjacency preferred (3.6.3c) |
+| `farmland_parcel` | HighDesert (bleeds to CoastalBoreal + Mediterranean only) | ✓ | Major 80 / Regional 40 / Local 15 | ∅ | 10 | Not in RockyAlpine (no adaptation entry = excluded); river-valley L1 prominence bias |
+| `dwelling_cluster` | CoastalBoreal | ✓ | Major 50 / Regional 20 / Local 10 | ∅ | 5 | Road-adjacency preferred (3.6.3c); bleeds to all 3 non-home biomes |
 | `remote_compound` | CoastalBoreal | ✓ | Remote 10 | 50, Major | 30 | Bleeds into all non-Mediterranean biomes (off-gridders pick exotic locations) |
 | `ranch` | HighDesert | ✓ | Regional 30 / Local 10 | ∅ | 15 | Bleed to CoastalBoreal = user-pinned "winter ranch" motivating example |
 | `homestead_clearing` | CoastalBoreal | ✓ | Local 15 / Remote 15 | 20, Major | 8 | Single-cabin scale; "almost wilderness" feel |
@@ -259,9 +259,8 @@ Notation: distances in km; tier is the minimum hub tier the rule references; `�
 
 **3.6.3b authoring status per feature:**
 
-- ✅ **Shipped to RON** (14 features): `ranch`, `remote_compound`, `homestead_clearing`, `natural_meadow`, `alpine_meadow`, `creek_valley`, `scenic_overlook`, `river_bend_viewpoint`, `hot_springs`, `abandoned_homestead`, `fishing_camp`, `tackle_shop`, `bait_shop`, `ferry_dock` — carry placement constraints + palettes (home + adaptation_per_host for bleed-over candidates) + render-primitive composition comments.
-- ⏳ **Pending RON authoring** (2 per-cell): `farmland_parcel`, `dwelling_cluster` + `gas_station`, `general_store` — authorable today against existing schema; `requires_road_adjacency` will be unenforced until 3.6.3c. Author in the next 3.6.3b pass or hold for 3.6.3c implementation.
-- ⏳ **Deferred to 3.6.3c** (infrastructure): `road_segment`, `dirt_road_segment`, `highway_intersection`, `rail_corridor_segment` — multi-cell groups require the engine.
+- ✅ **Shipped to RON** (18 features — all per-cell authorable features complete): `ranch`, `remote_compound`, `homestead_clearing`, `farmland_parcel`, `dwelling_cluster`, `natural_meadow`, `alpine_meadow`, `creek_valley`, `scenic_overlook`, `river_bend_viewpoint`, `hot_springs`, `abandoned_homestead`, `fishing_camp`, `tackle_shop`, `bait_shop`, `ferry_dock`, `gas_station`, `general_store` — carry placement constraints + palettes (home + adaptation_per_host for bleed-over candidates) + render-primitive composition comments. Features gated on road adjacency (`gas_station`, `general_store`) use conservative `selection_weight` (0.15-0.2) to keep per-cell rarity reasonable until 3.6.3c activates the adjacency gate.
+- ⏳ **Deferred to 3.6.3c** (4 infrastructure features): `road_segment`, `dirt_road_segment`, `highway_intersection`, `rail_corridor_segment` — multi-cell groups require the `FeatureGroup` engine.
 
 **Evaluation note**: all 14 shipped features use the pre-3.6.3b `SubBiomeFeature` schema (no `placement_rules` struct yet). Their `selection_weight` field provides the initial density calibration; per-tier hub-proximity weighting + spatial-spacing + road-adjacency gates land in 3.6.3c when the `PlacementRules` struct ships. Until then, the table above is the design contract — 3.6.3c implementation reads these rules and wires evaluation.
 

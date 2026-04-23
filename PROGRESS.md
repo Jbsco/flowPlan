@@ -12,25 +12,30 @@ Pre-code authoring sprint: encode the palette-adaptation mechanism + simple-prim
 - **Palette adaptation mechanism (PINNED)**: bleed-over features carry `home_palette` + `adaptation_per_host: HashMap<biome, palette>`. Render-side blends `home → host_adapted` by `blend_factor = smoothstep(0.1, 0.9, source_weight)` so winter-ranch / desert-fjord / similar rare cross-biome placements become visual experiences rather than categorical tags. Algorithm + authoring surface + visual-bench artifact plan encoded in **MAPGEN.md § Layer 3 phase split** + agent-memory `palette_adaptation_mechanism`.
 - **Simple-primitives render direction (PINNED)**: features render as composable geometric primitives (box / half-cylinder / cylinder / cone / sphere / stick-tree / flat-quad / terrain-coloration), not authored meshes. Per-feature spec is a small array of primitive instances with local-space transforms + palette refs. Ships fast, memory-light, cel-shading-compatible, palette-adaptation-friendly. Upgrade-to-mesh path preserved per-feature without engine changes. Encoded in MAPGEN.md + agent-memory `simple_primitives_render_direction`.
 - **Struct extensions (`crates/world/src/sub_biome.rs`)**: `Palette` (3-tuple of RGB triples — primary / secondary / accent) + `PaletteColor = (u8, u8, u8)` types added. `SubBiomeFeature` gains optional `home_palette: Option<Palette>` + `adaptation_per_host: HashMap<String, Palette>` fields with `#[serde(default)]` so existing entries parse without authoring updates.
-- **14 new RON features authored** in `data/world/sub_biome_features.ron`:
-  - **Developments (3)**: `ranch` (HighDesert home, bleeds — enables the user-pinned "winter ranch" experience), `remote_compound` (CoastalBoreal, bleeds), `homestead_clearing` (CoastalBoreal, bleeds).
+- **18 new RON features authored** in `data/world/sub_biome_features.ron` (all per-cell-authorable 3.6.3b features — the 4 remaining infrastructure features require the multi-cell `FeatureGroup` engine and wait on 3.6.3c):
+  - **Developments (5)**: `ranch` (HighDesert home, bleeds — enables the user-pinned "winter ranch" experience), `remote_compound` (CoastalBoreal, bleeds), `homestead_clearing` (CoastalBoreal, bleeds), `farmland_parcel` (HighDesert home; bleeds ONLY to CoastalBoreal + Mediterranean since RockyAlpine isn't arable — excluded via missing adaptation entry), `dwelling_cluster` (CoastalBoreal, bleeds widely).
   - **Scenery (7)**: `natural_meadow` (CoastalBoreal, bleeds), `alpine_meadow` (RockyAlpine, bleeds), `creek_valley` (CoastalBoreal, bleeds), `scenic_overlook` (RockyAlpine, no-bleed), `river_bend_viewpoint` (CoastalBoreal, bleeds), `hot_springs` (RockyAlpine, bleeds), `abandoned_homestead` (CoastalBoreal, bleeds).
   - **Water-adjacent resupply (4)**: `fishing_camp` (CoastalBoreal, bleeds), `tackle_shop` (CoastalBoreal, no-bleed), `bait_shop` (CoastalBoreal, no-bleed), `ferry_dock` (Mediterranean, no-bleed).
-- Each new entry carries placement constraints + `home_palette` + (where bleed-over) `adaptation_per_host` for the 3 non-home biomes + a render-primitive composition comment (e.g. `remote_compound = 3× box + 5× cone + 30% chance 1× stick_tree`).
+  - **Road-adjacent resupply (2)**: `gas_station` (CoastalBoreal home, bleeds widely; conservative `selection_weight: 0.15` keeps per-cell rarity reasonable until 3.6.3c activates `requires_road_adjacency`), `general_store` (CoastalBoreal, bleeds widely, `selection_weight: 0.2`).
+- Each new entry carries placement constraints + `home_palette` + (where bleed-over) `adaptation_per_host` for the 3 non-home biomes + a render-primitive composition comment (e.g. `remote_compound = 3× box + 5× cone + 30% chance 1× stick_tree`). `farmland_parcel` intentionally omits the RockyAlpine adaptation entry (biome-compatibility gate — arable biomes only).
 
 ### Test state
 
 - All 10 `sub_biome::*` unit tests pass with the extended struct + 14 new RON entries.
 - Full workspace builds clean. `libraries_parse_from_ron` test now sees 53+ feature entries across 5 libraries (was 38+); count thresholds stay below current totals so future additions don't break the test.
 
-### Pending (3.6.3b remainder)
+### Shipped (3.6.3b core SHIPPED 2026-04-23)
 
-- **Full-spec placement rules in MAPGEN + FEATURES** (Task #215): hub-proximity radii per tier (Major: 50 km dwellings / 80 km farmland / 30 km gas stations; Remote: maybe one homestead within 10 km), scenery prominence weighting from L1 + hydrology, biome compatibility per feature class.
-- **Existing-feature palette retrofit** (deferred to 3.6.3c polish or 3.6.4): the pre-3.6.3b features (mesa_top, lake_cluster, etc.) currently have `home_palette: None` so they render via biome-derived fallback. Authoring full palettes for them is a follow-on pass — not blocking 3.6.3c implementation since the mechanism degrades gracefully.
+- **Full-spec placement rules** (Task #215): 7-category schema (`hub_proximity`, `hub_exclusion`, `min_self_spacing_km`, `requires_road_adjacency`, `prominence_attractor`, `hydrology_coupling`, `climate_window`) + evaluation order + per-feature rules for all 21 cross-biome features (18 shipped to RON, 4 infrastructure deferred to 3.6.3c multi-cell groups) authored as **design spec** in MAPGEN.md § Placement rule vocabulary (PINNED) + FEATURES.md § Sub-biome feature placement rules (PINNED). `PlacementRules` RON struct + evaluation implementation land in 3.6.3c.
+- **Existing-feature palette retrofit** deferred to 3.6.4 polish — the 24 pre-3.6.3b features (mesa_top, lake_cluster, etc.) have `home_palette: None` and render via biome-derived fallback. Mechanism degrades gracefully; retrofit is authoring-hours, not structural.
+
+### Pending
+
+- User review of the full catalog + placement rules before 3.6.3c implementation kicks off.
 
 ### Next milestone
 
-**Phase 3.6.3c — multi-cell `FeatureGroup` engine + delta implementation for all 3.6.3b-authored features**. Adds polyline / cluster spans for roads + dwelling clusters; implements the development / resupply / scenery deltas authored above; ships palette-adaptation render integration in `composed::WorldRefs` so the winter-ranch / desert-fjord effects become visible.
+**Phase 3.6.3c — multi-cell `FeatureGroup` engine + `PlacementRules` struct + delta implementation for all 3.6.3b-authored features**. Adds polyline / cluster spans for roads + dwelling clusters; ships the `PlacementRules` sub-struct on `SubBiomeFeature` with RON parsing + bake-time evaluation; implements the development / resupply / scenery deltas authored above; ships palette-adaptation render integration in `composed::WorldRefs` so the winter-ranch / desert-fjord effects become visible.
 
 ---
 
