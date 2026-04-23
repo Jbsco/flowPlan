@@ -559,6 +559,42 @@ Placement rules authored alongside:
 
 `gas_station` cells shipped in 3.6.3b/c expose a gameplay anchor for Phase 4.5 missions: when the player aircraft lands within N m of a `gas_station` cell + road adjacency, refuel is available. Prices scale with remoteness (Major hubs cheap; remote gas stations expensive).
 
+#### Palette adaptation mechanism (PINNED)
+
+User-confirmed mechanic (2026-04-23): bleed-over features undergo **palette blending from home → host-adapted based on biome-weight blend factor**. Turns rare cross-biome placements into distinctive player experiences (winter ranch, desert fjord) rather than categorical tags.
+
+**Blend factor**: `smoothstep(0.1, 0.9, source_weight)` where `source_weight` is the bleed-over source biome's weight at the cell. 1.0 at biome core → full home palette; 0.0 deep in host → fully host-adapted.
+
+**Authoring surface per feature in RON**:
+- `home_palette: (primary, secondary, accent)` — 3-tuple colors native to the feature's parent biome
+- `adaptation_per_host: { "RockyAlpine": (...), "CoastalBoreal": (...), ... }` — per-host-biome override palette; missing entry = feature excluded from bleed-over to that host
+
+**Rendering**: `render_color = lerp(adaptation_per_host[host], home_palette, blend_factor)`. Ship: compute `blend_factor` in `composed::WorldRefs`, expose to shader; shader lerps.
+
+**Visual-bench artifact**: `palette_bleed_over_{crop}.png` showing palette gradient across transition-zone cells, deferred to 3.6.3c render integration.
+
+Memory reference: `palette_adaptation_mechanism`.
+
+#### Simple-primitives render direction (PINNED)
+
+User-confirmed rendering approach (2026-04-23): features render as composable geometric primitives instead of authored meshes. Ships fast, memory-light, cel-shading-compatible, palette-adaptation-friendly.
+
+Primitive vocabulary:
+- **Box**: buildings (cabins, shacks, sheds, compound structures)
+- **Half-cylinder**: quonset hangars, curved-roof agricultural sheds
+- **Cylinder (upright)**: silos, antenna bases, stick-tree trunks
+- **Cone (varied widths)**: conifer trees, steeples
+- **Sphere / oblate spheroid**: deciduous canopies, shrubs, rounded boulders
+- **Stick tree** (cylinder + cone/sphere composite): winter deciduous
+- **Flat quad**: dock boards, fence panels, runway markings
+- **None (terrain coloration)**: farmland parcels, meadows, dry-lake beds
+
+Per-feature authoring: spec a small array of primitive instances with local-space transforms + palette refs. Example: `remote_compound` = 3× box (cabin + shed + outhouse) + 5× cone (conifer windbreak) + 30% chance 1× stick_tree (dead snag).
+
+Variation deterministic per `(master_seed, cell_id)` — same cell always produces same instances. Scale ±20 %, rotation random, palette offset ±5° hue for natural variety.
+
+Memory reference: `simple_primitives_render_direction`. Upgrade path: individual features swap primitives for authored meshes per setpiece without engine changes.
+
 ### Composition properties (why this separation matters)
 
 - **Independent development.** Each layer lands on a separate milestone. Layer 1 = Phase 3.6.1; Layer 2 = Phase 3.6.2; Layer 3 = Phase 3.6.3 + 3.6.4.

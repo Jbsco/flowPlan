@@ -3,7 +3,86 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
-Last updated: **2026-04-23** (Phase 2.5 **SHIPPED**; Phase 3.2.1 + 3.2.2 + 3.2.3 weather W1/W2/W3 **SHIPPED**; world scope **LOCKED to Option A toroidal**; progression data-model locked; **scenario-realism audit COMPLETE**; **flight-model realism pass COMPLETE**; **water-physics hardening COMPLETE**; **Phase 3.6.0 through 3.6.2 SHIPPED** — Perlin-fBm terrain + per-biome primitives + altitude envelope, hydrology bake + delta fans + coastline, hub catalog ~55 K with tags + RON-authored names, magnetic variation field, **sub-biome Voronoi partition** (3.9 M cells, Bridson Poisson-disk, RON-authored feature libraries per biome + Oceanic library, bleed-over mechanism, 38+ feature types across 5 libraries); bench at ~70 scenarios + 220 unit tests, full gate green. **Next: Phase 3.6.3 Layer-3 feature-delta heightfield modifications.**).
+Last updated: **2026-04-23** (Phase 2.5 **SHIPPED**; Phase 3.2.1 + 3.2.2 + 3.2.3 weather W1/W2/W3 **SHIPPED**; world scope **LOCKED to Option A toroidal**; progression data-model locked; **scenario-realism audit COMPLETE**; **flight-model realism pass COMPLETE**; **water-physics hardening COMPLETE**; **Phase 3.6.0 through 3.6.2 SHIPPED** — Perlin-fBm terrain + per-biome primitives + altitude envelope, hydrology bake + delta fans + coastline, hub catalog ~55 K with tags + RON-authored names, magnetic variation field, **sub-biome Voronoi partition** (3.9 M cells, Bridson Poisson-disk, RON-authored feature libraries per biome + Oceanic library, bleed-over mechanism, 38+ feature types across 5 libraries); **Phase 3.6.3a SHIPPED** — L3 `FeatureDelta` engine + 10 natural deltas + tier-adaptive hub_foundation + 14-class `SurfaceClass` sampler (unblocks 2.5b.7) + L1 coastline tuning pass (`shore_attenuation` + `COASTAL_BOREAL` mean +100 m); bench at ~70 scenarios + 230+ unit tests, full gate green. **Now: Phase 3.6.3b design-authoring sprint** — palette-adaptation mechanism + simple-primitives render direction PINNED, 14 new RON features authored (developments / scenery / water-resupply, full palettes for bleed-over candidates).).
+
+## 2026-04-23 (iteration 6) — Phase 3.6.3b (design-authoring sprint, IN PROGRESS)
+
+Pre-code authoring sprint: encode the palette-adaptation mechanism + simple-primitives render direction as PINNED design directions, then expand the RON feature catalog with the developments / scenery / water-resupply features called out in the 3.6.3 split. No engine code in 3.6.3b — only design docs + RON content + struct extensions to carry the new fields. Implementation lands in 3.6.3c.
+
+- **Palette adaptation mechanism (PINNED)**: bleed-over features carry `home_palette` + `adaptation_per_host: HashMap<biome, palette>`. Render-side blends `home → host_adapted` by `blend_factor = smoothstep(0.1, 0.9, source_weight)` so winter-ranch / desert-fjord / similar rare cross-biome placements become visual experiences rather than categorical tags. Algorithm + authoring surface + visual-bench artifact plan encoded in **MAPGEN.md § Layer 3 phase split** + agent-memory `palette_adaptation_mechanism`.
+- **Simple-primitives render direction (PINNED)**: features render as composable geometric primitives (box / half-cylinder / cylinder / cone / sphere / stick-tree / flat-quad / terrain-coloration), not authored meshes. Per-feature spec is a small array of primitive instances with local-space transforms + palette refs. Ships fast, memory-light, cel-shading-compatible, palette-adaptation-friendly. Upgrade-to-mesh path preserved per-feature without engine changes. Encoded in MAPGEN.md + agent-memory `simple_primitives_render_direction`.
+- **Struct extensions (`crates/world/src/sub_biome.rs`)**: `Palette` (3-tuple of RGB triples — primary / secondary / accent) + `PaletteColor = (u8, u8, u8)` types added. `SubBiomeFeature` gains optional `home_palette: Option<Palette>` + `adaptation_per_host: HashMap<String, Palette>` fields with `#[serde(default)]` so existing entries parse without authoring updates.
+- **14 new RON features authored** in `data/world/sub_biome_features.ron`:
+  - **Developments (3)**: `ranch` (HighDesert home, bleeds — enables the user-pinned "winter ranch" experience), `remote_compound` (CoastalBoreal, bleeds), `homestead_clearing` (CoastalBoreal, bleeds).
+  - **Scenery (7)**: `natural_meadow` (CoastalBoreal, bleeds), `alpine_meadow` (RockyAlpine, bleeds), `creek_valley` (CoastalBoreal, bleeds), `scenic_overlook` (RockyAlpine, no-bleed), `river_bend_viewpoint` (CoastalBoreal, bleeds), `hot_springs` (RockyAlpine, bleeds), `abandoned_homestead` (CoastalBoreal, bleeds).
+  - **Water-adjacent resupply (4)**: `fishing_camp` (CoastalBoreal, bleeds), `tackle_shop` (CoastalBoreal, no-bleed), `bait_shop` (CoastalBoreal, no-bleed), `ferry_dock` (Mediterranean, no-bleed).
+- Each new entry carries placement constraints + `home_palette` + (where bleed-over) `adaptation_per_host` for the 3 non-home biomes + a render-primitive composition comment (e.g. `remote_compound = 3× box + 5× cone + 30% chance 1× stick_tree`).
+
+### Test state
+
+- All 10 `sub_biome::*` unit tests pass with the extended struct + 14 new RON entries.
+- Full workspace builds clean. `libraries_parse_from_ron` test now sees 53+ feature entries across 5 libraries (was 38+); count thresholds stay below current totals so future additions don't break the test.
+
+### Pending (3.6.3b remainder)
+
+- **Full-spec placement rules in MAPGEN + FEATURES** (Task #215): hub-proximity radii per tier (Major: 50 km dwellings / 80 km farmland / 30 km gas stations; Remote: maybe one homestead within 10 km), scenery prominence weighting from L1 + hydrology, biome compatibility per feature class.
+- **Existing-feature palette retrofit** (deferred to 3.6.3c polish or 3.6.4): the pre-3.6.3b features (mesa_top, lake_cluster, etc.) currently have `home_palette: None` so they render via biome-derived fallback. Authoring full palettes for them is a follow-on pass — not blocking 3.6.3c implementation since the mechanism degrades gracefully.
+
+### Next milestone
+
+**Phase 3.6.3c — multi-cell `FeatureGroup` engine + delta implementation for all 3.6.3b-authored features**. Adds polyline / cluster spans for roads + dwelling clusters; implements the development / resupply / scenery deltas authored above; ships palette-adaptation render integration in `composed::WorldRefs` so the winter-ranch / desert-fjord effects become visible.
+
+---
+
+## 2026-04-23 (iteration 5) — Phase 3.6.3a (Layer 3 feature-delta engine + L1 coastline tuning)
+
+L3 of the three-layer world-composition architecture — the geometry-modification layer. "What does the heightfield actually look like at this cell, given its assigned feature?" Per-cell delta functions add to the L1 base; bump-function falloff keeps Voronoi-edge continuity; hydrology graph is immutable across L3 (deltas suppressed when they would dam a river or fill a basin). Ships across 3 commits (`0292a46`, `ab40e18`, `e365c75`).
+
+- **`FeatureDelta` trait + registry** (`crates/world/src/feature_delta.rs`, ~280 LOC): maps `feature_id → fn(query, cell_seed_pos, cell_radius) -> delta_m`. `bump_falloff` (cosine bump) + `smoothstep` helpers shared across deltas. `compute_delta_at(world_refs, x, z)` walks the cell containing the query, sums delta + suppresses if hydrology graph would be violated, returns `(delta_m, was_suppressed)`.
+- **10 natural signature deltas** (`crates/world/src/feature_delta_impls.rs`, ~320 LOC): `lake_cluster` (negative bowl), `alpine_tarn` (smaller bowl + rim lift), `cirque` (semi-circle scoop with headwall), `mesa_top` (plateau + cliff edges), `book_cliffs` (linear cliff band), `dune_field` (sinusoidal ripples capped by amplitude), `bush_strip_clearing` (gentle flatten), `sandy_beach` (dished gravel slope), `cliff_coast` (sharp drop), `protected_cove` (concave bay scoop). Pattern coverage: bowl / plateau / cliff / flatten / ramp / dune — 3.6.3c extensions match these patterns.
+- **Tier-adaptive `hub_foundation_delta`**: Major hubs flatten the cell to mean elevation + 50 m skirt + cut-and-fill into positive elevation (so airstrip is always above grade); Regional uses 30 m skirt; Local does partial flatten with natural edges; Remote does minimal smoothing; Isolated emits no delta (lands on the natural feature). Priority: `hub_foundation > natural_feature > plain`.
+- **`SurfaceClass` sampler** (`crates/world/src/surface_class.rs`, ~290 LOC): 14-class enum (`Sand`, `Gravel`, `Rock`, `Cliff`, `Mudflat`, `Delta`, `IceEdge`, `Grass`, `Paved`, `Dirt`, `Snow`, `PowderSnow`, `DryLake`, `Water`). `surface_at(x, z) -> SurfaceClass` classifies from final heightfield slope + altitude + biome + hydrology + feature tag. **Unblocks Phase 2.5b.7 per-surface friction.**
+- **`composed::WorldRefs` bundle** (`crates/world/src/composed.rs`, ~230 LOC): query-time bundle holding refs to terrain + hydrology + biome + sub-biome catalog + feature_delta registry. Single entry point for L1+L2+L3 composed queries — keeps the delta engine free of ownership concerns and lets render-side share state cheaply.
+- **L3 integration into `Terrain::height_at_scale`**: opt-in param `use_l3_deltas: bool` so L1-only callers (regression tests, weather-coupling lookups) keep their existing behavior. New callers (final-render heightmap, surface_at) flip it on.
+- **Visual-bench (5 artifact families × 3 crops = 15 PNGs)** in `crates/world/tests/l3_feature_visual_bench.rs` (~425 LOC): L1-vs-L3 heightfield diff (signed colormap), shore-classification map (per-class hue), hub-foundation-effect overlay, feature-delta scatter (one tile per feature type at canonical altitude), surface-class transect (linear cross-section). Deterministic per seed, committed to `docs/world-gen-plots/`.
+- **Integration tests**: per-feature delta coverage assertions (each implemented delta produces a non-zero contribution at its representative cell), hydrology-suppression assertion (delta in a basin-fill case returns `was_suppressed=true`), boundary-falloff continuity assertion (delta → 0 at cell edge within 1 m), determinism assertion (same seed → bit-identical L3 heightfield across two bake runs).
+
+### L1 coastline tuning pass (mid-3.6.3a)
+
+Pre-tuning visual-bench artifacts showed two regressions vs. design intent: too much sea coverage (~40-50 % visible water) and broken-up speckled coastlines instead of continuous shorelines. User flagged: *"things are looking like a waterworld - and coastlines seems very broken up"*.
+
+Two-part fix in `crates/world/src/terrain.rs` (commit `e365c75`):
+
+1. **`COASTAL_BOREAL.mean_altitude_m: -50.0 → 50.0`** — biome's per-cell altitude offset was pulling L1 base below sea level on average. +100 m shift recovers land-with-fjords look while keeping fjord-channel cells below sea (intended).
+2. **`shore_attenuation` function** — fine fBm octave amplitude attenuated by proximity-to-shore in the slow base. `SHORE_BAND_WIDTH_M = 400.0`, `SHORE_ATTENUATION_FLOOR = 0.20`. Within ±400 m of sea level the fine octaves smoothly attenuate to 20 % of full amplitude → continuous coastlines, beaches still have grain, open ocean keeps wave-like detail.
+
+Both load-bearing — regression risk if either reverted. Pattern (proximity-to-threshold attenuation of fine octaves) generalizes to snow line / treeline / climate borders. Full rationale + values in agent-memory `coastline_tuning_pass`.
+
+### Bake stats (canonical seed `0xF10_1A11`, post-tuning)
+
+- L3 contribution range across sampled cells: -180 m (lake_cluster bowl floor) to +220 m (mesa_top + book_cliffs combined cap)
+- L3 suppressions: ~6.8 % of feature-bearing cells (deltas would have violated hydrology)
+- Sea coverage: ~26 % (down from ~45 % pre-tuning) — within design range
+- `SurfaceClass` distribution at 50 K sample points: Water 26 %, Rock 19 %, Grass 16 %, Sand 9 %, Snow 8 %, Gravel 7 %, Cliff 5 %, Dirt 4 %, Paved <1 % (matches biome / altitude expectations).
+
+### Test state
+
+- **18 new unit tests pass** (5 feature_delta, 6 feature_delta_impls, 5 surface_class, 2 composed).
+- **480 total workspace tests pass** (up from 462).
+- Full workspace green: fmt + clippy `-D warnings` + cargo test + cargo test --doc.
+- Doctest tolerance fix (`quantize_angular_frequency`: 1e-4 → 1e-2 absolute) — f32 round-trip at world scale needed looser bound. Captured in agent-memory `feedback_doctest_in_local_gate`.
+
+### Known deferrals (→ 3.6.3b / 3.6.3c)
+
+- **Development / scenery / resupply features**: 3.6.3b authoring sprint expanded the catalog with 14 features (see iteration 6 above); their delta implementations land in 3.6.3c.
+- **Multi-cell groups**: roads + residential clusters need polyline / cluster spans across cells. `FeatureGroup` engine ships in 3.6.3c.
+- **Palette-adaptation render integration**: `composed::WorldRefs` carries the bleed-over source/host info; the actual lerp + shader integration land in 3.6.3c.
+
+### Next milestone
+
+**Phase 3.6.3b — design-authoring sprint** (encoded above as iteration 6, IN PROGRESS).
+
+---
 
 ## 2026-04-23 (iteration 4) — Phase 3.6.2 (sub-biome Voronoi partition)
 

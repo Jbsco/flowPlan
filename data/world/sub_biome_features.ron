@@ -151,6 +151,44 @@
                 selection_weight: 0.3,
                 is_bleed_over_candidate: false,
             ),
+            // Working ranch — barn + outbuildings + corral + dirt yard
+            // + dry-grass paddock. Bleed-over enables the "winter ranch"
+            // experience (ranch in CoastalBoreal/RockyAlpine) — pinned
+            // motivating example for the palette-adaptation mechanism.
+            // Render primitives: 2× box (barn + house), 1× half-cylinder
+            // (quonset shed), 4× cylinder (silo, watertower, fence posts),
+            // 3× cone (windbreak conifers), terrain coloration (paddock).
+            (
+                id: "ranch",
+                slope_tolerance_max_deg: 5.0,
+                roughness_tolerance_m: 35.0,
+                water_adjacency: None,
+                altitude_range_m: (700.0, 2400.0),
+                selection_weight: 0.4,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (140, 95, 65),
+                    secondary: (165, 145, 105),
+                    accent: (95, 80, 65),
+                )),
+                adaptation_per_host: {
+                    "RockyAlpine": (
+                        primary: (115, 90, 75),
+                        secondary: (180, 195, 200),
+                        accent: (75, 70, 65),
+                    ),
+                    "CoastalBoreal": (
+                        primary: (105, 85, 70),
+                        secondary: (95, 115, 95),
+                        accent: (155, 165, 170),
+                    ),
+                    "MediterraneanArchipelago": (
+                        primary: (155, 105, 70),
+                        secondary: (195, 175, 130),
+                        accent: (160, 90, 65),
+                    ),
+                },
+            ),
         ],
 
         // ── RockyAlpine ─────────────────────────────────────────────
@@ -228,6 +266,97 @@
                 altitude_range_m: (1800.0, 3800.0),
                 selection_weight: 0.7,
                 is_bleed_over_candidate: false,
+            ),
+            // High-altitude wildflower meadow above treeline — short
+            // grass, paintbrush + lupine clumps, exposed granite. Bleeds
+            // into adjacent biomes as a microclimate pocket.
+            // Render primitives: terrain coloration (grass) + 8× sphere
+            // (flower clumps) + 2× cylinder (small granite outcrop).
+            (
+                id: "alpine_meadow",
+                slope_tolerance_max_deg: 12.0,
+                roughness_tolerance_m: 60.0,
+                water_adjacency: None,
+                altitude_range_m: (2200.0, 3800.0),
+                selection_weight: 0.8,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (115, 140, 75),
+                    secondary: (140, 155, 95),
+                    accent: (210, 105, 145),
+                )),
+                adaptation_per_host: {
+                    "HighDesert": (
+                        primary: (155, 135, 80),
+                        secondary: (175, 155, 100),
+                        accent: (200, 100, 135),
+                    ),
+                    "CoastalBoreal": (
+                        primary: (95, 135, 75),
+                        secondary: (120, 145, 90),
+                        accent: (200, 110, 150),
+                    ),
+                    "MediterraneanArchipelago": (
+                        primary: (135, 145, 85),
+                        secondary: (155, 160, 100),
+                        accent: (215, 110, 140),
+                    ),
+                },
+            ),
+            // Scenic overlook — exposed point with weathered cairn or
+            // benchmark. Photo-mode anchor (5.5). Strongly biome-locked.
+            // Render primitives: 1× cylinder (cairn / benchmark post),
+            // 2× sphere (boulders), terrain coloration.
+            (
+                id: "scenic_overlook",
+                slope_tolerance_max_deg: 25.0,
+                roughness_tolerance_m: 120.0,
+                water_adjacency: None,
+                altitude_range_m: (2000.0, 4000.0),
+                selection_weight: 0.4,
+                is_bleed_over_candidate: false,
+                home_palette: Some((
+                    primary: (110, 115, 105),
+                    secondary: (140, 145, 130),
+                    accent: (170, 180, 195),
+                )),
+                adaptation_per_host: {},
+            ),
+            // Hot springs — geothermal pool with mineral-stained
+            // travertine + steam. Bleeds into adjacent biomes (rare,
+            // photogenic, mission anchor).
+            // Render primitives: terrain coloration (mineral basin),
+            // 1× flat quad (water surface), no buildings (raw nature).
+            (
+                id: "hot_springs",
+                slope_tolerance_max_deg: 8.0,
+                roughness_tolerance_m: 40.0,
+                water_adjacency: None,
+                altitude_range_m: (1200.0, 3000.0),
+                selection_weight: 0.25,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (145, 195, 200),
+                    secondary: (215, 200, 175),
+                    accent: (220, 220, 220),
+                )),
+                adaptation_per_host: {
+                    "HighDesert": (
+                        primary: (160, 190, 195),
+                        secondary: (200, 145, 110),
+                        accent: (215, 215, 215),
+                    ),
+                    "CoastalBoreal": (
+                        primary: (140, 190, 195),
+                        secondary: (175, 175, 145),
+                        accent: (220, 220, 225),
+                    ),
+                    "MediterraneanArchipelago": (
+                        primary: (130, 195, 200),
+                        secondary: (220, 215, 195),
+                        accent: (225, 225, 225),
+                    ),
+                },
             ),
         ],
 
@@ -333,6 +462,297 @@
                 altitude_range_m: (-50.0, 800.0),
                 selection_weight: 0.7,
                 is_bleed_over_candidate: false,
+            ),
+            // Natural meadow — open grass clearing with wildflower
+            // accents, no human structures. Common low-key scenery
+            // feature; bleeds widely.
+            // Render primitives: terrain coloration + 6× sphere
+            // (wildflower clumps).
+            (
+                id: "natural_meadow",
+                slope_tolerance_max_deg: 6.0,
+                roughness_tolerance_m: 30.0,
+                water_adjacency: None,
+                altitude_range_m: (0.0, 1500.0),
+                selection_weight: 1.5,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (110, 145, 80),
+                    secondary: (155, 165, 110),
+                    accent: (220, 200, 100),
+                )),
+                adaptation_per_host: {
+                    "HighDesert": (
+                        primary: (155, 130, 85),
+                        secondary: (180, 155, 110),
+                        accent: (210, 175, 95),
+                    ),
+                    "RockyAlpine": (
+                        primary: (95, 125, 80),
+                        secondary: (130, 145, 100),
+                        accent: (200, 195, 130),
+                    ),
+                    "MediterraneanArchipelago": (
+                        primary: (140, 145, 90),
+                        secondary: (170, 165, 105),
+                        accent: (235, 180, 90),
+                    ),
+                },
+            ),
+            // Creek valley — narrow drainage with moss-rock banks,
+            // running water, riparian vegetation.
+            // Render primitives: 1× flat quad (water ribbon), 4× sphere
+            // (riparian shrubs), 3× cylinder (boulders), terrain colour.
+            (
+                id: "creek_valley",
+                slope_tolerance_max_deg: 18.0,
+                roughness_tolerance_m: 100.0,
+                water_adjacency: Required,
+                altitude_range_m: (50.0, 1800.0),
+                selection_weight: 0.9,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (75, 110, 80),
+                    secondary: (95, 105, 95),
+                    accent: (160, 195, 200),
+                )),
+                adaptation_per_host: {
+                    "HighDesert": (
+                        primary: (155, 100, 65),
+                        secondary: (135, 95, 70),
+                        accent: (180, 200, 195),
+                    ),
+                    "RockyAlpine": (
+                        primary: (95, 105, 90),
+                        secondary: (110, 115, 105),
+                        accent: (180, 215, 220),
+                    ),
+                    "MediterraneanArchipelago": (
+                        primary: (140, 120, 90),
+                        secondary: (170, 145, 110),
+                        accent: (170, 215, 225),
+                    ),
+                },
+            ),
+            // River-bend viewpoint — gravel bar at a wide bend with
+            // sweeping water visibility. Photo-mode anchor + water-
+            // landing candidate.
+            // Render primitives: terrain coloration (gravel bar),
+            // 2× sphere (riparian brush), no built structures.
+            (
+                id: "river_bend_viewpoint",
+                slope_tolerance_max_deg: 5.0,
+                roughness_tolerance_m: 30.0,
+                water_adjacency: Required,
+                altitude_range_m: (0.0, 800.0),
+                selection_weight: 0.6,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (135, 165, 175),
+                    secondary: (155, 145, 125),
+                    accent: (110, 135, 95),
+                )),
+                adaptation_per_host: {
+                    "HighDesert": (
+                        primary: (155, 175, 175),
+                        secondary: (165, 110, 75),
+                        accent: (140, 130, 90),
+                    ),
+                    "RockyAlpine": (
+                        primary: (155, 185, 195),
+                        secondary: (130, 130, 120),
+                        accent: (105, 130, 95),
+                    ),
+                    "MediterraneanArchipelago": (
+                        primary: (110, 175, 195),
+                        secondary: (200, 175, 140),
+                        accent: (135, 145, 105),
+                    ),
+                },
+            ),
+            // Abandoned homestead — collapsed cabin + chimney remnant +
+            // overgrown yard. Mission-hook anchor (treasure / lore).
+            // Render primitives: 1× box (collapsed cabin), 1× cylinder
+            // (chimney remnant), 4× stick_tree (overgrowth), terrain.
+            (
+                id: "abandoned_homestead",
+                slope_tolerance_max_deg: 8.0,
+                roughness_tolerance_m: 50.0,
+                water_adjacency: None,
+                altitude_range_m: (0.0, 1500.0),
+                selection_weight: 0.4,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (95, 80, 65),
+                    secondary: (75, 95, 70),
+                    accent: (155, 145, 110),
+                )),
+                adaptation_per_host: {
+                    "HighDesert": (
+                        primary: (160, 130, 95),
+                        secondary: (135, 115, 85),
+                        accent: (160, 130, 80),
+                    ),
+                    "RockyAlpine": (
+                        primary: (105, 95, 80),
+                        secondary: (185, 195, 200),
+                        accent: (140, 130, 100),
+                    ),
+                    "MediterraneanArchipelago": (
+                        primary: (135, 110, 85),
+                        secondary: (155, 130, 100),
+                        accent: (185, 100, 70),
+                    ),
+                },
+            ),
+            // Remote compound — small cluster of cabin + shed +
+            // outhouse, off-grid lifestyle. Mission anchor (delivery,
+            // contact). Bleeds into adjacent biomes (off-gridders
+            // pick exotic locations).
+            // Render primitives: 3× box (cabin + shed + outhouse),
+            // 5× cone (conifer windbreak), 1× stick_tree (snag, 30%).
+            (
+                id: "remote_compound",
+                slope_tolerance_max_deg: 6.0,
+                roughness_tolerance_m: 40.0,
+                water_adjacency: None,
+                altitude_range_m: (0.0, 1800.0),
+                selection_weight: 0.35,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (75, 60, 50),
+                    secondary: (95, 110, 75),
+                    accent: (105, 95, 85),
+                )),
+                adaptation_per_host: {
+                    "HighDesert": (
+                        primary: (165, 130, 90),
+                        secondary: (130, 110, 80),
+                        accent: (120, 100, 80),
+                    ),
+                    "RockyAlpine": (
+                        primary: (90, 80, 70),
+                        secondary: (170, 175, 180),
+                        accent: (110, 100, 90),
+                    ),
+                    "MediterraneanArchipelago": (
+                        primary: (215, 210, 195),
+                        secondary: (90, 130, 175),
+                        accent: (155, 95, 70),
+                    ),
+                },
+            ),
+            // Homestead clearing — single occupied cabin in a clearing
+            // ringed by conifers, often with a small garden plot and
+            // wood pile. Lighter-touch civilization; resupply candidate.
+            // Render primitives: 1× box (cabin), 1× box (woodshed),
+            // 6× cone (ringing conifers), terrain coloration (garden).
+            (
+                id: "homestead_clearing",
+                slope_tolerance_max_deg: 5.0,
+                roughness_tolerance_m: 35.0,
+                water_adjacency: None,
+                altitude_range_m: (0.0, 1600.0),
+                selection_weight: 0.5,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (110, 85, 65),
+                    secondary: (95, 115, 80),
+                    accent: (135, 110, 90),
+                )),
+                adaptation_per_host: {
+                    "HighDesert": (
+                        primary: (160, 125, 90),
+                        secondary: (135, 120, 90),
+                        accent: (165, 130, 95),
+                    ),
+                    "RockyAlpine": (
+                        primary: (95, 80, 65),
+                        secondary: (75, 95, 75),
+                        accent: (175, 185, 195),
+                    ),
+                    "MediterraneanArchipelago": (
+                        primary: (140, 110, 80),
+                        secondary: (105, 130, 90),
+                        accent: (175, 95, 70),
+                    ),
+                },
+            ),
+            // Fishing camp — shoreline shack + dock + drying nets +
+            // small skiff. Resupply candidate (fuel + bait + repair).
+            // Bleeds into adjacent biomes (anywhere with fishable water).
+            // Render primitives: 1× box (shack), 2× flat quad (dock
+            // boards), 1× half-cylinder (smoker), 4× cylinder (pilings).
+            (
+                id: "fishing_camp",
+                slope_tolerance_max_deg: 4.0,
+                roughness_tolerance_m: 25.0,
+                water_adjacency: Required,
+                altitude_range_m: (-10.0, 600.0),
+                selection_weight: 0.6,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (95, 80, 70),
+                    secondary: (135, 145, 130),
+                    accent: (165, 105, 75),
+                )),
+                adaptation_per_host: {
+                    "HighDesert": (
+                        primary: (155, 130, 95),
+                        secondary: (180, 165, 130),
+                        accent: (155, 100, 75),
+                    ),
+                    "RockyAlpine": (
+                        primary: (105, 90, 75),
+                        secondary: (175, 185, 195),
+                        accent: (135, 105, 80),
+                    ),
+                    "MediterraneanArchipelago": (
+                        primary: (215, 205, 185),
+                        secondary: (135, 165, 175),
+                        accent: (165, 100, 75),
+                    ),
+                },
+            ),
+            // Tackle shop — small commercial building near a fishing
+            // village, sells gear + license + ice. Resupply candidate.
+            // Locked to home biome (commercial signage idiom is local).
+            // Render primitives: 1× box (shop building), 1× flat quad
+            // (signage), 1× cylinder (icebox/cooler).
+            (
+                id: "tackle_shop",
+                slope_tolerance_max_deg: 4.0,
+                roughness_tolerance_m: 25.0,
+                water_adjacency: Required,
+                altitude_range_m: (-10.0, 200.0),
+                selection_weight: 0.25,
+                is_bleed_over_candidate: false,
+                home_palette: Some((
+                    primary: (135, 105, 80),
+                    secondary: (95, 125, 95),
+                    accent: (185, 165, 95),
+                )),
+                adaptation_per_host: {},
+            ),
+            // Bait shop — smaller cousin to tackle_shop, often a stand-
+            // alone hut with live-bait tank. Distinct orange "live bait"
+            // signage. Resupply candidate (smaller restock options).
+            // Render primitives: 1× box (hut), 1× cylinder (bait tank),
+            // 1× flat quad (signage).
+            (
+                id: "bait_shop",
+                slope_tolerance_max_deg: 4.0,
+                roughness_tolerance_m: 25.0,
+                water_adjacency: Required,
+                altitude_range_m: (-10.0, 200.0),
+                selection_weight: 0.3,
+                is_bleed_over_candidate: false,
+                home_palette: Some((
+                    primary: (115, 95, 70),
+                    secondary: (140, 125, 105),
+                    accent: (200, 105, 65),
+                )),
+                adaptation_per_host: {},
             ),
         ],
 
@@ -496,6 +916,28 @@
                 altitude_range_m: (0.0, 300.0),
                 selection_weight: 1.5,
                 is_bleed_over_candidate: true,
+            ),
+            // Ferry dock — heavier-duty pier with mooring cleats,
+            // gangway, ticket kiosk. Resupply candidate (commercial
+            // dock = fuel + provisions). Locked to Mediterranean (the
+            // ferry idiom is biome-local for this cohort of features).
+            // Render primitives: 3× flat quad (dock decking + gangway),
+            // 6× cylinder (pilings + cleats), 1× box (ticket kiosk),
+            // 1× cylinder + flat quad (red safety paint accent).
+            (
+                id: "ferry_dock",
+                slope_tolerance_max_deg: 3.0,
+                roughness_tolerance_m: 20.0,
+                water_adjacency: Required,
+                altitude_range_m: (-5.0, 50.0),
+                selection_weight: 0.3,
+                is_bleed_over_candidate: false,
+                home_palette: Some((
+                    primary: (165, 145, 115),
+                    secondary: (105, 105, 110),
+                    accent: (215, 80, 80),
+                )),
+                adaptation_per_host: {},
             ),
         ],
     },

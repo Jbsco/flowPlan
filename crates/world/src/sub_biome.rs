@@ -63,6 +63,26 @@ pub enum WaterAdjacency {
     None,
 }
 
+/// RGB color triple (0-255 per channel). Authored in RON as `(r, g, b)`.
+pub type PaletteColor = (u8, u8, u8);
+
+/// 3-color palette: primary (dominant), secondary (supporting), accent
+/// (highlight). Features render as simple primitives colored by these
+/// palette entries — see memory `simple_primitives_render_direction`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct Palette {
+    /// Primary color — dominant visual tone (building walls, tree
+    /// canopy, ground cover).
+    #[serde(default)]
+    pub primary: PaletteColor,
+    /// Secondary color — supporting detail (trim, shadows, accents).
+    #[serde(default)]
+    pub secondary: PaletteColor,
+    /// Accent color — highlights (roofing, flowers, trim contrast).
+    #[serde(default)]
+    pub accent: PaletteColor,
+}
+
 /// Single sub-biome feature catalog entry.
 #[derive(Clone, Debug, Deserialize)]
 pub struct SubBiomeFeature {
@@ -82,6 +102,18 @@ pub struct SubBiomeFeature {
     /// mechanism? False for strongly-biome-specific features
     /// (terracotta_port, glacier_tongue, etc.).
     pub is_bleed_over_candidate: bool,
+    /// Home palette (native biome). Optional — absent entries render
+    /// via biome-derived fallback colors until palette authoring lands.
+    #[serde(default)]
+    pub home_palette: Option<Palette>,
+    /// Per-host-biome adaptation palettes. Keys are
+    /// `BiomeClass` names (`"HighDesert"`, `"RockyAlpine"`, etc.).
+    /// When this feature appears in a host biome via bleed-over, the
+    /// render color blends from `home_palette` toward
+    /// `adaptation_per_host[host]` per `blend_factor` (see memory
+    /// `palette_adaptation_mechanism`).
+    #[serde(default)]
+    pub adaptation_per_host: HashMap<String, Palette>,
 }
 
 /// Root RON structure.
@@ -566,6 +598,8 @@ mod tests {
             altitude_range_m: (100.0, 500.0),
             selection_weight: 1.0,
             is_bleed_over_candidate: false,
+            home_palette: None,
+            adaptation_per_host: HashMap::new(),
         };
         // All pass.
         let ok = PlacementContext {
@@ -612,6 +646,8 @@ mod tests {
             altitude_range_m: (-1e6, 1e6),
             selection_weight: 1.0,
             is_bleed_over_candidate: false,
+            home_palette: None,
+            adaptation_per_host: HashMap::new(),
         };
         let forb = SubBiomeFeature {
             water_adjacency: WaterAdjacency::Forbidden,

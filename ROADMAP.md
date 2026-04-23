@@ -933,25 +933,28 @@ This milestone slots between Phase 3 close and Phase 3.6.1 so Layer-1 hydrology 
 
 Split (pinned 2026-04-23 per user direction, detail in [MAPGEN.md § Layer 3 phase split](MAPGEN.md#layer-3-phase-split-pinned-2026-04-23) + agent-memory `feature_delta_expansion_3_6_3`):
 
-**3.6.3a — per-cell delta engine + natural features + hub foundation + shore classification (code):**
+**3.6.3a — per-cell delta engine + natural features + hub foundation + shore classification (code): SHIPPED 2026-04-23.**
 
-- [ ] **`FeatureDelta` trait + registry** mapping feature_id → delta implementation. Additive on top of Layer 1: `final_height = base + Σ feature_deltas`.
-- [ ] **Boundary falloff invariant:** each delta smoothly to zero at Voronoi cell edges (bump-function / cosine falloff). Continuous terrain across Voronoi edges by construction.
-- [ ] **Hydrology continuity invariant** enforced at query time: deltas that would elevate a river channel / fill a lake basin / dam a drainage network are suppressed.
-- [ ] **~10 natural signature feature deltas**: `lake_cluster`, `alpine_tarn`, `cirque`, `mesa_top`, `book_cliffs`, `dune_field`, `bush_strip_clearing`, `sandy_beach`, `cliff_coast`, `protected_cove`. Covers the major delta-pattern classes (bowl / plateau / cliff / flatten / ramp / dune) so 3.6.3c extensions can match the pattern.
-- [ ] **Hub foundation delta** (tier-adaptive): Major = full flatten + 50 m skirt + cut-and-fill into positive elevation; Regional = flatten + 30 m skirt; Local = partial flatten + natural edges; Remote = minimal smoothing; Isolated = no delta. Cells hosting hubs get this delta instead of their natural feature delta (priority: `hub_foundation` > natural feature > `plain`).
-- [ ] **Shore classification sampler** (`world::surface_at(x, z) -> SurfaceClass`: Sand, Gravel, Rock, Cliff, Mudflat, Delta, IceEdge, Grass, Paved, Dirt, Snow, PowderSnow, DryLake, Water) from final heightfield + hydrology graph + biome + feature tag. **Unblocks 2.5b.7 per-surface friction.**
-- [ ] L3 integration into `Terrain::height_at_scale` (opt-in param).
-- [ ] Visual bench: L1-vs-L3 heightfield comparison, shore classification map, hub foundation effect visualization.
+- [x] **`FeatureDelta` trait + registry** mapping feature_id → delta implementation. Additive on top of Layer 1: `final_height = base + Σ feature_deltas`.
+- [x] **Boundary falloff invariant:** each delta smoothly to zero at Voronoi cell edges (bump-function / cosine falloff). Continuous terrain across Voronoi edges by construction.
+- [x] **Hydrology continuity invariant** enforced at query time: deltas that would elevate a river channel / fill a lake basin / dam a drainage network are suppressed.
+- [x] **~10 natural signature feature deltas**: `lake_cluster`, `alpine_tarn`, `cirque`, `mesa_top`, `book_cliffs`, `dune_field`, `bush_strip_clearing`, `sandy_beach`, `cliff_coast`, `protected_cove`. Covers the major delta-pattern classes (bowl / plateau / cliff / flatten / ramp / dune) so 3.6.3c extensions can match the pattern.
+- [x] **Hub foundation delta** (tier-adaptive): Major = full flatten + 50 m skirt + cut-and-fill into positive elevation; Regional = flatten + 30 m skirt; Local = partial flatten + natural edges; Remote = minimal smoothing; Isolated = no delta. Cells hosting hubs get this delta instead of their natural feature delta (priority: `hub_foundation` > natural feature > `plain`).
+- [x] **Shore classification sampler** (`world::surface_at(x, z) -> SurfaceClass`: Sand, Gravel, Rock, Cliff, Mudflat, Delta, IceEdge, Grass, Paved, Dirt, Snow, PowderSnow, DryLake, Water) from final heightfield + hydrology graph + biome + feature tag. **Unblocks 2.5b.7 per-surface friction.**
+- [x] L3 integration into `Terrain::height_at_scale` (opt-in param).
+- [x] Visual bench: L1-vs-L3 heightfield comparison, shore classification map, hub foundation effect visualization (5 artifact families × 3 crops = 15 PNGs).
+- [x] **L1 coastline tuning pass** (mid-3.6.3a): `COASTAL_BOREAL.mean_altitude_m` -50 → +50 + `shore_attenuation` function (proximity-to-shore fine-octave attenuation, 400 m band, 0.20 floor) — fixes "waterworld + speckled coastline" symptom. Both load-bearing; regression risk if reverted. Memory: `coastline_tuning_pass`.
 
-**3.6.3b — design-authoring sprint (no code):**
+**3.6.3b — design-authoring sprint (no code): IN PROGRESS.** Pinned design directions (palette adaptation + simple primitives) shipped to MAPGEN + memory; 14 of ~21 named features authored in RON with palettes; placement-rule depth + remaining features pending.
 
-- [ ] Expand `data/world/sub_biome_features.ron` + MAPGEN.md + FEATURES.md with cross-biome feature categories:
-  - [ ] **Developments**: `farmland_parcel`, `dwelling_cluster`, `remote_compound`, `ranch`, `homestead_clearing` (hub-proximity-biased placement).
-  - [ ] **Infrastructure** (multi-cell groups): `road_segment`, `dirt_road_segment`, `highway_intersection`, `rail_corridor_segment`.
-  - [ ] **Resupply / interactables**: `gas_station` (Phase 4.5 refuel economy anchor), `bait_shop`, `general_store`, `fishing_camp`, `tackle_shop`, `ferry_dock`.
-  - [ ] **Scenery cues** (render-tag-only, no heightfield delta): `natural_meadow`, `alpine_meadow`, `creek_valley`, `scenic_overlook`, `river_bend_viewpoint`, `hot_springs`, `abandoned_homestead`.
-- [ ] Placement rule design: hub-proximity radii per tier (Major: 50 km dwellings / 80 km farmland / 30 km gas stations; down to Remote: single homestead 10 km); biome compatibility per feature; scenery "earned reward" placement using L1 prominence + hydrology.
+- Expand `data/world/sub_biome_features.ron` + MAPGEN.md + FEATURES.md with cross-biome feature categories:
+  - **Developments**: `farmland_parcel` ⏳ pending, `dwelling_cluster` ⏳ pending, `remote_compound` ✅, `ranch` ✅ (HighDesert home, bleed-over enables "winter ranch"), `homestead_clearing` ✅. Hub-proximity-biased placement rules pending (Task #215).
+  - **Infrastructure** (multi-cell groups): `road_segment` ⏳, `dirt_road_segment` ⏳, `highway_intersection` ⏳, `rail_corridor_segment` ⏳ — all blocked on 3.6.3c `FeatureGroup` engine; design-only authoring still possible in 3.6.3b.
+  - **Resupply / interactables**: `gas_station` ⏳ (Phase 4.5 refuel economy anchor), `bait_shop` ✅, `general_store` ⏳, `fishing_camp` ✅, `tackle_shop` ✅, `ferry_dock` ✅.
+  - **Scenery cues** (render-tag-only, no heightfield delta): `natural_meadow` ✅, `alpine_meadow` ✅, `creek_valley` ✅, `scenic_overlook` ✅, `river_bend_viewpoint` ✅, `hot_springs` ✅, `abandoned_homestead` ✅. **Complete.**
+- [x] **Palette-adaptation mechanism (PINNED)** authored in MAPGEN § Layer 3 + memory `palette_adaptation_mechanism`. RON authoring surface: `home_palette: Option<Palette>` + `adaptation_per_host: HashMap<String, Palette>` shipped on `SubBiomeFeature`.
+- [x] **Simple-primitives render direction (PINNED)** authored in MAPGEN § Layer 3 + memory `simple_primitives_render_direction`. Per-feature primitive composition recorded in RON comments.
+- [ ] **Placement rule design** (Task #215): hub-proximity radii per tier (Major: 50 km dwellings / 80 km farmland / 30 km gas stations; down to Remote: single homestead 10 km); biome compatibility per feature; scenery "earned reward" placement using L1 prominence + hydrology.
 - [ ] User review / iteration on the full catalog before 3.6.3c implementation.
 
 **3.6.3c — multi-cell group engine + development/scenery deltas (code):**
