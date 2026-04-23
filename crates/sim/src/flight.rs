@@ -251,7 +251,18 @@ const TAILPLANE_LIFT_COEFF: f32 = 0.066;
 // via PID commanding more aileron input (within ±1.0 clamp).
 const CL_DELTA_A: f32 = 0.040;
 const CL_P: f32 = -0.5;
-const CL_BETA: f32 = -0.05;
+/// Dihedral effect: sideslip β produces rolling moment. Negative = stable
+/// (positive β / wind-from-right yields roll-left, restoring toward
+/// wings-level). Retuned 2026-04-22 post-playtest: -0.05 → -0.025 after
+/// air-abusive-yaw scenario revealed ~10× too-fast spiral mode. User report:
+/// sustained rudder causes aircraft to roll into pronounced bank within
+/// seconds; real Beaver's spiral mode has ~30-45s time constant. Halving
+/// `CL_BETA` slows equilibrium spiral roll rate from 22°/s to 11°/s (from
+/// formula `ω = 2V·Cl_β·β / (b·Cl_p)`), which matches real-world spiral
+/// divergence and removes the "pervasive left yaw" playtest complaint.
+/// Other scenarios compensate via PIDs (`BankHold` commands more aileron
+/// in turns). If dihedral-dependent tests drift, this is the knob to touch.
+const CL_BETA: f32 = -0.025;
 
 /// Yaw: weathervane stability (`Cn_β > 0`) yaws nose toward velocity when sideslip
 /// develops; rudder command (`Cn_δr > 0`) yaws nose right for positive pedal; damping
