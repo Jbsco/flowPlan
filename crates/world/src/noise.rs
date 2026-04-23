@@ -123,10 +123,42 @@ pub fn fbm_2d(
     base_spacing_m: f32,
     octaves: u32,
 ) -> f32 {
+    fbm_2d_at_scale(seed, octave_offset, x, z, base_spacing_m, octaves, 0.0)
+}
+
+/// Mipmap-aware fBm — same as [`fbm_2d`] but skips octaves whose spacing
+/// falls below `min_spacing_m`. Equivalent to `fbm_2d` when
+/// `min_spacing_m = 0.0`.
+///
+/// **Use case**: rendering at `pixel_size_m` world-meters per pixel,
+/// passing `min_spacing_m = pixel_size_m × 0.5` removes octaves that
+/// would alias (sub-pixel feature wavelength). Mirrors GPU mipmap
+/// filtering but at the procedural level. Saves 2× compute per octave
+/// skipped and produces properly band-limited output.
+///
+/// Used by terrain contour bench (wide-angle crops), hydrology bake
+/// (100 m sampling doesn't need 60 m octaves), Phase 3.6.2 streaming
+/// chunks (LOD-based octave selection), and in-engine map view
+/// (pan/zoom-appropriate detail).
+#[allow(clippy::module_name_repetitions)]
+pub fn fbm_2d_at_scale(
+    seed: u64,
+    octave_offset: u32,
+    x: f32,
+    z: f32,
+    base_spacing_m: f32,
+    octaves: u32,
+    min_spacing_m: f32,
+) -> f32 {
     let mut total = 0.0_f32;
     let mut amplitude = 1.0_f32;
     let mut spacing = base_spacing_m;
     for i in 0..octaves {
+        // Stop when this octave's spacing is below the mipmap floor;
+        // sub-pixel-scale detail would alias rather than contribute.
+        if spacing < min_spacing_m {
+            break;
+        }
         total += amplitude * perlin_2d(seed, octave_offset + i, x, z, spacing);
         amplitude *= 0.5;
         spacing *= 0.5;
@@ -165,10 +197,41 @@ pub fn ridged_multifractal_2d(
     offset: f32,
     power: f32,
 ) -> f32 {
+    ridged_multifractal_2d_at_scale(
+        seed,
+        octave_offset,
+        x,
+        z,
+        base_spacing_m,
+        octaves,
+        offset,
+        power,
+        0.0,
+    )
+}
+
+/// Mipmap-aware ridged multifractal — see [`fbm_2d_at_scale`] for the
+/// mipmap-floor concept. Skips octaves finer than `min_spacing_m`.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::module_name_repetitions)]
+pub fn ridged_multifractal_2d_at_scale(
+    seed: u64,
+    octave_offset: u32,
+    x: f32,
+    z: f32,
+    base_spacing_m: f32,
+    octaves: u32,
+    offset: f32,
+    power: f32,
+    min_spacing_m: f32,
+) -> f32 {
     let mut total = 0.0_f32;
     let mut amplitude = 1.0_f32;
     let mut spacing = base_spacing_m;
     for i in 0..octaves {
+        if spacing < min_spacing_m {
+            break;
+        }
         let p = perlin_2d(seed, octave_offset + i, x, z, spacing);
         let inverted = (offset - libm::fabsf(p)).max(0.0);
         let ridged = libm::powf(inverted, power);
@@ -214,24 +277,67 @@ pub fn domain_warped_fbm_2d(
     warp_spacing_m: f32,
     warp_octaves: u32,
 ) -> f32 {
+    domain_warped_fbm_2d_at_scale(
+        seed,
+        octave_offset,
+        x,
+        z,
+        base_spacing_m,
+        octaves,
+        warp_amplitude_m,
+        warp_spacing_m,
+        warp_octaves,
+        0.0,
+    )
+}
+
+/// Mipmap-aware domain-warped fBm — both warp and base layers skip
+/// octaves finer than `min_spacing_m`. Warp octaves are typically much
+/// coarser than base, so may survive a mipmap cap that kills most base
+/// octaves — that's fine, wide-zoom contours still benefit from the
+/// warp's large-scale distortion even when fine detail is filtered.
+#[allow(clippy::module_name_repetitions)]
+#[allow(clippy::too_many_arguments)]
+pub fn domain_warped_fbm_2d_at_scale(
+    seed: u64,
+    octave_offset: u32,
+    x: f32,
+    z: f32,
+    base_spacing_m: f32,
+    octaves: u32,
+    warp_amplitude_m: f32,
+    warp_spacing_m: f32,
+    warp_octaves: u32,
+    min_spacing_m: f32,
+) -> f32 {
     let warp_x = warp_amplitude_m
-        * fbm_2d(seed, octave_offset + 100, x, z, warp_spacing_m, warp_octaves);
+        * fbm_2d_at_scale(
+            seed,
+            octave_offset + 100,
+            x,
+            z,
+            warp_spacing_m,
+            warp_octaves,
+            min_spacing_m,
+        );
     let warp_z = warp_amplitude_m
-        * fbm_2d(
+        * fbm_2d_at_scale(
             seed,
             octave_offset + 200,
             x + 31_415.9,
             z + 27_182.8,
             warp_spacing_m,
             warp_octaves,
+            min_spacing_m,
         );
-    fbm_2d(
+    fbm_2d_at_scale(
         seed,
         octave_offset,
         x + warp_x,
         z + warp_z,
         base_spacing_m,
         octaves,
+        min_spacing_m,
     )
 }
 
@@ -291,6 +397,44 @@ mod tests {
             2.0,
         );
         assert!((a - b).abs() < 1e-2, "ridged seam: {a} vs {b}");
+    }
+
+    #[test]
+    fn fbm_at_scale_zero_min_spacing_matches_unfiltered() {
+        // min_spacing_m = 0.0 must exactly equal fbm_2d for all callers
+        // depending on default behavior to pass through.
+        let a = fbm_2d(42, 0, 100.0, 200.0, 2000.0, 6);
+        let b = fbm_2d_at_scale(42, 0, 100.0, 200.0, 2000.0, 6, 0.0);
+        assert_eq!(a.to_bits(), b.to_bits(), "a={a} b={b}");
+    }
+
+    #[test]
+    fn fbm_at_scale_caps_at_min_spacing() {
+        // With 6 octaves at base 2000m: octave spacings = {2000, 1000,
+        // 500, 250, 125, 62}. min_spacing_m = 400 should keep octaves
+        // {2000, 1000, 500} (3 octaves), skip the rest. Result should
+        // differ from unfiltered.
+        let a = fbm_2d(42, 0, 100.0, 200.0, 2000.0, 6);
+        let b = fbm_2d_at_scale(42, 0, 100.0, 200.0, 2000.0, 6, 400.0);
+        assert!((a - b).abs() > 1e-3, "mipmap cap produced unchanged output");
+        // Matches direct call with 3 octaves.
+        let c = fbm_2d(42, 0, 100.0, 200.0, 2000.0, 3);
+        assert_eq!(b.to_bits(), c.to_bits(), "capped (b={b}) should equal 3-octave direct (c={c})");
+    }
+
+    #[test]
+    fn fbm_at_scale_wraps_toroidally() {
+        let a = fbm_2d_at_scale(42, 0, 100.0, 200.0, 2000.0, 6, 250.0);
+        let b = fbm_2d_at_scale(
+            42,
+            0,
+            100.0 + WORLD_EXTENT_M,
+            200.0,
+            2000.0,
+            6,
+            250.0,
+        );
+        assert!((a - b).abs() < 1e-3, "mipmap seam: a={a} b={b}");
     }
 
     #[test]

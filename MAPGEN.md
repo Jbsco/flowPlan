@@ -2,7 +2,9 @@
 
 > **Role in the docs stack:** MAPGEN.md is the design doc for flowPlan's procedural world generation and terrain representation. It sits between [PLAN.md](PLAN.md) (vision), [DESIGN.md](DESIGN.md) (architecture + invariants), [FEATURES.md](FEATURES.md) (feature backlog), and [ROADMAP.md](ROADMAP.md) (phased execution). This document is **design, not implementation**: it records decisions, proposed strategies, and explicitly-open questions so Phase 3+ terrain / hydrology / world-scope work can start from a concrete specification rather than rediscovering tradeoffs.
 >
-> **Status:** draft. No code yet. Updates land by amendment PR. Resolution of open questions closes with either a follow-up amendment or a ROADMAP milestone entry.
+> **Implementation companion**: [`docs/WORLD_GEN.md`](docs/WORLD_GEN.md) covers the *how* — actual algorithms, function signatures, octave-offset convention, performance characteristics, and Marching Squares contour rendering. Read MAPGEN for design rationale, WORLD_GEN when working in the code.
+>
+> **Status:** Phase 3.6.0 + 3.6.1a + 3.6.1b implementation shipped (terrain Perlin-fBm, biomes with soft blending, per-biome ridged/domain-warped primitives, weather Perlin-fBm migration, variable Voronoi cell size). 3.6.1c–3.6.4 still ahead. Updates land by amendment PR.
 
 ## Contents
 

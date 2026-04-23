@@ -24,6 +24,7 @@ When in doubt at any point: stop and ask. Re-open the spec docs rather than gues
 ### Deeper design documents (consult when the topic is in scope)
 
 - **[MAPGEN.md](MAPGEN.md)** -- procedural map generation, chunk model, seed topology, hydrology sub-system, biome placement, flight-log memory. Design draft; read before any Phase 3.6 terrain work or Phase 4 world-scope decision.
+- **[docs/WORLD_GEN.md](docs/WORLD_GEN.md)** -- world-gen *implementation* reference (the *how* — algorithms, function signatures, parameters, performance, octave-offset convention). Companion to MAPGEN's *design* doc; read when modifying terrain, biome, weather, or Voronoi code.
 - **UI_ARCHITECTURE.md** *(pending)* -- UI framework decision, navigation model, prompt system. Pre-Phase-4.8 design deliverable. Draft not yet committed.
 - **LIVERY.md** *(pending — may live as an expanded section of FEATURES.md)* -- paint-editor representation choice, brush model, undo-history scope, save format. Pre-Phase-4.10 design deliverable.
 

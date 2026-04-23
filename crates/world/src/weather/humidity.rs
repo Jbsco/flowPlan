@@ -103,16 +103,6 @@ pub fn humidity_at_with_terrain<T: crate::terrain::HeightSampler>(
     rh_at_alt.clamp(0.0, 1.0)
 }
 
-#[must_use]
-#[allow(clippy::cast_precision_loss)]
-fn hash_to_unit(seed: u64, tag: u64) -> f32 {
-    let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15).wrapping_add(tag);
-    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    x ^= x >> 31;
-    ((x >> 40) as f32) / ((1u32 << 24) as f32)
-}
-
 #[cfg(test)]
 #[allow(clippy::cast_precision_loss)]
 #[allow(clippy::float_cmp)]
