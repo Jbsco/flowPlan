@@ -54,6 +54,22 @@ pub const GRID_SPACING_M: f32 = 25_000.0;
 #[allow(clippy::cast_sign_loss)]
 pub const GRID_CELL_COUNT: i32 = (flowplan_core::WORLD_EXTENT_M / GRID_SPACING_M) as i32;
 
+/// Weight-field spacing (m) for variable cell size (Phase 3.6.0+).
+///
+/// Per `MAPGEN.md § Variable Voronoi cell size`, each cell gets a
+/// per-seed weight sampled from a coarse Perlin field at this scale.
+/// Cells with higher weights win more territory in the power-diagram
+/// metric; cells with lower weights shrink or get absorbed. Weight-field
+/// at 500 km means "this 500 km region favors large cells; that region
+/// favors small cells" — produces natural mix of compact convective
+/// cells and sprawling frontal systems at ~20× the base 25 km cell size.
+const WEIGHT_FIELD_SPACING_M: f32 = 500_000.0;
+
+/// Amplitude of per-cell weight (m²). Power-diagram metric subtracts
+/// weight from squared distance; scale so max weight ≈ (GRID_SPACING × 0.8)²
+/// gives ~2-3× size variation without creating degenerate-tiny cells.
+const WEIGHT_AMPLITUDE_M2: f32 = 4.0e8; // ≈ (20 km)²
+
 /// Maximum seed jitter as a fraction of [`GRID_SPACING_M`].
 ///
 /// Keeps seeds within the inner ~60% of each grid cell so neighboring seeds
@@ -97,44 +113,62 @@ pub fn seed_position(master_seed: u64, cell: CellId) -> Vec2 {
     )
 }
 
+/// Per-cell weight for the power-diagram metric (Phase 3.6.0+). Sampled
+/// from a coarse Perlin field at the seed position so weights vary
+/// smoothly across the world — regional areas favor larger cells or
+/// smaller cells rather than checker-board alternation.
+fn cell_weight(master_seed: u64, seed_pos: Vec2) -> f32 {
+    let weight_seed = super::field_seed(
+        super::weather_seed(master_seed),
+        u64::from_le_bytes(*b"vcell_wt"),
+    );
+    // Perlin in [−0.707, 0.707]; shift to [0, 1] so all weights are
+    // non-negative (power-diagram metric requires weight ≥ 0).
+    let raw = crate::noise::perlin_2d(weight_seed, 0, seed_pos.x, seed_pos.y, WEIGHT_FIELD_SPACING_M);
+    let normalized = (raw + 0.707) / 1.414; // → [0, 1]
+    normalized.clamp(0.0, 1.0) * WEIGHT_AMPLITUDE_M2
+}
+
 /// Voronoi cell owning world coordinate `(x, z)`. Static (no drift).
+///
+/// Uses an **additively-weighted power-diagram metric**: distance to a
+/// seed is `||p − seed||² − weight(seed)` where `weight` is a per-cell
+/// Perlin-sampled value in `[0, WEIGHT_AMPLITUDE_M2]`. Cells with higher
+/// weights win more territory — produces organic cell-size variation at
+/// ~500 km regional scale (compact cells here, sprawling cells there)
+/// rather than uniform grid-aligned structure.
 ///
 /// Toroidal-wrap-aware (Phase 3.6.0): cell IDs wrap via mod-N so queries
 /// near the seam correctly identify the same cell whether approached from
-/// `x < 0` or `x > WORLD_EXTENT_M`. Seed positions for wrapped cells are
-/// computed relative to the query point so the distance calc doesn't span
-/// the whole world.
+/// `x < 0` or `x > WORLD_EXTENT_M`.
 #[must_use]
 #[allow(clippy::cast_possible_truncation)]
 pub fn cell_at(master_seed: u64, x_m: f32, z_m: f32) -> CellLookup {
-    // Identify the grid cell containing the query point; search its 3×3
-    // neighborhood for the two nearest seeds.
+    // Identify the grid cell containing the query point; search a 5×5
+    // neighborhood so weighted cells (which can "reach" further than a
+    // uniform cell) are still captured. 3×3 was sufficient for the
+    // uniform-metric case; weighted needs the extra margin because a
+    // high-weight cell can dominate its neighbors.
     let ix0 = libm::floorf(x_m / GRID_SPACING_M) as i32;
     let iz0 = libm::floorf(z_m / GRID_SPACING_M) as i32;
 
-    let mut best = f32::INFINITY;
+    let mut best = f32::INFINITY; // in weighted-distance² (can be negative)
     let mut second = f32::INFINITY;
     let mut best_id = CellId { ix: 0, iz: 0 };
     let mut best_pos = Vec2::ZERO;
+    let mut best_d_euclid = 0.0_f32; // for reporting distance_to_seed
 
     let n = i64::from(GRID_CELL_COUNT);
     let half_world = flowplan_core::WORLD_EXTENT_M * 0.5;
 
-    for dx in -1..=1_i32 {
-        for dz in -1..=1_i32 {
-            // Raw grid indices may be negative or exceed N near the seam;
-            // wrap for canonical cell identity (affects jitter hash), but
-            // keep the raw-index position so seam-adjacent queries see the
-            // "near" representative rather than the canonical far-side one.
+    for dx in -2..=2_i32 {
+        for dz in -2..=2_i32 {
             let ix_raw = ix0 + dx;
             let iz_raw = iz0 + dz;
             let id = CellId {
                 ix: flowplan_core::wrap_cell_index(i64::from(ix_raw), n) as i32,
                 iz: flowplan_core::wrap_cell_index(i64::from(iz_raw), n) as i32,
             };
-            // Canonical seed position uses the wrapped ID (consistent jitter
-            // across all queries for this cell), then we shift by whole-world
-            // increments so the position is the representative near x_m.
             let mut pos = seed_position(master_seed, id);
             if pos.x - x_m > half_world {
                 pos.x -= flowplan_core::WORLD_EXTENT_M;
@@ -147,23 +181,32 @@ pub fn cell_at(master_seed: u64, x_m: f32, z_m: f32) -> CellLookup {
                 pos.y += flowplan_core::WORLD_EXTENT_M;
             }
             let d2 = (pos.x - x_m) * (pos.x - x_m) + (pos.y - z_m) * (pos.y - z_m);
-            let d = libm::sqrtf(d2);
-            if d < best {
+            let weight = cell_weight(master_seed, pos);
+            let d2_weighted = d2 - weight;
+            if d2_weighted < best {
                 second = best;
-                best = d;
+                best = d2_weighted;
                 best_id = id;
                 best_pos = pos;
-            } else if d < second {
-                second = d;
+                best_d_euclid = libm::sqrtf(d2.max(0.0));
+            } else if d2_weighted < second {
+                second = d2_weighted;
             }
         }
     }
 
+    // distance_to_edge in weighted-distance-space is (second - best) / 2;
+    // scale roughly back to meters via sqrt. This is approximate for edge
+    // feathering purposes — exact geometric edge distance under power
+    // diagrams requires more math but isn't needed here.
+    let weighted_edge_gap = (second - best).max(0.0);
+    let distance_to_edge = libm::sqrtf(weighted_edge_gap) * 0.5;
+
     CellLookup {
         cell_id: best_id,
         seed_pos: best_pos,
-        distance_to_seed: best,
-        distance_to_edge: (second - best) * 0.5,
+        distance_to_seed: best_d_euclid,
+        distance_to_edge,
     }
 }
 

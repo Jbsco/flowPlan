@@ -532,6 +532,56 @@ The hydrology graph is **immutable across layers**. Delta functions respect it o
 - **Concern separation for later refinement.** Changing the heightfield generator (swap ridged multifractal for something else) affects L1 only. Adding a new sub-biome feature affects L2 + L3 authoring, not L1. Retuning the chunk streaming algorithm affects neither.
 - **Cross-cell feature groups.** When a feature should span multiple cells (a ridgeline, a salmon-run river through several cells), feature-group declarations at Layer 2 coordinate delta functions at Layer 3. Groups don't break the layer boundary — they're still L2 placement + L3 geometry.
 
+### Variable Voronoi cell size (PINNED — all Voronoi applications)
+
+**Principle:** uniform cell size is visible as regular-grid structure even with jittered seed positions. All Voronoi applications in flowPlan — weather (W2, ~25 km scale), terrain sub-biome features (L2, ~2 km scale), any future Voronoi layers — use **weighted distance metric** with per-cell weights sampled from a coarse Perlin field, producing organic cell-size variation at ~10-20× the base cell scale.
+
+**Mechanism** (additive-weighted Voronoi / power diagram):
+
+```
+weight(seed_i) = Perlin(master_seed, seed_pos.x, seed_pos.z, weight_spacing)
+distance(query, seed_i) = ||query - seed_pos_i||² − weight(seed_i)
+owning_cell = argmin_i(distance(query, seed_i))
+```
+
+One-line change to the standard Voronoi distance calc. Cells with higher weights "win" more territory (grow larger); lower-weight cells shrink or are absorbed by stronger neighbors. The weight field's spacing is 10-20× the base cell size, so variation happens at regional scales — "this area has mostly-large cells; that area has mostly-small cells."
+
+**Per-application tuning:**
+
+| Application | Base spacing | Weight-field spacing | Amplitude |
+|---|---|---|---|
+| Weather Voronoi | ~25 km | ~500 km | moderate (2-3× size variation) |
+| Terrain sub-biome | ~2 km | ~40 km | high (5-10× — some regions fine-grained detail, others broad sweeps) |
+
+**Feel:** real-world weather has both compact convective cells and sprawling frontal systems; real geography has both tightly-packed features (archipelago islands) and broad expanses (desert plateaus). Uniform cell size can't express this. Variable cell size does.
+
+**Determinism:** Perlin weights are deterministic per `(master_seed, seed_pos)`. Same seed → same weights → same cell boundaries.
+
+### Biome edge blending + tri-biome rare experiences (PINNED)
+
+**Principle:** biome boundaries are where content diversity concentrates. Players crossing from coastal-boreal into rocky-alpine should see *mixed-character terrain* for ~50-100 km of transition — neither purely coastal nor purely alpine, but recognizably both, with features from each appearing in the other's territory before the full "other biome" character dominates. Sharp biome transitions feel artificial; blended edges feel geographic.
+
+**Mechanism** (extends the Layer 2 palette-adaptation rules):
+
+1. **Bleed-over radius:** each sub-biome feature declares a `bleed_distance_m` (typical 10-50 km). Within this distance of an adjacent biome, the feature can be *selected from either biome's library* with probability proportional to distance-to-biome-edge. So a coastal-boreal sub-biome cell 10 km from the alpine border has ~50/50 chance of spawning a coastal feature (with palette shifted toward alpine) vs an alpine feature (with palette shifted toward coastal).
+
+2. **Palette shifting:** already specified per [FEATURES.md § Sub-biome feature overlap with palette adaptation](FEATURES.md#sub-biome-feature-overlap-with-palette-adaptation). At transition edges, palette interpolation runs between the home biome and the nearest neighbor biome.
+
+3. **Adjacency rule enforcement still applies:** forbidden transitions (e.g. snow → tropical — see § Biome system) are rejected regardless of bleed distance. Physical + climate adjacency rules override cosmetic bleeding.
+
+4. **Tri-biome intersections:** where three biome regions meet within a cell's bleed radius, the cell has access to all three biomes' feature libraries. These triple-points are **rare by construction** (3-way meetings are topologically sparse in a 2D Voronoi) but offer the richest mix. Authoring gets a small explicit set of triple-point-only features (crystal-lake amid forest amid desert mesa — the "places that shouldn't exist") gated to spawn only at tri-biome intersections.
+
+5. **Fine-octave climate helps** — adding fine octaves to `temperature_at` / `humidity_at` fBm produces microclimate pockets at ~15-30 km scale. Within-region biome variety increases (a warm valley inside a cold region) without shrinking the world. Microclimates enable tri-biome intersections to actually form at the 2 km feature-cell scale; without them, the three biomes might only meet at very coarse regional boundaries.
+
+**Gameplay payoff:**
+
+- **Discovery:** players seeking rare combos fly transition zones deliberately.
+- **Photo mode (Phase 5.5):** transition-edge composites are naturally striking backgrounds.
+- **Mission design:** Phase 4 mission templates can prefer tri-biome landmarks for "find the odd place" missions.
+- **Progression:** rare triple-point features can gate upgrade cosmetics or lore drops without feeling grindy (since they're just "fly where the climate maps cross").
+
+**Implementation phase:** Layer 2 feature assignment (Phase 3.6.2) gets the bleed-radius + neighbor-biome-probability logic; palette adaptation already pinned; tri-biome authoring hooks added then; fine-octave climate tuning happens alongside 3.6.2 biome-terrain work.
+
 ---
 
 ## Three-layer weather composition (second application of the pattern)
