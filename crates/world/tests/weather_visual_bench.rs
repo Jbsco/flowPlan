@@ -38,6 +38,8 @@ use image::{ImageBuffer, Rgb};
 // test target sees but doesn't itself name directly.
 use flowplan_core as _;
 use glam as _;
+use ron as _;
+use serde as _;
 
 /// Full-world-scenario extent (m). 500 km — representative small region.
 const FULL_EXTENT_M: f32 = 500_000.0;

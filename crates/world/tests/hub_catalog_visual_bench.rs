@@ -32,6 +32,8 @@ use image::{ImageBuffer, Rgb};
 // Silence unused-crate-dependencies for transitive test deps.
 use glam as _;
 use libm as _;
+use ron as _;
+use serde as _;
 
 const FULL_EXTENT_M: f32 = 500_000.0;
 const CONTINENTAL_EXTENT_M: f32 = 2_000_000.0;

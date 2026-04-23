@@ -3,7 +3,45 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
-Last updated: **2026-04-23** (Phase 2.5 **SHIPPED**; Phase 3.2.1 + 3.2.2 + 3.2.3 weather W1/W2/W3 + flight coupling + chop wiring **SHIPPED**; world scope **LOCKED to Option A toroidal**; progression data-model locked; **scenario-realism audit COMPLETE**; **flight-model realism pass COMPLETE**; **water-physics hardening + q_chord aero audit COMPLETE**; **Phase 3.6.0 through 3.6.1e SHIPPED** — Perlin-fBm terrain, per-biome ridged/domain-warped primitives, mipmap-aware sampling, real-world-possible altitude envelope, hydrology bake (priority-flood + D8 + wetness equilibrium + delta fans + coastline), hub catalog (~55 K hubs across 5 tiers with operational tags + per-biome names), magnetic variation field; bench at ~70 scenarios + 200 unit tests, full gate green. **Next: Phase 3.6.2 Voronoi partition + sub-biome features.**).
+Last updated: **2026-04-23** (Phase 2.5 **SHIPPED**; Phase 3.2.1 + 3.2.2 + 3.2.3 weather W1/W2/W3 **SHIPPED**; world scope **LOCKED to Option A toroidal**; progression data-model locked; **scenario-realism audit COMPLETE**; **flight-model realism pass COMPLETE**; **water-physics hardening COMPLETE**; **Phase 3.6.0 through 3.6.2 SHIPPED** — Perlin-fBm terrain + per-biome primitives + altitude envelope, hydrology bake + delta fans + coastline, hub catalog ~55 K with tags + RON-authored names, magnetic variation field, **sub-biome Voronoi partition** (3.9 M cells, Bridson Poisson-disk, RON-authored feature libraries per biome + Oceanic library, bleed-over mechanism, 38+ feature types across 5 libraries); bench at ~70 scenarios + 220 unit tests, full gate green. **Next: Phase 3.6.3 Layer-3 feature-delta heightfield modifications.**).
+
+## 2026-04-23 (iteration 4) — Phase 3.6.2 (sub-biome Voronoi partition)
+
+L2 of the three-layer world-composition architecture — the semantic layer. "What is where, per 2 km cell." Voronoi cells at Bridson Poisson-disk distribution + per-biome feature library sampling + biome-edge bleed-over + Oceanic library for sea cells.
+
+- **Seed distribution**: Bridson 2007 blue-noise Poisson-disk at 2 km avg spacing. ~3.9 M seeds for the 5000 km world (62 % of theoretical hex-packing max — standard for Bridson). Bake ~20 s release. Spatial hash for O(1) nearest-seed lookup. Toroidal-wrap-clean.
+- **RON-authored feature libraries** (user direction: "RON likely best, easy to version control"): `data/world/sub_biome_features.ron` carries 38+ feature types across 4 land biomes + 8 Oceanic. Each entry declares placement constraints (slope/roughness/water-adjacency/altitude) + selection weight + bleed-over eligibility. User-flagged `book_cliffs` (HighDesert, Colorado-Utah region) shipped as the first addition beyond MAPGEN's listed types.
+- **Oceanic library** (per user design note mid-phase: "oceanic features to keep things interesting — ships, fishing, sailboats, receive missions"): sea cells below -5 m short-circuit the land-biome rollup and sample from an Oceanic catalog (`open_ocean`, `shipping_lane`, `fishing_grounds`, `crab_pot_patch`, `sailing_regatta_zone`, `ghost_ship_wreck_site`, `kelp_forest`, `whale_migration_path`). NPC population + interaction gameplay land at Phase 4+ — memory `oceanic_features_npcs` saves the direction.
+- **Bleed-over mechanism**: cells with biome-weight primary < 0.8 are in a transition zone; feature selection can draw from adjacent biomes' libraries (only entries marked `is_bleed_over_candidate: true`). Produces "lake_cluster in sheltered desert valley" effect pinned in `biome_edge_bleed_over` memory. Observed rate: ~18.5 % of cells.
+- **Placement constraints**: checked at bake per cell via `PlacementContext` (altitude from mipmap-aware terrain, slope from finite-difference kernel, roughness proxy, water-adjacency via 30 km hydrology probe, biome weights). Cells failing all candidates re-roll up to 8 times then fall back to `plain`. Fallback rate ~13 % (acceptable per MAPGEN: "fall back to plain is still valid").
+- **Query API**: `SubBiomeCellCatalog::sub_biome_at(x, z, terrain, hydrology) -> FeatureAssignment` with `{feature_id, source: Primary|BleedOver, is_fallback}`. Feature assignment is lazy (computed on demand) — avoids the ~30 s eager-bake cost for 3.9 M cells × ~10 µs each.
+- **Visual-bench**: 4 artifact families × 3 crops = 12 PNGs (cell partition, feature scatter, bleed-over map, composite on hydrology base) + a catalog-stats diagnostic.
+
+### Bake stats (canonical seed `0xF10_1A11`, sampled 20 K cells)
+
+- cell_count: 3 908 876 (Bridson 2 km avg spacing)
+- bleed-over rate: 18.5 %
+- fallback rate: 13.1 %
+- top features: `talus_slope` 19 %, `plain` 13 %, `open_ocean` 9.6 %, `dense_spruce_forest` 4.9 %, `protected_cove` 4.4 %, `fishing_grounds` 4.2 %, ... distributed across 38+ types total.
+
+### Test state
+
+- **20 new unit tests pass** (10 sub_biome, 10 voronoi_cells).
+- **462 total workspace tests pass** (up from 444).
+- Full workspace green: fmt + clippy `-D warnings` + cargo test + cargo test --doc.
+
+### Known deferrals (→ 3.6.3)
+
+- **Feature geometry (heightfield deltas)**: `lake_cluster` → negative bowl, `mesa_top` → plateau + cliff, `arch_formation` → rock mesh, etc. All heightfield modifications land at L3.
+- **Palette adaptation rendering**: cells carry `BiomeSource::BleedOver { host, source }`; shader-side home/host palette blending is a 3.6.3+ concern.
+- **Hub late-binding resolve**: `HubEntry.approx_world_pos` snaps to exact cell-center positions using the adjacency graph.
+- **Shore classification sampler** (`world::surface_at -> SurfaceClass`) unblocks 2.5b.7 — needs heightfield deltas first.
+
+### Next milestone
+
+**Phase 3.6.3 — Layer-3 feature-delta heightfield modifications** (basin carving, mesa raising, sandbar deposition, flora placement, shore classification).
+
+---
 
 ## 2026-04-23 (iteration 3) — Phase 3.6.1e (hub catalog + magnetic variation)
 

@@ -15,6 +15,12 @@ workspace = true
 flowplan-core = { workspace = true }
 glam = { workspace = true }
 libm = { workspace = true }
+# Sub-biome feature libraries (Phase 3.6.2) authored as RON for version-
+# control-friendly editing + additions (e.g. HighDesert Book Cliffs
+# variant). Parsed once at world-bake time; zero cost on subsequent
+# queries. RON + serde are already workspace deps.
+ron = { workspace = true }
+serde = { workspace = true }
 # world depends on core only. Sim queries world's pure samplers for buoyancy
 # (Phase 2.5a) and ground effect (Phase 2.4.6); that's the sim -> world direction.
 

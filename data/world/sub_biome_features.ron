@@ -1,0 +1,502 @@
+// Sub-biome feature libraries (Phase 3.6.2).
+//
+// Each entry defines a feature type a Voronoi cell can carry within a
+// parent biome. Placement constraints are checked against the L1
+// terrain + hydrology at bake time; features that don't fit re-roll
+// to another compatible feature, or fall back to a generic `plain`.
+//
+// Authoring notes:
+// - `id`: stable string key used in the sub_biome catalog. Keep
+//   snake_case.
+// - `parent_biome`: which biome library this feature belongs to.
+//   Must match one of the four Phase 3.6.0-pinned biomes.
+// - `slope_tolerance_max_deg`: max terrain slope the feature accepts
+//   at its seed position. Flat features (lakes, runways) use small
+//   values; rugged features (ridges, talus) accept large slopes.
+// - `roughness_tolerance_m`: max heightfield variance across a ~2 km
+//   cell footprint. Low = needs flat ground (beaches, airstrips);
+//   high = doesn't care (rocky ridges, forests).
+// - `water_adjacency`: Required / Forbidden / None. Features needing
+//   lake/river/coast presence use `Required`; features that reject
+//   water (mesa top, dune field) use `Forbidden`; most use `None`.
+// - `altitude_range_m`: (min, max). Cells outside this range reject.
+// - `selection_weight`: relative RNG weight for selection within a
+//   biome's library. Default 1.0 balances feature frequencies; tune
+//   for rarity (arch_formation = 0.2 means ~5× less common than
+//   baseline features).
+// - `is_bleed_over_candidate`: can this feature appear in adjacent
+//   biomes via the Phase 3.6.2 bleed-over mechanism? True for
+//   atmospheric / water-driven features that could plausibly sneak
+//   across biome lines (lake clusters, arches); False for strongly
+//   biome-specific features (terracotta_port).
+//
+// Evolution path: add entries here over time. User flagged
+// `book_cliffs` (HighDesert, Colorado-Utah region specific) as an
+// initial addition beyond the MAPGEN-listed types. Pattern:
+// whenever playtest or world-gen artifacts reveal a missing feel,
+// author a new entry here.
+
+(
+    biomes: {
+        // ── HighDesert ──────────────────────────────────────────────
+        // Colorado Plateau / Grand Mesa / Colorado-Utah red-rock
+        // country. User has ground-truth familiarity — see memory
+        // `biome_grand_mesa_ground_truth`.
+        "HighDesert": [
+            (
+                id: "mesa_top",
+                slope_tolerance_max_deg: 3.0,
+                roughness_tolerance_m: 40.0,
+                water_adjacency: Forbidden,
+                altitude_range_m: (1500.0, 3200.0),
+                selection_weight: 1.0,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "book_cliffs",
+                slope_tolerance_max_deg: 35.0,
+                roughness_tolerance_m: 300.0,
+                water_adjacency: None,
+                altitude_range_m: (1400.0, 2800.0),
+                selection_weight: 0.6,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "arch_formation",
+                slope_tolerance_max_deg: 12.0,
+                roughness_tolerance_m: 80.0,
+                water_adjacency: None,
+                altitude_range_m: (1200.0, 2400.0),
+                selection_weight: 0.2,
+                is_bleed_over_candidate: true,
+            ),
+            (
+                id: "slickrock_canyon",
+                slope_tolerance_max_deg: 30.0,
+                roughness_tolerance_m: 200.0,
+                water_adjacency: None,
+                altitude_range_m: (1000.0, 2200.0),
+                selection_weight: 1.2,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "sagebrush_plain",
+                slope_tolerance_max_deg: 4.0,
+                roughness_tolerance_m: 30.0,
+                water_adjacency: None,
+                altitude_range_m: (800.0, 2200.0),
+                selection_weight: 2.0,
+                is_bleed_over_candidate: true,
+            ),
+            (
+                id: "dry_wash",
+                slope_tolerance_max_deg: 8.0,
+                roughness_tolerance_m: 50.0,
+                water_adjacency: None,
+                altitude_range_m: (600.0, 2200.0),
+                selection_weight: 1.5,
+                is_bleed_over_candidate: true,
+            ),
+            (
+                id: "dune_field",
+                slope_tolerance_max_deg: 10.0,
+                roughness_tolerance_m: 80.0,
+                water_adjacency: Forbidden,
+                altitude_range_m: (600.0, 2000.0),
+                selection_weight: 0.5,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "dry_lake_bed",
+                slope_tolerance_max_deg: 1.5,
+                roughness_tolerance_m: 10.0,
+                water_adjacency: None,
+                altitude_range_m: (600.0, 2200.0),
+                selection_weight: 0.4,
+                is_bleed_over_candidate: true,
+            ),
+            (
+                id: "rail_corridor",
+                slope_tolerance_max_deg: 5.0,
+                roughness_tolerance_m: 40.0,
+                water_adjacency: None,
+                altitude_range_m: (700.0, 2500.0),
+                selection_weight: 0.3,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "scrub_valley",
+                slope_tolerance_max_deg: 8.0,
+                roughness_tolerance_m: 60.0,
+                water_adjacency: None,
+                altitude_range_m: (900.0, 2500.0),
+                selection_weight: 1.5,
+                is_bleed_over_candidate: true,
+            ),
+            (
+                id: "juniper_stand",
+                slope_tolerance_max_deg: 15.0,
+                roughness_tolerance_m: 80.0,
+                water_adjacency: None,
+                altitude_range_m: (1500.0, 2800.0),
+                selection_weight: 1.0,
+                is_bleed_over_candidate: true,
+            ),
+            (
+                id: "slot_canyon",
+                slope_tolerance_max_deg: 40.0,
+                roughness_tolerance_m: 300.0,
+                water_adjacency: None,
+                altitude_range_m: (900.0, 2400.0),
+                selection_weight: 0.3,
+                is_bleed_over_candidate: false,
+            ),
+        ],
+
+        // ── RockyAlpine ─────────────────────────────────────────────
+        // Colorado Rockies / Sawtooth / Cascades. Density-altitude,
+        // short lake windows, narrow valleys, fire-hopping.
+        "RockyAlpine": [
+            (
+                id: "alpine_tarn",
+                slope_tolerance_max_deg: 5.0,
+                roughness_tolerance_m: 30.0,
+                water_adjacency: Required,
+                altitude_range_m: (1800.0, 3500.0),
+                selection_weight: 1.0,
+                is_bleed_over_candidate: true,
+            ),
+            (
+                id: "ridge_traverse",
+                slope_tolerance_max_deg: 35.0,
+                roughness_tolerance_m: 300.0,
+                water_adjacency: Forbidden,
+                altitude_range_m: (2000.0, 4200.0),
+                selection_weight: 1.5,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "cirque",
+                slope_tolerance_max_deg: 25.0,
+                roughness_tolerance_m: 200.0,
+                water_adjacency: None,
+                altitude_range_m: (2200.0, 4000.0),
+                selection_weight: 0.8,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "narrow_valley",
+                slope_tolerance_max_deg: 15.0,
+                roughness_tolerance_m: 100.0,
+                water_adjacency: None,
+                altitude_range_m: (1200.0, 3200.0),
+                selection_weight: 1.5,
+                is_bleed_over_candidate: true,
+            ),
+            (
+                id: "talus_slope",
+                slope_tolerance_max_deg: 40.0,
+                roughness_tolerance_m: 400.0,
+                water_adjacency: None,
+                altitude_range_m: (2000.0, 4000.0),
+                selection_weight: 1.0,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "glacier_dammed_lake",
+                slope_tolerance_max_deg: 8.0,
+                roughness_tolerance_m: 50.0,
+                water_adjacency: Required,
+                altitude_range_m: (1500.0, 3500.0),
+                selection_weight: 0.4,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "fire_burn_area",
+                slope_tolerance_max_deg: 20.0,
+                roughness_tolerance_m: 150.0,
+                water_adjacency: None,
+                altitude_range_m: (1000.0, 3000.0),
+                selection_weight: 0.6,
+                is_bleed_over_candidate: true,
+            ),
+            (
+                id: "avalanche_chute",
+                slope_tolerance_max_deg: 45.0,
+                roughness_tolerance_m: 300.0,
+                water_adjacency: None,
+                altitude_range_m: (1800.0, 3800.0),
+                selection_weight: 0.7,
+                is_bleed_over_candidate: false,
+            ),
+        ],
+
+        // ── CoastalBoreal ───────────────────────────────────────────
+        // Alaska panhandle / BC coast. Stunning alpine lakes, cliff
+        // regions, remote recreational landing. The floatplane home.
+        "CoastalBoreal": [
+            (
+                id: "lake_cluster",
+                slope_tolerance_max_deg: 6.0,
+                roughness_tolerance_m: 40.0,
+                water_adjacency: Required,
+                altitude_range_m: (-50.0, 1500.0),
+                selection_weight: 1.5,
+                is_bleed_over_candidate: true,
+            ),
+            (
+                id: "alpine_valley",
+                slope_tolerance_max_deg: 12.0,
+                roughness_tolerance_m: 120.0,
+                water_adjacency: None,
+                altitude_range_m: (500.0, 2500.0),
+                selection_weight: 1.0,
+                is_bleed_over_candidate: true,
+            ),
+            (
+                id: "dense_spruce_forest",
+                slope_tolerance_max_deg: 20.0,
+                roughness_tolerance_m: 150.0,
+                water_adjacency: None,
+                altitude_range_m: (0.0, 1800.0),
+                selection_weight: 2.0,
+                is_bleed_over_candidate: true,
+            ),
+            (
+                id: "rocky_ridge",
+                slope_tolerance_max_deg: 35.0,
+                roughness_tolerance_m: 250.0,
+                water_adjacency: None,
+                altitude_range_m: (400.0, 2500.0),
+                selection_weight: 1.0,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "tundra_patch",
+                slope_tolerance_max_deg: 10.0,
+                roughness_tolerance_m: 60.0,
+                water_adjacency: None,
+                altitude_range_m: (300.0, 2000.0),
+                selection_weight: 0.8,
+                is_bleed_over_candidate: true,
+            ),
+            (
+                id: "river_floodplain",
+                slope_tolerance_max_deg: 3.0,
+                roughness_tolerance_m: 30.0,
+                water_adjacency: Required,
+                altitude_range_m: (0.0, 1000.0),
+                selection_weight: 0.9,
+                is_bleed_over_candidate: true,
+            ),
+            (
+                id: "bush_strip_clearing",
+                slope_tolerance_max_deg: 4.0,
+                roughness_tolerance_m: 30.0,
+                water_adjacency: None,
+                altitude_range_m: (0.0, 1500.0),
+                selection_weight: 0.7,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "glacier_tongue",
+                slope_tolerance_max_deg: 15.0,
+                roughness_tolerance_m: 100.0,
+                water_adjacency: None,
+                altitude_range_m: (500.0, 3000.0),
+                selection_weight: 0.3,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "fjord_entrance",
+                slope_tolerance_max_deg: 30.0,
+                roughness_tolerance_m: 200.0,
+                water_adjacency: Required,
+                altitude_range_m: (-50.0, 500.0),
+                selection_weight: 0.8,
+                is_bleed_over_candidate: true,
+            ),
+            (
+                id: "salmon_run_river",
+                slope_tolerance_max_deg: 5.0,
+                roughness_tolerance_m: 40.0,
+                water_adjacency: Required,
+                altitude_range_m: (0.0, 600.0),
+                selection_weight: 0.5,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "cliff_coast",
+                slope_tolerance_max_deg: 50.0,
+                roughness_tolerance_m: 400.0,
+                water_adjacency: Required,
+                altitude_range_m: (-50.0, 800.0),
+                selection_weight: 0.7,
+                is_bleed_over_candidate: false,
+            ),
+        ],
+
+        // ── Oceanic ─────────────────────────────────────────────────
+        // Features for cells below sea level (altitude < -5 m). Not
+        // tied to any single land biome — ocean spans all climate
+        // gradients, so this is its own catalog. Rendering + NPC
+        // ship population land in later phases (gameplay / render).
+        //
+        // User-pinned design direction: oceanic zones host large
+        // ships, commercial/private fishing, lobster boats, sailboats
+        // — player can pull alongside and interact (receive missions,
+        // deliver cargo). See agent-memory `oceanic_features_npcs`.
+        "Oceanic": [
+            (
+                id: "open_ocean",
+                slope_tolerance_max_deg: 90.0,
+                roughness_tolerance_m: 10000.0,
+                water_adjacency: Required,
+                altitude_range_m: (-10000.0, -5.0),
+                selection_weight: 3.0,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "shipping_lane",
+                slope_tolerance_max_deg: 90.0,
+                roughness_tolerance_m: 10000.0,
+                water_adjacency: Required,
+                altitude_range_m: (-10000.0, -5.0),
+                selection_weight: 0.8,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "fishing_grounds",
+                slope_tolerance_max_deg: 90.0,
+                roughness_tolerance_m: 10000.0,
+                water_adjacency: Required,
+                altitude_range_m: (-500.0, -5.0),
+                selection_weight: 1.2,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "crab_pot_patch",
+                slope_tolerance_max_deg: 90.0,
+                roughness_tolerance_m: 10000.0,
+                water_adjacency: Required,
+                altitude_range_m: (-200.0, -5.0),
+                selection_weight: 0.5,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "sailing_regatta_zone",
+                slope_tolerance_max_deg: 90.0,
+                roughness_tolerance_m: 10000.0,
+                water_adjacency: Required,
+                altitude_range_m: (-300.0, -5.0),
+                selection_weight: 0.3,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "ghost_ship_wreck_site",
+                slope_tolerance_max_deg: 90.0,
+                roughness_tolerance_m: 10000.0,
+                water_adjacency: Required,
+                altitude_range_m: (-400.0, -5.0),
+                selection_weight: 0.15,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "kelp_forest",
+                slope_tolerance_max_deg: 90.0,
+                roughness_tolerance_m: 10000.0,
+                water_adjacency: Required,
+                altitude_range_m: (-60.0, -5.0),
+                selection_weight: 0.7,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "whale_migration_path",
+                slope_tolerance_max_deg: 90.0,
+                roughness_tolerance_m: 10000.0,
+                water_adjacency: Required,
+                altitude_range_m: (-2000.0, -20.0),
+                selection_weight: 0.4,
+                is_bleed_over_candidate: false,
+            ),
+        ],
+
+        // ── MediterraneanArchipelago ────────────────────────────────
+        // Aegean / Corsica / Sardinia. Turquoise water, terracotta
+        // ports, inland seas, island clusters.
+        "MediterraneanArchipelago": [
+            (
+                id: "protected_cove",
+                slope_tolerance_max_deg: 10.0,
+                roughness_tolerance_m: 80.0,
+                water_adjacency: Required,
+                altitude_range_m: (-50.0, 400.0),
+                selection_weight: 1.5,
+                is_bleed_over_candidate: true,
+            ),
+            (
+                id: "rocky_islet",
+                slope_tolerance_max_deg: 40.0,
+                roughness_tolerance_m: 300.0,
+                water_adjacency: Required,
+                altitude_range_m: (-10.0, 300.0),
+                selection_weight: 1.2,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "terracotta_port",
+                slope_tolerance_max_deg: 5.0,
+                roughness_tolerance_m: 30.0,
+                water_adjacency: Required,
+                altitude_range_m: (0.0, 200.0),
+                selection_weight: 0.4,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "pine_headland",
+                slope_tolerance_max_deg: 20.0,
+                roughness_tolerance_m: 150.0,
+                water_adjacency: None,
+                altitude_range_m: (0.0, 800.0),
+                selection_weight: 1.2,
+                is_bleed_over_candidate: true,
+            ),
+            (
+                id: "sandy_beach",
+                slope_tolerance_max_deg: 3.0,
+                roughness_tolerance_m: 15.0,
+                water_adjacency: Required,
+                altitude_range_m: (-5.0, 40.0),
+                selection_weight: 1.0,
+                is_bleed_over_candidate: true,
+            ),
+            (
+                id: "small_harbor",
+                slope_tolerance_max_deg: 4.0,
+                roughness_tolerance_m: 30.0,
+                water_adjacency: Required,
+                altitude_range_m: (0.0, 100.0),
+                selection_weight: 0.5,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "island_strait",
+                slope_tolerance_max_deg: 25.0,
+                roughness_tolerance_m: 200.0,
+                water_adjacency: Required,
+                altitude_range_m: (-10.0, 600.0),
+                selection_weight: 0.7,
+                is_bleed_over_candidate: false,
+            ),
+            (
+                id: "coastal_plain",
+                slope_tolerance_max_deg: 5.0,
+                roughness_tolerance_m: 40.0,
+                water_adjacency: None,
+                altitude_range_m: (0.0, 300.0),
+                selection_weight: 1.5,
+                is_bleed_over_candidate: true,
+            ),
+        ],
+    },
+)

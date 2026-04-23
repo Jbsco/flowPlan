@@ -15,7 +15,9 @@ pub mod hydrology;
 pub mod magnetic_variation;
 pub mod noise;
 pub mod sky;
+pub mod sub_biome;
 pub mod terrain;
+pub mod voronoi_cells;
 pub mod water;
 pub mod weather;
 
@@ -30,7 +32,12 @@ pub use hydrology::{
 };
 pub use magnetic_variation::{magnetic_variation, MAG_VAR_AMPLITUDE_DEG};
 pub use sky::{local_time_of_day, sun_direction};
+pub use sub_biome::{
+    assign_feature, pick_biome_source, BiomeSource, FeatureAssignment, PlacementContext,
+    SubBiomeFeature, SubBiomeLibraries, WaterAdjacency, FALLBACK_FEATURE_ID,
+};
 pub use terrain::{HeightSampler, Terrain};
+pub use voronoi_cells::{CellId as SubBiomeCellId, CellSeed, SubBiomeCellCatalog, SEED_SPACING_M};
 pub use water::{chop_intensity_from_wind, max_amplitude as water_max_amplitude, water_height};
 pub use weather::{
     cell_at as weather_cell_at, cell_at_drifted as weather_cell_at_drifted, frontal_segments,

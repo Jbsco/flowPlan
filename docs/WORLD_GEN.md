@@ -16,6 +16,7 @@
 - [Per-biome terrain profiles](#per-biome-terrain-profiles)
 - [Hydrology graph (3.6.1d)](#hydrology-graph-361d)
 - [Hub catalog + magnetic variation (3.6.1e)](#hub-catalog--magnetic-variation-361e)
+- [Sub-biome Voronoi partition (3.6.2)](#sub-biome-voronoi-partition-362)
 - [Weather field generation](#weather-field-generation)
 - [Voronoi cells (variable size)](#voronoi-cells-variable-size)
 - [Toroidal world topology](#toroidal-world-topology)
@@ -485,6 +486,129 @@ Amplitude ±`MAG_VAR_AMPLITUDE_DEG` (= 15°). Tunable — drop to 5° for soft o
 - **Late-binding cell resolution** → 3.6.2 (matches Voronoi arrival)
 - **Discovery / cartographer unlock flags** → save format (3.7)
 - **Barn-find attachments** → 3.6.3+
+
+---
+
+## Sub-biome Voronoi partition (3.6.2)
+
+Layer 2 of the three-layer world-composition architecture — the semantic layer. "What is where, per 2 km cell." Two modules:
+
+- `crates/world/src/voronoi_cells.rs` — Bridson 2007 blue-noise Poisson-disk seeding + spatial-hash lookup
+- `crates/world/src/sub_biome.rs` — per-biome feature libraries (loaded from RON) + placement constraints + bleed-over mechanism
+- `crates/world/src/hub_names.rs` (existing) / `data/world/sub_biome_features.ron` (new) — authored content
+
+### Seed distribution (Bridson Poisson-disk)
+
+- `SEED_SPACING_M = 2_000` m target average
+- Bridson K = 30 candidate attempts per active seed
+- Spatial grid cell size = `r / √2` (≈ 1.414 km) — exactly one seed per grid cell
+- Toroidal wrap handled via `wrap_coord` + `wrap_cell_index` + toroidal-closest-path neighbor distance
+- Runtime: ~20 s release for the full 5000 km world; produces ~3.9 M seeds (62% of theoretical hex-packing max, which is typical for Bridson dart-throwing)
+- Memory: ~76 MB (spatial grid 50 MB, seed positions 26 MB)
+
+### Per-biome feature libraries (RON-authored)
+
+`data/world/sub_biome_features.ron` declares per-biome feature catalogs. 38+ feature types across 4 land biomes + 8 Oceanic features. Each entry:
+
+```ron
+(
+    id: "mesa_top",
+    slope_tolerance_max_deg: 3.0,
+    roughness_tolerance_m: 40.0,
+    water_adjacency: Forbidden,
+    altitude_range_m: (1500.0, 3200.0),
+    selection_weight: 1.0,
+    is_bleed_over_candidate: false,
+)
+```
+
+Loaded lazily via `include_str!` + `ron::from_str` on first `SubBiomeLibraries::shared()`. Adding new features is pure content editing — user-flagged `book_cliffs` (HighDesert, Colorado-Utah region) is the first such addition beyond the MAPGEN catalog.
+
+### Placement constraints
+
+Each feature declares four constraints checked at bake time against terrain + hydrology:
+
+| Constraint | Meaning |
+|---|---|
+| `slope_tolerance_max_deg` | Max terrain slope (from finite-difference kernel at seed) |
+| `roughness_tolerance_m` | Max heightfield variance across cell footprint |
+| `water_adjacency` | `Required` / `Forbidden` / `None` — checked via hydrology graph at 30 km radius |
+| `altitude_range_m` | `(min, max)` altitude bounds |
+
+`selection_weight` scales selection probability within the library (tune for rarity). `is_bleed_over_candidate` controls whether the feature can appear in adjacent biomes via bleed-over.
+
+### Bleed-over mechanism
+
+Cells with biome-weight primary < `BLEED_OVER_PRIMARY_WEIGHT_THRESHOLD` = 0.8 are in a biome-transition zone. Their feature selection can draw from adjacent biomes' libraries — restricted to entries marked `is_bleed_over_candidate: true`. Produces the "lake_cluster in sheltered desert valley" effect pinned in the `biome_edge_bleed_over` memory.
+
+Bleed-over rate on canonical seed: ~18.5 % of sampled cells carry features from an adjacent biome rather than their primary.
+
+### Open-water short-circuit + Oceanic library
+
+Cells whose seed sits below `OPEN_WATER_ALTITUDE_THRESHOLD_M = -5 m` short-circuit the land-biome rollup and sample from the **Oceanic** library instead. Without this, ~24 % of the world (sea cells) would fall through to the generic `plain` fallback because land-biome features don't match deep-sea terrain.
+
+Oceanic feature types (per user design note — memory `oceanic_features_npcs`):
+- `open_ocean`, `shipping_lane`, `fishing_grounds`, `crab_pot_patch`, `sailing_regatta_zone`, `ghost_ship_wreck_site`, `kelp_forest`, `whale_migration_path`
+
+These provide interaction hooks for Phase 4+ NPC ships (large ships, fishing vessels, sailboats — player pulls alongside to receive missions, deliver cargo). Rendering + NPC population land in later phases.
+
+### Feature assignment
+
+Pure function of `(master_seed, cell_id, terrain, hydrology)`:
+
+1. Sample `biome_weights_at(seed, x, z)` — determines primary biome + bleed-over eligibility
+2. If altitude < -5 m → sample from Oceanic library (skip bleed-over evaluation)
+3. Else → pick `BiomeSource::Primary` or `BiomeSource::BleedOver` via weighted RNG on non-primary candidate biomes
+4. Weighted-RNG pick a feature from the chosen library
+5. Check `PlacementContext::satisfies` against placement constraints
+6. If fails, re-roll up to `MAX_FEATURE_ROLL_ATTEMPTS` = 8 times
+7. If exhausted, return the generic `plain` fallback
+
+Fallback rate on canonical seed: ~13 % (acceptable; fallbacks are valid — 3.6.3 feature-delta renderer treats `plain` as "no heightfield modification").
+
+### Query API
+
+```rust
+pub struct SubBiomeCellCatalog { /* ... */ }
+
+impl SubBiomeCellCatalog {
+    pub fn bake(master_seed: u64) -> Self;
+    pub fn nearest_cell(&self, x: f32, z: f32) -> CellId;
+    pub fn feature_at_cell(&self, cell_id, terrain, hydrology) -> FeatureAssignment;
+    pub fn sub_biome_at(&self, x, z, terrain, hydrology) -> FeatureAssignment;
+    pub fn neighbors_of(&self, cell_id: CellId, k: usize) -> Vec<CellId>;
+}
+```
+
+Feature assignment is **lazy** — computed on demand per query rather than eagerly pre-baked. Avoids the ~30 s eager-bake cost for 3.9 M cells × ~10 µs each. Consumers (visual-bench, streaming generator, hub late-bind) memoize on their side.
+
+### Canonical-seed stats
+
+Sample from 20 K cells (stride-sampled across the 3.9 M total):
+
+| Feature | Count | % |
+|---|---|---|
+| talus_slope | 3800 | 19.0 % |
+| plain (fallback) | 2619 | 13.1 % |
+| open_ocean | 1921 | 9.6 % |
+| dense_spruce_forest | 987 | 4.9 % |
+| protected_cove | 882 | 4.4 % |
+| fishing_grounds | 834 | 4.2 % |
+| cirque | 851 | 4.2 % |
+| ridge_traverse | 834 | 4.2 % |
+| pine_headland | 805 | 4.0 % |
+| fjord_entrance | 651 | 3.2 % |
+| ... | ... | ... |
+
+Bleed-over rate 18.5 %, fallback rate 13.1 %. Feature distribution reflects biome distribution (RockyAlpine dominates in canonical seed).
+
+### Known deferrals (→ 3.6.3)
+
+- **Feature geometry (heightfield deltas)**: lake_cluster carves a bowl, mesa_top raises a plateau + cliff edge, arch_formation adds rock-arch mesh, etc. All heightfield modifications live at L3.
+- **Palette adaptation rendering**: feature cells carry `BiomeSource` info so render can blend home/host palettes; actual shader-side adaptation is a 3.6.3+ concern.
+- **Hub late-binding resolve**: `HubEntry.approx_world_pos` snaps to exact cell-center positions using the adjacency graph shipped here.
+- **Shore classification sampler**: `world::surface_at(x, z) -> SurfaceClass` unblocks 2.5b.7 but needs heightfield deltas first.
+- **Roughness tolerance refinement**: current proxy is `max(|center - cardinal-sample|)` which is coarse. Real cell-footprint variance statistics land at 3.6.3.
 
 ---
 
