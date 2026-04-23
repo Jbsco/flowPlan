@@ -47,9 +47,11 @@ Every phase ends with the same gate. **A phase is not complete until the gate pa
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo test --workspace                       # includes Doc-tests blocks — scan output for them
 cargo bench --bench frame_budget -- --test   # runs the budget check in CI mode
 ```
+
+`cargo test --workspace` runs both unit tests and doctests, but the doctest summary lives in separate `Doc-tests <crate>` blocks at the end of the output. **Scan for those blocks specifically** — a unit-test pass does not imply a doctest pass, and CI fails on doctest regressions exactly like unit-test regressions. For f32 round-trip math at world scale, default doctest tolerance to ≥1e-2 absolute (or relative-aware bounds) — tighter tolerances exceed f32 precision at magnitude ~5000.
 
 Additionally, per-phase gates (below) list any phase-specific verification on top of the generic gate.
 

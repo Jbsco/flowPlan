@@ -23,6 +23,15 @@ Three sub-phases shipped from cold-start of Phase 3.6 work:
 - 5 visual-bench artifact families × 3–4 crops regenerated; canonical seed `0xF101_A11`. Per-pixel mipmap-aware contour gated behind `FLOWPLAN_VISUAL_BENCH_FULL=1` (Marching Squares variant is the default deliverable).
 - Seam-continuity tolerance acknowledged at f32 precision limit (~100 m at 5000 km world scale); real fix would require f64 internal math (deferred).
 
+### Gate fix-up pass (post-3.6.1c push)
+
+CI failed on the 3.6.1c push for two reasons that the local gate had silently let through:
+
+- **Doctest in `crates/core/src/world_topology.rs::quantize_angular_frequency`** asserted `cycles - cycles.round()` within 1e-4, but f32 round-trip math at magnitude ~5000 only delivers ~1e-3 absolute precision. Bumped to 1e-2 with explanatory comment. Local-gate lesson encoded in `ROADMAP.md § Per-Phase Quality Gate`: `cargo test --workspace` runs doctests in separate `Doc-tests <crate>` blocks; scan for them.
+- **Clippy strict (`-D warnings`)** flagged 43 nursery/pedantic warnings — mostly missing-backticks, long doc paragraphs, doc list indentation, plus i32→f32 cast warnings in test grids. Fixed by rephrasing docs (paragraph splits + backtick wrapping), `#[allow(clippy::cast_precision_loss)]` at test-module level (matches existing convention), and `#[allow(clippy::struct_field_names)]` on `BiomeProfile` / `BiomeEnvelope` for the intentional `_m` suffix discipline.
+
+Cross-platform determinism workflow (separate from quality gate) remains expected-to-diverge until Phase 6.1 hardware-verification work; not blocking PRs.
+
 ### Known limitations / deferrals
 
 - **Wide-view contour density** still cluttered at continental crops — deferred until a "show only every Nth (index) contour" mode lands.
