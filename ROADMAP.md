@@ -854,6 +854,7 @@ All of the following, verified on reference hardware:
 - [ ] **Load path:** session start reads `pilot.save` + `pilot/<this-seed>.progress` + `worlds/<this-seed>.world`. Sub-second cold read, <10 MB peak.
 - [ ] **Save path:** append deltas during play, compact on clean session close.
 - [ ] Determinism: save + reload → byte-identical world state continuation.
+- [ ] **Seed-uniqueness test battery** per [TEST_PLAN.md § Seed-generation uniqueness](TEST_PLAN.md#seed-generation-uniqueness-pending--phase-37-save-format--seed-creation-ui): coverage (N distinct seeds → N distinct worlds), bit-adjacency decorrelation, sub-seed independence, seed-bundle collision check, pairwise uniqueness across representative seeds. First milestone where seed-generation happens at scale, so the test battery lands here.
 
 ### Deliverable
 

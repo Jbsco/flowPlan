@@ -271,6 +271,20 @@ proptest! {
 - **Stall recovery:** triggered stall recovers within a bounded time window.
 - **Water surface sampling equivalence:** CPU sample and GPU sample agree within epsilon at the same (x, z, t).
 
+### Seed-generation uniqueness (pending — Phase 3.7 save-format / seed-creation UI)
+
+When player-facing seed generation lands (currently seeds are hardcoded constants; `MAPGEN.md § World-bake parameters` defines `master_seed: u64` + `WeatherTuning` as the seed bundle), add a battery of tests that verify the seed space produces distinct worlds without collision or correlation:
+
+1. **Coverage:** sample N master seeds (N=1000 or 10000), compute terrain heightfield at a fixed canonical point for each, assert N distinct output values (modulo f32 precision). Same for biome classification + weather cell-state at canonical (x, z, t). Catches accidental seed-reuse at the sub-seed derivation layer.
+2. **Bit-adjacency decorrelation:** for seeds differing in 1 bit, assert outputs are statistically uncorrelated (correlation coefficient < 0.1 across a sample grid). Catches weak hash functions that preserve input structure. `splitmix64` should pass trivially — this is insurance against future refactors that introduce weaker derivations.
+3. **Sub-seed independence:** for a fixed master seed, assert each derived sub-seed (terrain, weather-Voronoi, terrain-Voronoi, hub-catalog) is bit-different from every other sub-seed. Zero accidental collisions.
+4. **Seed-bundle collision:** (master_seed, WeatherTuning) pairs that differ in ANY component must produce distinct worlds. Verifies the `seed_hex = master_seed XOR hash(WeatherTuning)` pattern from `MAPGEN.md § Hub persistence` is collision-free.
+5. **Pairwise uniqueness on realistic seed set:** sample 100 random seeds with representative WeatherTuning values, assert all 4950 pairs produce distinct world outputs at a canonical sample point.
+
+These tests belong alongside the existing same-seed / different-seed determinism tests (`crates/core/src/rng.rs`, `crates/world/src/terrain.rs`, `crates/sim/src/hash.rs`) but exercise the **space of seeds** rather than pairs. The save-format scaffolding (Phase 3.7) introduces the seed-UI + seed-persistence that makes this failure mode possible; tests land with that milestone.
+
+Memory: `terrain_noise_primitives_spec` notes the octave-offset convention that prevents gradient-hash collisions at the Perlin-primitive layer; this seed-uniqueness battery generalizes that discipline to the whole seed-bundle layer.
+
 ---
 
 ## Flight Test Bench
