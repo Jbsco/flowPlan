@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use flowplan_core::WORLD_EXTENT_M;
+use flowplan_world::hub_catalog::HubCatalog;
 use flowplan_world::hydrology::HydrologyGraph;
 use flowplan_world::sub_biome::FeatureAssignment;
 use flowplan_world::terrain::Terrain;
@@ -404,4 +405,70 @@ fn emit_catalog_stats() {
             100.0 * *count as f32 / n as f32
         );
     }
+}
+
+#[test]
+#[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
+fn emit_placement_rule_rejection_stats() {
+    // 3.6.3c.1b calibration signal: compare feature frequencies across
+    // a cell sample with and without PlacementRules evaluation. The
+    // delta shows rules ARE firing + their net effect on the catalog.
+    //
+    // Columns: feature_id | without_rules | with_rules | delta
+    let terrain = Terrain::from_seed(CANONICAL_SEED);
+    let hydrology = HydrologyGraph::bake(CANONICAL_SEED, &terrain);
+    let cells = SubBiomeCellCatalog::bake(CANONICAL_SEED);
+    let hub_catalog = HubCatalog::bake(CANONICAL_SEED, &terrain, &hydrology);
+
+    let sample_size = 10_000_u32;
+    let stride = (cells.cell_count() as u32 / sample_size).max(1);
+    let mut without: HashMap<String, u32> = HashMap::new();
+    let mut with_rules: HashMap<String, u32> = HashMap::new();
+    let mut differ = 0_u32;
+    let mut n = 0_u32;
+    for cell_id in (0..cells.cell_count() as u32).step_by(stride as usize) {
+        let a = cells.feature_at_cell(cell_id, &terrain, &hydrology);
+        let b = cells.feature_at_cell_with_rules(cell_id, &terrain, &hydrology, &hub_catalog);
+        *without.entry(a.feature_id.clone()).or_insert(0) += 1;
+        *with_rules.entry(b.feature_id.clone()).or_insert(0) += 1;
+        if a.feature_id != b.feature_id {
+            differ += 1;
+        }
+        n += 1;
+    }
+
+    eprintln!(
+        "placement-rule rejection stats (sample n={n}):\n  cells reassigned by rules: {differ} ({:.2}%)",
+        100.0 * differ as f32 / n as f32
+    );
+
+    // Sorted diff table — features whose count moved the most.
+    let mut keys: std::collections::BTreeSet<String> = without.keys().cloned().collect();
+    keys.extend(with_rules.keys().cloned());
+    let mut rows: Vec<(String, i32, u32, u32)> = keys
+        .into_iter()
+        .map(|k| {
+            let a = i32::try_from(*without.get(&k).unwrap_or(&0)).unwrap_or(0);
+            let b = i32::try_from(*with_rules.get(&k).unwrap_or(&0)).unwrap_or(0);
+            (k, b - a, a as u32, b as u32)
+        })
+        .collect();
+    rows.sort_by_key(|(_, d, _, _)| -d.abs());
+
+    eprintln!(
+        "  {:24}  {:>8} {:>8} {:>8}",
+        "feature_id", "without", "with", "delta"
+    );
+    for (id, delta, a, b) in rows.iter().take(25) {
+        let sign = if *delta >= 0 { "+" } else { "" };
+        eprintln!("    {id:24}  {a:>8} {b:>8} {sign}{delta:>7}");
+    }
+
+    // Sanity assertion: rules fired on at least *some* cells. With 18
+    // features authored with rules + 10k samples, we'd expect >0.1 %
+    // reassignment even on a conservative canonical seed.
+    assert!(
+        differ > 0,
+        "expected PlacementRules to reassign at least some cells; sample shows 0 — did wiring regress?"
+    );
 }

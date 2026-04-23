@@ -709,12 +709,25 @@ pub struct FeatureAssignment {
 /// 5. If exhausted, return the `plain` fallback.
 ///
 /// Deterministic per `(master_seed, cell_id)`.
+///
+/// When `rules_ctx` is `Some`, placement rules are evaluated for each
+/// rolled candidate — rule rejections cause reroll like `context`
+/// failures. When `None`, rules are skipped entirely (pre-3.6.3c.1
+/// baseline behavior). `cell_pos` is used only when `rules_ctx` is
+/// `Some`; callers without rules can pass `(0.0, 0.0)`.
+///
+/// Attractor rules (`hub_proximity`, `prominence`) currently contribute
+/// only their gate semantics in the retry-loop (Pass/Reject). The
+/// `weight_mult` they compute is discarded in this wiring — an eager
+/// placement pass (3.6.3c.1c Poisson) will consume it properly.
 #[must_use]
 pub fn assign_feature(
     master_seed: u64,
     cell_id: u32,
+    cell_pos: (f32, f32),
     context: &PlacementContext,
     libraries: &SubBiomeLibraries,
+    rules_ctx: Option<&PlacementRulesContext<'_>>,
 ) -> FeatureAssignment {
     let field_seed = mix_seed(master_seed, SUB_BIOME_FIELD_TAG);
     let bleed_rng = mix_seed(field_seed, u64::from(cell_id) | (1_u64 << 32)) as u32;
@@ -737,7 +750,7 @@ pub fn assign_feature(
                 u64::from(cell_id) | (u64::from(attempt) << 48) | (1 << 60),
             );
             if let Some(f) = sample_feature(oceanic, roll_rng, false) {
-                if context.satisfies(f) {
+                if context.satisfies(f) && passes_placement_rules(f, cell_pos, context, rules_ctx) {
                     return FeatureAssignment {
                         feature_id: f.id.clone(),
                         source,
@@ -762,7 +775,7 @@ pub fn assign_feature(
         let roll_rng = mix_seed(field_seed, u64::from(cell_id) | (u64::from(attempt) << 48));
         let feature = sample_feature(lib, roll_rng, source.is_bleed_over());
         if let Some(f) = feature {
-            if context.satisfies(f) {
+            if context.satisfies(f) && passes_placement_rules(f, cell_pos, context, rules_ctx) {
                 return FeatureAssignment {
                     feature_id: f.id.clone(),
                     source,
@@ -777,6 +790,25 @@ pub fn assign_feature(
         source,
         is_fallback: true,
     }
+}
+
+/// Gate-only placement-rule check used inside the `assign_feature`
+/// retry loop. Returns `true` if no rules are declared, if rules_ctx
+/// is `None`, or if [`evaluate_placement_rules`] returns
+/// [`PlacementRuleOutcome::Pass`]. Returns `false` on any reject.
+fn passes_placement_rules(
+    feature: &SubBiomeFeature,
+    cell_pos: (f32, f32),
+    context: &PlacementContext,
+    rules_ctx: Option<&PlacementRulesContext<'_>>,
+) -> bool {
+    let Some(rules_ctx) = rules_ctx else {
+        return true;
+    };
+    matches!(
+        evaluate_placement_rules(feature, cell_pos, context, rules_ctx),
+        PlacementRuleOutcome::Pass { .. }
+    )
 }
 
 /// Sample a feature from a library by selection_weight, filtering to
@@ -1174,11 +1206,7 @@ fn compute_hub_proximity_boost(
 
 /// True if cell is within `exclusion_min_km` of any hub at or above
 /// `exclusion_min_tier`.
-fn is_within_hub_exclusion(
-    hub: &HubRules,
-    cell_pos: (f32, f32),
-    hub_catalog: &HubCatalog,
-) -> bool {
+fn is_within_hub_exclusion(hub: &HubRules, cell_pos: (f32, f32), hub_catalog: &HubCatalog) -> bool {
     let Some(min_tier_str) = &hub.exclusion_min_tier else {
         return false;
     };
@@ -1505,7 +1533,7 @@ mod tests {
                 ..Default::default()
             },
         };
-        let result = assign_feature(42, 0, &ctx, libs);
+        let result = assign_feature(42, 0, (0.0, 0.0), &ctx, libs, None);
         assert!(result.is_fallback);
         assert_eq!(result.feature_id, FALLBACK_FEATURE_ID);
     }
@@ -1523,8 +1551,8 @@ mod tests {
                 ..Default::default()
             },
         };
-        let a = assign_feature(42, 1234, &ctx, libs);
-        let b = assign_feature(42, 1234, &ctx, libs);
+        let a = assign_feature(42, 1234, (0.0, 0.0), &ctx, libs, None);
+        let b = assign_feature(42, 1234, (0.0, 0.0), &ctx, libs, None);
         assert_eq!(a.feature_id, b.feature_id);
         assert_eq!(a.source, b.source);
         assert_eq!(a.is_fallback, b.is_fallback);
@@ -1771,6 +1799,59 @@ mod tests {
     }
 
     #[test]
+    fn authored_placement_rules_present_in_catalog() {
+        // Spot-check 5 features authored in 3.6.3c.1b. Rule shape must
+        // survive round-trip through the embedded RON.
+        let libs = SubBiomeLibraries::shared();
+
+        // ranch (HighDesert) — hub_proximity + self_spacing
+        let ranch = libs.find(BiomeClass::HighDesert, "ranch").unwrap();
+        let rules = ranch.placement_rules.as_ref().unwrap();
+        let hub = rules.hub.as_ref().unwrap();
+        assert!(hub.proximity_km_per_tier.contains_key("Regional"));
+        assert!(rules.self_spacing.is_some());
+
+        // scenic_overlook (RockyAlpine) — prominence + self_spacing
+        let overlook = libs
+            .find(BiomeClass::RockyAlpine, "scenic_overlook")
+            .unwrap();
+        let rules = overlook.placement_rules.as_ref().unwrap();
+        let prom = rules.prominence.as_ref().unwrap();
+        let eps = 1e-6_f32;
+        assert!((prom.min_m - 100.0).abs() < eps);
+        assert!((prom.min_slope_deg - 20.0).abs() < eps);
+
+        // creek_valley (CoastalBoreal) — hydrology coupling (Creek)
+        let creek = libs
+            .find(BiomeClass::CoastalBoreal, "creek_valley")
+            .unwrap();
+        let hyd = creek
+            .placement_rules
+            .as_ref()
+            .and_then(|r| r.hydrology.as_ref())
+            .unwrap();
+        assert_eq!(hyd.required_class, "Creek");
+
+        // hot_springs (RockyAlpine) — climate window
+        let hs = libs.find(BiomeClass::RockyAlpine, "hot_springs").unwrap();
+        let clim = hs
+            .placement_rules
+            .as_ref()
+            .and_then(|r| r.climate.as_ref())
+            .unwrap();
+        assert!(clim.temp_range_c.is_some());
+
+        // gas_station (CoastalBoreal) — road_adjacency required
+        let gas = libs.find(BiomeClass::CoastalBoreal, "gas_station").unwrap();
+        let ra = gas
+            .placement_rules
+            .as_ref()
+            .and_then(|r| r.road_adjacency.as_ref())
+            .unwrap();
+        assert!(ra.required);
+    }
+
+    #[test]
     fn spillover_rules_parse_from_ron() {
         // Even though evaluation is stubbed, schema must parse — future
         // anchor-feature authoring depends on it.
@@ -1798,7 +1879,10 @@ mod tests {
             .as_ref()
             .and_then(|r| r.spillover.as_ref())
             .unwrap();
-        assert_eq!(spill.supporting_features, vec!["dwelling_cluster", "gas_station"]);
+        assert_eq!(
+            spill.supporting_features,
+            vec!["dwelling_cluster", "gas_station"]
+        );
         let eps = 1e-6_f32;
         assert!((spill.radius_km - 8.0).abs() < eps);
         assert_eq!(spill.min_count, 2);
@@ -1842,7 +1926,7 @@ mod tests {
         use std::collections::HashSet;
         let mut seen: HashSet<String> = HashSet::new();
         for cell_id in 0..50 {
-            let r = assign_feature(42, cell_id, &ctx, libs);
+            let r = assign_feature(42, cell_id, (0.0, 0.0), &ctx, libs, None);
             if !r.is_fallback {
                 seen.insert(r.feature_id);
             }

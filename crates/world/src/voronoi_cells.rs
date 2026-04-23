@@ -46,12 +46,13 @@ use core::f32::consts::TAU;
 use flowplan_core::{wrap_cell_index, wrap_coord, WORLD_EXTENT_M};
 
 use crate::biome::{biome_at, BiomeClass};
+use crate::hub_catalog::HubCatalog;
 use crate::hydrology::{HydrologyGraph, WaterClass};
 use crate::sub_biome::{
     assign_feature, biome_weights_at_position, FeatureAssignment, PlacementContext,
-    SubBiomeLibraries,
+    PlacementRulesContext, SubBiomeLibraries,
 };
-use crate::terrain::Terrain;
+use crate::terrain::{HeightSampler, Terrain};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Constants
@@ -310,7 +311,7 @@ impl SubBiomeCellCatalog {
         let (x, z) = self.seeds[cell_id as usize].position;
         let context = build_placement_context(self.seed, x, z, terrain, hydrology);
         let libs = SubBiomeLibraries::shared();
-        assign_feature(self.seed, cell_id, &context, libs)
+        assign_feature(self.seed, cell_id, (x, z), &context, libs, None)
     }
 
     /// Sub-biome at world coordinate `(x, z)`. Looks up the nearest
@@ -325,6 +326,50 @@ impl SubBiomeCellCatalog {
     ) -> FeatureAssignment {
         let cell_id = self.nearest_cell(x, z);
         self.feature_at_cell(cell_id, terrain, hydrology)
+    }
+
+    /// Same as [`Self::feature_at_cell`] but evaluates 3.6.3c.1
+    /// placement rules (hub_proximity / hub_exclusion / prominence /
+    /// hydrology_coupling / climate_window) against the passed hub
+    /// catalog. Features whose rules reject cause a reroll within the
+    /// `assign_feature` retry loop.
+    ///
+    /// Deterministic per `(master_seed, cell_id, baked_inputs)`.
+    #[must_use]
+    pub fn feature_at_cell_with_rules(
+        &self,
+        cell_id: CellId,
+        terrain: &Terrain,
+        hydrology: &HydrologyGraph,
+        hub_catalog: &HubCatalog,
+    ) -> FeatureAssignment {
+        let (x, z) = self.seeds[cell_id as usize].position;
+        let context = build_placement_context(self.seed, x, z, terrain, hydrology);
+        let libs = SubBiomeLibraries::shared();
+        let height_at = |qx: f32, qz: f32| terrain.height(qx, qz);
+        let rules_ctx = PlacementRulesContext {
+            master_seed: self.seed,
+            hub_catalog,
+            hydrology,
+            height_at: &height_at,
+        };
+        assign_feature(self.seed, cell_id, (x, z), &context, libs, Some(&rules_ctx))
+    }
+
+    /// Sub-biome at world coordinate with placement-rule evaluation.
+    /// Same signature-pattern as [`Self::sub_biome_at`] but threads the
+    /// hub catalog.
+    #[must_use]
+    pub fn sub_biome_at_with_rules(
+        &self,
+        x: f32,
+        z: f32,
+        terrain: &Terrain,
+        hydrology: &HydrologyGraph,
+        hub_catalog: &HubCatalog,
+    ) -> FeatureAssignment {
+        let cell_id = self.nearest_cell(x, z);
+        self.feature_at_cell_with_rules(cell_id, terrain, hydrology, hub_catalog)
     }
 
     /// Return the k nearest cell ids to a seed (adjacency neighbors).

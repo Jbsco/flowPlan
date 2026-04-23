@@ -187,6 +187,12 @@
                     ),
                 },
                 palette_category: Some(Vegetation),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Major": 80.0, "Regional": 40.0, "Local": 15.0 },
+                    )),
+                    self_spacing: Some((min_km: 10.0)),
+                )),
             ),
             // Working ranch — barn + outbuildings + corral + dirt yard
             // + dry-grass paddock. Bleed-over enables the "winter ranch"
@@ -226,6 +232,12 @@
                     ),
                 },
                 palette_category: Some(BuildingWooden),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Regional": 30.0, "Local": 10.0 },
+                    )),
+                    self_spacing: Some((min_km: 15.0)),
+                )),
             ),
         ],
 
@@ -341,6 +353,9 @@
                     ),
                 },
                 palette_category: Some(Vegetation),
+                placement_rules: Some((
+                    self_spacing: Some((min_km: 3.0)),
+                )),
             ),
             // Scenic overlook — exposed point with weathered cairn or
             // benchmark. Photo-mode anchor (5.5). Strongly biome-locked.
@@ -361,6 +376,10 @@
                 )),
                 adaptation_per_host: {},
                 palette_category: Some(Stone),
+                placement_rules: Some((
+                    self_spacing: Some((min_km: 8.0)),
+                    prominence: Some((min_m: 100.0, min_slope_deg: 20.0)),
+                )),
             ),
             // Hot springs — geothermal pool with mineral-stained
             // travertine + steam. Bleeds into adjacent biomes (rare,
@@ -398,6 +417,10 @@
                     ),
                 },
                 palette_category: Some(Water),
+                placement_rules: Some((
+                    self_spacing: Some((min_km: 50.0)),
+                    climate: Some((temp_range_c: Some((-50.0, 5.0)))),
+                )),
             ),
         ],
 
@@ -540,6 +563,9 @@
                     ),
                 },
                 palette_category: Some(Vegetation),
+                placement_rules: Some((
+                    self_spacing: Some((min_km: 5.0)),
+                )),
             ),
             // Creek valley — narrow drainage with moss-rock banks,
             // running water, riparian vegetation.
@@ -576,6 +602,10 @@
                     ),
                 },
                 palette_category: Some(Vegetation),
+                placement_rules: Some((
+                    self_spacing: Some((min_km: 2.0)),
+                    hydrology: Some((required_class: "Creek")),
+                )),
             ),
             // River-bend viewpoint — gravel bar at a wide bend with
             // sweeping water visibility. Photo-mode anchor + water-
@@ -613,6 +643,10 @@
                     ),
                 },
                 palette_category: Some(Water),
+                placement_rules: Some((
+                    self_spacing: Some((min_km: 10.0)),
+                    hydrology: Some((required_class: "RiverBend", min_accumulation: Some(500.0))),
+                )),
             ),
             // Abandoned homestead — collapsed cabin + chimney remnant +
             // overgrown yard. Mission-hook anchor (treasure / lore).
@@ -649,6 +683,13 @@
                     ),
                 },
                 palette_category: Some(BuildingWooden),
+                placement_rules: Some((
+                    hub: Some((
+                        exclusion_min_km: 30.0,
+                        exclusion_min_tier: Some("Isolated"),
+                    )),
+                    self_spacing: Some((min_km: 20.0)),
+                )),
             ),
             // Remote compound — small cluster of cabin + shed +
             // outhouse, off-grid lifestyle. Mission anchor (delivery,
@@ -687,6 +728,14 @@
                     ),
                 },
                 palette_category: Some(BuildingWooden),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Remote": 10.0 },
+                        exclusion_min_km: 50.0,
+                        exclusion_min_tier: Some("Major"),
+                    )),
+                    self_spacing: Some((min_km: 30.0)),
+                )),
             ),
             // Homestead clearing — single occupied cabin in a clearing
             // ringed by conifers, often with a small garden plot and
@@ -724,6 +773,14 @@
                     ),
                 },
                 palette_category: Some(BuildingWooden),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Local": 15.0, "Remote": 15.0 },
+                        exclusion_min_km: 20.0,
+                        exclusion_min_tier: Some("Major"),
+                    )),
+                    self_spacing: Some((min_km: 8.0)),
+                )),
             ),
             // Fishing camp — shoreline shack + dock + drying nets +
             // small skiff. Resupply candidate (fuel + bait + repair).
@@ -761,6 +818,13 @@
                     ),
                 },
                 palette_category: Some(BuildingWooden),
+                placement_rules: Some((
+                    hub: Some((
+                        exclusion_min_km: 20.0,
+                        exclusion_min_tier: Some("Major"),
+                    )),
+                    self_spacing: Some((min_km: 20.0)),
+                )),
             ),
             // Tackle shop — small commercial building near a fishing
             // village, sells gear + license + ice. Resupply candidate.
@@ -782,6 +846,12 @@
                 )),
                 adaptation_per_host: {},
                 palette_category: Some(BuildingWooden),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Local": 2.0 },
+                    )),
+                    self_spacing: Some((min_km: 10.0)),
+                )),
             ),
             // Bait shop — smaller cousin to tackle_shop, often a stand-
             // alone hut with live-bait tank. Distinct orange "live bait"
@@ -803,6 +873,12 @@
                 )),
                 adaptation_per_host: {},
                 palette_category: Some(BuildingWooden),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Local": 5.0 },
+                    )),
+                    self_spacing: Some((min_km: 10.0)),
+                )),
             ),
             // Dwelling cluster — small village: 5-8 houses + yards + trees,
             // moderate density. CoastalBoreal home (valley settlements);
@@ -843,6 +919,13 @@
                     ),
                 },
                 palette_category: Some(BuildingWooden),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Major": 50.0, "Regional": 20.0, "Local": 10.0 },
+                    )),
+                    self_spacing: Some((min_km: 5.0)),
+                    road_adjacency: Some((required: false)),
+                )),
             ),
             // Gas station — small-format fuel stop + convenience store.
             // Phase 4.5 refuel economy anchor: when player lands within
@@ -888,6 +971,13 @@
                     ),
                 },
                 palette_category: Some(Signage),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Major": 30.0, "Regional": 10.0 },
+                    )),
+                    self_spacing: Some((min_km: 20.0)),
+                    road_adjacency: Some((required: true)),
+                )),
             ),
             // General store — small-town mercantile: groceries + basic
             // cargo + hardware. Resupply + light-cargo mission anchor
@@ -929,6 +1019,13 @@
                     ),
                 },
                 palette_category: Some(BuildingWooden),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Regional": 10.0, "Local": 5.0 },
+                    )),
+                    self_spacing: Some((min_km: 15.0)),
+                    road_adjacency: Some((required: false)),
+                )),
             ),
         ],
 
@@ -1115,6 +1212,12 @@
                 )),
                 adaptation_per_host: {},
                 palette_category: Some(BuildingWooden),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Regional": 5.0, "Local": 5.0 },
+                    )),
+                    self_spacing: Some((min_km: 30.0)),
+                )),
             ),
         ],
     },

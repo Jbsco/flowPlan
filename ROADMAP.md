@@ -945,7 +945,7 @@ Split (pinned 2026-04-23 per user direction, detail in [MAPGEN.md § Layer 3 pha
 - [x] Visual bench: L1-vs-L3 heightfield comparison, shore classification map, hub foundation effect visualization (5 artifact families × 3 crops = 15 PNGs).
 - [x] **L1 coastline tuning pass** (mid-3.6.3a): `COASTAL_BOREAL.mean_altitude_m` -50 → +50 + `shore_attenuation` function (proximity-to-shore fine-octave attenuation, 400 m band, 0.20 floor) — fixes "waterworld + speckled coastline" symptom. Both load-bearing; regression risk if reverted. Memory: `coastline_tuning_pass`.
 
-**3.6.3b — design-authoring sprint (no code): IN PROGRESS.** Pinned design directions (palette adaptation + simple primitives) shipped to MAPGEN + memory; 14 of ~21 named features authored in RON with palettes; placement-rule depth + remaining features pending.
+**3.6.3b — design-authoring sprint (no code): SHIPPED 2026-04-23.** All pinned design directions (palette adaptation, simple primitives) in MAPGEN + memory; 18 features authored in RON with palettes + categories; full-spec placement rules in MAPGEN + FEATURES per-feature table; palette-adaptation mechanism revised mid-phase to biome-receives direction.
 
 - Expand `data/world/sub_biome_features.ron` + MAPGEN.md + FEATURES.md with cross-biome feature categories:
   - **Developments** (5): `farmland_parcel` ✅ (HighDesert home; bleeds ONLY to CB + Med — not arable in RA), `dwelling_cluster` ✅, `remote_compound` ✅, `ranch` ✅ (HighDesert home, bleed-over enables "winter ranch"), `homestead_clearing` ✅. **Complete.** Placement-rule evaluation deferred to 3.6.3c.
@@ -957,14 +957,44 @@ Split (pinned 2026-04-23 per user direction, detail in [MAPGEN.md § Layer 3 pha
 - [x] **Placement rule design** (Task #215): 7-category schema (hub_proximity, hub_exclusion, min_self_spacing_km, requires_road_adjacency, prominence_attractor, hydrology_coupling, climate_window) + evaluation order + per-feature rules for all 21 cross-biome features authored as **design spec** in [MAPGEN.md § Placement rule vocabulary (PINNED)](MAPGEN.md#placement-rule-vocabulary-pinned) + [FEATURES.md § Sub-biome feature placement rules (PINNED)](FEATURES.md#sub-biome-feature-placement-rules-pinned). `PlacementRules` RON struct + evaluation implementation land in 3.6.3c.
 - [ ] User review / iteration on the full catalog before 3.6.3c implementation.
 
-**3.6.3c — multi-cell group engine + development/scenery deltas (code):**
+**3.6.3c — multi-cell group engine + development/scenery deltas (code): IN PROGRESS.** Split into 5 sub-milestones for incremental ship.
+
+**3.6.3c.1 — `PlacementRules` struct + bake-time evaluation: SHIPPED 2026-04-23.**
+
+- [x] **`PlacementRules` nested schema** with 7 rule-category sub-structs (`HubRules`, `SelfSpacingRules`, `RoadAdjacencyRules`, `ProminenceRules`, `HydrologyRules`, `ClimateRules`, `SpilloverRules`). All `#[serde(default)]`.
+- [x] **`evaluate_placement_rules` function**: 5 rule categories evaluated — hub_proximity (weighted boost + required bool), hub_exclusion, prominence (median-of-9 elevation proxy + slope gate), hydrology_coupling (direct enum match + synthesized RiverBend/LakeEdge), climate_window (temp + humidity via existing samplers at `time_s=0.0`).
+- [x] **Wired into `assign_feature`** via optional `PlacementRulesContext` bundle. Existing baseline callers unchanged; new `feature_at_cell_with_rules` / `sub_biome_at_with_rules` catalog methods thread rules through.
+- [x] **18 features authored with `placement_rules` in RON** per FEATURES.md table.
+- [x] **Diagnostic** (`emit_placement_rule_rejection_stats`): 10 K-cell sample reports reassignment rate + per-feature deltas. Canonical-seed run shows 2.84 % reassignment — rules active, some too-strict features flagged for 3.6.3c.2 tuning (`abandoned_homestead`, `scenic_overlook`).
+- Stubs parsed but not evaluated: `self_spacing` (3.6.3c.1c), `requires_road_adjacency` (3.6.3c.3), `spillover` (3.6.3c.3+).
+- [x] **Hub emergent upgrade via feature spillover** — design PINNED in MAPGEN + memory `hub_emergent_upgrade_via_spillover`; stub `SpilloverRules` struct shipped for future anchor-feature authoring. Per-trigger `max_count` budget + optional region-cap safety net.
+
+**3.6.3c.1c — Eager Poisson self-spacing pass (Task #225): pending.**
+
+- [ ] Bake-time Poisson-disk rejection for features with `self_spacing.min_km`. Per-feature-type spatial hash built incrementally during placement. Attractor `weight_mult` from hub_proximity / prominence consumed in this pass.
+
+**3.6.3c.2 — Per-cell deltas for 18 3.6.3b features: pending.**
+
+- [ ] Development deltas (modest flatten + skirt smaller than hub_foundation). Scenery = render-tag-only. Registry extension in `feature_delta.rs`.
+
+**3.6.3c.3 — `FeatureGroup` multi-cell engine: pending.**
 
 - [ ] **`FeatureGroup` concept** in `voronoi_cells`: cells can belong to a group ID. Groups span multiple cells for connected features. Graph construction at bake time (road polylines via adjacency; dwelling clusters via k-nearest-cells).
 - [ ] **Group-aware deltas**: road depression runs continuous across group-member cells via shared centerline polyline. Similar for residential clusters.
-- [ ] Implement all 3.6.3b-authored development / infrastructure / resupply / scenery features.
+- [ ] Implement 3.6.3b-authored infrastructure features (`road_segment`, `dirt_road_segment`, `highway_intersection`, `rail_corridor_segment`).
+- [ ] Activate `requires_road_adjacency` rule evaluation (depends on this phase).
+- [ ] Spillover placement-queue mechanism — anchors pull supporting features via queued placement. First anchor features authored (candidate list in FEATURES.md § Emergent-hub anchor features).
 - [ ] Flora placement hooks tied to feature type (billboards for remote, instanced for hub-proximate — LOD work in 3.6.4).
 - [ ] Tier-1 / tier-2 **authored hub chunk** seam-blending infrastructure (authored content lands in Phase 4.1).
 - [ ] **Deterministic / telemetric validation:** final heightfield byte-identical across platforms; boundary-falloff continuity between neighboring cells; hydrology-graph-violation rejection; `surface_at` returns coherent classes along sample transects.
+
+**3.6.3c.4 — Palette-adaptation render integration: pending.**
+
+- [ ] `composed::WorldRefs` computes `source_weight` + `blend_factor = smoothstep(0.1, 0.9, source_weight)`; shader-side palette lerp. Visual-bench `palette_bleed_over_{crop}.png`. Makes the winter-ranch / desert-fjord effects actually visible.
+
+**3.6.3c.5 — Debug camera (Task #223): pending.**
+
+- [ ] Slew-mode free 6-DoF camera, no aircraft model — in-engine verification of placement rules + palette adaptation + deltas. Evolves into photo-mode (5.5) + multiplayer spectator (Phase 6). Memory `visual_bench_pattern` flags this pre-spec.
 
 ### Milestone 3.6.4: Flora, decoration, seasonal overlay
 
