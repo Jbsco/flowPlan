@@ -31,6 +31,7 @@
 use std::path::Path;
 
 use flowplan_core::{wrap_cell_index, wrap_coord, WORLD_EXTENT_M};
+use flowplan_world::biome::{biome_at, BiomeClass};
 use flowplan_world::terrain::{HeightSampler, Terrain};
 use image::{ImageBuffer, Rgb};
 
@@ -41,6 +42,11 @@ use libm as _;
 
 /// Full-world-scenario crop extent (m). 500 km — representative regional view.
 const FULL_EXTENT_M: f32 = 500_000.0;
+
+/// Continental-scale extent (m). 2000 km — previews Option A world-scale
+/// climate seamlessness; biome diversity at this scale is richer than the
+/// 500 km regional view. Matches the weather bench's continental crop.
+const CONTINENTAL_EXTENT_M: f32 = 2_000_000.0;
 
 /// Player-local crop extent (m). Matches ~10 km streaming disk outer radius.
 const PLAYER_EXTENT_M: f32 = 10_000.0;
@@ -78,6 +84,13 @@ impl Crop {
     const PLAYER: Self = Self {
         name: "player",
         extent_m: PLAYER_EXTENT_M,
+        center_x_m: 0.0,
+        center_z_m: 0.0,
+    };
+
+    const CONTINENTAL: Self = Self {
+        name: "continental",
+        extent_m: CONTINENTAL_EXTENT_M,
         center_x_m: 0.0,
         center_z_m: 0.0,
     };
@@ -277,5 +290,44 @@ fn emit_heightfield_artifacts() {
     for &crop in CROPS {
         let img = render_field(crop, value_range, |x, z| terrain.height(x, z));
         write_png(&img, &dir, &format!("heightfield_{}.png", crop.name));
+    }
+}
+
+/// Biome-class color palette — picked for visual contrast at the
+/// biome-mask crop. Each biome gets a distinctive hue so multi-biome
+/// regions are readable at a glance.
+fn biome_rgb(b: BiomeClass) -> [u8; 3] {
+    match b {
+        // Warm ochre — desert
+        BiomeClass::HighDesert => [205, 168, 92],
+        // Cold slate-gray — alpine
+        BiomeClass::RockyAlpine => [160, 172, 182],
+        // Deep teal — boreal coast
+        BiomeClass::CoastalBoreal => [62, 128, 132],
+        // Warm olive — mediterranean islands
+        BiomeClass::MediterraneanArchipelago => [156, 168, 96],
+    }
+}
+
+#[test]
+#[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
+fn emit_biome_mask_artifacts() {
+    let dir = output_dir();
+    // Biomes emit at all three standard crops + continental (2000 km) to
+    // verify that the world-wide climate range produces the full 4-biome
+    // catalog (at smaller crops only 2-3 biomes may appear — a 500 km
+    // slice is a fraction of the world's climate range).
+    let crops_with_continental: &[Crop] =
+        &[Crop::FULL, Crop::QUADRANT, Crop::PLAYER, Crop::CONTINENTAL];
+    for &crop in crops_with_continental {
+        let mut img = ImageBuffer::new(RESOLUTION, RESOLUTION);
+        for py in 0..RESOLUTION {
+            for px in 0..RESOLUTION {
+                let (x, z) = crop.world_coord(px, py);
+                let b = biome_at(CANONICAL_SEED, x, z);
+                img.put_pixel(px, py, Rgb(biome_rgb(b)));
+            }
+        }
+        write_png(&img, &dir, &format!("biome_{}.png", crop.name));
     }
 }
