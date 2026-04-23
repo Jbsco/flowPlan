@@ -109,12 +109,18 @@ pub const fn wrap_cell_index(i: i64, n: i64) -> i64 {
 /// ```
 /// use flowplan_core::{quantize_angular_frequency, WORLD_EXTENT_M};
 /// use core::f32::consts::TAU;
-/// // Input ω = 0.006 rad/m → wavelength ≈ 1047 m at world scale
+/// // Input ω = 0.006 rad/m → wavelength ≈ 1047 m at world scale (~4775
+/// // cycles per world). Quantization rounds to the nearest integer cycle
+/// // count.
 /// let omega_raw = 0.006;
 /// let omega_q = quantize_angular_frequency(omega_raw);
-/// // Product with world extent should be an integer multiple of TAU
+/// // Product with world extent should be an integer multiple of TAU.
+/// // Tolerance accounts for f32 precision at magnitude ~4775 (~6×10⁻⁴
+/// // absolute from a ~10⁻⁷ relative ULP), well below 0.5 needed to
+/// // identify the nearest integer.
 /// let cycles = omega_q * WORLD_EXTENT_M / TAU;
-/// assert!((cycles - cycles.round()).abs() < 1e-4);
+/// assert!((cycles - cycles.round()).abs() < 0.01,
+///     "cycles={cycles} should be near integer", cycles = cycles);
 /// // Rounding error should be small
 /// assert!((omega_q - omega_raw).abs() / omega_raw < 0.001);
 /// ```

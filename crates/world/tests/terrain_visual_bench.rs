@@ -656,14 +656,17 @@ fn emit_contour_map_ms_artifacts() {
                 }
                 let start_level = (cell_min / contour_interval_m).ceil() * contour_interval_m;
                 let end_level = (cell_max / contour_interval_m).floor() * contour_interval_m;
-                let mut level = start_level;
-                while level <= end_level + 1e-6 {
+                // Iterate over integer steps to avoid float-loop counter drift.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let n_levels = ((end_level - start_level) / contour_interval_m).floor() as i32 + 1;
+                for step in 0..n_levels {
+                    let level = start_level + (step as f32) * contour_interval_m;
                     let crossings = marching_squares_crossings(corners, positions, level);
                     // Bold the sea-level (altitude = 0) contour as the
                     // shoreline / coastline — topographic-map convention
                     // for the most visually important "index contour".
                     let is_sea_level = level.abs() < 1e-3;
-                    let bold_radius = if is_sea_level { 1 } else { 0 };
+                    let bold_radius = i32::from(is_sea_level);
                     match crossings.len() {
                         2 => {
                             let (x0, y0) = world_to_pixel(crossings[0].0, crossings[0].1);
@@ -684,7 +687,6 @@ fn emit_contour_map_ms_artifacts() {
                         },
                         _ => {},
                     }
-                    level += contour_interval_m;
                 }
             }
         }

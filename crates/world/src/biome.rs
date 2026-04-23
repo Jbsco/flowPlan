@@ -44,7 +44,7 @@
 //! no direct snow→desert, no direct snow→tropical. The current threshold-
 //! based classifier happens to keep these apart because the intervening
 //! climate bands (e.g. cold-but-not-snow, warm-but-not-desert) land as
-//! CoastalBoreal or MediterraneanArchipelago. The classifier doesn't
+//! `CoastalBoreal` or `MediterraneanArchipelago`. The classifier doesn't
 //! explicitly enforce adjacency; if the visual-bench output reveals
 //! violations, add a post-classification smoothing step.
 
@@ -63,17 +63,19 @@ pub enum BiomeClass {
     MediterraneanArchipelago,
 }
 
-/// Temperature thresholds (°C) at sea level. Alpine below this = cold
-/// enough to be "snowy mountains" climate (we use the sea-level temp so
-/// climate is terrain-independent; terrain generation in 3.6.1b will
-/// raise peaks IN alpine regions, and lapse rate automatically makes
-/// them colder at altitude). Hot threshold = arid-regime onset.
+/// Temperature thresholds (°C) at sea level.
 ///
-/// Current temperature field: baseline 15°C ± 12K climate + ±3K synoptic
-/// + ±5K diurnal. Thresholds at +10°C (alpine) and +20°C (hot) are
-/// symmetric around baseline — each covers roughly the colder / warmer
-/// 20% of world area, leaving the middle ~60% for Mediterranean or
-/// CoastalBoreal depending on humidity.
+/// Alpine below this = cold enough to be "snowy mountains" climate (we
+/// use the sea-level temp so climate is terrain-independent; terrain
+/// generation in 3.6.1b will raise peaks IN alpine regions, and lapse
+/// rate automatically makes them colder at altitude). Hot threshold =
+/// arid-regime onset.
+///
+/// Current temperature field: baseline 15°C ± 12K climate + ±3K
+/// synoptic + ±5K diurnal. Thresholds at +10°C (alpine) and +20°C (hot)
+/// are symmetric around baseline — each covers roughly the colder /
+/// warmer 20% of world area, leaving the middle ~60% for Mediterranean
+/// or `CoastalBoreal` depending on humidity.
 const ALPINE_TEMP_C: f32 = 10.0;
 const HOT_TEMP_C: f32 = 20.0;
 
@@ -96,6 +98,7 @@ const EDGE_SOFTNESS_TEMP_C: f32 = 2.0;
 const EDGE_SOFTNESS_HUMIDITY: f32 = 0.05;
 
 /// Soft biome membership weights — each field in `[0, 1]`, sum to 1.0.
+///
 /// Used by 3.6.1b per-biome terrain blending: terrain at `(x, z)` is
 /// `Σ weight_i × biome_primitive_i(x, z)`, producing smooth biome
 /// transitions without visible seams.
@@ -121,10 +124,11 @@ fn smoothstep(edge_lo: f32, edge_hi: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Soft biome membership weights at `(x, z)`. Matches the `biome_at`
-/// decision tree but with smoothstep-softened thresholds so weights
-/// transition smoothly across biome boundaries. Always returns
-/// normalized weights summing to 1.0.
+/// Soft biome membership weights at `(x, z)`.
+///
+/// Matches the `biome_at` decision tree but with smoothstep-softened
+/// thresholds so weights transition smoothly across biome boundaries.
+/// Always returns normalized weights summing to 1.0.
 ///
 /// Used by 3.6.1b terrain blending. The discrete [`biome_at`]
 /// classifier is retained for L2 feature-type assignment where a
@@ -183,12 +187,14 @@ pub fn biome_weights_at(master_seed: u64, x_m: f32, z_m: f32) -> BiomeWeights {
     }
 }
 
-/// Biome class at world coordinate `(x, z)`. Pure function of climate
-/// fields (sea-level temperature + humidity) — **intentionally independent
-/// of terrain elevation** so 3.6.1b's biome-parameterized terrain can
-/// shape elevation TO MATCH the biome assignment without circular
-/// dependency. Classifier says "this region should be alpine"; 3.6.1b
-/// makes it so by applying ridged multifractal + higher amplitude there.
+/// Biome class at world coordinate `(x, z)`.
+///
+/// Pure function of climate fields (sea-level temperature + humidity) —
+/// **intentionally independent of terrain elevation** so 3.6.1b's
+/// biome-parameterized terrain can shape elevation TO MATCH the biome
+/// assignment without circular dependency. Classifier says "this region
+/// should be alpine"; 3.6.1b makes it so by applying ridged multifractal
+/// + higher amplitude there.
 ///
 /// Time parameter is 0.0 (classification is static — biomes don't drift
 /// with weather evolution).
@@ -222,6 +228,7 @@ pub fn biome_at(master_seed: u64, x_m: f32, z_m: f32) -> BiomeClass {
 }
 
 #[cfg(test)]
+#[allow(clippy::cast_precision_loss)] // test grid iteration: i32→f32 cast is idiomatic
 mod tests {
     use super::*;
 

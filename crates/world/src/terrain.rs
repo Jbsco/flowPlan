@@ -98,8 +98,9 @@ impl FbmConfig {
 // Per-biome terrain profiles (Phase 3.6.1b)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Noise primitive selection per [MAPGEN.md § Layer 1 noise primitives](../../../MAPGEN.md#layer-1-noise-primitives-reference).
+/// Noise primitive selection per [`MAPGEN.md § Layer 1 noise primitives`](../../../MAPGEN.md#layer-1-noise-primitives-reference).
 #[derive(Copy, Clone, Debug)]
+#[allow(dead_code)] // Fbm reserved for future biomes (Canadian Boreal etc.)
 enum PrimitiveType {
     /// Standard Perlin-fBm (smooth rolling terrain).
     Fbm,
@@ -111,13 +112,16 @@ enum PrimitiveType {
     DomainWarped,
 }
 
-/// Per-biome terrain parameters. Each biome declares a primary primitive
-/// + scale + amplitude + mean-altitude bias + a secondary fBm "background"
-/// layer that adds rolling variation even in valleys of the primary
-/// primitive (prevents flat-plateau artifacts where ridged multifractal
-/// bottoms out to zero). At sample time the terrain module computes this
-/// biome's contribution and blends all 4 by [`BiomeWeights`](crate::biome::BiomeWeights).
+/// Per-biome terrain parameters.
+///
+/// Each biome declares a primary primitive + scale + amplitude + mean-
+/// altitude bias + a secondary fBm "background" layer that adds rolling
+/// variation even in valleys of the primary primitive (prevents flat-
+/// plateau artifacts where ridged multifractal bottoms out to zero).
+/// At sample time the terrain module computes this biome's contribution
+/// and blends all 4 by [`BiomeWeights`](crate::biome::BiomeWeights).
 #[derive(Copy, Clone, Debug)]
+#[allow(clippy::struct_field_names)] // intentional: all altitudes use `_m` suffix per project convention
 struct BiomeProfile {
     /// Noise primitive: fBm, ridged, or domain-warped.
     primitive: PrimitiveType,
@@ -266,25 +270,28 @@ impl BiomeProfile {
     };
 }
 
-/// World-wide hard altitude floor (m). Per
-/// [MAPGEN.md § Altitude envelope](../../../MAPGEN.md#altitude-envelope--real-world-possible-gate)
+/// World-wide hard altitude floor (m).
+///
+/// Per [`MAPGEN.md § Altitude envelope`](../../../MAPGEN.md#altitude-envelope--real-world-possible-gate)
 /// — −86 m Death Valley reference rounded to −100 m for safety margin.
 /// Final heightfield output is clamped at this value regardless of
 /// biome composition.
 pub const WORLD_HARD_MIN_M: f32 = -100.0;
 
-/// World-wide hard altitude ceiling (m). Per MAPGEN.md altitude envelope.
-/// 4500 m chosen as cap above Mt Elbert (4401 m) / Mt Rainier (4392 m) /
-/// Mauna Kea (4205 m) — within Beaver service ceiling (5500 m density-
-/// alt) and turbine conversions (~7 km), so all aircraft can fly above
-/// any terrain by design. No 8000 m Himalayan biomes in flowPlan's
-/// catalog.
+/// World-wide hard altitude ceiling (m).
+///
+/// Per `MAPGEN.md` altitude envelope: 4500 m chosen as cap above Mt
+/// Elbert (4401 m) / Mt Rainier (4392 m) / Mauna Kea (4205 m) — within
+/// Beaver service ceiling (5500 m density-altitude) and turbine
+/// conversions (~7 km), so all aircraft can fly above any terrain by
+/// design. No 8000 m Himalayan biomes in flowPlan's catalog.
 pub const WORLD_HARD_MAX_M: f32 = 4_500.0;
 
 /// Per-biome altitude envelope (weighted across biomes for soft transitions).
 /// Used by [`soft_clamp`] to enforce real-world-possible bounds at
 /// terrain sample time.
 #[derive(Copy, Clone, Debug)]
+#[allow(clippy::struct_field_names)] // intentional: all altitudes use `_m` suffix per project convention
 struct BiomeEnvelope {
     hard_min_m: f32,
     typical_min_m: f32,
@@ -293,7 +300,7 @@ struct BiomeEnvelope {
 }
 
 impl BiomeEnvelope {
-    /// World-default envelope (used when terrain.amplitude_scale = 0).
+    /// World-default envelope (used when `Terrain::amplitude_scale` = 0).
     /// No tightening — global hard limits only.
     const WORLD_DEFAULT: Self = Self {
         hard_min_m: WORLD_HARD_MIN_M,
@@ -331,20 +338,21 @@ impl BiomeEnvelope {
     }
 }
 
-/// Soft-clamp `value` into `[hard_lo, hard_hi]` using exponential
-/// compression. Inside `[soft_lo, soft_hi]`: identity (no transformation).
-/// Outside: compressed asymptotically toward hard bounds — output
-/// approaches but never exceeds them. C¹-continuous at the soft edges
-/// (derivative = 1 at soft_lo / soft_hi, matching the identity branch),
-/// so no visible kink in the heightfield.
+/// Soft-clamp `value` into `[hard_lo, hard_hi]` using exponential compression.
 ///
-/// Per [MAPGEN.md § Altitude envelope](../../../MAPGEN.md#altitude-envelope--real-world-possible-gate):
+/// Inside `[soft_lo, soft_hi]`: identity (no transformation). Outside:
+/// compressed asymptotically toward hard bounds — output approaches but
+/// never exceeds them. C¹-continuous at the soft edges (derivative = 1
+/// at `soft_lo` / `soft_hi`, matching the identity branch), so no
+/// visible kink in the heightfield.
+///
+/// Per [`MAPGEN.md § Altitude envelope`](../../../MAPGEN.md#altitude-envelope--real-world-possible-gate):
 /// "most terrain in the biome sits inside `typical_min..typical_max`;
 /// the `typical_max..max_altitude` band allows rare peaks; `min_altitude`
 /// is a hard floor (smoothstepped to avoid visible banding)."
 ///
-/// Formula for over-soft case: compressed = (hard_hi − soft_hi) ×
-/// (1 − exp(−(value − soft_hi) / (hard_hi − soft_hi))). Symmetric for
+/// Formula for over-soft case: `compressed = (hard_hi − soft_hi) ×
+/// (1 − exp(−(value − soft_hi) / (hard_hi − soft_hi)))`. Symmetric for
 /// under-soft. Asymptotically saturates at the hard bound.
 fn soft_clamp(value: f32, hard_lo: f32, soft_lo: f32, soft_hi: f32, hard_hi: f32) -> f32 {
     debug_assert!(

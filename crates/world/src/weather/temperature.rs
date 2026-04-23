@@ -21,7 +21,7 @@
 //! **Synoptic fBm** adds frontal-system-scale variation at ~357 km scale
 //! (quantized to integer cycles per world for clean toroidal wrap).
 //!
-//! **Diurnal** cycle remains unchanged — simple sinusoid keyed to time_s.
+//! **Diurnal** cycle remains unchanged — simple sinusoid keyed to `time_s`.
 //!
 //! Replaces the earlier rotated-harmonic-bands design that produced
 //! visible banded biome patterns. See `weather_rotated_band_wrap_gap`
@@ -62,10 +62,11 @@ pub const DAY_LENGTH_S: f32 = 24.0 * 3_600.0;
 
 const TEMPERATURE_FIELD_TAG: u64 = u64::from_le_bytes(*b"tempera_");
 
-/// Latitude-proxy amplitude (K peak-to-peak is ±this). Real Earth
-/// equator-to-pole seasonal-mean temperature spread is ~50 K; we use
-/// a gentler ±8 K so the world has varied biomes without being entirely
-/// tundra at the extremes.
+/// Latitude-proxy amplitude (K peak-to-peak is ±this).
+///
+/// Real Earth equator-to-pole seasonal-mean temperature spread is ~50 K;
+/// we use a gentler ±8 K so the world has varied biomes without being
+/// entirely tundra at the extremes.
 pub const LATITUDE_AMPLITUDE_K: f32 = 8.0;
 
 /// Sea-level temperature at world `(x, z)` at `time` seconds. Kelvin.

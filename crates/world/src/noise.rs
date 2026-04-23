@@ -64,9 +64,11 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + t * (b - a)
 }
 
-/// Single octave of 2D Perlin noise. Grid spacing `spacing_m` controls
-/// the scale: at spacing 1000 m, features are ~1 km across. Output
-/// bounded in `[−√0.5, √0.5] ≈ [−0.707, 0.707]` by the 2D Perlin theorem.
+/// Single octave of 2D Perlin noise.
+///
+/// Grid spacing `spacing_m` controls the scale: at spacing 1000 m,
+/// features are ~1 km across. Output bounded in `[−√0.5, √0.5] ≈
+/// [−0.707, 0.707]` by the 2D Perlin theorem.
 ///
 /// **Wrap invariant**: `WORLD_EXTENT_M / spacing_m` must be an integer
 /// (callers enforce via `spacing_m` divisibility). Output at `x` and
@@ -166,10 +168,11 @@ pub fn fbm_2d_at_scale(
     total
 }
 
-/// Ridged multifractal noise — fBm variant where each octave's Perlin
-/// output is inverted-absolute-valued and raised to a power, producing
-/// sharp crested ridges with smooth valleys. Per `MAPGEN.md § Layer 1
-/// noise primitives`:
+/// Ridged multifractal noise.
+///
+/// fBm variant where each octave's Perlin output is inverted-absolute-
+/// valued and raised to a power, producing sharp crested ridges with
+/// smooth valleys. Per `MAPGEN.md § Layer 1 noise primitives`:
 ///
 /// ```text
 /// ridged(x, z) = Σ_{i=0..N−1} amp × persist^i × (offset − |perlin_i|)^power
@@ -291,11 +294,13 @@ pub fn domain_warped_fbm_2d(
     )
 }
 
-/// Mipmap-aware domain-warped fBm — both warp and base layers skip
-/// octaves finer than `min_spacing_m`. Warp octaves are typically much
-/// coarser than base, so may survive a mipmap cap that kills most base
-/// octaves — that's fine, wide-zoom contours still benefit from the
-/// warp's large-scale distortion even when fine detail is filtered.
+/// Mipmap-aware domain-warped fBm.
+///
+/// Both warp and base layers skip octaves finer than `min_spacing_m`.
+/// Warp octaves are typically much coarser than base, so may survive a
+/// mipmap cap that kills most base octaves — that's fine, wide-zoom
+/// contours still benefit from the warp's large-scale distortion even
+/// when fine detail is filtered.
 #[allow(clippy::module_name_repetitions)]
 #[allow(clippy::too_many_arguments)]
 pub fn domain_warped_fbm_2d_at_scale(
@@ -342,6 +347,7 @@ pub fn domain_warped_fbm_2d_at_scale(
 }
 
 #[cfg(test)]
+#[allow(clippy::cast_precision_loss)] // test grid iteration: i32→f32 cast is idiomatic
 mod tests {
     use super::*;
 

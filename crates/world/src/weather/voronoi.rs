@@ -65,9 +65,11 @@ pub const GRID_CELL_COUNT: i32 = (flowplan_core::WORLD_EXTENT_M / GRID_SPACING_M
 /// cells and sprawling frontal systems at ~20× the base 25 km cell size.
 const WEIGHT_FIELD_SPACING_M: f32 = 500_000.0;
 
-/// Amplitude of per-cell weight (m²). Power-diagram metric subtracts
-/// weight from squared distance; scale so max weight ≈ (GRID_SPACING × 0.8)²
-/// gives ~2-3× size variation without creating degenerate-tiny cells.
+/// Amplitude of per-cell weight (m²).
+///
+/// Power-diagram metric subtracts weight from squared distance; scale so
+/// max weight ≈ (`GRID_SPACING_M` × 0.8)² gives ~2-3× size variation
+/// without creating degenerate-tiny cells.
 const WEIGHT_AMPLITUDE_M2: f32 = 4.0e8; // ≈ (20 km)²
 
 /// Maximum seed jitter as a fraction of [`GRID_SPACING_M`].
