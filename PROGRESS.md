@@ -3,7 +3,36 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
-Last updated: **2026-04-22** (Phase 2.5 **SHIPPED**; Phase 3.2.1 + 3.2.2 + 3.2.3 weather W1/W2/W3 + flight coupling + chop wiring **SHIPPED**; world scope **LOCKED to Option A toroidal**; progression data-model locked; **scenario-realism audit COMPLETE — all phases**; **flight-model realism pass COMPLETE** (control-response rates now match real Beaver POH); **water-rudder flip bug FIXED**; **water-physics hardening + q_chord aero audit COMPLETE** — all clamps converted to smooth physics-motivated rolloffs; bench at ~70 scenarios, full gate green. **Phase 3 resumption unblocked; next major direction is Pre-Phase-3 world-scope prototype OR 3.4 CI OR Cloud research memo.**).
+Last updated: **2026-04-23** (Phase 2.5 **SHIPPED**; Phase 3.2.1 + 3.2.2 + 3.2.3 weather W1/W2/W3 + flight coupling + chop wiring **SHIPPED**; world scope **LOCKED to Option A toroidal**; progression data-model locked; **scenario-realism audit COMPLETE**; **flight-model realism pass COMPLETE**; **water-physics hardening + q_chord aero audit COMPLETE**; **Phase 3.6.0 + 3.6.1a + 3.6.1b + 3.6.1c SHIPPED** — Perlin-fBm terrain, per-biome ridged/domain-warped primitives, mipmap-aware sampling, real-world-possible altitude envelope; bench at ~70 scenarios + 135 unit tests, full gate green. **Next: Phase 3.6.1d hydrology D8 drainage.**).
+
+## 2026-04-23 — Phase 3.6.1a–c (world Layer 1 topographic base)
+
+Three sub-phases shipped from cold-start of Phase 3.6 work:
+
+- **3.6.1a — climate + biome classification + Voronoi variation.** `weather/{temperature,humidity,pressure}.rs` migrated from rotated-harmonic sums to **Perlin-fBm** + **latitude-proxy** (`cos(2π·z/W) × 8K` for synthetic equator-warm/poles-cold belt). `biome.rs` adds `BiomeClass` (4 biomes — High Desert / Rocky Alpine / Coastal Boreal / Mediterranean Archipelago) + soft `BiomeWeights` smoothstepped across ±2°C / ±0.05 humidity. Weather Voronoi cells gain **variable size** via additively-weighted power-diagram (`distance² = ‖p−s‖² − weight`) where `weight` is sampled from a coarse Perlin field at 500 km. Octave-offset convention pinned across subsystems (terrain `[0, 200)`, weather `[200, 240)`, voronoi-weight `[400, 500)`, biome `[500, 700)`).
+- **3.6.1b — per-biome terrain + visual-bench artifacts.** `noise.rs` adds `ridged_multifractal_2d` + `domain_warped_fbm_2d` (with `_at_scale` mipmap-aware variants). `terrain.rs` adds `BiomeProfile` const instances per biome — Ridged for High Desert + Rocky Alpine, DomainWarped for Coastal Boreal + Mediterranean. **Background fBm layer** in each profile prevents flat-plateau artifacts where ridged valleys collapse to zero. `Terrain::height_at_scale(x, z, min_spacing_m)` provides Nyquist-style mipmap filtering (skip octaves < `min_spacing_m`) — used by all wide-crop visual-bench artifacts to kill sub-pixel aliasing. Visual-bench grew to 5 artifact families × 3-4 crops each (player 10 km / quadrant 250 km / full 500 km / continental 2000 km) at 1024×1024 (heightfield/biome/topo) or 4096×4096 (contour). **Marching Squares contour extraction** added as a separate output (50× faster than per-pixel) with bold sea-level contour. Per-pixel mipmap-aware contour is now gated behind `FLOWPLAN_VISUAL_BENCH_FULL=1` because of its render cost.
+- **3.6.1c — altitude envelope + real-world-possible gate.** Each `BiomeProfile` declares `(hard_min_m, typical_min_m, typical_max_m, hard_max_m)`; biome-blended envelope = `Σ weight_i × bound_i`. New `soft_clamp` helper (libm-based exp compression, C¹-continuous at soft edges, asymptotically saturates at hard bounds) applied per-sample after primitive composition. Global hard limits `[WORLD_HARD_MIN_M, WORLD_HARD_MAX_M] = [-100 m, 4500 m]` enforced as final safety net. Tests: `soft_clamp_*` (identity, asymptotic, monotonic, C¹ continuity) + `heightfield_within_world_hard_bounds` + `biome_envelope_caps_extreme_amplitudes` cover the envelope surface.
+
+### Implementation reference
+
+`docs/WORLD_GEN.md` is the implementation companion to `MAPGEN.md` (architectural design). Updated this iteration to cover terrain composition pipeline, altitude envelope formula, per-biome profile table, mipmap-aware sampling, and visual-bench artifact catalog.
+
+### Test state
+
+- **135 unit tests pass** across `flowplan-world` (zero regressions).
+- 5 visual-bench artifact families × 3–4 crops regenerated; canonical seed `0xF101_A11`. Per-pixel mipmap-aware contour gated behind `FLOWPLAN_VISUAL_BENCH_FULL=1` (Marching Squares variant is the default deliverable).
+- Seam-continuity tolerance acknowledged at f32 precision limit (~100 m at 5000 km world scale); real fix would require f64 internal math (deferred).
+
+### Known limitations / deferrals
+
+- **Wide-view contour density** still cluttered at continental crops — deferred until a "show only every Nth (index) contour" mode lands.
+- **f32 precision** at world scale — documented; f64 retrofit deferred (no playtest impact).
+
+### Next milestone
+
+**Phase 3.6.1d — hydrology D8 drainage** (rivers + lakes + coastlines). Then 3.6.1e (hub catalog bake + magnetic variation), then 3.6.2 (Voronoi partition + sub-biome features with variable cell size + biome edge bleed-over + tri-biome features).
+
+---
 
 ## 2026-04-22 (iteration 2) — Water physics hardening + q_chord aero audit (COMPLETE)
 

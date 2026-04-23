@@ -2,7 +2,7 @@
 
 > **Role in the docs stack:** companion to [MAPGEN.md](../MAPGEN.md). MAPGEN is the **design** doc (the *what* and *why*); this is the **implementation** reference (the *how* — actual algorithms, function signatures, parameters, performance notes). Read MAPGEN first for the architectural rationale; read this when you need to know what `Terrain::height` actually does or which octave offsets are reserved for which subsystem.
 >
-> **Status:** Phase 3.6.0–3.6.1b shipped. Updated 2026-04-23.
+> **Status:** Phase 3.6.0–3.6.1c shipped. Updated 2026-04-23.
 
 ## Contents
 
@@ -11,6 +11,7 @@
 - [Mipmap-aware sampling](#mipmap-aware-sampling)
 - [Octave-offset convention](#octave-offset-convention)
 - [Terrain composition](#terrain-composition)
+- [Altitude envelope (real-world-possible gate)](#altitude-envelope-real-world-possible-gate)
 - [Biome classification + soft weighting](#biome-classification--soft-weighting)
 - [Per-biome terrain profiles](#per-biome-terrain-profiles)
 - [Weather field generation](#weather-field-generation)
@@ -174,19 +175,19 @@ Convention: each biome reserves **20 slots** (primary + background + warp-x + wa
 
 ## Terrain composition
 
-`Terrain::height_at_scale(x, z, min_spacing_m)` composes three layers:
+`Terrain::height_at_scale(x, z, min_spacing_m)` composes baseline + per-biome contributions, then enforces the real-world-possible altitude envelope:
 
 ```
-height(x, z) =
-  beach_flatten(
-    amplitude_scale × (
-      regional_baseline_fbm(x, z)                  ← continental trend
-      + fine_baseline_fbm(x, z)                    ← small-scale texture
-      + Σ biome_weight_i × biome_contribution_i(x, z)  ← per-biome character
-    ),
-    BEACH_WIDTH_M
-  )
-  + base_height
+raw(x, z) = amplitude_scale × (
+              regional_baseline_fbm(x, z)                  ← continental trend
+              + fine_baseline_fbm(x, z)                    ← small-scale texture
+              + Σ biome_weight_i × biome_contribution_i(x, z)  ← per-biome character
+            )
+
+clamped(x, z) = soft_clamp(raw, weighted_envelope(x, z))   ← per-biome envelope
+                  .clamp(WORLD_HARD_MIN_M, WORLD_HARD_MAX_M)  ← global hard limits
+
+height(x, z) = beach_flatten(clamped, BEACH_WIDTH_M) + base_height
 ```
 
 **Baseline layers** are biome-independent — they prevent flat-height seams across biome transitions. Tuning:
@@ -198,9 +199,63 @@ height(x, z) =
 
 The `background_amplitude × fbm_background` term prevents flat-plateau artifacts where ridged-multifractal valleys collapse to exactly zero contribution.
 
+**Altitude envelope (Phase 3.6.1c, real-world-possible gate)**: `soft_clamp` enforces per-biome `(hard_min, typical_min, typical_max, hard_max)` bounds — most output sits inside the typical band (identity, no transformation), excess gets exponentially compressed asymptotically toward the hard bounds, never exceeding them. C¹-continuous at the soft edges (no visible kink). Then a global `clamp` to `[WORLD_HARD_MIN_M, WORLD_HARD_MAX_M] = [-100 m, 4500 m]` as a final safety net. See [Altitude envelope](#altitude-envelope-real-world-possible-gate) below for formula + per-biome values.
+
 **Beach flatten** compresses heights within `BEACH_WIDTH_M = 20 m` of sea level via `raw × smoothstep(|raw|, 0, BEACH_WIDTH_M)²` so shores rise gently rather than punching directly through the water surface. Pre-Phase-3.6.1d hydrology stopgap.
 
-**`amplitude_scale`** is 1.0 for `Terrain::from_seed(seed)`, 0.0 for `Terrain::flat()` / `Terrain::flat_land()` (used in scenario-bench playback to disable terrain content).
+**`amplitude_scale`** is 1.0 for `Terrain::from_seed(seed)`, 0.0 for `Terrain::flat()` / `Terrain::flat_land()` (used in scenario-bench playback to disable terrain content). The `amplitude_scale = 0` path bypasses biome composition + envelope entirely so the test scaffolds remain bit-exact.
+
+---
+
+## Altitude envelope (real-world-possible gate)
+
+Phase 3.6.1c enforces the design gate from `MAPGEN.md § Altitude envelope`: *"is this possible in the real world? if not, we may have allowed too much."* Three-layer enforcement at terrain sample time:
+
+### 1. World hard limits
+
+```rust
+pub const WORLD_HARD_MIN_M: f32 = -100.0;  // Death Valley −86 m + safety margin
+pub const WORLD_HARD_MAX_M: f32 = 4_500.0; // Above Mt Elbert 4401 m + Mt Rainier 4392 m
+```
+
+No 8000 m Himalayan biomes — within Beaver service ceiling (5500 m density-altitude), turbine conversions reach ~7 km. Terrain never exceeds these bounds regardless of seed or biome composition.
+
+### 2. Per-biome envelope (`BiomeProfile`)
+
+Each biome declares `(hard_min_m, typical_min_m, typical_max_m, hard_max_m)`:
+
+| Biome | Real reference | typical_min | typical_max | hard_min | hard_max |
+|---|---|---|---|---|---|
+| HighDesert | Colorado Plateau, Uncompahgre 3851 m | 200 m | 2 500 m | −100 m | 3 851 m |
+| RockyAlpine | Colorado Rockies, Elbert 4401 m | 800 m | 3 500 m | 0 m | 4 500 m |
+| CoastalBoreal | Chugach / Wrangell, Denali rare | −100 m | 1 500 m | −100 m | 4 500 m |
+| MediterraneanArchipelago | Aegean / Sardinia, Etna 2706 m | −50 m | 1 200 m | −100 m | 2 706 m |
+
+At biome edges the envelope is `Σ weight_i × profile_i.bound` — smooth transitions match the biome weight smoothing so altitude bands don't show stripes.
+
+### 3. `soft_clamp(value, hard_lo, soft_lo, soft_hi, hard_hi)`
+
+Inside `[soft_lo, soft_hi]`: identity (no transformation — most terrain output passes through untouched).
+
+Outside: exponential compression asymptotically saturating at the hard bound:
+
+```
+if value > soft_hi:
+    range = hard_hi - soft_hi
+    delta = value - soft_hi
+    return soft_hi + range × (1 - exp(-delta / range))
+```
+
+(symmetric for `value < soft_lo`).
+
+Properties:
+- **C¹ continuous at the soft edges** — derivative = 1 at `soft_lo` / `soft_hi`, matching the identity branch. No visible kink in the heightfield.
+- **Asymptotically saturates** — `lim value→±∞ soft_clamp(value) = hard_lo / hard_hi`. f32 precision saturates to exact equality at extreme overshoots (~50× the over-band range), which is acceptable since the math result is "infinitesimally close."
+- **Monotonic everywhere** — stable for elevation-derived calculations (gradient, hillshade).
+
+### Verification
+
+`heightfield_within_world_hard_bounds` asserts every sample on a 50×50 grid (~2500 km square) lies in `[-100 m, 4500 m]`. `biome_envelope_caps_extreme_amplitudes` does the same on a different seed at 80 km spacing. `soft_clamp_*` tests verify identity-inside-band, asymptotic-outside-band, C¹ continuity at soft edges, monotonicity.
 
 ---
 
@@ -243,7 +298,7 @@ Used by `Terrain::height_at_scale` to blend per-biome primitives without seams. 
 
 ## Per-biome terrain profiles
 
-Defined in `crates/world/src/terrain.rs` as `BiomeProfile` const instances. Current values:
+Defined in `crates/world/src/terrain.rs` as `BiomeProfile` const instances. Current values (noise-shape parameters; envelope bounds in [Altitude envelope](#altitude-envelope-real-world-possible-gate)):
 
 | Biome | Primitive | Spacing | Amplitude | Mean alt | Power | Warp amp | Background |
 |---|---|---|---|---|---|---|---|
@@ -255,6 +310,8 @@ Defined in `crates/world/src/terrain.rs` as `BiomeProfile` const instances. Curr
 **Mean-altitude bias** lifts each biome to its characteristic elevation regardless of baseline noise — alpine sits at ~1500 m baseline, coastal at sea level. Biome weights interpolate these means at boundaries → smooth elevation transitions.
 
 **Background fBm layer** prevents flat-plateau artifacts. Ridged multifractal bottoms out to exactly 0 in valleys, so without the background term you'd see perfectly flat regions at `mean_altitude`. The 30–80 m background variation gives rolling valley floors.
+
+**Altitude envelope** is enforced AFTER primitive composition — see [Altitude envelope (real-world-possible gate)](#altitude-envelope-real-world-possible-gate).
 
 ---
 

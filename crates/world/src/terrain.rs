@@ -85,9 +85,7 @@ impl FbmConfig {
         let regional_sum: f32 = (0..self.regional_octaves)
             .map(|i| 0.5_f32.powi(i as i32))
             .sum();
-        let fine_sum: f32 = (0..self.fine_octaves)
-            .map(|i| 0.5_f32.powi(i as i32))
-            .sum();
+        let fine_sum: f32 = (0..self.fine_octaves).map(|i| 0.5_f32.powi(i as i32)).sum();
         // 2D Perlin peak ≈ 1/√2 ≈ 0.7071; 1.2× fudge for correlated-octave
         // cases that slightly exceed per-octave bounds.
         (self.regional_amplitude_m * regional_sum + self.fine_amplitude_m * fine_sum)
@@ -157,16 +155,34 @@ struct BiomeProfile {
     /// Background fBm spacing (m) — typical ~500-1500 m, below biome's
     /// primary spacing so background varies at smaller feature scale.
     background_spacing_m: f32,
+    /// Typical altitude floor (m). Below this, soft-clamp transitions
+    /// smoothly toward `hard_min_m`. Most biome output should sit above
+    /// this — rare excursions allowed for valley floors / depressions.
+    typical_min_m: f32,
+    /// Typical altitude ceiling (m). Above this, rare peaks allowed via
+    /// smoothstep transition toward `hard_max_m`.
+    typical_max_m: f32,
+    /// Hard altitude floor (m) — biome contribution can never go below.
+    /// Smoothstep applies between this and `typical_min_m`.
+    hard_min_m: f32,
+    /// Hard altitude ceiling (m). Per `MAPGEN.md § Altitude envelope`,
+    /// biome catalog references real-world maxima (Mt Rainier 4392 m,
+    /// Mt Etna 2706 m, etc.).
+    hard_max_m: f32,
 }
 
 impl BiomeProfile {
     /// High Desert / Plateau — ridged multifractal at moderate power
-    /// (mesas + canyons, moderate altitude).
+    /// (mesas + canyons, moderate altitude). Envelope per
+    /// [MAPGEN.md § Altitude envelope](../../../MAPGEN.md#altitude-envelope--real-world-possible-gate)
+    /// row "High Desert / Plateau": Colorado Plateau analog, peak ref
+    /// 3851 m (Uncompahgre), Death Valley −86 m exception preserved as
+    /// hard floor at −100 m.
     const HIGH_DESERT: Self = Self {
         primitive: PrimitiveType::Ridged,
         spacing_m: 20_000.0, // 20 km mesa scale
         octaves: 5,
-        amplitude_m: 400.0, // mesas rise 400 m above mean
+        amplitude_m: 400.0,     // mesas rise 400 m above mean
         mean_altitude_m: 800.0, // Colorado Plateau baseline
         octave_offset_base: 500,
         ridged_offset: 1.0,
@@ -175,14 +191,20 @@ impl BiomeProfile {
         warp_spacing_m: 40_000.0,
         background_amplitude_m: 60.0, // rolling desert floor variation
         background_spacing_m: 1_000.0,
+        typical_min_m: 200.0, // canyon-floor level (Glen Canyon ~1100m allowed in typical)
+        typical_max_m: 2_500.0, // mesa rim
+        hard_min_m: -100.0,   // Death Valley exception
+        hard_max_m: 3_851.0,  // Uncompahgre Peak
     };
 
     /// Rocky Alpine — ridged multifractal at high power (sharp peaks).
+    /// Envelope per MAPGEN.md row "Rocky / Alpine": Colorado Rockies
+    /// analog, peak 4401 m (Elbert) — capped to world max 4500 m.
     const ROCKY_ALPINE: Self = Self {
         primitive: PrimitiveType::Ridged,
         spacing_m: 10_000.0, // 10 km individual mountain scale
         octaves: 5,
-        amplitude_m: 900.0, // peaks rise 900 m above mean
+        amplitude_m: 900.0,      // peaks rise 900 m above mean
         mean_altitude_m: 1500.0, // Colorado Rockies baseline
         octave_offset_base: 520,
         ridged_offset: 1.0,
@@ -191,14 +213,21 @@ impl BiomeProfile {
         warp_spacing_m: 20_000.0,
         background_amplitude_m: 80.0, // alpine valley + ridge flank rolling variation
         background_spacing_m: 800.0,
+        typical_min_m: 800.0,   // alpine valley floor
+        typical_max_m: 3_500.0, // standard peak band
+        hard_min_m: 0.0,        // alpine biome doesn't go below sea level
+        hard_max_m: 4_500.0,    // world max — Elbert + margin
     };
 
     /// Coastal Boreal — domain-warped fBm (fjord-like organic coast).
+    /// Envelope per MAPGEN.md row "Coastal Alaska / Canadian boreal":
+    /// Chugach/Wrangell/Alaska Range analog. Allows Denali-scale rare
+    /// peaks (4500 m) but most terrain in 0-1500 m fjord/valley band.
     const COASTAL_BOREAL: Self = Self {
         primitive: PrimitiveType::DomainWarped,
         spacing_m: 10_000.0,
         octaves: 5,
-        amplitude_m: 300.0, // moderate relief
+        amplitude_m: 300.0,     // moderate relief
         mean_altitude_m: -50.0, // sits near sea level (slight negative so fjords form)
         octave_offset_base: 540,
         ridged_offset: 1.0,
@@ -207,15 +236,21 @@ impl BiomeProfile {
         warp_spacing_m: 20_000.0,
         background_amplitude_m: 40.0, // coastal fjord wall texture
         background_spacing_m: 600.0,
+        typical_min_m: -100.0,  // tide flats / fjord bottom
+        typical_max_m: 1_500.0, // typical fjord-wall height
+        hard_min_m: -100.0,     // world min (rare tide flats)
+        hard_max_m: 4_500.0,    // Denali-scale rare peaks (world max)
     };
 
     /// Mediterranean Archipelago — strongly domain-warped fBm
-    /// (varied island clusters).
+    /// (varied island clusters). Envelope per MAPGEN.md row
+    /// "Mediterranean archipelago": Aegean/Corsica/Sardinia analog,
+    /// peak 2706 m (Etna). Tighter ceiling than alpine biomes.
     const MEDITERRANEAN: Self = Self {
         primitive: PrimitiveType::DomainWarped,
         spacing_m: 5_000.0, // 5 km island scale
         octaves: 5,
-        amplitude_m: 200.0, // low islands
+        amplitude_m: 200.0,    // low islands
         mean_altitude_m: 20.0, // just above sea level
         octave_offset_base: 560,
         ridged_offset: 1.0,
@@ -224,7 +259,119 @@ impl BiomeProfile {
         warp_spacing_m: 15_000.0,
         background_amplitude_m: 30.0, // small-island surface variation
         background_spacing_m: 400.0,
+        typical_min_m: -50.0,   // shallow water / shoreline
+        typical_max_m: 1_200.0, // Corsica / Crete typical interior altitude
+        hard_min_m: -100.0,     // world min
+        hard_max_m: 2_706.0,    // Mt Etna
     };
+}
+
+/// World-wide hard altitude floor (m). Per
+/// [MAPGEN.md § Altitude envelope](../../../MAPGEN.md#altitude-envelope--real-world-possible-gate)
+/// — −86 m Death Valley reference rounded to −100 m for safety margin.
+/// Final heightfield output is clamped at this value regardless of
+/// biome composition.
+pub const WORLD_HARD_MIN_M: f32 = -100.0;
+
+/// World-wide hard altitude ceiling (m). Per MAPGEN.md altitude envelope.
+/// 4500 m chosen as cap above Mt Elbert (4401 m) / Mt Rainier (4392 m) /
+/// Mauna Kea (4205 m) — within Beaver service ceiling (5500 m density-
+/// alt) and turbine conversions (~7 km), so all aircraft can fly above
+/// any terrain by design. No 8000 m Himalayan biomes in flowPlan's
+/// catalog.
+pub const WORLD_HARD_MAX_M: f32 = 4_500.0;
+
+/// Per-biome altitude envelope (weighted across biomes for soft transitions).
+/// Used by [`soft_clamp`] to enforce real-world-possible bounds at
+/// terrain sample time.
+#[derive(Copy, Clone, Debug)]
+struct BiomeEnvelope {
+    hard_min_m: f32,
+    typical_min_m: f32,
+    typical_max_m: f32,
+    hard_max_m: f32,
+}
+
+impl BiomeEnvelope {
+    /// World-default envelope (used when terrain.amplitude_scale = 0).
+    /// No tightening — global hard limits only.
+    const WORLD_DEFAULT: Self = Self {
+        hard_min_m: WORLD_HARD_MIN_M,
+        typical_min_m: WORLD_HARD_MIN_M,
+        typical_max_m: WORLD_HARD_MAX_M,
+        hard_max_m: WORLD_HARD_MAX_M,
+    };
+
+    /// Weighted envelope blend across the 4 biomes per [`BiomeWeights`].
+    /// Each bound is `Σ w_i × biome_i.bound`. Smooth transitions across
+    /// biome edges avoid altitude-band stripes.
+    fn from_weights(weights: &BiomeWeights) -> Self {
+        let hd = &BiomeProfile::HIGH_DESERT;
+        let ra = &BiomeProfile::ROCKY_ALPINE;
+        let cb = &BiomeProfile::COASTAL_BOREAL;
+        let me = &BiomeProfile::MEDITERRANEAN;
+        Self {
+            hard_min_m: weights.high_desert * hd.hard_min_m
+                + weights.rocky_alpine * ra.hard_min_m
+                + weights.coastal_boreal * cb.hard_min_m
+                + weights.mediterranean * me.hard_min_m,
+            typical_min_m: weights.high_desert * hd.typical_min_m
+                + weights.rocky_alpine * ra.typical_min_m
+                + weights.coastal_boreal * cb.typical_min_m
+                + weights.mediterranean * me.typical_min_m,
+            typical_max_m: weights.high_desert * hd.typical_max_m
+                + weights.rocky_alpine * ra.typical_max_m
+                + weights.coastal_boreal * cb.typical_max_m
+                + weights.mediterranean * me.typical_max_m,
+            hard_max_m: weights.high_desert * hd.hard_max_m
+                + weights.rocky_alpine * ra.hard_max_m
+                + weights.coastal_boreal * cb.hard_max_m
+                + weights.mediterranean * me.hard_max_m,
+        }
+    }
+}
+
+/// Soft-clamp `value` into `[hard_lo, hard_hi]` using exponential
+/// compression. Inside `[soft_lo, soft_hi]`: identity (no transformation).
+/// Outside: compressed asymptotically toward hard bounds — output
+/// approaches but never exceeds them. C¹-continuous at the soft edges
+/// (derivative = 1 at soft_lo / soft_hi, matching the identity branch),
+/// so no visible kink in the heightfield.
+///
+/// Per [MAPGEN.md § Altitude envelope](../../../MAPGEN.md#altitude-envelope--real-world-possible-gate):
+/// "most terrain in the biome sits inside `typical_min..typical_max`;
+/// the `typical_max..max_altitude` band allows rare peaks; `min_altitude`
+/// is a hard floor (smoothstepped to avoid visible banding)."
+///
+/// Formula for over-soft case: compressed = (hard_hi − soft_hi) ×
+/// (1 − exp(−(value − soft_hi) / (hard_hi − soft_hi))). Symmetric for
+/// under-soft. Asymptotically saturates at the hard bound.
+fn soft_clamp(value: f32, hard_lo: f32, soft_lo: f32, soft_hi: f32, hard_hi: f32) -> f32 {
+    debug_assert!(
+        hard_lo <= soft_lo && soft_lo <= soft_hi && soft_hi <= hard_hi,
+        "soft_clamp bounds must satisfy hard_lo <= soft_lo <= soft_hi <= hard_hi; got [{hard_lo}, {soft_lo}, {soft_hi}, {hard_hi}]"
+    );
+    if value < soft_lo {
+        let range = soft_lo - hard_lo;
+        if range > 0.0 {
+            let delta = soft_lo - value;
+            let compressed = range * (1.0 - libm::expf(-delta / range));
+            soft_lo - compressed
+        } else {
+            hard_lo
+        }
+    } else if value > soft_hi {
+        let range = hard_hi - soft_hi;
+        if range > 0.0 {
+            let delta = value - soft_hi;
+            let compressed = range * (1.0 - libm::expf(-delta / range));
+            soft_hi + compressed
+        } else {
+            hard_hi
+        }
+    } else {
+        value
+    }
 }
 
 /// Compute this biome's terrain contribution (m) at `(x, z)`, optionally
@@ -399,6 +546,10 @@ impl Terrain {
     /// filtering (Nyquist-inspired). Used by contour-bench wide crops,
     /// Phase 3.6.2 LOD streaming chunks, hydrology bake (100 m grid),
     /// in-engine map view.
+    ///
+    /// Phase 3.6.1c real-world-possible gate: per-biome envelope
+    /// soft-clamp + global hard clamp applied after primitive
+    /// composition. See [`soft_clamp`] and [`MAPGEN.md § Altitude envelope`](../../../MAPGEN.md#altitude-envelope--real-world-possible-gate).
     #[must_use]
     pub fn height_at_scale(&self, x: f32, z: f32, min_spacing_m: f32) -> f32 {
         let regional = self.config.regional_amplitude_m
@@ -423,14 +574,37 @@ impl Terrain {
             );
         let baseline = regional + fine;
 
-        let biome_contribution_total = if self.amplitude_scale > 0.0 {
-            biome_blended_contribution_at_scale(self.seed, x, z, min_spacing_m)
+        let (biome_contribution_total, envelope) = if self.amplitude_scale > 0.0 {
+            let weights = biome_weights_at(self.seed, x, z);
+            (
+                biome_blended_contribution_with_weights(&weights, self.seed, x, z, min_spacing_m),
+                BiomeEnvelope::from_weights(&weights),
+            )
         } else {
-            0.0
+            (0.0, BiomeEnvelope::WORLD_DEFAULT)
         };
 
         let raw = self.amplitude_scale * (baseline + biome_contribution_total);
-        beach_flatten(raw, BEACH_WIDTH_M) + self.base_height
+
+        // Per-biome envelope soft-clamp — caps biome-blended raw output
+        // into [hard_min, hard_max] band per real-world-possible gate.
+        // Skip when amplitude_scale = 0 (test scaffolds: flat() / flat_land()).
+        let clamped = if self.amplitude_scale > 0.0 {
+            let envelope_clamped = soft_clamp(
+                raw,
+                envelope.hard_min_m,
+                envelope.typical_min_m,
+                envelope.typical_max_m,
+                envelope.hard_max_m,
+            );
+            // Global hard safety net: world cannot exceed ±world bounds
+            // even if biome envelope is permissive.
+            envelope_clamped.clamp(WORLD_HARD_MIN_M, WORLD_HARD_MAX_M)
+        } else {
+            raw
+        };
+
+        beach_flatten(clamped, BEACH_WIDTH_M) + self.base_height
     }
 }
 
@@ -456,17 +630,17 @@ impl HeightSampler for Terrain {
     }
 }
 
-/// Compute the biome-weighted terrain contribution at `(x, z)`, with
-/// mipmap-aware octave filtering. Queries [`biome_weights_at`] for soft
-/// 4-biome membership, then evaluates each biome's primitive (capped at
-/// `min_spacing_m`) and blends by weight.
-fn biome_blended_contribution_at_scale(
+/// Compute the biome-weighted terrain contribution at `(x, z)` using
+/// pre-computed [`BiomeWeights`]. Used by [`Terrain::height_at_scale`]
+/// to avoid double-evaluating `biome_weights_at` (once for the
+/// contribution, once for the envelope).
+fn biome_blended_contribution_with_weights(
+    weights: &BiomeWeights,
     seed: u64,
     x: f32,
     z: f32,
     min_spacing_m: f32,
 ) -> f32 {
-    let weights = biome_weights_at(seed, x, z);
     let mut total = 0.0_f32;
     if weights.high_desert > 1e-4 {
         total += weights.high_desert
@@ -571,11 +745,7 @@ mod tests {
     fn height_at_scale_zero_matches_height() {
         // Default height() must equal height_at_scale(_, _, 0.0) exactly.
         let t = Terrain::from_seed(0xCAFE);
-        for &(x, z) in &[
-            (0.0, 0.0),
-            (1234.5, -6789.0),
-            (100_000.0, 50_000.0),
-        ] {
+        for &(x, z) in &[(0.0, 0.0), (1234.5, -6789.0), (100_000.0, 50_000.0)] {
             let h = t.height(x, z);
             let h_scale = t.height_at_scale(x, z, 0.0);
             assert_eq!(
@@ -599,5 +769,174 @@ mod tests {
             (h_full - h_capped).abs() > 0.1,
             "mipmap cap didn't alter height: h_full={h_full} h_capped={h_capped}"
         );
+    }
+
+    // ─── Phase 3.6.1c: altitude envelope + real-world-possible gate ───
+
+    #[test]
+    fn soft_clamp_identity_inside_soft_band() {
+        // Inside [soft_lo, soft_hi]: identity (no transformation).
+        for &v in &[-50.0_f32, 0.0, 100.0, 1234.5, 2500.0] {
+            let r = soft_clamp(v, -100.0, -100.0, 2500.0, 4500.0);
+            assert!(
+                (r - v).abs() < 1e-5,
+                "soft_clamp identity violated at v={v}: got {r}"
+            );
+        }
+    }
+
+    #[test]
+    fn soft_clamp_continuous_at_soft_edges() {
+        // Just inside vs just outside soft edge — must agree to within
+        // a fraction of the over-band range (C¹ continuity).
+        let (hard_lo, soft_lo, soft_hi, hard_hi) = (-100.0, 0.0, 2500.0, 4500.0);
+        // At soft_hi: identity returns soft_hi; over-band branch returns
+        // soft_hi + 0 = soft_hi.
+        let inside = soft_clamp(2500.0 - 0.001, hard_lo, soft_lo, soft_hi, hard_hi);
+        let outside = soft_clamp(2500.0 + 0.001, hard_lo, soft_lo, soft_hi, hard_hi);
+        assert!(
+            (outside - inside).abs() < 0.01,
+            "soft_clamp discontinuous at soft_hi: inside={inside} outside={outside}"
+        );
+        // Same at soft_lo.
+        let inside = soft_clamp(0.0 + 0.001, hard_lo, soft_lo, soft_hi, hard_hi);
+        let outside = soft_clamp(0.0 - 0.001, hard_lo, soft_lo, soft_hi, hard_hi);
+        assert!(
+            (outside - inside).abs() < 0.01,
+            "soft_clamp discontinuous at soft_lo: inside={inside} outside={outside}"
+        );
+    }
+
+    #[test]
+    fn soft_clamp_asymptotic_to_hard_bounds() {
+        // Far above soft_hi: result approaches hard_hi asymptotically.
+        // At extreme overshoots, f32 precision saturates `1 - exp(-x)` to
+        // 1.0 exactly, producing r == hard_hi (saturation is acceptable
+        // since the math result is "infinitesimally close"). At moderate
+        // overshoots, strict inequality holds.
+        let (hard_lo, soft_lo, soft_hi, hard_hi) = (-100.0, 0.0, 2500.0, 4500.0);
+        for &overshoot in &[100.0_f32, 1_000.0, 10_000.0, 100_000.0] {
+            let r = soft_clamp(soft_hi + overshoot, hard_lo, soft_lo, soft_hi, hard_hi);
+            assert!(
+                r <= hard_hi,
+                "soft_clamp exceeded hard_hi at overshoot={overshoot}: r={r}"
+            );
+            assert!(
+                r > soft_hi,
+                "soft_clamp went backward at overshoot={overshoot}: r={r}"
+            );
+        }
+        // Strict-less-than at moderate overshoot (where f32 precision
+        // doesn't saturate yet).
+        let r_moderate = soft_clamp(soft_hi + 100.0, hard_lo, soft_lo, soft_hi, hard_hi);
+        assert!(
+            r_moderate < hard_hi,
+            "soft_clamp should not reach hard_hi at moderate overshoot: r={r_moderate}"
+        );
+        // Far below soft_lo: same asymptotic + saturation behavior.
+        for &undershoot in &[100.0_f32, 1_000.0, 10_000.0, 100_000.0] {
+            let r = soft_clamp(soft_lo - undershoot, hard_lo, soft_lo, soft_hi, hard_hi);
+            assert!(
+                r >= hard_lo,
+                "soft_clamp exceeded hard_lo at undershoot={undershoot}: r={r}"
+            );
+            assert!(
+                r < soft_lo,
+                "soft_clamp went backward at undershoot={undershoot}: r={r}"
+            );
+        }
+        let r_moderate = soft_clamp(soft_lo - 50.0, hard_lo, soft_lo, soft_hi, hard_hi);
+        assert!(
+            r_moderate > hard_lo,
+            "soft_clamp should not reach hard_lo at moderate undershoot: r={r_moderate}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn soft_clamp_monotonic() {
+        // Output must monotonically increase with input. Iterate over
+        // integer steps to avoid float-loop counter drift.
+        let (hard_lo, soft_lo, soft_hi, hard_hi) = (-100.0, 0.0, 2500.0, 4500.0);
+        let mut prev = soft_clamp(-10_000.0, hard_lo, soft_lo, soft_hi, hard_hi);
+        for step in -99_i32..=100 {
+            let v = (step * 100) as f32;
+            let r = soft_clamp(v, hard_lo, soft_lo, soft_hi, hard_hi);
+            assert!(
+                r >= prev - 1e-5,
+                "soft_clamp non-monotonic at v={v}: r={r} prev={prev}"
+            );
+            prev = r;
+        }
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn heightfield_within_world_hard_bounds() {
+        // Phase 3.6.1c real-world-possible gate: every sample across a
+        // wide world grid must lie strictly within the world hard
+        // limits [WORLD_HARD_MIN_M, WORLD_HARD_MAX_M].
+        let t = Terrain::from_seed(42);
+        // 50 × 50 grid spanning ~2500 km square — wide enough to exercise
+        // every biome combination.
+        for ix in 0..50_i32 {
+            for iz in 0..50_i32 {
+                let x = (ix as f32 - 25.0) * 50_000.0;
+                let z = (iz as f32 - 25.0) * 50_000.0;
+                let h = t.height(x, z);
+                assert!(
+                    (WORLD_HARD_MIN_M..=WORLD_HARD_MAX_M).contains(&h),
+                    "heightfield out of world bounds at ({x}, {z}): h={h} not in [{WORLD_HARD_MIN_M}, {WORLD_HARD_MAX_M}]"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn flat_terrains_unaffected_by_envelope() {
+        // amplitude_scale=0 path bypasses biome composition + clamp;
+        // flat() / flat_land() must still produce exact-zero output
+        // (modulo base_height) regardless of the envelope code path.
+        let water = Terrain::flat();
+        let land = Terrain::flat_land();
+        for &(x, z) in &[(0.0, 0.0), (1234.5, -6789.0), (1_000_000.0, -500_000.0)] {
+            assert_eq!(
+                land.height(x, z).to_bits(),
+                0.0_f32.to_bits(),
+                "flat_land must be exactly 0 at ({x}, {z})"
+            );
+            assert_eq!(
+                water.height(x, z).to_bits(),
+                (-10.0_f32).to_bits(),
+                "flat must be exactly -10 at ({x}, {z})"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn biome_envelope_caps_extreme_amplitudes() {
+        // Sanity: the soft-clamp must actually fire at extreme noise
+        // outliers. Sample on a wide grid and verify NO point exceeds
+        // the WORST per-biome hard_max (4500 m) even with stacked baseline
+        // peaks. Replaces "naive max_height" as the truth statement —
+        // before 3.6.1c, max_height could be exceeded by ridge-stacking.
+        let t = Terrain::from_seed(0xBADC_0FFE);
+        for ix in 0..30_i32 {
+            for iz in 0..30_i32 {
+                let x = (ix as f32 - 15.0) * 80_000.0;
+                let z = (iz as f32 - 15.0) * 80_000.0;
+                let h = t.height(x, z);
+                // World hard ceiling is 4500 m — any sample above is a bug.
+                assert!(
+                    h <= WORLD_HARD_MAX_M,
+                    "envelope failed to cap altitude at ({x}, {z}): h={h} > {WORLD_HARD_MAX_M}"
+                );
+                assert!(
+                    h >= WORLD_HARD_MIN_M,
+                    "envelope failed to cap altitude at ({x}, {z}): h={h} < {WORLD_HARD_MIN_M}"
+                );
+            }
+        }
     }
 }

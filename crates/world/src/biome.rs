@@ -324,9 +324,21 @@ mod tests {
                 max_mediterranean = max_mediterranean.max(w.mediterranean);
             }
         }
-        assert!(max_alpine > 0.5, "alpine never substantial: max={max_alpine}");
-        assert!(max_desert > 0.3, "desert never substantial: max={max_desert}");
-        assert!(max_coastal > 0.5, "coastal never substantial: max={max_coastal}");
-        assert!(max_mediterranean > 0.3, "mediterranean never substantial: max={max_mediterranean}");
+        assert!(
+            max_alpine > 0.5,
+            "alpine never substantial: max={max_alpine}"
+        );
+        assert!(
+            max_desert > 0.3,
+            "desert never substantial: max={max_desert}"
+        );
+        assert!(
+            max_coastal > 0.5,
+            "coastal never substantial: max={max_coastal}"
+        );
+        assert!(
+            max_mediterranean > 0.3,
+            "mediterranean never substantial: max={max_mediterranean}"
+        );
     }
 }

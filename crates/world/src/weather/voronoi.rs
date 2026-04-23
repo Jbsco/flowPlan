@@ -124,7 +124,13 @@ fn cell_weight(master_seed: u64, seed_pos: Vec2) -> f32 {
     );
     // Perlin in [−0.707, 0.707]; shift to [0, 1] so all weights are
     // non-negative (power-diagram metric requires weight ≥ 0).
-    let raw = crate::noise::perlin_2d(weight_seed, 0, seed_pos.x, seed_pos.y, WEIGHT_FIELD_SPACING_M);
+    let raw = crate::noise::perlin_2d(
+        weight_seed,
+        0,
+        seed_pos.x,
+        seed_pos.y,
+        WEIGHT_FIELD_SPACING_M,
+    );
     let normalized = (raw + 0.707) / 1.414; // → [0, 1]
     normalized.clamp(0.0, 1.0) * WEIGHT_AMPLITUDE_M2
 }
@@ -359,8 +365,14 @@ mod tests {
             let near_origin = cell_at(42, x, z);
             let wrapped_east = cell_at(42, x + WORLD_EXTENT_M, z);
             let wrapped_north = cell_at(42, x, z + WORLD_EXTENT_M);
-            assert_eq!(near_origin.cell_id, wrapped_east.cell_id, "east seam at {x},{z}");
-            assert_eq!(near_origin.cell_id, wrapped_north.cell_id, "north seam at {x},{z}");
+            assert_eq!(
+                near_origin.cell_id, wrapped_east.cell_id,
+                "east seam at {x},{z}"
+            );
+            assert_eq!(
+                near_origin.cell_id, wrapped_north.cell_id,
+                "north seam at {x},{z}"
+            );
         }
     }
 
@@ -415,7 +427,10 @@ mod tests {
                 break;
             }
         }
-        assert!(any_drift, "no cell in sample grid drifted after 6h advection");
+        assert!(
+            any_drift,
+            "no cell in sample grid drifted after 6h advection"
+        );
     }
 
     #[test]

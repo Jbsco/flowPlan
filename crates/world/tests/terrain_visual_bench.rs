@@ -237,7 +237,14 @@ fn terrain_wraps_continuously_across_seam() {
     // sin/output boundary). Tracked for future polish; current tolerance
     // well under visual threshold even at the seam.
     let tol = 100.0_f32;
-    for &z in &[0.0, 1000.0, -1000.0, 100_000.0, 2_500_000.0, -WORLD_EXTENT_M / 3.0] {
+    for &z in &[
+        0.0,
+        1000.0,
+        -1000.0,
+        100_000.0,
+        2_500_000.0,
+        -WORLD_EXTENT_M / 3.0,
+    ] {
         for &x_base in &[0.0, 100.0, -100.0, 12345.6, -12345.6, WORLD_EXTENT_M / 2.0] {
             let h_base = terrain.height(x_base, z);
             let h_shifted = terrain.height(x_base + WORLD_EXTENT_M, z);
@@ -571,8 +578,7 @@ fn marching_squares_crossings(
 fn emit_contour_map_ms_artifacts() {
     let dir = output_dir();
     let terrain = Terrain::from_seed(CANONICAL_SEED);
-    let crops_contour: &[Crop] =
-        &[Crop::FULL, Crop::QUADRANT, Crop::PLAYER, Crop::CONTINENTAL];
+    let crops_contour: &[Crop] = &[Crop::FULL, Crop::QUADRANT, Crop::PLAYER, Crop::CONTINENTAL];
     for &crop in crops_contour {
         let mut img = ImageBuffer::new(CONTOUR_RESOLUTION, CONTOUR_RESOLUTION);
         // Paint slate-white background.
@@ -644,17 +650,12 @@ fn emit_contour_map_ms_artifacts() {
                 let positions = [(x_l, z_b), (x_r, z_b), (x_r, z_t), (x_l, z_t)];
 
                 let cell_min = corners.iter().copied().fold(f32::INFINITY, f32::min);
-                let cell_max = corners
-                    .iter()
-                    .copied()
-                    .fold(f32::NEG_INFINITY, f32::max);
+                let cell_max = corners.iter().copied().fold(f32::NEG_INFINITY, f32::max);
                 if cell_max - cell_min < 1e-6 {
                     continue;
                 }
-                let start_level =
-                    (cell_min / contour_interval_m).ceil() * contour_interval_m;
-                let end_level =
-                    (cell_max / contour_interval_m).floor() * contour_interval_m;
+                let start_level = (cell_min / contour_interval_m).ceil() * contour_interval_m;
+                let end_level = (cell_max / contour_interval_m).floor() * contour_interval_m;
                 let mut level = start_level;
                 while level <= end_level + 1e-6 {
                     let crossings = marching_squares_crossings(corners, positions, level);
@@ -667,10 +668,8 @@ fn emit_contour_map_ms_artifacts() {
                         2 => {
                             let (x0, y0) = world_to_pixel(crossings[0].0, crossings[0].1);
                             let (x1, y1) = world_to_pixel(crossings[1].0, crossings[1].1);
-                            draw_line_bold(
-                                &mut img, x0, y0, x1, y1, CONTOUR_BLACK, bold_radius,
-                            );
-                        }
+                            draw_line_bold(&mut img, x0, y0, x1, y1, CONTOUR_BLACK, bold_radius);
+                        },
                         4 => {
                             // Saddle — naive pairing (a, b) and (c, d).
                             // Canonical resolution uses cell-center altitude
@@ -680,14 +679,10 @@ fn emit_contour_map_ms_artifacts() {
                             let (x1, y1) = world_to_pixel(crossings[1].0, crossings[1].1);
                             let (x2, y2) = world_to_pixel(crossings[2].0, crossings[2].1);
                             let (x3, y3) = world_to_pixel(crossings[3].0, crossings[3].1);
-                            draw_line_bold(
-                                &mut img, x0, y0, x1, y1, CONTOUR_BLACK, bold_radius,
-                            );
-                            draw_line_bold(
-                                &mut img, x2, y2, x3, y3, CONTOUR_BLACK, bold_radius,
-                            );
-                        }
-                        _ => {}
+                            draw_line_bold(&mut img, x0, y0, x1, y1, CONTOUR_BLACK, bold_radius);
+                            draw_line_bold(&mut img, x2, y2, x3, y3, CONTOUR_BLACK, bold_radius);
+                        },
+                        _ => {},
                     }
                     level += contour_interval_m;
                 }
@@ -701,10 +696,26 @@ fn emit_contour_map_ms_artifacts() {
 #[test]
 #[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
 fn emit_contour_map_artifacts() {
+    // Per-pixel mipmap-aware contour rendering is the slowest artifact
+    // in the suite — 4096² × 3 height samples per pixel × 4 crops, with
+    // mipmap-aware fBm cascade on every sample. The Marching Squares
+    // variant (`emit_contour_map_ms_artifacts`) covers the same crops
+    // ~50× faster and is what reviewers usually want. This per-pixel
+    // path is preserved for fidelity comparison + LOD-streaming
+    // mipmap validation, gated behind an explicit env-var so default
+    // `--ignored` runs aren't blocked on it.
+    if std::env::var_os("FLOWPLAN_VISUAL_BENCH_FULL").is_none() {
+        eprintln!(
+            "skipping emit_contour_map_artifacts (per-pixel mipmap-aware, ~slow); \
+             set FLOWPLAN_VISUAL_BENCH_FULL=1 to include. \
+             Marching Squares contour artifacts emitted by `emit_contour_map_ms_artifacts` \
+             are the default deliverable."
+        );
+        return;
+    }
     let dir = output_dir();
     let terrain = Terrain::from_seed(CANONICAL_SEED);
-    let crops_contour: &[Crop] =
-        &[Crop::FULL, Crop::QUADRANT, Crop::PLAYER, Crop::CONTINENTAL];
+    let crops_contour: &[Crop] = &[Crop::FULL, Crop::QUADRANT, Crop::PLAYER, Crop::CONTINENTAL];
     for &crop in crops_contour {
         let mut img = ImageBuffer::new(CONTOUR_RESOLUTION, CONTOUR_RESOLUTION);
         let pixel_m = crop.extent_m / CONTOUR_RESOLUTION as f32;
@@ -776,8 +787,7 @@ fn emit_topo_map_artifacts() {
     let terrain = Terrain::from_seed(CANONICAL_SEED);
     // Extra crop for topographic viewing — intermediate scale between
     // full and player showing distinct biome character.
-    let crops_topo: &[Crop] =
-        &[Crop::FULL, Crop::QUADRANT, Crop::PLAYER, Crop::CONTINENTAL];
+    let crops_topo: &[Crop] = &[Crop::FULL, Crop::QUADRANT, Crop::PLAYER, Crop::CONTINENTAL];
     for &crop in crops_topo {
         let mut img = ImageBuffer::new(RESOLUTION, RESOLUTION);
         let pixel_m = crop.extent_m / RESOLUTION as f32;
@@ -805,8 +815,7 @@ fn emit_topo_map_artifacts() {
                         let dh_dx = (h_east - h_here) / pixel_m;
                         let dh_dz = (h_south - h_here) / pixel_m;
                         let shade = hillshade(dh_dx, dh_dz);
-                        let contour =
-                            contour_factor(h_here, contour_interval_m, line_half_width);
+                        let contour = contour_factor(h_here, contour_interval_m, line_half_width);
                         let [r, g, b] = topo_rgb(h_here);
                         let factor = shade * contour;
                         rsum += f32::from(r) * factor;

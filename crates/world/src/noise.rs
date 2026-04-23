@@ -367,7 +367,10 @@ mod tests {
         // point (decorrelated via independent gradient hashes).
         let a = fbm_2d(42, 0, 500.0, 500.0, 2000.0, 4);
         let b = fbm_2d(42, 100, 500.0, 500.0, 2000.0, 4);
-        assert!((a - b).abs() > 1e-3, "same seed, different offset produced same value");
+        assert!(
+            (a - b).abs() > 1e-3,
+            "same seed, different offset produced same value"
+        );
     }
 
     #[test]
@@ -386,16 +389,7 @@ mod tests {
     #[test]
     fn ridged_multifractal_wraps_toroidally() {
         let a = ridged_multifractal_2d(42, 0, 123.0, 456.0, 2000.0, 4, 1.0, 2.0);
-        let b = ridged_multifractal_2d(
-            42,
-            0,
-            123.0 + WORLD_EXTENT_M,
-            456.0,
-            2000.0,
-            4,
-            1.0,
-            2.0,
-        );
+        let b = ridged_multifractal_2d(42, 0, 123.0 + WORLD_EXTENT_M, 456.0, 2000.0, 4, 1.0, 2.0);
         assert!((a - b).abs() < 1e-2, "ridged seam: {a} vs {b}");
     }
 
@@ -419,21 +413,17 @@ mod tests {
         assert!((a - b).abs() > 1e-3, "mipmap cap produced unchanged output");
         // Matches direct call with 3 octaves.
         let c = fbm_2d(42, 0, 100.0, 200.0, 2000.0, 3);
-        assert_eq!(b.to_bits(), c.to_bits(), "capped (b={b}) should equal 3-octave direct (c={c})");
+        assert_eq!(
+            b.to_bits(),
+            c.to_bits(),
+            "capped (b={b}) should equal 3-octave direct (c={c})"
+        );
     }
 
     #[test]
     fn fbm_at_scale_wraps_toroidally() {
         let a = fbm_2d_at_scale(42, 0, 100.0, 200.0, 2000.0, 6, 250.0);
-        let b = fbm_2d_at_scale(
-            42,
-            0,
-            100.0 + WORLD_EXTENT_M,
-            200.0,
-            2000.0,
-            6,
-            250.0,
-        );
+        let b = fbm_2d_at_scale(42, 0, 100.0 + WORLD_EXTENT_M, 200.0, 2000.0, 6, 250.0);
         assert!((a - b).abs() < 1e-3, "mipmap seam: a={a} b={b}");
     }
 

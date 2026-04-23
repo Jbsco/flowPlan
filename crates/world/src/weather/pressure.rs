@@ -79,7 +79,6 @@ pub fn pressure_at(master_seed: u64, x_m: f32, y_altitude_m: f32, z_m: f32, time
     p_sea * libm::expf(-altitude / ATMOSPHERE_SCALE_HEIGHT_M)
 }
 
-
 #[cfg(test)]
 #[allow(clippy::cast_precision_loss)] // Test grid iteration: i32→f32 cast is idiomatic.
 #[allow(clippy::float_cmp)] // Tests compare floats via .to_bits() for determinism.
