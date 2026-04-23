@@ -28,7 +28,7 @@
 //! at the 5000 km world scale — seam continuity is maintained to within ~1 m
 //! (well below visual threshold against ±275 m peak amplitudes).
 
-use flowplan_core::{splitmix64, wrap_cell_index, WORLD_EXTENT_M};
+use crate::noise::fbm_2d;
 
 /// A sampleable height function.
 pub trait HeightSampler: Send + Sync {
@@ -36,116 +36,11 @@ pub trait HeightSampler: Send + Sync {
     fn height(&self, x: f32, z: f32) -> f32;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Noise primitives (Perlin + fBm, toroidal-wrap)
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Gradient direction at integer grid cell `(ix, iz)` for a given
-/// `(seed, octave)`. Grid wraps at `n_cells` so lookups at `ix + n_cells`
-/// produce identical output — the mechanism that makes fBm toroidal.
-///
-/// Hash uses Knuth's multiplicative mixing of the inputs followed by
-/// `splitmix64` for thorough bit-diffusion. Adjacent grid cells produce
-/// uncorrelated directions.
-#[allow(clippy::cast_sign_loss)] // wrap_cell_index returns non-negative i64 by contract
-fn gradient(seed: u64, octave: u32, ix: i64, iz: i64, n_cells: i64) -> (f32, f32) {
-    use core::f32::consts::TAU;
-    let ix_w = wrap_cell_index(ix, n_cells) as u64;
-    let iz_w = wrap_cell_index(iz, n_cells) as u64;
-    let combined = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        ^ (u64::from(octave)).wrapping_mul(0x517C_C1B7_2722_0A95)
-        ^ ix_w.wrapping_mul(0xBF58_476D_1CE4_E5B9)
-        ^ iz_w.wrapping_mul(0x94D0_49BB_1331_11EB);
-    let h = splitmix64(combined);
-    #[allow(clippy::cast_precision_loss)]
-    let h_f64 = h as f64;
-    #[allow(clippy::cast_precision_loss)]
-    let u64_max_f64 = u64::MAX as f64;
-    #[allow(clippy::cast_possible_truncation)]
-    let theta = (h_f64 / u64_max_f64) as f32 * TAU;
-    (libm::cosf(theta), libm::sinf(theta))
-}
-
-/// Perlin's quintic fade function — smooths interpolation weights to
-/// `t³(6t² − 15t + 10)`, zeroing first + second derivatives at endpoints
-/// for C² continuity across grid cell boundaries.
-fn fade(t: f32) -> f32 {
-    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
-}
-
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    a + t * (b - a)
-}
-
-/// Single octave of 2D Perlin noise. Grid spacing `spacing_m` controls
-/// the scale: at spacing 1000 m, features are ~1 km across. Output is
-/// bounded in `[-√0.5, √0.5] ≈ [-0.707, 0.707]` by the 2D Perlin theorem.
-///
-/// **Wrap invariant**: `WORLD_EXTENT_M / spacing_m` must be an integer
-/// (callers enforce via `base_spacing` divisibility). Output at `x` and
-/// `x + WORLD_EXTENT_M` is identical by construction.
-#[allow(clippy::cast_possible_truncation)]
-fn perlin(seed: u64, octave: u32, x: f32, z: f32, spacing_m: f32) -> f32 {
-    let n_cells = (WORLD_EXTENT_M / spacing_m).round() as i64;
-    let xs = x / spacing_m;
-    let zs = z / spacing_m;
-    #[allow(clippy::cast_possible_truncation)]
-    let ix = libm::floorf(xs) as i64;
-    #[allow(clippy::cast_possible_truncation)]
-    let iz = libm::floorf(zs) as i64;
-    #[allow(clippy::cast_precision_loss)]
-    let fx = xs - ix as f32;
-    #[allow(clippy::cast_precision_loss)]
-    let fz = zs - iz as f32;
-
-    // Four corner gradients
-    let g00 = gradient(seed, octave, ix, iz, n_cells);
-    let g10 = gradient(seed, octave, ix + 1, iz, n_cells);
-    let g01 = gradient(seed, octave, ix, iz + 1, n_cells);
-    let g11 = gradient(seed, octave, ix + 1, iz + 1, n_cells);
-
-    // Dot products with distance-to-corner vectors
-    let n00 = g00.0 * fx + g00.1 * fz;
-    let n10 = g10.0 * (fx - 1.0) + g10.1 * fz;
-    let n01 = g01.0 * fx + g01.1 * (fz - 1.0);
-    let n11 = g11.0 * (fx - 1.0) + g11.1 * (fz - 1.0);
-
-    // Bilinear with quintic smoothing
-    let u = fade(fx);
-    let v = fade(fz);
-    let nx0 = lerp(n00, n10, u);
-    let nx1 = lerp(n01, n11, u);
-    lerp(nx0, nx1, v)
-}
-
-/// Fractional Brownian motion: sum of Perlin octaves at halving spacing
-/// (lacunarity = 2.0) and halving amplitude (persistence = 0.5). Returns
-/// raw sum; caller normalizes/scales.
-///
-/// `octave_offset` shifts the octave indices so independent fBm layers
-/// (regional / fine) use different gradient hashes even at the same seed.
-fn fbm(
-    seed: u64,
-    octave_offset: u32,
-    x: f32,
-    z: f32,
-    base_spacing_m: f32,
-    octaves: u32,
-) -> f32 {
-    let mut total = 0.0_f32;
-    let mut amplitude = 1.0_f32;
-    let mut spacing = base_spacing_m;
-    for i in 0..octaves {
-        total += amplitude * perlin(seed, octave_offset + i, x, z, spacing);
-        amplitude *= 0.5;
-        spacing *= 0.5;
-    }
-    total
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Terrain
-// ═══════════════════════════════════════════════════════════════════════════
+// Noise primitives are in `crate::noise` — Perlin-fBm shared between
+// terrain and weather subsystems. Terrain uses octave-offset ranges
+// `[0..100)` for the regional layer and `[100..200)` for the fine layer;
+// weather and biome layers use disjoint offset ranges per the convention
+// in `crate::noise` docs.
 
 /// fBm terrain configuration: two-layer regional + fine composition
 /// per [`MAPGEN.md § Altitude envelope`](../../../MAPGEN.md#altitude-envelope--real-world-possible-gate)
@@ -298,7 +193,7 @@ impl HeightSampler for Terrain {
         // layer's octave index prevents hash collisions with regional
         // layer — fine octave 0 ≠ regional octave 0.
         let regional = self.config.regional_amplitude_m
-            * fbm(
+            * fbm_2d(
                 self.seed,
                 0,
                 x,
@@ -307,7 +202,7 @@ impl HeightSampler for Terrain {
                 self.config.regional_octaves,
             );
         let fine = self.config.fine_amplitude_m
-            * fbm(
+            * fbm_2d(
                 self.seed,
                 100,
                 x,
@@ -390,20 +285,5 @@ mod tests {
         }
     }
 
-    #[test]
-    fn perlin_is_periodic_by_construction() {
-        // Perlin at (x, z) and (x + WORLD_EXTENT_M, z) must match closely
-        // (integer-grid wrap via wrap_cell_index; residual is f32 precision).
-        let seed = 0xCAFE_BEEF;
-        let octave = 0;
-        let spacing = 2000.0;
-        for &x in &[0.0, 1234.5, -1234.5, 1_000_000.0] {
-            for &z in &[0.0, 999.9, -999.9] {
-                let p1 = perlin(seed, octave, x, z, spacing);
-                let p2 = perlin(seed, octave, x + WORLD_EXTENT_M, z, spacing);
-                // f32 precision accumulates ~1e-4 at world scale
-                assert!((p1 - p2).abs() < 1e-3, "x={x} z={z}: p1={p1} p2={p2}");
-            }
-        }
-    }
+    // Note: Perlin-periodicity tests moved to `crate::noise::tests`.
 }

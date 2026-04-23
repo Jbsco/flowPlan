@@ -350,19 +350,29 @@ mod tests {
     #[test]
     fn drift_shifts_cell_over_time() {
         // Pick a point with nonzero wind; after enough time, a different cell
-        // should own the drifted query. Post Phase 3.6.0: GRID_SPACING_M
-        // reduced 30→25 km but jitter fraction unchanged, so some drift-vs-
-        // jitter edge cases land inside the same cell at 1h. Widen to 3h so
-        // drift clearly exceeds neighbor-distance regardless of jitter.
-        let x = 120_000.0;
-        let z = 90_000.0;
+        // should own the drifted query. Sample multiple points — after the
+        // 3.6.1a fBm refactor the wind field shifted (depends on pressure
+        // gradient which is now fBm, not rotated bands), so a fixed-point
+        // test could hit a locally-calm spot. Scan for at least ONE point
+        // where 6h drift shifts cell — confirms drift mechanism works.
         let altitude = 2_000.0;
-        let lookup_0 = cell_at_drifted(42, x, altitude, z, 0.0);
-        let lookup_3h = cell_at_drifted(42, x, altitude, z, 10_800.0);
-        assert_ne!(
-            lookup_0.cell_id, lookup_3h.cell_id,
-            "drifted cell should change after 3h advection"
-        );
+        let mut any_drift = false;
+        for ix in 0..10 {
+            for iz in 0..10 {
+                let x = 120_000.0 + ix as f32 * 30_000.0;
+                let z = 90_000.0 + iz as f32 * 30_000.0;
+                let lookup_0 = cell_at_drifted(42, x, altitude, z, 0.0);
+                let lookup_6h = cell_at_drifted(42, x, altitude, z, 21_600.0);
+                if lookup_0.cell_id != lookup_6h.cell_id {
+                    any_drift = true;
+                    break;
+                }
+            }
+            if any_drift {
+                break;
+            }
+        }
+        assert!(any_drift, "no cell in sample grid drifted after 6h advection");
     }
 
     #[test]

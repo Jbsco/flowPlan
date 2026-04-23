@@ -47,24 +47,15 @@ pub const HUMIDITY_SCALE_HEIGHT_M: f32 = 5_000.0;
 const HUMIDITY_FIELD_TAG: u64 = u64::from_le_bytes(*b"humidity");
 
 /// Sea-level relative humidity at world `(x, z)` at `time` seconds. `[0, 1]`.
+///
+/// Perlin-fBm regional + synoptic layers (Phase 3.6.1a refactor).
+/// Octave offsets `[220..230)` to avoid collision with terrain layers
+/// `[0..200)` and temperature layers `[200..220)`.
 #[must_use]
 pub fn sea_level_humidity(master_seed: u64, x_m: f32, z_m: f32, _time_s: f32) -> f32 {
     let seed = field_seed(weather_seed(master_seed), HUMIDITY_FIELD_TAG);
-
-    // Regional variation (moisture advection).
-    let k_reg = core::f32::consts::TAU / REGIONAL_WAVELENGTH_M;
-    let phase_r = hash_to_unit(seed, 1) * core::f32::consts::TAU;
-    let angle_r = hash_to_unit(seed, 2) * core::f32::consts::TAU;
-    let (dx_r, dz_r) = (libm::cosf(angle_r), libm::sinf(angle_r));
-    let regional = libm::sinf(k_reg * (x_m * dx_r + z_m * dz_r) + phase_r);
-
-    // Synoptic variation (storm-system-associated moisture).
-    let k_syn = core::f32::consts::TAU / SYNOPTIC_WAVELENGTH_M;
-    let phase_s = hash_to_unit(seed, 3) * core::f32::consts::TAU;
-    let angle_s = hash_to_unit(seed, 4) * core::f32::consts::TAU;
-    let (dx_s, dz_s) = (libm::cosf(angle_s), libm::sinf(angle_s));
-    let synoptic = libm::sinf(k_syn * (x_m * dx_s + z_m * dz_s) + phase_s);
-
+    let regional = crate::noise::fbm_2d(seed, 220, x_m, z_m, REGIONAL_WAVELENGTH_M, 4);
+    let synoptic = crate::noise::fbm_2d(seed, 225, x_m, z_m, SYNOPTIC_WAVELENGTH_M, 3);
     let rh = BASELINE_RH + REGIONAL_AMPLITUDE * regional + SYNOPTIC_AMPLITUDE * synoptic;
     rh.clamp(0.0, 1.0)
 }

@@ -55,39 +55,17 @@ const PRESSURE_FIELD_TAG: u64 = u64::from_le_bytes(*b"pressure");
 /// Sea-level pressure at world `(x, z)` at simulation `time` seconds.
 ///
 /// Returns pressure in hectopascals (hPa). Normal range ~980-1040 hPa.
+///
+/// Perlin-fBm synoptic field (Phase 3.6.1a refactor). Octave offset
+/// `[230..240)` avoids collision with terrain/temperature/humidity. Drift
+/// via prevailing wind: query is offset backward in time by drift speed,
+/// giving the apparent motion of pressure systems past a stationary point.
 #[must_use]
 pub fn sea_level_pressure(master_seed: u64, x_m: f32, z_m: f32, time_s: f32) -> f32 {
     let seed = field_seed(weather_seed(master_seed), PRESSURE_FIELD_TAG);
-
-    // Two harmonic noise layers at the synoptic wavelength, drifted by time.
-    // Harmonic superposition gives smooth regions of high/low pressure
-    // matching real-world weather-map structure.
-    let k = core::f32::consts::TAU / SYNOPTIC_WAVELENGTH_M;
-    let drift = PRESSURE_DRIFT_MPS * time_s;
-
-    // Phase offsets derived from the pressure field's seed so different
-    // master seeds produce distinct pressure patterns.
-    let phase_a = hash_to_unit(seed, 1) * core::f32::consts::TAU;
-    let phase_b = hash_to_unit(seed, 2) * core::f32::consts::TAU;
-    let angle_a = hash_to_unit(seed, 3) * core::f32::consts::TAU;
-    let angle_b = hash_to_unit(seed, 4) * core::f32::consts::TAU;
-
-    // Direction vectors for the two harmonic layers (rotated bands).
-    let (dx_a, dz_a) = (libm::cosf(angle_a), libm::sinf(angle_a));
-    let (dx_b, dz_b) = (libm::cosf(angle_b), libm::sinf(angle_b));
-
-    // Drift vector — prevailing westerly for simplicity; per-seed variation
-    // could rotate this, but keeping constant at W1 matches real pressure
-    // systems that primarily move west-to-east at mid-latitudes.
-    let drift_x = -drift;
-    let drift_z = 0.0;
-
-    let arg_a = k * ((x_m - drift_x) * dx_a + (z_m - drift_z) * dz_a) + phase_a;
-    let arg_b = k * ((x_m - drift_x) * dx_b + (z_m - drift_z) * dz_b) + phase_b;
-
-    // Half-amplitude per layer so sum stays within [-1, +1] * SYNOPTIC_AMPLITUDE.
-    let variation = 0.5 * (libm::sinf(arg_a) + libm::sinf(arg_b));
-
+    let drift_x = -PRESSURE_DRIFT_MPS * time_s;
+    let x_sample = x_m - drift_x;
+    let variation = crate::noise::fbm_2d(seed, 230, x_sample, z_m, SYNOPTIC_WAVELENGTH_M, 4);
     BASELINE_HPA + SYNOPTIC_AMPLITUDE_HPA * variation
 }
 

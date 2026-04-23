@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod biome;
+pub mod noise;
 pub mod sky;
 pub mod terrain;
 pub mod water;

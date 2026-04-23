@@ -2,19 +2,33 @@
 //!
 //! Pure function of `(master_seed, world_xz, altitude, time)`.
 //!
-//! # Model
+//! # Model (Phase 3.6.1a refactor)
 //!
-//! Sea-level temperature = `BASELINE_KELVIN` + latitude-band gradient (real
-//! world latitude would be the driver; here we synthesize a slow varying
-//! "climate-gradient" field since flowPlan doesn't track latitude explicitly
-//! at the world-bake level) + synoptic variation + seasonal + diurnal.
-//! Altitude lapse rate applies ISA standard ~6.5 K / km troposphere.
+//! Sea-level temperature = `BASELINE_KELVIN` + latitude-proxy gradient +
+//! climate Perlin-fBm + synoptic Perlin-fBm + diurnal cycle. Altitude lapse
+//! rate applies ISA standard ~6.5 K / km troposphere.
 //!
-//! # Characteristic scale
+//! **Latitude proxy**: one full `cos` cycle in the world-z axis produces
+//! a synthetic "equator at z=0 / poles at z=±W/2" climate gradient. On a
+//! flat torus there are no true poles, but the belt structure matches real
+//! Earth intuition (players flying "north" see cooler climate) and wraps
+//! cleanly (the cos period divides `WORLD_EXTENT_M` exactly).
 //!
-//! Climate-gradient wavelength ≈ 500 km (slow continental-scale variation).
-//! Synoptic variation at ~300 km (same scale as pressure, since temperature +
-//! pressure correlate at synoptic scales). Diurnal cycle period 1 day.
+//! **Climate fBm** adds regional variation on top of the latitude trend —
+//! coastal regions warmer than interior, rain-shadow mechanisms, etc. at
+//! ~500 km scale.
+//!
+//! **Synoptic fBm** adds frontal-system-scale variation at ~357 km scale
+//! (quantized to integer cycles per world for clean toroidal wrap).
+//!
+//! **Diurnal** cycle remains unchanged — simple sinusoid keyed to time_s.
+//!
+//! Replaces the earlier rotated-harmonic-bands design that produced
+//! visible banded biome patterns. See `weather_rotated_band_wrap_gap`
+//! memory for context.
+
+use crate::noise::fbm_2d;
+use flowplan_core::WORLD_EXTENT_M;
 
 use super::{field_seed, weather_seed};
 
@@ -48,30 +62,38 @@ pub const DAY_LENGTH_S: f32 = 24.0 * 3_600.0;
 
 const TEMPERATURE_FIELD_TAG: u64 = u64::from_le_bytes(*b"tempera_");
 
+/// Latitude-proxy amplitude (K peak-to-peak is ±this). Real Earth
+/// equator-to-pole seasonal-mean temperature spread is ~50 K; we use
+/// a gentler ±8 K so the world has varied biomes without being entirely
+/// tundra at the extremes.
+pub const LATITUDE_AMPLITUDE_K: f32 = 8.0;
+
 /// Sea-level temperature at world `(x, z)` at `time` seconds. Kelvin.
+///
+/// Perlin-fBm climate + synoptic layers + latitude-proxy belt + diurnal.
 #[must_use]
 pub fn sea_level_temperature(master_seed: u64, x_m: f32, z_m: f32, time_s: f32) -> f32 {
     let seed = field_seed(weather_seed(master_seed), TEMPERATURE_FIELD_TAG);
 
-    // Climate-gradient component (slow continental scale).
-    let k_climate = core::f32::consts::TAU / CLIMATE_WAVELENGTH_M;
-    let phase_c = hash_to_unit(seed, 1) * core::f32::consts::TAU;
-    let angle_c = hash_to_unit(seed, 2) * core::f32::consts::TAU;
-    let (dx_c, dz_c) = (libm::cosf(angle_c), libm::sinf(angle_c));
-    let climate = libm::sinf(k_climate * (x_m * dx_c + z_m * dz_c) + phase_c);
+    // Latitude proxy: one full cosine cycle over WORLD_EXTENT_M in the z
+    // axis. Equator at z = 0 (warm, cos = +1); poles at z = ±W/2 (cold,
+    // cos = −1). Wraps cleanly — period divides world extent exactly.
+    let lat_phase = core::f32::consts::TAU * z_m / WORLD_EXTENT_M;
+    let latitude = libm::cosf(lat_phase);
 
-    // Synoptic component (faster, smaller).
-    let k_syn = core::f32::consts::TAU / SYNOPTIC_WAVELENGTH_M;
-    let phase_s = hash_to_unit(seed, 3) * core::f32::consts::TAU;
-    let angle_s = hash_to_unit(seed, 4) * core::f32::consts::TAU;
-    let (dx_s, dz_s) = (libm::cosf(angle_s), libm::sinf(angle_s));
-    let synoptic = libm::sinf(k_syn * (x_m * dx_s + z_m * dz_s) + phase_s);
+    // Climate fBm: 500 km coarse, 4 octaves. Octave offset 200 to avoid
+    // collision with terrain [0..200).
+    let climate = fbm_2d(seed, 200, x_m, z_m, CLIMATE_WAVELENGTH_M, 4);
 
-    // Diurnal component — centered on noon (t = 12 h).
+    // Synoptic fBm: ~357 km coarse, 3 octaves. Octave offset 210.
+    let synoptic = fbm_2d(seed, 210, x_m, z_m, SYNOPTIC_WAVELENGTH_M, 3);
+
+    // Diurnal component — centered on noon (t = 12 h). Unchanged from prior.
     let diurnal_phase = core::f32::consts::TAU * (time_s / DAY_LENGTH_S - 0.25);
     let diurnal = libm::sinf(diurnal_phase);
 
     BASELINE_KELVIN
+        + LATITUDE_AMPLITUDE_K * latitude
         + CLIMATE_AMPLITUDE_K * climate
         + SYNOPTIC_AMPLITUDE_K * synoptic
         + DIURNAL_AMPLITUDE_K * diurnal
@@ -105,16 +127,22 @@ mod tests {
     #[test]
     fn sea_level_temperature_in_plausible_range() {
         // Sample a 500 km grid; all temperatures should fall within a realistic
-        // continental range.
+        // continental range. Range accounts for latitude proxy ±LATITUDE_AMPLITUDE_K
+        // + climate ±CLIMATE_AMPLITUDE_K + synoptic ±SYNOPTIC_AMPLITUDE_K +
+        // diurnal ±DIURNAL_AMPLITUDE_K. Post Phase 3.6.1a refactor: climate + synoptic
+        // are fBm (bounded ~±1.4 at peak vs ±1.0 for sinusoid); widen the range.
         let seed = 42;
+        let fbm_peak_factor = 1.4_f32; // empirical fBm peak
         let max_expected = BASELINE_KELVIN
-            + CLIMATE_AMPLITUDE_K
-            + SYNOPTIC_AMPLITUDE_K
+            + LATITUDE_AMPLITUDE_K
+            + CLIMATE_AMPLITUDE_K * fbm_peak_factor
+            + SYNOPTIC_AMPLITUDE_K * fbm_peak_factor
             + DIURNAL_AMPLITUDE_K
             + 0.1;
         let min_expected = BASELINE_KELVIN
-            - CLIMATE_AMPLITUDE_K
-            - SYNOPTIC_AMPLITUDE_K
+            - LATITUDE_AMPLITUDE_K
+            - CLIMATE_AMPLITUDE_K * fbm_peak_factor
+            - SYNOPTIC_AMPLITUDE_K * fbm_peak_factor
             - DIURNAL_AMPLITUDE_K
             - 0.1;
         for ix in 0..25 {
@@ -124,7 +152,7 @@ mod tests {
                 let t = sea_level_temperature(seed, x, z, 12.0 * 3_600.0);
                 assert!(
                     (min_expected..=max_expected).contains(&t),
-                    "temperature {t} K at ({x}, {z}) outside expected range"
+                    "temperature {t} K at ({x}, {z}) outside expected range [{min_expected}, {max_expected}]"
                 );
             }
         }
