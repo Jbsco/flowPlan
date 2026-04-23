@@ -254,6 +254,13 @@ impl SubBiomeCellCatalog {
         self.seeds.len()
     }
 
+    /// Master seed used to generate this catalog. Exposed for the
+    /// `baked_assignments` eager-bake pass (3.6.3c.1c).
+    #[must_use]
+    pub const fn master_seed(&self) -> u64 {
+        self.seed
+    }
+
     /// All cell seeds.
     #[must_use]
     pub fn seeds(&self) -> &[CellSeed] {
@@ -352,6 +359,7 @@ impl SubBiomeCellCatalog {
             hub_catalog,
             hydrology,
             height_at: &height_at,
+            cell_hubs_cache: None,
         };
         assign_feature(self.seed, cell_id, (x, z), &context, libs, Some(&rules_ctx))
     }
@@ -409,8 +417,9 @@ impl SubBiomeCellCatalog {
 // Placement context — sample terrain + hydrology + biome at a cell seed
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Build a [`PlacementContext`] for a cell seed at `(x, z)` by
-/// sampling terrain + hydrology + biome weights.
+/// Build a [`PlacementContext`] for a cell seed at `(x, z)`.
+///
+/// Samples terrain + hydrology + biome weights:
 ///
 /// - altitude: `Terrain::height_at_scale(x, z, 2_500.0)` (mipmap-aware)
 /// - slope: approximated from a small finite-difference kernel
@@ -421,7 +430,10 @@ impl SubBiomeCellCatalog {
 ///   within [`WATER_ADJACENCY_RADIUS_M`] hits a non-DryChannel water
 ///   class in the hydrology graph
 /// - biome_weights: [`biome_weights_at_position`]
-fn build_placement_context(
+///
+/// Public for use by `baked_assignments` (3.6.3c.1c eager bake pass)
+/// — same computation as the internal call in `feature_at_cell*`.
+pub fn build_placement_context(
     master_seed: u64,
     x: f32,
     z: f32,

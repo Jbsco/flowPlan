@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use flowplan_core::WORLD_EXTENT_M;
+use flowplan_world::baked_assignments::BakedAssignments;
 use flowplan_world::hub_catalog::HubCatalog;
 use flowplan_world::hydrology::HydrologyGraph;
 use flowplan_world::sub_biome::FeatureAssignment;
@@ -471,4 +472,72 @@ fn emit_placement_rule_rejection_stats() {
         differ > 0,
         "expected PlacementRules to reassign at least some cells; sample shows 0 — did wiring regress?"
     );
+}
+
+#[test]
+#[ignore = "expensive bake (~30-90 s); opt-in via --ignored"]
+fn emit_baked_assignments_calibration() {
+    // 3.6.3c.1c calibration: full eager bake of all ~3.9 M cells with
+    // self-spacing rule enforcement + attractor weight_mult biasing.
+    // Reports wall-clock + per-feature counts + self-spacing reject
+    // count + bleed-over rate. Compares baked output (with self-
+    // spacing) against the lazy with-rules path (no self-spacing) so
+    // the spacing-enforced delta is visible.
+
+    let terrain = Terrain::from_seed(CANONICAL_SEED);
+    let hydrology = HydrologyGraph::bake(CANONICAL_SEED, &terrain);
+    let hub_catalog = HubCatalog::bake(CANONICAL_SEED, &terrain, &hydrology);
+    let cells = SubBiomeCellCatalog::bake(CANONICAL_SEED);
+
+    eprintln!("baking BakedAssignments — eager pass with self-spacing + attractor biasing...");
+    let baked = BakedAssignments::bake(&cells, &terrain, &hydrology, &hub_catalog);
+
+    let stats = baked.stats();
+    eprintln!("=== BakedAssignments stats ===");
+    eprintln!("  cell_count:                {}", stats.cell_count);
+    eprintln!("  unique features in catalog: {}", baked.unique_feature_count());
+    eprintln!("  fallback (`plain`) count:  {} ({:.2}%)",
+        stats.fallback_count,
+        100.0 * stats.fallback_count as f32 / stats.cell_count as f32);
+    eprintln!("  bleed-over count:          {} ({:.2}%)",
+        stats.bleed_over_count,
+        100.0 * stats.bleed_over_count as f32 / stats.cell_count as f32);
+    eprintln!("  self-spacing rejections:   {}", stats.self_spacing_reject_count);
+    eprintln!("  bake wall-clock:           {} ms ({:.2} s)",
+        stats.bake_wallclock_ms,
+        stats.bake_wallclock_ms as f64 / 1000.0);
+
+    // Per-feature baked counts (top 25 by frequency).
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    for cell_id in 0..stats.cell_count {
+        let assn = baked.feature_at_cell(cell_id);
+        *counts.entry(assn.feature_id).or_insert(0) += 1;
+    }
+    let mut sorted: Vec<(String, u32)> = counts.into_iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    eprintln!("=== Top 25 baked features ===");
+    for (id, c) in sorted.iter().take(25) {
+        let pct = 100.0 * *c as f32 / stats.cell_count as f32;
+        eprintln!("  {id:30} {c:>8} ({pct:.2}%)");
+    }
+
+    // Per-feature spatial-hash sizes (proves self-spacing tracked the
+    // 18 authored-with-self_spacing features).
+    eprintln!("=== Per-feature self-spacing placement counts ===");
+    let tracked_feature_ids = [
+        "ranch", "remote_compound", "homestead_clearing", "farmland_parcel",
+        "dwelling_cluster", "natural_meadow", "alpine_meadow", "creek_valley",
+        "scenic_overlook", "river_bend_viewpoint", "hot_springs",
+        "abandoned_homestead", "fishing_camp", "tackle_shop", "bait_shop",
+        "ferry_dock", "gas_station", "general_store",
+    ];
+    let hashes = baked.spatial_hashes();
+    eprintln!("  tracked feature types: {}", hashes.feature_count());
+    for id in tracked_feature_ids {
+        eprintln!("  {id:30} {} placements", hashes.placement_count(id));
+    }
+
+    // Sanity: bake produced results.
+    assert!(stats.cell_count > 3_000_000, "expected >3M cells in canonical seed");
+    assert!(stats.bake_wallclock_ms > 0, "wall-clock should be measured");
 }

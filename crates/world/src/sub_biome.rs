@@ -1022,7 +1022,27 @@ pub struct PlacementRulesContext<'a> {
     /// Height sampler: `(x, z) -> altitude_m`. Used for prominence
     /// median-sampling.
     pub height_at: &'a dyn Fn(f32, f32) -> f32,
+    /// Optional per-cell hub-cache (3.6.3c.1c bake optimization).
+    ///
+    /// Precomputed list of hubs within [`MAX_RULE_HUB_RADIUS_M`] of the
+    /// cell being evaluated. When present, hub-proximity and hub-
+    /// exclusion rules iterate this short list instead of re-querying
+    /// `hub_catalog.hubs_in_radius` per candidate. The bake loop fills
+    /// it once per cell and reuses across all candidate evaluations,
+    /// turning ~5 spatial queries per cell into 1.
+    ///
+    /// Lazy callers (no eager bake) leave this as `None` and pay the
+    /// per-rule query cost — fine for sparse query patterns.
+    #[allow(clippy::doc_markdown)]
+    pub cell_hubs_cache: Option<&'a [&'a crate::hub_catalog::HubEntry]>,
 }
+
+/// Maximum hub-proximity radius any authored placement rule references.
+///
+/// Used by the bake loop to size the per-cell hub cache. Set above the
+/// largest authored radius (`farmland_parcel.hub.proximity_km_per_tier
+/// = "Major": 80.0`) with margin for future authoring.
+pub const MAX_RULE_HUB_RADIUS_M: f32 = 100_000.0;
 
 /// Outcome of placement-rule evaluation.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -1090,7 +1110,7 @@ pub fn evaluate_placement_rules(
     // Hub rules — proximity + exclusion.
     if let Some(hub) = &rules.hub {
         if !hub.proximity_km_per_tier.is_empty() {
-            let boost = compute_hub_proximity_boost(hub, cell_pos, rules_ctx.hub_catalog);
+            let boost = compute_hub_proximity_boost(hub, cell_pos, rules_ctx);
             if hub.proximity_required && boost <= 1.0 {
                 return PlacementRuleOutcome::Reject {
                     reason: RejectReason::HubProximityRequired,
@@ -1098,9 +1118,7 @@ pub fn evaluate_placement_rules(
             }
             weight_mult *= boost;
         }
-        if hub.exclusion_min_km > 0.0
-            && is_within_hub_exclusion(hub, cell_pos, rules_ctx.hub_catalog)
-        {
+        if hub.exclusion_min_km > 0.0 && is_within_hub_exclusion(hub, cell_pos, rules_ctx) {
             return PlacementRuleOutcome::Reject {
                 reason: RejectReason::HubExclusion,
             };
@@ -1171,18 +1189,21 @@ pub fn evaluate_placement_rules(
 }
 
 /// Compute hub-proximity attractor boost — maximum weighted multiplier
-/// from any qualifying hub's tier. Example: `hub.proximity_km_per_tier`
-/// maps `"Regional": 30.0`; a cell 15 km from a Regional hub is inside
-/// the radius → returns a boost > 1.0. Cells outside every tier's
-/// radius return 1.0 (no boost).
+/// from any qualifying hub's tier.
+///
+/// Example: `hub.proximity_km_per_tier` maps `"Regional": 30.0`; a cell
+/// 15 km from a Regional hub is inside the radius → returns a boost
+/// > 1.0. Cells outside every tier's radius return 1.0 (no boost).
 ///
 /// Boost magnitude: `1 + 2 * (1 - dist/radius)` → 1.0 at radius edge,
-/// 3.0 at cell center. Roughly 3× selection-weight boost at the heart
-/// of an attractor zone; decays linearly to 1.0 at the boundary.
+/// 3.0 at cell center.
+///
+/// Uses `rules_ctx.cell_hubs_cache` when present (3.6.3c.1c bake
+/// optimization). Falls back to `hub_catalog.hubs_in_radius` otherwise.
 fn compute_hub_proximity_boost(
     hub: &HubRules,
     cell_pos: (f32, f32),
-    hub_catalog: &HubCatalog,
+    rules_ctx: &PlacementRulesContext<'_>,
 ) -> f32 {
     let mut best_boost = 1.0_f32;
     for (tier_str, radius_km) in &hub.proximity_km_per_tier {
@@ -1190,15 +1211,40 @@ fn compute_hub_proximity_boost(
             continue;
         };
         let radius_m = *radius_km * 1000.0;
-        for h in hub_catalog.hubs_in_radius(cell_pos.0, cell_pos.1, radius_m) {
+        let radius_m_sq = radius_m * radius_m;
+
+        // Iterate hubs from cache (per-cell precomputed) or fall back
+        // to a fresh spatial query. Cache wins by ~5× when multiple
+        // candidates evaluate hub-proximity against the same cell.
+        let check_hub = |h: &crate::hub_catalog::HubEntry| -> Option<f32> {
             if h.tier != tier {
-                continue;
+                return None;
             }
             let dx = h.approx_world_pos.0 - cell_pos.0;
             let dz = h.approx_world_pos.1 - cell_pos.1;
-            let d = dx.hypot(dz);
-            let boost = 1.0 + 2.0 * (1.0 - (d / radius_m).min(1.0));
-            best_boost = best_boost.max(boost);
+            let d_sq = dx * dx + dz * dz;
+            if d_sq > radius_m_sq {
+                return None;
+            }
+            let d = d_sq.sqrt();
+            Some(1.0 + 2.0 * (1.0 - (d / radius_m).min(1.0)))
+        };
+
+        if let Some(cached) = rules_ctx.cell_hubs_cache {
+            for h in cached {
+                if let Some(boost) = check_hub(h) {
+                    best_boost = best_boost.max(boost);
+                }
+            }
+        } else {
+            for h in rules_ctx
+                .hub_catalog
+                .hubs_in_radius(cell_pos.0, cell_pos.1, radius_m)
+            {
+                if let Some(boost) = check_hub(h) {
+                    best_boost = best_boost.max(boost);
+                }
+            }
         }
     }
     best_boost
@@ -1206,7 +1252,13 @@ fn compute_hub_proximity_boost(
 
 /// True if cell is within `exclusion_min_km` of any hub at or above
 /// `exclusion_min_tier`.
-fn is_within_hub_exclusion(hub: &HubRules, cell_pos: (f32, f32), hub_catalog: &HubCatalog) -> bool {
+///
+/// Uses `rules_ctx.cell_hubs_cache` when present.
+fn is_within_hub_exclusion(
+    hub: &HubRules,
+    cell_pos: (f32, f32),
+    rules_ctx: &PlacementRulesContext<'_>,
+) -> bool {
     let Some(min_tier_str) = &hub.exclusion_min_tier else {
         return false;
     };
@@ -1214,10 +1266,27 @@ fn is_within_hub_exclusion(hub: &HubRules, cell_pos: (f32, f32), hub_catalog: &H
         return false;
     };
     let radius_m = hub.exclusion_min_km * 1000.0;
-    hub_catalog
-        .hubs_in_radius(cell_pos.0, cell_pos.1, radius_m)
-        .iter()
-        .any(|h| h.tier <= min_tier)
+    let radius_m_sq = radius_m * radius_m;
+
+    let within = |h: &crate::hub_catalog::HubEntry| -> bool {
+        if h.tier > min_tier {
+            return false;
+        }
+        let dx = h.approx_world_pos.0 - cell_pos.0;
+        let dz = h.approx_world_pos.1 - cell_pos.1;
+        dx * dx + dz * dz <= radius_m_sq
+    };
+
+    rules_ctx.cell_hubs_cache.map_or_else(
+        || {
+            rules_ctx
+                .hub_catalog
+                .hubs_in_radius(cell_pos.0, cell_pos.1, radius_m)
+                .iter()
+                .any(|h| within(h))
+        },
+        |cached| cached.iter().any(|h| within(h)),
+    )
 }
 
 /// Parse hub-tier string to enum. Returns `None` for typos so a RON
@@ -1339,6 +1408,260 @@ fn is_lake_edge(cell_pos: (f32, f32), hydrology: &HydrologyGraph) -> bool {
             .water_surface_at(cell_pos.0 + dx, cell_pos.1 + dz)
             .is_none_or(|s| !is_lake(s.class))
     })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Self-spacing state + bake-time assignment (3.6.3c.1c)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Per-feature spatial hash for self-spacing rule enforcement.
+///
+/// Each feature with a `SelfSpacingRules.min_km` rule gets a sparse
+/// grid (~10 km cells) of placed positions. Self-spacing checks query
+/// the grid in the cell+neighbors-within-min_km window.
+///
+/// Built incrementally during the eager bake pass
+/// ([`crate::baked_assignments::BakedAssignments::bake`]); after bake,
+/// usable for spatial lookups.
+#[derive(Default)]
+pub struct SelfSpacingState {
+    /// feature_id_str → grid of placed positions.
+    grids: HashMap<String, FeatureSpatialGrid>,
+}
+
+struct FeatureSpatialGrid {
+    cell_size_m: f32,
+    cells: HashMap<(i32, i32), Vec<(f32, f32)>>,
+}
+
+impl SelfSpacingState {
+    /// Create an empty state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Check whether `pos` is within `min_km` of any already-placed
+    /// position for the given feature id. True = self-spacing rule
+    /// violated (reject placement).
+    #[must_use]
+    pub fn would_violate(&self, feature_id: &str, pos: (f32, f32), min_km: f32) -> bool {
+        let Some(grid) = self.grids.get(feature_id) else {
+            return false;
+        };
+        let min_m = min_km * 1000.0;
+        let min_m_sq = min_m * min_m;
+        let r_cells = (min_m / grid.cell_size_m).ceil() as i32;
+        let (gx, gz) = grid.cell_for(pos);
+        for dz in -r_cells..=r_cells {
+            for dx in -r_cells..=r_cells {
+                if let Some(positions) = grid.cells.get(&(gx + dx, gz + dz)) {
+                    for &(px, pz) in positions {
+                        let ddx = px - pos.0;
+                        let ddz = pz - pos.1;
+                        if ddx * ddx + ddz * ddz < min_m_sq {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Insert a placement into the grid for the given feature.
+    pub fn insert(&mut self, feature_id: &str, pos: (f32, f32)) {
+        let grid = self
+            .grids
+            .entry(feature_id.to_string())
+            .or_insert_with(|| FeatureSpatialGrid {
+                cell_size_m: 10_000.0,
+                cells: HashMap::new(),
+            });
+        let key = grid.cell_for(pos);
+        grid.cells.entry(key).or_default().push(pos);
+    }
+
+    /// Number of feature types tracked.
+    #[must_use]
+    pub fn feature_count(&self) -> usize {
+        self.grids.len()
+    }
+
+    /// Number of placed positions for a feature (0 if untracked).
+    #[must_use]
+    pub fn placement_count(&self, feature_id: &str) -> usize {
+        self.grids
+            .get(feature_id)
+            .map_or(0, |g| g.cells.values().map(Vec::len).sum())
+    }
+}
+
+impl FeatureSpatialGrid {
+    fn cell_for(&self, pos: (f32, f32)) -> (i32, i32) {
+        (
+            (pos.0 / self.cell_size_m).floor() as i32,
+            (pos.1 / self.cell_size_m).floor() as i32,
+        )
+    }
+}
+
+/// Bake-time variant of [`assign_feature`].
+///
+/// Same retry-loop structure but ALSO checks self-spacing against
+/// `self_spacing_state`. On successful placement, inserts the cell
+/// position into the per-feature spatial hash. Increments
+/// `stats.self_spacing_reject_count` for each retry that fired the
+/// self-spacing check.
+///
+/// Caller (`baked_assignments::BakedAssignments::bake`) processes cells
+/// in a deterministic permuted order so the spatial-hash mutations
+/// happen reproducibly.
+#[must_use]
+pub fn assign_feature_for_bake(
+    master_seed: u64,
+    cell_id: u32,
+    cell_pos: (f32, f32),
+    context: &PlacementContext,
+    libraries: &SubBiomeLibraries,
+    rules_ctx: &PlacementRulesContext<'_>,
+    self_spacing_state: &mut SelfSpacingState,
+    stats: &mut crate::baked_assignments::BakeStats,
+) -> FeatureAssignment {
+    let field_seed = mix_seed(master_seed, SUB_BIOME_FIELD_TAG);
+    let bleed_rng = mix_seed(field_seed, u64::from(cell_id) | (1_u64 << 32)) as u32;
+    let source = pick_biome_source(&context.biome_weights, bleed_rng);
+
+    if context.altitude_m < OPEN_WATER_ALTITUDE_THRESHOLD_M {
+        let oceanic = libraries.oceanic();
+        for attempt in 0..MAX_FEATURE_ROLL_ATTEMPTS {
+            let roll_rng = mix_seed(
+                field_seed,
+                u64::from(cell_id) | (u64::from(attempt) << 48) | (1 << 60),
+            );
+            if let Some(f) =
+                sample_feature_with_context(oceanic, roll_rng, false, cell_pos, context, rules_ctx)
+            {
+                if context.satisfies(f) {
+                    return FeatureAssignment {
+                        feature_id: f.id.clone(),
+                        source,
+                        is_fallback: false,
+                    };
+                }
+            }
+        }
+        return FeatureAssignment {
+            feature_id: OPEN_WATER_FEATURE_ID.to_string(),
+            source,
+            is_fallback: false,
+        };
+    }
+
+    let source_biome = source.feature_source_biome();
+    let lib = libraries.for_biome(source_biome);
+
+    for attempt in 0..MAX_FEATURE_ROLL_ATTEMPTS {
+        let roll_rng = mix_seed(field_seed, u64::from(cell_id) | (u64::from(attempt) << 48));
+        let feature = sample_feature_with_context(
+            lib,
+            roll_rng,
+            source.is_bleed_over(),
+            cell_pos,
+            context,
+            rules_ctx,
+        );
+        if let Some(f) = feature {
+            if !context.satisfies(f) {
+                continue;
+            }
+            let self_spacing_min_km = f
+                .placement_rules
+                .as_ref()
+                .and_then(|r| r.self_spacing.as_ref())
+                .map_or(0.0, |ss| ss.min_km);
+            if self_spacing_min_km > 0.0
+                && self_spacing_state.would_violate(&f.id, cell_pos, self_spacing_min_km)
+            {
+                stats.self_spacing_reject_count += 1;
+                continue;
+            }
+            if self_spacing_min_km > 0.0 {
+                self_spacing_state.insert(&f.id, cell_pos);
+            }
+            return FeatureAssignment {
+                feature_id: f.id.clone(),
+                source,
+                is_fallback: false,
+            };
+        }
+    }
+    FeatureAssignment {
+        feature_id: FALLBACK_FEATURE_ID.to_string(),
+        source,
+        is_fallback: true,
+    }
+}
+
+/// Public wrapper around [`crate::voronoi_cells::build_placement_context`]
+/// for `baked_assignments` to call.
+#[must_use]
+pub fn build_placement_context_external(
+    master_seed: u64,
+    x: f32,
+    z: f32,
+    terrain: &crate::terrain::Terrain,
+    hydrology: &crate::hydrology::HydrologyGraph,
+) -> PlacementContext {
+    crate::voronoi_cells::build_placement_context(master_seed, x, z, terrain, hydrology)
+}
+
+/// Like [`sample_feature`] but additionally uses placement-rule
+/// `weight_mult` from attractor rules (hub_proximity, prominence) to
+/// bias the weighted RNG roll.
+///
+/// Rejected candidates contribute zero weight (cannot be picked).
+/// Accepted candidates contribute `selection_weight × weight_mult`.
+fn sample_feature_with_context<'a>(
+    lib: &'a [SubBiomeFeature],
+    rng_u64: u64,
+    require_bleed_over_candidate: bool,
+    cell_pos: (f32, f32),
+    context: &PlacementContext,
+    rules_ctx: &PlacementRulesContext<'_>,
+) -> Option<&'a SubBiomeFeature> {
+    let filtered: Vec<&SubBiomeFeature> = lib
+        .iter()
+        .filter(|f| !require_bleed_over_candidate || f.is_bleed_over_candidate)
+        .collect();
+    if filtered.is_empty() {
+        return None;
+    }
+
+    let weights: Vec<f32> = filtered
+        .iter()
+        .map(|f| {
+            let mult = match evaluate_placement_rules(f, cell_pos, context, rules_ctx) {
+                PlacementRuleOutcome::Pass { weight_mult } => weight_mult,
+                PlacementRuleOutcome::Reject { .. } => 0.0,
+            };
+            f.selection_weight * mult
+        })
+        .collect();
+
+    let total_weight: f32 = weights.iter().sum();
+    if total_weight <= 0.0 {
+        return None;
+    }
+    let roll = ((rng_u64 & 0xFFFF_FFFF) as f32 / (u32::MAX as f32 + 1.0)) * total_weight;
+    let mut acc = 0.0_f32;
+    for (f, w) in filtered.iter().zip(weights.iter()) {
+        acc += w;
+        if roll <= acc {
+            return Some(*f);
+        }
+    }
+    filtered.last().copied()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
