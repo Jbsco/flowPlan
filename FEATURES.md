@@ -207,9 +207,65 @@ In addition to per-biome natural feature libraries, the 3.6.3b design sprint aut
 - **Resupply / interactables** (Phase 4 gameplay hooks): `gas_station`, `bait_shop`, `general_store`, `fishing_camp`, `tackle_shop`, `ferry_dock`. `gas_station` exposes a Phase 4.5 refuel economy anchor — land within range, refuel available, prices scale with remoteness.
 - **Scenery cues** (earned discovery, render-tag-only — no heightfield modification): `natural_meadow`, `alpine_meadow`, `creek_valley`, `scenic_overlook`, `river_bend_viewpoint`, `hot_springs`, `abandoned_homestead`. Photo-mode + mission anchors.
 
-**Placement rule anchors**: developments cluster by nearest-hub tier radii (Major: dwellings within 50 km, farmland within 80 km, gas stations at road intersections within 30 km; down to Remote: maybe one homestead within 10 km). Scenery uses L1 terrain prominence (`scenic_overlook` at steep cells with big view factor; `river_bend_viewpoint` on outside-bend of high-accumulation rivers).
+**Placement rule anchors**: developments cluster by nearest-hub tier radii (Major: dwellings within 50 km, farmland within 80 km, gas stations at road intersections within 30 km; down to Remote: maybe one homestead within 10 km). Scenery uses L1 terrain prominence (`scenic_overlook` at steep cells with big view factor; `river_bend_viewpoint` on outside-bend of high-accumulation rivers). Full schema in [MAPGEN.md § Placement rule vocabulary (PINNED)](MAPGEN.md#placement-rule-vocabulary-pinned).
 
-Full authoring spec: [MAPGEN.md § Layer 3 phase split](MAPGEN.md#layer-3--feature-delta-heightfield-modifications) + agent-memory `feature_delta_expansion_3_6_3`.
+#### Sub-biome feature placement rules (PINNED)
+
+Per-feature rule authoring for all 21 cross-biome features (developments, infrastructure, resupply, scenery). Rules are **AND**-composed: all applicable rules must pass, with weighted rules multiplying selection probability rather than outright rejecting.
+
+Notation: distances in km; tier is the minimum hub tier the rule references; `∅` = rule not used for this feature; `3.6.3c` = rule authored now but not enforced until the road / group engine ships.
+
+**Developments** — cluster near hubs, self-spaced, home-biome-gated with bleed:
+
+| Feature | Home | Bleed | Hub-proximity (km, tier) | Hub-exclusion (km, tier) | Self-spacing (km) | Other rules |
+|---|---|---|---|---|---|---|
+| `farmland_parcel` | HighDesert / CoastalBoreal / Mediterranean | ✓ | Major 80 / Regional 40 / Local 15 | ∅ | 10 | Not in RockyAlpine (not arable); river-valley L1 prominence bias |
+| `dwelling_cluster` | CoastalBoreal | ✓ | Major 50 / Regional 20 / Local 10 | ∅ | 5 | Road-adjacency preferred (3.6.3c) |
+| `remote_compound` | CoastalBoreal | ✓ | Remote 10 | 50, Major | 30 | Bleeds into all non-Mediterranean biomes (off-gridders pick exotic locations) |
+| `ranch` | HighDesert | ✓ | Regional 30 / Local 10 | ∅ | 15 | Bleed to CoastalBoreal = user-pinned "winter ranch" motivating example |
+| `homestead_clearing` | CoastalBoreal | ✓ | Local 15 / Remote 15 | 20, Major | 8 | Single-cabin scale; "almost wilderness" feel |
+
+**Infrastructure** (multi-cell groups — design authored; implementation blocked on 3.6.3c):
+
+| Feature | Kind | Rules |
+|---|---|---|
+| `road_segment` | Multi-cell polyline group | Connects hub ↔ hub + hub ↔ development. Group-adjacency via Voronoi-neighbor chains; hub ends snap to hub cells. Paved in Major/Regional corridors; dirt otherwise. |
+| `dirt_road_segment` | Multi-cell polyline group | Connects Remote/Isolated hubs + development clusters. Narrower corridor (~50 m vs ~200 m for paved); always gets dirt surface class. |
+| `highway_intersection` | Multi-cell node group | Rare — only at Major-hub crossings. 4-way or T-intersection. Visual cue = wider delta + traffic island geometry (3.6.3c). |
+| `rail_corridor_segment` | Multi-cell polyline group | HighDesert only (the `rail_corridor` per-cell RON entry is the existing 3.6.2 placeholder; 3.6.3c converts it to a group). Follows river-valley routes; rarely crosses steep terrain. |
+
+**Resupply / interactables** — most gated on water or road adjacency:
+
+| Feature | Home | Bleed | Hub-proximity | Hub-exclusion | Self-spacing | Other |
+|---|---|---|---|---|---|---|
+| `gas_station` | All land biomes | — | Major 30 / Regional 10 | ∅ | 20 | `requires_road_adjacency` (3.6.3c). Phase 4.5 refuel economy anchor; prices scale with remoteness |
+| `general_store` | All land biomes | — | Regional 10 / Local 5 | ∅ | 15 | Road-adjacency preferred (3.6.3c); basic resupply + small cargo vendor |
+| `fishing_camp` | CoastalBoreal | ✓ | ∅ | 20, Major | 20 | `water_adjacency: Required` (shore or lake); mission-origin anchor |
+| `bait_shop` | CoastalBoreal | ✗ | Local 5 | ∅ | 10 | `water_adjacency: Required`; fishing-village locality |
+| `tackle_shop` | CoastalBoreal | ✗ | Local 2 | ∅ | 10 | `water_adjacency: Required`; sells gear + license |
+| `ferry_dock` | Mediterranean | ✗ | Regional 5 / Local 5 | ∅ | 30 | `water_adjacency: Required`; commercial pier, Phase 4 mission anchor |
+
+**Scenery cues** — render-tag-only (no heightfield delta), weighted by prominence + hydrology coupling:
+
+| Feature | Home | Bleed | Prominence / hydrology coupling | Self-spacing | Other |
+|---|---|---|---|---|---|
+| `natural_meadow` | CoastalBoreal | ✓ | Low-prominence (flat, open) | 5 | No hub proximity rule; appears in any biome |
+| `alpine_meadow` | RockyAlpine | ✓ | High-altitude gate (already in `altitude_range_m`) | 3 | Short bloom window ties to seasonal overlay (3.6.4) |
+| `creek_valley` | CoastalBoreal | ✓ | Hydrology coupling: `Creek` class required | 2 | Narrow drainage — flora density bonus |
+| `scenic_overlook` | RockyAlpine | ✗ | Prominence attractor: slope ≥ 20°, view-distance ≥ 10 km | 8 | Photo-mode anchor (5.5); no home-biome bleed — RockyAlpine-locked |
+| `river_bend_viewpoint` | CoastalBoreal | ✓ | Hydrology coupling: `RiverBend` class, min accumulation 500 | 10 | Outside-bend of high-accumulation rivers; water-landing candidate |
+| `hot_springs` | RockyAlpine | ✓ | Climate window: temperature_c (min, 5.0) — cold-climate gate | 50 | Very rare discovery; photogenic + mission anchor |
+| `abandoned_homestead` | CoastalBoreal | ✓ | ∅ | 20 | `hub_exclusion: 30, any tier` — "abandoned" means it wasn't viable near civilization; treasure / lore anchor |
+
+**3.6.3b authoring status per feature:**
+
+- ✅ **Shipped to RON** (14 features): `ranch`, `remote_compound`, `homestead_clearing`, `natural_meadow`, `alpine_meadow`, `creek_valley`, `scenic_overlook`, `river_bend_viewpoint`, `hot_springs`, `abandoned_homestead`, `fishing_camp`, `tackle_shop`, `bait_shop`, `ferry_dock` — carry placement constraints + palettes (home + adaptation_per_host for bleed-over candidates) + render-primitive composition comments.
+- ⏳ **Pending RON authoring** (2 per-cell): `farmland_parcel`, `dwelling_cluster` + `gas_station`, `general_store` — authorable today against existing schema; `requires_road_adjacency` will be unenforced until 3.6.3c. Author in the next 3.6.3b pass or hold for 3.6.3c implementation.
+- ⏳ **Deferred to 3.6.3c** (infrastructure): `road_segment`, `dirt_road_segment`, `highway_intersection`, `rail_corridor_segment` — multi-cell groups require the engine.
+
+**Evaluation note**: all 14 shipped features use the pre-3.6.3b `SubBiomeFeature` schema (no `placement_rules` struct yet). Their `selection_weight` field provides the initial density calibration; per-tier hub-proximity weighting + spatial-spacing + road-adjacency gates land in 3.6.3c when the `PlacementRules` struct ships. Until then, the table above is the design contract — 3.6.3c implementation reads these rules and wires evaluation.
+
+Full schema + evaluation-order spec: [MAPGEN.md § Placement rule vocabulary (PINNED)](MAPGEN.md#placement-rule-vocabulary-pinned) + agent-memory `feature_delta_expansion_3_6_3`.
 
 ### Sub-biome feature overlap with palette adaptation
 

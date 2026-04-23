@@ -954,7 +954,7 @@ Split (pinned 2026-04-23 per user direction, detail in [MAPGEN.md § Layer 3 pha
   - **Scenery cues** (render-tag-only, no heightfield delta): `natural_meadow` ✅, `alpine_meadow` ✅, `creek_valley` ✅, `scenic_overlook` ✅, `river_bend_viewpoint` ✅, `hot_springs` ✅, `abandoned_homestead` ✅. **Complete.**
 - [x] **Palette-adaptation mechanism (PINNED)** authored in MAPGEN § Layer 3 + memory `palette_adaptation_mechanism`. RON authoring surface: `home_palette: Option<Palette>` + `adaptation_per_host: HashMap<String, Palette>` shipped on `SubBiomeFeature`.
 - [x] **Simple-primitives render direction (PINNED)** authored in MAPGEN § Layer 3 + memory `simple_primitives_render_direction`. Per-feature primitive composition recorded in RON comments.
-- [ ] **Placement rule design** (Task #215): hub-proximity radii per tier (Major: 50 km dwellings / 80 km farmland / 30 km gas stations; down to Remote: single homestead 10 km); biome compatibility per feature; scenery "earned reward" placement using L1 prominence + hydrology.
+- [x] **Placement rule design** (Task #215): 7-category schema (hub_proximity, hub_exclusion, min_self_spacing_km, requires_road_adjacency, prominence_attractor, hydrology_coupling, climate_window) + evaluation order + per-feature rules for all 21 cross-biome features authored as **design spec** in [MAPGEN.md § Placement rule vocabulary (PINNED)](MAPGEN.md#placement-rule-vocabulary-pinned) + [FEATURES.md § Sub-biome feature placement rules (PINNED)](FEATURES.md#sub-biome-feature-placement-rules-pinned). `PlacementRules` RON struct + evaluation implementation land in 3.6.3c.
 - [ ] User review / iteration on the full catalog before 3.6.3c implementation.
 
 **3.6.3c — multi-cell group engine + development/scenery deltas (code):**

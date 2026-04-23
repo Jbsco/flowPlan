@@ -595,6 +595,71 @@ Variation deterministic per `(master_seed, cell_id)` — same cell always produc
 
 Memory reference: `simple_primitives_render_direction`. Upgrade path: individual features swap primitives for authored meshes per setpiece without engine changes.
 
+#### Placement rule vocabulary (PINNED)
+
+User-confirmed authoring schema (2026-04-23): placement rules for cross-biome features (developments / resupply / scenery) go beyond the per-cell `PlacementContext` constraints shipped in 3.6.2 (slope / roughness / water-adjacency / altitude / selection-weight / bleed-over). Six additional rule categories cover the spatial-relationship and environment-coupling concerns that aren't per-cell-local.
+
+**Categories:**
+
+| Rule | Purpose | Evaluated at |
+|---|---|---|
+| `hub_proximity` | Developments / resupply cluster near hubs by tier. Per-tier max-distance attracts placement probability. | Bake time (spatial query against hub catalog) |
+| `hub_exclusion` | "Wilderness" features (remote_compound, abandoned_homestead) stay at least `min_distance_km` from hubs at or above `min_tier`. | Bake time |
+| `min_self_spacing_km` | Same feature type not within X km of itself — prevents clustering of rare/unique features (hot_springs 50 km; scenic_overlook 8 km). | Bake time (spatial-hash self-query) |
+| `requires_road_adjacency` | Feature needs adjacency to a road cell. In 3.6.3b this evaluates to "always false" (no roads yet); activates in 3.6.3c when `FeatureGroup` engine ships. | Bake time (3.6.3c onward) |
+| `prominence_attractor` | Scenery features weighted by terrain prominence (slope + view-distance). Steep cells with open horizon attract `scenic_overlook`. | Bake time (per-cell L1 + sampling) |
+| `hydrology_coupling` | Features that require specific water classes — `river_bend_viewpoint` needs outside-bend of high-accumulation river; `creek_valley` needs creek-class water in cell. | Bake time (hydrology graph query) |
+| `climate_window` | Features with narrow climate envelopes — `hot_springs` requires cold-climate contrast (authored as temperature range); gates placement. | Bake time (climate sampler) |
+
+**Evaluation order (bake time):**
+
+1. Per-cell `PlacementContext` constraints pass (3.6.2 mechanism — slope/roughness/water/altitude).
+2. Per-cell climate + hydrology coupling rules pass (this layer).
+3. Spatial-relationship rules (hub-proximity attractor boost, hub-exclusion reject, min-self-spacing reject, road-adjacency require).
+4. Weighted-RNG selection from surviving candidates (3.6.2 mechanism).
+
+Rules compose via AND: all applicable rules must pass. Weighted rules (`hub_proximity`, `prominence_attractor`) multiply the selection weight rather than outright rejecting — a cell far from any hub can still host a development, just at lower probability.
+
+**Authoring surface (per feature in RON, via `PlacementRules` sub-struct — 3.6.3c implementation):**
+
+```ron
+placement_rules: (
+    // Attract placement within N km of hubs at a given tier.
+    // Missing tier = no attractor at that tier. Weighted: cells inside
+    // the radius get selection-weight × attractor_multiplier (2-5×).
+    hub_proximity_km_per_tier: { "Major": 50.0, "Regional": 20.0 },
+    // Exclude placement within N km of hubs at or above the given tier.
+    // 0.0 or absent = no exclusion.
+    hub_exclusion_min_km: 20.0,
+    hub_exclusion_min_tier: "Major",
+    // Minimum spacing from same feature type. 0.0 = no constraint.
+    min_self_spacing_km: 15.0,
+    // Road adjacency gate — enforced only when 3.6.3c road engine ships.
+    // Until then, authored but not enforced. Features gated on roads
+    // (gas_station, general_store) will be rare in 3.6.3b preview builds.
+    requires_road_adjacency: false,
+    // Prominence attractor (scenery). Empty = not used.
+    prominence_min_slope_deg: 20.0,
+    prominence_min_view_distance_km: 10.0,
+    // Hydrology coupling — feature requires specific water-class in cell.
+    // One of: "Creek", "River", "LakeEdge", "RiverBend", "DeltaFan".
+    // None = no coupling.
+    hydrology_required_class: Some("RiverBend"),
+    hydrology_min_accumulation: Some(500.0),
+    // Climate envelope. Each (min, max) range in its physical units.
+    // None = no gate for that variable.
+    climate_temp_range_c: Some((-10.0, 5.0)),
+    climate_humidity_range: None,
+    climate_precipitation_range: None,
+),
+```
+
+**3.6.3b posture (design-only authoring)**: the `PlacementRules` struct is documented in this section as the *authoring target*. It is NOT shipped as a struct field on `SubBiomeFeature` yet — current RON entries use only the pre-3.6.3b fields (slope / roughness / water / altitude / selection-weight / bleed-over / palette). Full-spec placement rules per-feature live in **[FEATURES.md § Sub-biome feature placement rules](FEATURES.md#sub-biome-feature-placement-rules-pinned)** as the design of record; 3.6.3c implementation adds the struct + parses + evaluates them.
+
+**Why split design from implementation**: placement-rule evaluation requires the multi-cell group engine (3.6.3c) for road adjacency, the hub catalog's tier-indexed spatial query (exists since 3.6.1e), climate sampler at bake time (exists), and hydrology-graph queries (exists). Ship the spec now so 3.6.3c implementation has a concrete target; the struct lands then.
+
+**Variation & rarity**: rules tune *density* by category. Scenery features use aggressive `min_self_spacing_km` (5-50 km) so they stay rare discoveries. Developments use moderate spacing (5-30 km) + hub-proximity attractors so they cluster believably. Wilderness-themed features use `hub_exclusion` to keep their "off-grid" identity.
+
 ### Composition properties (why this separation matters)
 
 - **Independent development.** Each layer lands on a separate milestone. Layer 1 = Phase 3.6.1; Layer 2 = Phase 3.6.2; Layer 3 = Phase 3.6.3 + 3.6.4.
