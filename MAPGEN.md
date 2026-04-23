@@ -559,19 +559,60 @@ Placement rules authored alongside:
 
 `gas_station` cells shipped in 3.6.3b/c expose a gameplay anchor for Phase 4.5 missions: when the player aircraft lands within N m of a `gas_station` cell + road adjacency, refuel is available. Prices scale with remoteness (Major hubs cheap; remote gas stations expensive).
 
-#### Palette adaptation mechanism (PINNED)
+#### Palette adaptation mechanism (PINNED — REVISED 2026-04-23)
 
-User-confirmed mechanic (2026-04-23): bleed-over features undergo **palette blending from home → host-adapted based on biome-weight blend factor**. Turns rare cross-biome placements into distinctive player experiences (winter ranch, desert fjord) rather than categorical tags.
+User-confirmed mechanic: bleed-over features undergo **palette adaptation from home → host-adapted based on biome-weight blend factor**. Turns rare cross-biome placements into distinctive player experiences (winter ranch, desert fjord) rather than categorical tags.
 
-**Blend factor**: `smoothstep(0.1, 0.9, source_weight)` where `source_weight` is the bleed-over source biome's weight at the cell. 1.0 at biome core → full home palette; 0.0 deep in host → fully host-adapted.
+**Architecture: biome receives + feature categorizes (+ optional explicit override).** The *host biome* declares how it impresses its character on imported features via per-category HSV shifts. Each *feature* declares a palette category (what it visually IS). Features retain the option to author an explicit per-host override when the biome default doesn't fit.
 
-**Authoring surface per feature in RON**:
-- `home_palette: (primary, secondary, accent)` — 3-tuple colors native to the feature's parent biome
-- `adaptation_per_host: { "RockyAlpine": (...), "CoastalBoreal": (...), ... }` — per-host-biome override palette; missing entry = feature excluded from bleed-over to that host
+This flips an earlier (2026-04-23 initial draft) direction where each feature authored N-biome adaptations. The biome-receives direction is architecturally cleaner: scales as N features + M biomes (not N × M), enforces biome visual cohesion ("everything in HighDesert looks HighDesert"), and matches real climate semantics (a ranch in CoastalBoreal gets moss, not exported HighDesert dryness).
 
-**Rendering**: `render_color = lerp(adaptation_per_host[host], home_palette, blend_factor)`. Ship: compute `blend_factor` in `composed::WorldRefs`, expose to shader; shader lerps.
+**Three-tier resolution order** (see `sub_biome::adapt_palette`):
 
-**Visual-bench artifact**: `palette_bleed_over_{crop}.png` showing palette gradient across transition-zone cells, deferred to 3.6.3c render integration.
+1. **Explicit override** — `feature.adaptation_per_host[host]` wins if present. Authored palette returned as-is, no HSV shift applied.
+2. **Biome receiving-adaptation, per-category** — `biome_receiving_adaptations[host][feature.palette_category]`. Biome's HSV shift applied to feature's home_palette.
+3. **Biome receiving-adaptation, default fallback** — `biome_receiving_adaptations[host]["default"]`. Same mechanism, catch-all category.
+4. **No adaptation authored** — return the unmodified `home_palette`.
+
+**Blend factor** (applies to the final adapted palette from any tier above):
+```
+blend_factor = smoothstep(0.1, 0.9, source_weight)
+render_color = lerp(adapted_palette, home_palette, blend_factor)
+```
+Where `source_weight` is the bleed-over source biome's weight at the cell. 1.0 at biome core → full home palette; 0.0 deep in host → fully adapted. Computed in `composed::WorldRefs`, shader lerps.
+
+**HSV-shift model** (per biome × per category):
+- `hue_shift_deg: f32` — positive = warmer (toward yellow/red); negative = cooler (toward blue/cyan)
+- `saturation_mult: f32` — 1.0 = unchanged; 0.5 = half saturation; 2.0 = double
+- `value_mult: f32` — 1.0 = unchanged; < 1 darker; > 1 brighter
+
+Applied independently to `primary`, `secondary`, `accent` of the home_palette.
+
+**Palette categories**: `building_wooden`, `building_masonry`, `vegetation`, `stone`, `water`, `signage`, `textile`, `default`. Features tag themselves with `palette_category: Some(BuildingWooden)` etc. in RON; `None` = uses the biome's `"default"` shift.
+
+**TODO (3.6.4+): compositing overlays.** Snow-dusting on roofs, moss on stonework, algae on docks, etc. are compositing operations (blend a texture / color onto specific palette slots), not HSV shifts. Currently not supported by the schema. Planned for the flora/decoration pass — will live in the render layer as an overlay system independent of palette adaptation, so HSV-adapted palettes remain clean per-primitive colors.
+
+**Authoring surface per feature in RON** (lean — 2 fields instead of 4):
+```ron
+home_palette: Some((primary: (R, G, B), secondary: (R, G, B), accent: (R, G, B))),
+palette_category: Some(BuildingWooden),   // or None = use biome's "default"
+adaptation_per_host: {},                  // optional; empty = use biome-receiving default
+```
+
+**Authoring surface per biome in RON** (one-time table):
+```ron
+biome_receiving_adaptations: {
+    "HighDesert": {
+        "building_wooden": (hue_shift_deg: 8.0, saturation_mult: 1.10, value_mult: 1.15),
+        "vegetation":      (hue_shift_deg: 15.0, saturation_mult: 0.60, value_mult: 1.10),
+        "default":         (hue_shift_deg: 5.0, saturation_mult: 1.00, value_mult: 1.05),
+        ...
+    },
+    ...
+}
+```
+
+**Visual-bench artifact**: `palette_bleed_over_{crop}.png` showing adapted palettes across transition-zone cells; deferred to 3.6.3c render integration.
 
 Memory reference: `palette_adaptation_mechanism`.
 

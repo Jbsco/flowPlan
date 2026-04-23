@@ -66,9 +66,10 @@ pub enum WaterAdjacency {
 /// RGB color triple (0-255 per channel). Authored in RON as `(r, g, b)`.
 pub type PaletteColor = (u8, u8, u8);
 
-/// 3-color palette: primary (dominant), secondary (supporting), accent
-/// (highlight). Features render as simple primitives colored by these
-/// palette entries — see memory `simple_primitives_render_direction`.
+/// 3-color palette: primary, secondary, accent.
+///
+/// Features render as simple primitives colored by these palette
+/// entries — see memory `simple_primitives_render_direction`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 pub struct Palette {
     /// Primary color — dominant visual tone (building walls, tree
@@ -81,6 +82,90 @@ pub struct Palette {
     /// Accent color — highlights (roofing, flowers, trim contrast).
     #[serde(default)]
     pub accent: PaletteColor,
+}
+
+/// Palette category — classifies a feature's dominant visual character.
+///
+/// The biome-receiving-adaptation table applies a category-appropriate
+/// HSV shift when bleed-over places the feature in a host biome. See
+/// memory `palette_adaptation_mechanism`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+pub enum PaletteCategory {
+    /// Wooden buildings — cabins, sheds, barns, docks, wooden stores.
+    BuildingWooden,
+    /// Masonry / concrete / metal — gas-station canopies, silos,
+    /// permanent commercial / industrial structures.
+    BuildingMasonry,
+    /// Vegetation-dominated features — meadows, farmland, creek valleys
+    /// where greens / grasses carry the palette.
+    Vegetation,
+    /// Rock / stone features — scenic overlooks, cliff coasts.
+    Stone,
+    /// Water-dominated features — river-bend viewpoints, hot springs.
+    Water,
+    /// Commercial signage / branded features — gas stations, stores
+    /// where the branded identity is the dominant visual.
+    Signage,
+    /// Fabric / weathered-textile features — sails, awnings, banners.
+    /// Currently reserved; use once a feature needs it.
+    Textile,
+    /// Default catch-all — features without a specific category.
+    Default,
+}
+
+impl PaletteCategory {
+    /// String key used in the biome-receiving-adaptation RON table.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::BuildingWooden => "building_wooden",
+            Self::BuildingMasonry => "building_masonry",
+            Self::Vegetation => "vegetation",
+            Self::Stone => "stone",
+            Self::Water => "water",
+            Self::Signage => "signage",
+            Self::Textile => "textile",
+            Self::Default => "default",
+        }
+    }
+}
+
+/// HSV-space shift applied to a foreign feature's palette.
+///
+/// Captures the biome's visual character impressing itself on imports
+/// when bleed-over places a feature in a non-home biome.
+///
+/// TODO(3.6.4+): extend with compositing overlays for snow-dusting,
+/// moss-on-stonework, algae-on-docks, etc. For now all adaptation is
+/// pure HSV shift; overlays live in the render / flora layer when they
+/// arrive. Leaving a placeholder comment here documents the extension
+/// point.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+pub struct PaletteHsvShift {
+    /// Hue rotation in degrees (positive = toward yellow/red, negative
+    /// = toward blue/cyan). Applied modulo 360°.
+    #[serde(default)]
+    pub hue_shift_deg: f32,
+    /// Saturation multiplier (1.0 = unchanged, 0.5 = halve, 2.0 = double).
+    #[serde(default = "one_f32")]
+    pub saturation_mult: f32,
+    /// Value (brightness) multiplier (1.0 = unchanged).
+    #[serde(default = "one_f32")]
+    pub value_mult: f32,
+}
+
+fn one_f32() -> f32 {
+    1.0
+}
+
+impl Default for PaletteHsvShift {
+    fn default() -> Self {
+        Self {
+            hue_shift_deg: 0.0,
+            saturation_mult: 1.0,
+            value_mult: 1.0,
+        }
+    }
 }
 
 /// Single sub-biome feature catalog entry.
@@ -106,20 +191,29 @@ pub struct SubBiomeFeature {
     /// via biome-derived fallback colors until palette authoring lands.
     #[serde(default)]
     pub home_palette: Option<Palette>,
-    /// Per-host-biome adaptation palettes. Keys are
-    /// `BiomeClass` names (`"HighDesert"`, `"RockyAlpine"`, etc.).
-    /// When this feature appears in a host biome via bleed-over, the
-    /// render color blends from `home_palette` toward
-    /// `adaptation_per_host[host]` per `blend_factor` (see memory
-    /// `palette_adaptation_mechanism`).
+    /// Per-host-biome adaptation palettes — **explicit overrides**.
+    /// Keys are `BiomeClass` names (`"HighDesert"`, `"RockyAlpine"`,
+    /// etc.). When present, wins over the biome-receiving default.
+    /// Leave empty to fall through to the biome's default HSV shift
+    /// (see [`SubBiomeLibraries::biome_receiving_adaptations`]).
     #[serde(default)]
     pub adaptation_per_host: HashMap<String, Palette>,
+    /// Palette category — classifies the feature's dominant visual so
+    /// the biome-receiving table can apply a category-appropriate HSV
+    /// shift. `None` = uses the biome's `"default"` fallback shift.
+    #[serde(default)]
+    pub palette_category: Option<PaletteCategory>,
 }
 
 /// Root RON structure.
 #[derive(Debug, Deserialize)]
 struct SubBiomeFeaturesRon {
     biomes: HashMap<String, Vec<SubBiomeFeature>>,
+    /// Per-biome receiving-adaptation tables — keyed by biome name,
+    /// then by palette-category key (`"building_wooden"`, `"stone"`,
+    /// etc. or `"default"`).
+    #[serde(default)]
+    biome_receiving_adaptations: HashMap<String, HashMap<String, PaletteHsvShift>>,
 }
 
 /// Per-biome feature libraries, parsed once from the embedded RON.
@@ -132,6 +226,9 @@ pub struct SubBiomeLibraries {
     coastal_boreal: Vec<SubBiomeFeature>,
     mediterranean: Vec<SubBiomeFeature>,
     oceanic: Vec<SubBiomeFeature>,
+    /// Per-biome receiving-adaptation HSV-shift tables, used by
+    /// [`adapt_palette`] when a feature bleeds into a host biome.
+    biome_receiving_adaptations: HashMap<BiomeClass, HashMap<String, PaletteHsvShift>>,
 }
 
 impl SubBiomeLibraries {
@@ -148,6 +245,15 @@ impl SubBiomeLibraries {
     fn load() -> Self {
         let root: SubBiomeFeaturesRon = ron::from_str(SUB_BIOME_FEATURES_RON)
             .unwrap_or_else(|e| panic!("failed to parse sub_biome_features.ron: {e}"));
+
+        let mut biome_receiving_adaptations: HashMap<BiomeClass, HashMap<String, PaletteHsvShift>> =
+            HashMap::new();
+        for (biome_key, table) in root.biome_receiving_adaptations {
+            if let Some(biome) = parse_biome_key(&biome_key) {
+                biome_receiving_adaptations.insert(biome, table);
+            }
+        }
+
         Self {
             high_desert: root.biomes.get("HighDesert").cloned().unwrap_or_default(),
             rocky_alpine: root.biomes.get("RockyAlpine").cloned().unwrap_or_default(),
@@ -162,7 +268,18 @@ impl SubBiomeLibraries {
                 .cloned()
                 .unwrap_or_default(),
             oceanic: root.biomes.get("Oceanic").cloned().unwrap_or_default(),
+            biome_receiving_adaptations,
         }
+    }
+
+    /// Receiving-adaptation table for a given host biome, if authored.
+    /// Returned map keys are palette-category strings (or `"default"`).
+    #[must_use]
+    pub fn receiving_adaptation(
+        &self,
+        host: BiomeClass,
+    ) -> Option<&HashMap<String, PaletteHsvShift>> {
+        self.biome_receiving_adaptations.get(&host)
     }
 
     /// The Oceanic feature library (for sea cells below
@@ -535,6 +652,151 @@ fn sample_feature(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Palette adaptation — biome-receiving HSV shift + explicit override
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Parse a biome-name string (as authored in RON) into [`BiomeClass`].
+/// Returns `None` for unknown biomes — caller drops the entry so a
+/// typo doesn't silently shadow a real biome.
+fn parse_biome_key(key: &str) -> Option<BiomeClass> {
+    match key {
+        "HighDesert" => Some(BiomeClass::HighDesert),
+        "RockyAlpine" => Some(BiomeClass::RockyAlpine),
+        "CoastalBoreal" => Some(BiomeClass::CoastalBoreal),
+        "MediterraneanArchipelago" => Some(BiomeClass::MediterraneanArchipelago),
+        _ => None,
+    }
+}
+
+/// Stringified [`BiomeClass`] for looking into per-feature
+/// `adaptation_per_host` overrides.
+const fn biome_key(b: BiomeClass) -> &'static str {
+    match b {
+        BiomeClass::HighDesert => "HighDesert",
+        BiomeClass::RockyAlpine => "RockyAlpine",
+        BiomeClass::CoastalBoreal => "CoastalBoreal",
+        BiomeClass::MediterraneanArchipelago => "MediterraneanArchipelago",
+    }
+}
+
+/// Resolve the adapted palette for a feature appearing in a `host`
+/// biome. Three-tier resolution order:
+///
+/// 1. Feature's `adaptation_per_host[host]` — explicit per-feature
+///    override (from 3.6.3b authoring).
+/// 2. Biome's receiving-adaptation table
+///    `biome_receiving_adaptations[host][feature.palette_category]` —
+///    per-category biome default (from 3.6.3b authoring — this is the
+///    new primary mechanism).
+/// 3. Biome's receiving-adaptation fallback
+///    `biome_receiving_adaptations[host]["default"]`.
+/// 4. If none apply, return the unmodified `home_palette` (feature
+///    renders in home colors — no adaptation).
+///
+/// Returns the default palette if the feature has no `home_palette`
+/// (render falls back to biome-derived colors — pre-palette-authoring
+/// degradation path).
+#[must_use]
+pub fn adapt_palette(
+    feature: &SubBiomeFeature,
+    host: BiomeClass,
+    libraries: &SubBiomeLibraries,
+) -> Palette {
+    let Some(home) = feature.home_palette else {
+        return Palette::default();
+    };
+
+    // Tier 1: explicit per-feature override
+    if let Some(over) = feature.adaptation_per_host.get(biome_key(host)) {
+        return *over;
+    }
+
+    // Tier 2 + 3: biome receiving-adaptation
+    if let Some(table) = libraries.receiving_adaptation(host) {
+        let category_key = feature
+            .palette_category
+            .map_or("default", PaletteCategory::key);
+        let shift = table
+            .get(category_key)
+            .or_else(|| table.get("default"))
+            .copied()
+            .unwrap_or_default();
+        return apply_hsv_shift(home, shift);
+    }
+
+    // Tier 4: no adaptation authored — render in home colors
+    home
+}
+
+/// Apply an HSV shift to every slot of a palette.
+#[must_use]
+pub fn apply_hsv_shift(p: Palette, shift: PaletteHsvShift) -> Palette {
+    Palette {
+        primary: apply_hsv_shift_color(p.primary, shift),
+        secondary: apply_hsv_shift_color(p.secondary, shift),
+        accent: apply_hsv_shift_color(p.accent, shift),
+    }
+}
+
+fn apply_hsv_shift_color(rgb: PaletteColor, shift: PaletteHsvShift) -> PaletteColor {
+    let (h, s, v) = rgb_to_hsv(rgb);
+    let h_new = (h + shift.hue_shift_deg).rem_euclid(360.0);
+    let s_new = (s * shift.saturation_mult).clamp(0.0, 1.0);
+    let v_new = (v * shift.value_mult).clamp(0.0, 1.0);
+    hsv_to_rgb((h_new, s_new, v_new))
+}
+
+/// RGB (0-255 per channel) → HSV (hue in degrees 0-360; sat + val in 0-1).
+// Single-char names r/g/b/h/s/v/max/min/delta follow color-math literature
+// convention — introducing descriptive names here would fight the reader's
+// mental model. Scope-limited allow; no crate-wide suppression.
+#[allow(clippy::float_cmp, clippy::many_single_char_names)]
+fn rgb_to_hsv(rgb: PaletteColor) -> (f32, f32, f32) {
+    let r = f32::from(rgb.0) / 255.0;
+    let g = f32::from(rgb.1) / 255.0;
+    let b = f32::from(rgb.2) / 255.0;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+    let v = max;
+    let s = if max > 0.0 { delta / max } else { 0.0 };
+    let h = if delta == 0.0 {
+        0.0
+    } else if max == r {
+        60.0 * (((g - b) / delta).rem_euclid(6.0))
+    } else if max == g {
+        60.0 * ((b - r) / delta + 2.0)
+    } else {
+        60.0 * ((r - g) / delta + 4.0)
+    };
+    (h, s, v)
+}
+
+/// HSV → RGB (0-255 per channel).
+// Single-char names follow color-math convention; see rgb_to_hsv.
+#[allow(clippy::many_single_char_names)]
+fn hsv_to_rgb(hsv: (f32, f32, f32)) -> PaletteColor {
+    let (h, s, v) = hsv;
+    let c = v * s;
+    let h_prime = h / 60.0;
+    let x = c * (1.0 - (h_prime.rem_euclid(2.0) - 1.0).abs());
+    let (r1, g1, b1) = match h_prime.floor() as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    // `clamp(0.0, 255.0)` guarantees the f32 is in [0, 255] before cast;
+    // sign-loss cannot occur. Inline allow per CODING_RULES.md §49.
+    #[allow(clippy::cast_sign_loss)]
+    let to_u8 = |x: f32| ((x + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    (to_u8(r1), to_u8(g1), to_u8(b1))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Helper: biome weights at a coordinate
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -600,6 +862,7 @@ mod tests {
             is_bleed_over_candidate: false,
             home_palette: None,
             adaptation_per_host: HashMap::new(),
+            palette_category: None,
         };
         // All pass.
         let ok = PlacementContext {
@@ -648,6 +911,7 @@ mod tests {
             is_bleed_over_candidate: false,
             home_palette: None,
             adaptation_per_host: HashMap::new(),
+            palette_category: None,
         };
         let forb = SubBiomeFeature {
             water_adjacency: WaterAdjacency::Forbidden,
@@ -745,6 +1009,161 @@ mod tests {
         assert_eq!(a.feature_id, b.feature_id);
         assert_eq!(a.source, b.source);
         assert_eq!(a.is_fallback, b.is_fallback);
+    }
+
+    #[test]
+    fn biome_receiving_adaptations_authored() {
+        // All 4 land biomes must have a receiving-adaptation table
+        // with at least a `"default"` entry. 3.6.3b catalog authoring.
+        let libs = SubBiomeLibraries::shared();
+        for biome in [
+            BiomeClass::HighDesert,
+            BiomeClass::RockyAlpine,
+            BiomeClass::CoastalBoreal,
+            BiomeClass::MediterraneanArchipelago,
+        ] {
+            let table = libs
+                .receiving_adaptation(biome)
+                .unwrap_or_else(|| panic!("{biome:?} missing receiving-adaptation table"));
+            assert!(
+                table.contains_key("default"),
+                "{biome:?} receiving-adaptation table missing `default` fallback"
+            );
+        }
+    }
+
+    #[test]
+    fn adapt_palette_resolves_explicit_override_first() {
+        // Tier 1: feature's adaptation_per_host entry wins over biome
+        // receiving-adaptation.
+        let mut over = HashMap::new();
+        over.insert(
+            "RockyAlpine".to_string(),
+            Palette {
+                primary: (1, 2, 3),
+                secondary: (4, 5, 6),
+                accent: (7, 8, 9),
+            },
+        );
+        let feature = SubBiomeFeature {
+            id: "t".into(),
+            slope_tolerance_max_deg: 90.0,
+            roughness_tolerance_m: 1e6,
+            water_adjacency: WaterAdjacency::None,
+            altitude_range_m: (-1e6, 1e6),
+            selection_weight: 1.0,
+            is_bleed_over_candidate: true,
+            home_palette: Some(Palette {
+                primary: (100, 100, 100),
+                secondary: (100, 100, 100),
+                accent: (100, 100, 100),
+            }),
+            adaptation_per_host: over,
+            palette_category: Some(PaletteCategory::BuildingWooden),
+        };
+        let libs = SubBiomeLibraries::shared();
+        let adapted = adapt_palette(&feature, BiomeClass::RockyAlpine, libs);
+        // Override wins — exact RGB returned, not an HSV-shifted version.
+        assert_eq!(adapted.primary, (1, 2, 3));
+        assert_eq!(adapted.secondary, (4, 5, 6));
+        assert_eq!(adapted.accent, (7, 8, 9));
+    }
+
+    #[test]
+    fn adapt_palette_falls_through_to_biome_default() {
+        // Tier 2/3: feature without override uses biome receiving-
+        // adaptation per category. With category=BuildingWooden in
+        // RockyAlpine, HSV shifts are nonzero (hue −5°, sat 0.80,
+        // value 0.90), so the adapted palette differs from home.
+        let feature = SubBiomeFeature {
+            id: "t".into(),
+            slope_tolerance_max_deg: 90.0,
+            roughness_tolerance_m: 1e6,
+            water_adjacency: WaterAdjacency::None,
+            altitude_range_m: (-1e6, 1e6),
+            selection_weight: 1.0,
+            is_bleed_over_candidate: true,
+            home_palette: Some(Palette {
+                primary: (140, 95, 65),
+                secondary: (165, 145, 105),
+                accent: (95, 80, 65),
+            }),
+            adaptation_per_host: HashMap::new(),
+            palette_category: Some(PaletteCategory::BuildingWooden),
+        };
+        let libs = SubBiomeLibraries::shared();
+        let adapted = adapt_palette(&feature, BiomeClass::RockyAlpine, libs);
+        let home = feature.home_palette.unwrap();
+        // RA BuildingWooden shift reduces value → darker. Adapted differs.
+        assert!(
+            adapted.primary != home.primary,
+            "expected HSV shift to modify primary, got {:?} == {:?}",
+            adapted.primary,
+            home.primary
+        );
+    }
+
+    #[test]
+    fn adapt_palette_uses_default_when_category_none() {
+        // Feature with palette_category=None falls to biome's "default"
+        // entry in its receiving table. All 4 biomes authored "default".
+        let feature = SubBiomeFeature {
+            id: "t".into(),
+            slope_tolerance_max_deg: 90.0,
+            roughness_tolerance_m: 1e6,
+            water_adjacency: WaterAdjacency::None,
+            altitude_range_m: (-1e6, 1e6),
+            selection_weight: 1.0,
+            is_bleed_over_candidate: true,
+            home_palette: Some(Palette {
+                primary: (100, 120, 80),
+                secondary: (150, 150, 120),
+                accent: (180, 160, 110),
+            }),
+            adaptation_per_host: HashMap::new(),
+            palette_category: None,
+        };
+        let libs = SubBiomeLibraries::shared();
+        let adapted = adapt_palette(&feature, BiomeClass::HighDesert, libs);
+        let home = feature.home_palette.unwrap();
+        // HD default shift (hue +5, sat 1.0, value 1.05) changes colors.
+        assert!(adapted.primary != home.primary);
+    }
+
+    #[test]
+    fn adapt_palette_no_home_returns_default_palette() {
+        let feature = SubBiomeFeature {
+            id: "t".into(),
+            slope_tolerance_max_deg: 90.0,
+            roughness_tolerance_m: 1e6,
+            water_adjacency: WaterAdjacency::None,
+            altitude_range_m: (-1e6, 1e6),
+            selection_weight: 1.0,
+            is_bleed_over_candidate: true,
+            home_palette: None,
+            adaptation_per_host: HashMap::new(),
+            palette_category: None,
+        };
+        let libs = SubBiomeLibraries::shared();
+        let adapted = adapt_palette(&feature, BiomeClass::HighDesert, libs);
+        assert_eq!(adapted, Palette::default());
+    }
+
+    #[test]
+    fn hsv_zero_shift_is_identity_within_rounding() {
+        let colors: &[PaletteColor] =
+            &[(100, 50, 20), (200, 200, 200), (50, 150, 250), (255, 0, 0)];
+        let zero_shift = PaletteHsvShift::default();
+        for &c in colors {
+            let shifted = apply_hsv_shift_color(c, zero_shift);
+            // Allow ±2/255 rounding tolerance per channel.
+            assert!(
+                (i32::from(shifted.0) - i32::from(c.0)).abs() <= 2
+                    && (i32::from(shifted.1) - i32::from(c.1)).abs() <= 2
+                    && (i32::from(shifted.2) - i32::from(c.2)).abs() <= 2,
+                "hsv roundtrip drift: {c:?} -> {shifted:?}"
+            );
+        }
     }
 
     #[test]

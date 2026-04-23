@@ -186,6 +186,7 @@
                         accent: (210, 195, 135),
                     ),
                 },
+                palette_category: Some(Vegetation),
             ),
             // Working ranch — barn + outbuildings + corral + dirt yard
             // + dry-grass paddock. Bleed-over enables the "winter ranch"
@@ -224,6 +225,7 @@
                         accent: (160, 90, 65),
                     ),
                 },
+                palette_category: Some(BuildingWooden),
             ),
         ],
 
@@ -338,6 +340,7 @@
                         accent: (215, 110, 140),
                     ),
                 },
+                palette_category: Some(Vegetation),
             ),
             // Scenic overlook — exposed point with weathered cairn or
             // benchmark. Photo-mode anchor (5.5). Strongly biome-locked.
@@ -357,6 +360,7 @@
                     accent: (170, 180, 195),
                 )),
                 adaptation_per_host: {},
+                palette_category: Some(Stone),
             ),
             // Hot springs — geothermal pool with mineral-stained
             // travertine + steam. Bleeds into adjacent biomes (rare,
@@ -393,6 +397,7 @@
                         accent: (225, 225, 225),
                     ),
                 },
+                palette_category: Some(Water),
             ),
         ],
 
@@ -534,6 +539,7 @@
                         accent: (235, 180, 90),
                     ),
                 },
+                palette_category: Some(Vegetation),
             ),
             // Creek valley — narrow drainage with moss-rock banks,
             // running water, riparian vegetation.
@@ -569,6 +575,7 @@
                         accent: (170, 215, 225),
                     ),
                 },
+                palette_category: Some(Vegetation),
             ),
             // River-bend viewpoint — gravel bar at a wide bend with
             // sweeping water visibility. Photo-mode anchor + water-
@@ -605,6 +612,7 @@
                         accent: (135, 145, 105),
                     ),
                 },
+                palette_category: Some(Water),
             ),
             // Abandoned homestead — collapsed cabin + chimney remnant +
             // overgrown yard. Mission-hook anchor (treasure / lore).
@@ -640,6 +648,7 @@
                         accent: (185, 100, 70),
                     ),
                 },
+                palette_category: Some(BuildingWooden),
             ),
             // Remote compound — small cluster of cabin + shed +
             // outhouse, off-grid lifestyle. Mission anchor (delivery,
@@ -677,6 +686,7 @@
                         accent: (155, 95, 70),
                     ),
                 },
+                palette_category: Some(BuildingWooden),
             ),
             // Homestead clearing — single occupied cabin in a clearing
             // ringed by conifers, often with a small garden plot and
@@ -713,6 +723,7 @@
                         accent: (175, 95, 70),
                     ),
                 },
+                palette_category: Some(BuildingWooden),
             ),
             // Fishing camp — shoreline shack + dock + drying nets +
             // small skiff. Resupply candidate (fuel + bait + repair).
@@ -749,6 +760,7 @@
                         accent: (165, 100, 75),
                     ),
                 },
+                palette_category: Some(BuildingWooden),
             ),
             // Tackle shop — small commercial building near a fishing
             // village, sells gear + license + ice. Resupply candidate.
@@ -769,6 +781,7 @@
                     accent: (185, 165, 95),
                 )),
                 adaptation_per_host: {},
+                palette_category: Some(BuildingWooden),
             ),
             // Bait shop — smaller cousin to tackle_shop, often a stand-
             // alone hut with live-bait tank. Distinct orange "live bait"
@@ -789,6 +802,7 @@
                     accent: (200, 105, 65),
                 )),
                 adaptation_per_host: {},
+                palette_category: Some(BuildingWooden),
             ),
             // Dwelling cluster — small village: 5-8 houses + yards + trees,
             // moderate density. CoastalBoreal home (valley settlements);
@@ -828,6 +842,7 @@
                         accent: (170, 95, 70),
                     ),
                 },
+                palette_category: Some(BuildingWooden),
             ),
             // Gas station — small-format fuel stop + convenience store.
             // Phase 4.5 refuel economy anchor: when player lands within
@@ -872,6 +887,7 @@
                         accent: (215, 90, 60),
                     ),
                 },
+                palette_category: Some(Signage),
             ),
             // General store — small-town mercantile: groceries + basic
             // cargo + hardware. Resupply + light-cargo mission anchor
@@ -912,6 +928,7 @@
                         accent: (160, 95, 70),
                     ),
                 },
+                palette_category: Some(BuildingWooden),
             ),
         ],
 
@@ -1097,7 +1114,82 @@
                     accent: (215, 80, 80),
                 )),
                 adaptation_per_host: {},
+                palette_category: Some(BuildingWooden),
             ),
         ],
+    },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Biome-receiving adaptations (PINNED 2026-04-23 — primary mechanism)
+    // ═══════════════════════════════════════════════════════════════════════
+    //
+    // When a foreign feature bleeds into a host biome (via the 3.6.2
+    // bleed-over mechanism), the host biome IMPRESSES ITS CHARACTER on
+    // the imported palette. Each biome declares an HSV shift per
+    // palette-category (building_wooden, vegetation, stone, etc.).
+    //
+    // Resolution order (see `adapt_palette` in sub_biome.rs):
+    //   1. Feature's `adaptation_per_host[host]` — explicit override
+    //   2. This table: `biome_receiving_adaptations[host][feature.category]`
+    //   3. This table: `biome_receiving_adaptations[host]["default"]`
+    //   4. Feature's unmodified `home_palette` (no adaptation)
+    //
+    // HSV shifts capture warm/cool/saturate/desaturate/lighten/darken
+    // cleanly. Compositing operations (snow dusting on roofs, moss on
+    // stonework, algae on docks) are a RENDER-LAYER concern — left
+    // intentionally blank here; planned for 3.6.4+ flora/decoration
+    // pass as a separate overlay system.
+    //
+    // Authoring guidance per biome:
+    //   • HighDesert    — warm+ hue, dry (desaturate vegetation),
+    //                     sun-bleached (value+), sandstone tones.
+    //   • RockyAlpine   — cool- hue, weathered (saturation-),
+    //                     shadow-darker (value-), granite grey.
+    //   • CoastalBoreal — slight green-shift, moist (saturation-),
+    //                     overcast (value-), moss-greyed stones.
+    //   • Mediterranean — warm+ hue, sun-saturated, whitewash
+    //                     (masonry → white), turquoise water pop.
+
+    biome_receiving_adaptations: {
+        "HighDesert": {
+            "building_wooden":  (hue_shift_deg: 8.0,   saturation_mult: 1.10, value_mult: 1.15),
+            "building_masonry": (hue_shift_deg: 5.0,   saturation_mult: 1.05, value_mult: 1.00),
+            "vegetation":       (hue_shift_deg: 15.0,  saturation_mult: 0.60, value_mult: 1.10),
+            "stone":            (hue_shift_deg: 10.0,  saturation_mult: 1.00, value_mult: 1.10),
+            "water":            (hue_shift_deg: -5.0,  saturation_mult: 0.95, value_mult: 1.00),
+            "signage":          (hue_shift_deg: 5.0,   saturation_mult: 1.00, value_mult: 1.05),
+            "textile":          (hue_shift_deg: 8.0,   saturation_mult: 0.90, value_mult: 1.05),
+            "default":          (hue_shift_deg: 5.0,   saturation_mult: 1.00, value_mult: 1.05),
+        },
+        "RockyAlpine": {
+            "building_wooden":  (hue_shift_deg: -5.0,  saturation_mult: 0.80, value_mult: 0.90),
+            "building_masonry": (hue_shift_deg: -3.0,  saturation_mult: 0.90, value_mult: 0.95),
+            "vegetation":       (hue_shift_deg: -3.0,  saturation_mult: 0.95, value_mult: 1.00),
+            "stone":            (hue_shift_deg: -5.0,  saturation_mult: 0.85, value_mult: 0.95),
+            "water":            (hue_shift_deg: -8.0,  saturation_mult: 1.05, value_mult: 1.05),
+            "signage":          (hue_shift_deg: -2.0,  saturation_mult: 0.95, value_mult: 0.95),
+            "textile":          (hue_shift_deg: -3.0,  saturation_mult: 0.85, value_mult: 0.90),
+            "default":          (hue_shift_deg: -3.0,  saturation_mult: 0.90, value_mult: 0.95),
+        },
+        "CoastalBoreal": {
+            "building_wooden":  (hue_shift_deg: 3.0,   saturation_mult: 0.85, value_mult: 0.90),
+            "building_masonry": (hue_shift_deg: 5.0,   saturation_mult: 0.90, value_mult: 0.95),
+            "vegetation":       (hue_shift_deg: 8.0,   saturation_mult: 1.00, value_mult: 0.95),
+            "stone":            (hue_shift_deg: 10.0,  saturation_mult: 0.85, value_mult: 0.90),
+            "water":            (hue_shift_deg: 5.0,   saturation_mult: 0.90, value_mult: 0.90),
+            "signage":          (hue_shift_deg: 5.0,   saturation_mult: 0.90, value_mult: 0.95),
+            "textile":          (hue_shift_deg: 3.0,   saturation_mult: 0.85, value_mult: 0.90),
+            "default":          (hue_shift_deg: 5.0,   saturation_mult: 0.90, value_mult: 0.95),
+        },
+        "MediterraneanArchipelago": {
+            "building_wooden":  (hue_shift_deg: 5.0,   saturation_mult: 0.95, value_mult: 1.10),
+            "building_masonry": (hue_shift_deg: 15.0,  saturation_mult: 0.70, value_mult: 1.20),
+            "vegetation":       (hue_shift_deg: 10.0,  saturation_mult: 0.85, value_mult: 1.05),
+            "stone":            (hue_shift_deg: 12.0,  saturation_mult: 0.85, value_mult: 1.15),
+            "water":            (hue_shift_deg: -5.0,  saturation_mult: 1.20, value_mult: 1.10),
+            "signage":          (hue_shift_deg: 8.0,   saturation_mult: 1.10, value_mult: 1.10),
+            "textile":          (hue_shift_deg: 10.0,  saturation_mult: 1.15, value_mult: 1.10),
+            "default":          (hue_shift_deg: 10.0,  saturation_mult: 1.00, value_mult: 1.10),
+        },
     },
 )
