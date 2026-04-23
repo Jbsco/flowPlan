@@ -39,6 +39,7 @@ use image::{ImageBuffer, Rgb};
 // Silence unused-crate-dependencies for transitive test deps.
 use glam as _;
 use libm as _;
+use rayon as _;
 use ron as _;
 use serde as _;
 

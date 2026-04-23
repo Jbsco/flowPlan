@@ -1506,34 +1506,56 @@ impl FeatureSpatialGrid {
     }
 }
 
-/// Bake-time variant of [`assign_feature`].
+/// Per-cell phase-A output consumed by `BakedAssignments::bake`.
 ///
-/// Same retry-loop structure but ALSO checks self-spacing against
-/// `self_spacing_state`. On successful placement, inserts the cell
-/// position into the per-feature spatial hash. Increments
-/// `stats.self_spacing_reject_count` for each retry that fired the
-/// self-spacing check.
+/// Carries the cell's biome source (Primary/BleedOver), the ordered
+/// list of retry candidates that survived all rules EXCEPT
+/// self-spacing, and an `is_open_water` flag indicating which library
+/// was sampled (oceanic features carry no self-spacing rules so
+/// phase B short-circuits open-water cells).
+pub struct CellBakeOutcome {
+    pub source: BiomeSource,
+    pub attempts: Vec<CellBakeAttempt>,
+    pub is_open_water: bool,
+}
+
+/// One retry candidate from phase A. Phase B uses `self_spacing_min_km`
+/// to know whether to spatial-hash-check the candidate.
+pub struct CellBakeAttempt {
+    pub feature_id: String,
+    pub self_spacing_min_km: f32,
+}
+
+/// Phase-A worker for the bake pass.
 ///
-/// Caller (`baked_assignments::BakedAssignments::bake`) processes cells
-/// in a deterministic permuted order so the spatial-hash mutations
-/// happen reproducibly.
+/// Walks the standard retry loop with rule evaluation + biome-source
+/// selection, but **does NOT enforce self-spacing**. Returns the
+/// candidate list (up to [`MAX_FEATURE_ROLL_ATTEMPTS`] entries, each
+/// being a feature that survived `context.satisfies` + placement-rule
+/// checks). Phase B walks this list in the cell's permuted-order slot
+/// to apply self-spacing + commit to the per-cell array.
+///
+/// Pure read-only against `terrain` / `hydrology` / `hub_catalog` /
+/// `climate samplers` — safe to call from multiple threads in parallel
+/// (no shared mutable state).
 #[must_use]
-pub fn assign_feature_for_bake(
+pub fn compute_bake_candidates_for_cell(
     master_seed: u64,
     cell_id: u32,
     cell_pos: (f32, f32),
     context: &PlacementContext,
     libraries: &SubBiomeLibraries,
     rules_ctx: &PlacementRulesContext<'_>,
-    self_spacing_state: &mut SelfSpacingState,
-    stats: &mut crate::baked_assignments::BakeStats,
-) -> FeatureAssignment {
+) -> CellBakeOutcome {
     let field_seed = mix_seed(master_seed, SUB_BIOME_FIELD_TAG);
     let bleed_rng = mix_seed(field_seed, u64::from(cell_id) | (1_u64 << 32)) as u32;
     let source = pick_biome_source(&context.biome_weights, bleed_rng);
 
+    // Open-water short-circuit: oceanic features have no self_spacing
+    // rules, so phase B can take the first attempt directly.
     if context.altitude_m < OPEN_WATER_ALTITUDE_THRESHOLD_M {
         let oceanic = libraries.oceanic();
+        let mut attempts = Vec::with_capacity(1);
         for attempt in 0..MAX_FEATURE_ROLL_ATTEMPTS {
             let roll_rng = mix_seed(
                 field_seed,
@@ -1543,23 +1565,32 @@ pub fn assign_feature_for_bake(
                 sample_feature_with_context(oceanic, roll_rng, false, cell_pos, context, rules_ctx)
             {
                 if context.satisfies(f) {
-                    return FeatureAssignment {
+                    attempts.push(CellBakeAttempt {
                         feature_id: f.id.clone(),
-                        source,
-                        is_fallback: false,
-                    };
+                        self_spacing_min_km: 0.0,
+                    });
+                    break;
                 }
             }
         }
-        return FeatureAssignment {
-            feature_id: OPEN_WATER_FEATURE_ID.to_string(),
+        if attempts.is_empty() {
+            attempts.push(CellBakeAttempt {
+                feature_id: OPEN_WATER_FEATURE_ID.to_string(),
+                self_spacing_min_km: 0.0,
+            });
+        }
+        return CellBakeOutcome {
             source,
-            is_fallback: false,
+            attempts,
+            is_open_water: true,
         };
     }
 
+    // Land cell: collect ALL surviving retry candidates so phase B can
+    // pick the first that doesn't self-space-violate.
     let source_biome = source.feature_source_biome();
     let lib = libraries.for_biome(source_biome);
+    let mut attempts = Vec::with_capacity(MAX_FEATURE_ROLL_ATTEMPTS as usize);
 
     for attempt in 0..MAX_FEATURE_ROLL_ATTEMPTS {
         let roll_rng = mix_seed(field_seed, u64::from(cell_id) | (u64::from(attempt) << 48));
@@ -1580,26 +1611,17 @@ pub fn assign_feature_for_bake(
                 .as_ref()
                 .and_then(|r| r.self_spacing.as_ref())
                 .map_or(0.0, |ss| ss.min_km);
-            if self_spacing_min_km > 0.0
-                && self_spacing_state.would_violate(&f.id, cell_pos, self_spacing_min_km)
-            {
-                stats.self_spacing_reject_count += 1;
-                continue;
-            }
-            if self_spacing_min_km > 0.0 {
-                self_spacing_state.insert(&f.id, cell_pos);
-            }
-            return FeatureAssignment {
+            attempts.push(CellBakeAttempt {
                 feature_id: f.id.clone(),
-                source,
-                is_fallback: false,
-            };
+                self_spacing_min_km,
+            });
         }
     }
-    FeatureAssignment {
-        feature_id: FALLBACK_FEATURE_ID.to_string(),
+
+    CellBakeOutcome {
         source,
-        is_fallback: true,
+        attempts,
+        is_open_water: false,
     }
 }
 

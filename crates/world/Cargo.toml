@@ -15,6 +15,9 @@ workspace = true
 flowplan-core = { workspace = true }
 glam = { workspace = true }
 libm = { workspace = true }
+# Data parallelism for the eager sub-biome-assignment bake (Phase
+# 3.6.3c.1c). World-bake time only; never on render or audio hot paths.
+rayon = { workspace = true }
 # Sub-biome feature libraries (Phase 3.6.2) authored as RON for version-
 # control-friendly editing + additions (e.g. HighDesert Book Cliffs
 # variant). Parsed once at world-bake time; zero cost on subsequent

@@ -37,6 +37,7 @@ use image::{ImageBuffer, Rgb};
 
 use glam as _;
 use libm as _;
+use rayon as _;
 use ron as _;
 use serde as _;
 
@@ -495,17 +496,29 @@ fn emit_baked_assignments_calibration() {
     let stats = baked.stats();
     eprintln!("=== BakedAssignments stats ===");
     eprintln!("  cell_count:                {}", stats.cell_count);
-    eprintln!("  unique features in catalog: {}", baked.unique_feature_count());
-    eprintln!("  fallback (`plain`) count:  {} ({:.2}%)",
+    eprintln!(
+        "  unique features in catalog: {}",
+        baked.unique_feature_count()
+    );
+    eprintln!(
+        "  fallback (`plain`) count:  {} ({:.2}%)",
         stats.fallback_count,
-        100.0 * stats.fallback_count as f32 / stats.cell_count as f32);
-    eprintln!("  bleed-over count:          {} ({:.2}%)",
+        100.0 * stats.fallback_count as f32 / stats.cell_count as f32
+    );
+    eprintln!(
+        "  bleed-over count:          {} ({:.2}%)",
         stats.bleed_over_count,
-        100.0 * stats.bleed_over_count as f32 / stats.cell_count as f32);
-    eprintln!("  self-spacing rejections:   {}", stats.self_spacing_reject_count);
-    eprintln!("  bake wall-clock:           {} ms ({:.2} s)",
+        100.0 * stats.bleed_over_count as f32 / stats.cell_count as f32
+    );
+    eprintln!(
+        "  self-spacing rejections:   {}",
+        stats.self_spacing_reject_count
+    );
+    eprintln!(
+        "  bake wall-clock:           {} ms ({:.2} s)",
         stats.bake_wallclock_ms,
-        stats.bake_wallclock_ms as f64 / 1000.0);
+        stats.bake_wallclock_ms as f64 / 1000.0
+    );
 
     // Per-feature baked counts (top 25 by frequency).
     let mut counts: HashMap<String, u32> = HashMap::new();
@@ -525,11 +538,24 @@ fn emit_baked_assignments_calibration() {
     // 18 authored-with-self_spacing features).
     eprintln!("=== Per-feature self-spacing placement counts ===");
     let tracked_feature_ids = [
-        "ranch", "remote_compound", "homestead_clearing", "farmland_parcel",
-        "dwelling_cluster", "natural_meadow", "alpine_meadow", "creek_valley",
-        "scenic_overlook", "river_bend_viewpoint", "hot_springs",
-        "abandoned_homestead", "fishing_camp", "tackle_shop", "bait_shop",
-        "ferry_dock", "gas_station", "general_store",
+        "ranch",
+        "remote_compound",
+        "homestead_clearing",
+        "farmland_parcel",
+        "dwelling_cluster",
+        "natural_meadow",
+        "alpine_meadow",
+        "creek_valley",
+        "scenic_overlook",
+        "river_bend_viewpoint",
+        "hot_springs",
+        "abandoned_homestead",
+        "fishing_camp",
+        "tackle_shop",
+        "bait_shop",
+        "ferry_dock",
+        "gas_station",
+        "general_store",
     ];
     let hashes = baked.spatial_hashes();
     eprintln!("  tracked feature types: {}", hashes.feature_count());
@@ -538,6 +564,9 @@ fn emit_baked_assignments_calibration() {
     }
 
     // Sanity: bake produced results.
-    assert!(stats.cell_count > 3_000_000, "expected >3M cells in canonical seed");
+    assert!(
+        stats.cell_count > 3_000_000,
+        "expected >3M cells in canonical seed"
+    );
     assert!(stats.bake_wallclock_ms > 0, "wall-clock should be measured");
 }

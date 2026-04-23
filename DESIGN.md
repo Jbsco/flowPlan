@@ -400,6 +400,7 @@ Deliberately conservative. New dependencies require an amendment to this doc and
 | Logging    | `tracing` (+ `tracing-tracy` dev only) | Pin                                 | Structured logging; Tracy for profiling in dev.                           |
 | Time       | `std::time` + `quanta` if needed | Pin                                    | High-resolution timestamps.                                               |
 | Hot reload | `notify` (dev only)   | Pin, cfg-gated                                   | Shader/asset source watching.                                             |
+| Data parallelism | `rayon`         | Pin (workspace dep, world-bake only)             | World-bake hot paths only. Phase 3.6.3c.1c uses `par_iter` to split per-cell sub-biome rule evaluation across cores (~5× speedup, ~275 s → ~55 s on canonical seed). **NEVER on render or audio hot paths** — those follow the no-spawn / no-collect rules in [CODING_RULES.md § real-time discipline](CODING_RULES.md#real-time-discipline). World-bake is a one-time world-load cost, not a per-frame concern. |
 
 ### Explicitly not in the stack
 

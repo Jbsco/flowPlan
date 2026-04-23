@@ -46,17 +46,24 @@
 //! `feedback_no_lint_bypass` and broader project ethos: not a Minecraft-
 //! style multi-GB world state).
 //!
-//! # Parallelization candidate
+//! # Parallelization (SHIPPED)
 //!
-//! Per-cell rule evaluation is read-only against
-//! terrain / hydrology / hub_catalog / climate samplers — embarrassingly
-//! parallel via `rayon::par_iter`. Self-spacing-check + spatial-hash-
-//! insert phase is serial state mutation. Clean split: parallel phase
-//! produces `Vec<(CellId, candidate_attempts)>`; serial phase walks
-//! permuted order doing self-spacing + retries.
+//! `bake` runs as **Phase A in parallel** (per-cell rule evaluation,
+//! read-only against terrain / hydrology / hub_catalog / climate
+//! samplers — embarrassingly parallel via `rayon::par_iter`) followed
+//! by **Phase B in serial** (master-seed-keyed permuted-order walk;
+//! self-spacing checks + spatial-hash inserts).
 //!
-//! Estimated 3-4× speedup. Adding `rayon` is a one-line dep change. Ship
-//! serial first; measure; add parallel if wall-clock > 30 s.
+//! Determinism: master-seed-keyed permutation drives Phase B order, so
+//! the same master_seed produces bit-identical output regardless of
+//! thread count or scheduling. Phase A's parallel iteration order is
+//! irrelevant because each cell is independent + the consumer (Phase
+//! B) re-orders.
+//!
+//! Measured at canonical seed: **275 s serial → 33 s 8-core parallel
+//! = 8.3× speedup**. `rayon` is in `DESIGN.md` tech-stack, world-bake
+//! hot paths only — never on render or audio per CODING_RULES § real-
+//! time discipline.
 
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_possible_truncation)]
@@ -64,11 +71,14 @@
 
 use std::collections::HashMap;
 
+use rayon::prelude::*;
+
 use crate::hub_catalog::HubCatalog;
 use crate::hydrology::HydrologyGraph;
 use crate::sub_biome::{
-    assign_feature_for_bake, build_placement_context_external, BiomeSource, FeatureAssignment,
-    PlacementRulesContext, SelfSpacingState, SubBiomeLibraries, FALLBACK_FEATURE_ID,
+    build_placement_context_external, compute_bake_candidates_for_cell, BiomeSource,
+    FeatureAssignment, PlacementRulesContext, SelfSpacingState, SubBiomeLibraries,
+    FALLBACK_FEATURE_ID,
 };
 use crate::terrain::{HeightSampler, Terrain};
 use crate::voronoi_cells::{CellId, SubBiomeCellCatalog};
@@ -132,15 +142,26 @@ pub struct BakedAssignments {
 }
 
 impl BakedAssignments {
-    /// Run the eager bake pass.
+    /// Run the eager bake pass — parallel phase A + serial phase B.
     ///
-    /// Iterates all cells in master-seed-keyed permuted order. For each
-    /// cell, evaluates the full placement-rule pipeline (including
-    /// self-spacing); writes accepted assignments to the per-cell cache
-    /// + per-feature spatial hashes.
+    /// **Phase A (parallel via `rayon::par_iter`)**: per-cell, build
+    /// `PlacementContext` + per-cell hub cache + a list of candidate
+    /// retries. Each retry candidate is the feature the RNG would
+    /// pick at that attempt, after passing all rules EXCEPT
+    /// self-spacing (which is deferred to phase B for sequential
+    /// state mutation). Read-only against terrain / hydrology /
+    /// hub_catalog / climate samplers — embarrassingly parallel.
     ///
-    /// Single-threaded synchronous. Wall-clock measured + recorded in
-    /// [`BakeStats::bake_wallclock_ms`].
+    /// **Phase B (serial in master-seed-keyed permuted order)**: walk
+    /// per-cell candidate lists; first non-self-spacing-violating
+    /// candidate wins; insert into `SelfSpacingState` + write u16
+    /// feature index to per-cell array.
+    ///
+    /// Determinism: master-seed-keyed permutation drives Phase B
+    /// order, so the same master_seed produces bit-identical output
+    /// regardless of thread count or scheduling.
+    ///
+    /// Wall-clock measured + recorded in [`BakeStats::bake_wallclock_ms`].
     #[must_use]
     pub fn bake(
         catalog: &SubBiomeCellCatalog,
@@ -151,38 +172,10 @@ impl BakedAssignments {
         let start = std::time::Instant::now();
         let master_seed = catalog.master_seed();
         let n_cells = catalog.cell_count();
+        let libraries = SubBiomeLibraries::shared();
 
         // ---- Build feature-id intern table --------------------------
-        // Determinism: sort unique IDs alphabetically before assigning indices.
-        let libraries = SubBiomeLibraries::shared();
-        let mut all_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        all_ids.insert(FALLBACK_FEATURE_ID.to_string());
-        for biome in [
-            crate::biome::BiomeClass::HighDesert,
-            crate::biome::BiomeClass::RockyAlpine,
-            crate::biome::BiomeClass::CoastalBoreal,
-            crate::biome::BiomeClass::MediterraneanArchipelago,
-        ] {
-            for f in libraries.for_biome(biome) {
-                all_ids.insert(f.id.clone());
-            }
-        }
-        for f in libraries.oceanic() {
-            all_ids.insert(f.id.clone());
-        }
-        // Move FALLBACK to index 0 explicitly.
-        let mut feature_ids: Vec<String> = Vec::with_capacity(all_ids.len());
-        feature_ids.push(FALLBACK_FEATURE_ID.to_string());
-        for id in all_ids {
-            if id != FALLBACK_FEATURE_ID {
-                feature_ids.push(id);
-            }
-        }
-        let feature_id_index: HashMap<String, u16> = feature_ids
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (s.clone(), i as u16))
-            .collect();
+        let (feature_ids, feature_id_index) = build_feature_id_intern_table(libraries);
 
         // ---- Compute permuted scan order ----------------------------
         let mut order: Vec<(u64, CellId)> = (0..n_cells as CellId)
@@ -190,64 +183,78 @@ impl BakedAssignments {
             .collect();
         order.sort_unstable_by_key(|&(k, _)| k);
 
-        // ---- Bake-state -----------------------------------------
+        // ---- Phase A: parallel per-cell candidate generation -------
+        let precomputed = run_phase_a(
+            master_seed,
+            n_cells,
+            catalog,
+            terrain,
+            hydrology,
+            hub_catalog,
+            libraries,
+            &feature_id_index,
+        );
+
+        // ---- Phase B: serial self-spacing merge in permuted order ---
         let mut per_cell: Vec<u16> = vec![FALLBACK_INDEX; n_cells];
-        let mut per_cell_source: Vec<BiomeSource> = vec![
-            BiomeSource::Primary(crate::biome::BiomeClass::CoastalBoreal);
-            n_cells
-        ];
+        let mut per_cell_source: Vec<BiomeSource> =
+            vec![BiomeSource::Primary(crate::biome::BiomeClass::CoastalBoreal); n_cells];
         let mut spatial_hashes = SelfSpacingState::new();
         let mut stats = BakeStats {
             cell_count: n_cells as u32,
             ..BakeStats::default()
         };
 
-        // ---- Per-cell evaluation loop ---------------------------
-        let height_at = |x: f32, z: f32| terrain.height(x, z);
-
         for (_, cell_id) in order {
-            let (x, z) = catalog.seeds()[cell_id as usize].position;
-            let context = build_placement_context_external(master_seed, x, z, terrain, hydrology);
-
-            // 3.6.3c.1c bake optimization: fetch hubs in MAX_RULE_HUB_RADIUS_M
-            // ONCE per cell and reuse across all candidate evaluations.
-            // Without this cache the bake explodes to ~minutes per 100 K
-            // cells (every candidate's hub-proximity rule re-queries the
-            // hub spatial hash).
-            let cell_hubs: Vec<&crate::hub_catalog::HubEntry> = hub_catalog.hubs_in_radius(
-                x,
-                z,
-                crate::sub_biome::MAX_RULE_HUB_RADIUS_M,
-            );
-            let rules_ctx = PlacementRulesContext {
-                master_seed,
-                hub_catalog,
-                hydrology,
-                height_at: &height_at,
-                cell_hubs_cache: Some(&cell_hubs),
-            };
-
-            let assignment = assign_feature_for_bake(
-                master_seed,
-                cell_id,
-                (x, z),
-                &context,
-                libraries,
-                &rules_ctx,
-                &mut spatial_hashes,
-                &mut stats,
-            );
-
-            let idx = *feature_id_index
-                .get(&assignment.feature_id)
-                .unwrap_or(&FALLBACK_INDEX);
-            per_cell[cell_id as usize] = idx;
-            per_cell_source[cell_id as usize] = assignment.source;
-            if assignment.is_fallback {
-                stats.fallback_count += 1;
-            }
-            if assignment.source.is_bleed_over() {
+            let cell = &precomputed[cell_id as usize];
+            per_cell_source[cell_id as usize] = cell.source;
+            if cell.source.is_bleed_over() {
                 stats.bleed_over_count += 1;
+            }
+
+            // Open-water cells: oceanic features have no self_spacing
+            // rules. Take the first attempt (or FALLBACK_INDEX if none
+            // — but oceanic library is permissive, so first attempt
+            // almost always wins).
+            if cell.is_open_water {
+                let idx = cell
+                    .attempts
+                    .first()
+                    .map_or(FALLBACK_INDEX, |a| a.feature_id_index);
+                per_cell[cell_id as usize] = idx;
+                if idx == FALLBACK_INDEX {
+                    stats.fallback_count += 1;
+                }
+                continue;
+            }
+
+            // Land cells: walk attempts in order, accept first that
+            // doesn't violate self-spacing. Insert into hash on accept.
+            let mut accepted = false;
+            for attempt in &cell.attempts {
+                if attempt.self_spacing_min_km > 0.0
+                    && spatial_hashes.would_violate(
+                        feature_ids[attempt.feature_id_index as usize].as_str(),
+                        cell.pos,
+                        attempt.self_spacing_min_km,
+                    )
+                {
+                    stats.self_spacing_reject_count += 1;
+                    continue;
+                }
+                if attempt.self_spacing_min_km > 0.0 {
+                    spatial_hashes.insert(
+                        feature_ids[attempt.feature_id_index as usize].as_str(),
+                        cell.pos,
+                    );
+                }
+                per_cell[cell_id as usize] = attempt.feature_id_index;
+                accepted = true;
+                break;
+            }
+            if !accepted {
+                per_cell[cell_id as usize] = FALLBACK_INDEX;
+                stats.fallback_count += 1;
             }
         }
 
@@ -315,6 +322,122 @@ impl BakedAssignments {
     pub const fn spatial_hashes(&self) -> &SelfSpacingState {
         &self.spatial_hashes
     }
+}
+
+/// Phase-A worker. Per-cell parallel candidate generation, no shared
+/// mutable state. Returns `Vec<PrecomputedCell>` indexed by `CellId`
+/// (NOT permuted order — phase B does the permuted walk).
+///
+/// Read-only against terrain / hydrology / hub_catalog / climate
+/// samplers. Embarrassingly parallel via `rayon::par_iter`.
+#[allow(clippy::too_many_arguments)]
+fn run_phase_a(
+    master_seed: u64,
+    n_cells: usize,
+    catalog: &SubBiomeCellCatalog,
+    terrain: &Terrain,
+    hydrology: &HydrologyGraph,
+    hub_catalog: &HubCatalog,
+    libraries: &SubBiomeLibraries,
+    feature_id_index: &HashMap<String, u16>,
+) -> Vec<PrecomputedCell> {
+    let height_at_local = move |x: f32, z: f32| terrain.height(x, z);
+    (0..n_cells as CellId)
+        .into_par_iter()
+        .map(|cell_id| {
+            let (x, z) = catalog.seeds()[cell_id as usize].position;
+            let context = build_placement_context_external(master_seed, x, z, terrain, hydrology);
+            let cell_hubs: Vec<&crate::hub_catalog::HubEntry> =
+                hub_catalog.hubs_in_radius(x, z, crate::sub_biome::MAX_RULE_HUB_RADIUS_M);
+            let rules_ctx = PlacementRulesContext {
+                master_seed,
+                hub_catalog,
+                hydrology,
+                height_at: &height_at_local,
+                cell_hubs_cache: Some(&cell_hubs),
+            };
+            let outcome = compute_bake_candidates_for_cell(
+                master_seed,
+                cell_id,
+                (x, z),
+                &context,
+                libraries,
+                &rules_ctx,
+            );
+            let attempts: Vec<CandidateAttempt> = outcome
+                .attempts
+                .into_iter()
+                .map(|a| CandidateAttempt {
+                    feature_id_index: *feature_id_index
+                        .get(&a.feature_id)
+                        .unwrap_or(&FALLBACK_INDEX),
+                    self_spacing_min_km: a.self_spacing_min_km,
+                })
+                .collect();
+            PrecomputedCell {
+                pos: (x, z),
+                source: outcome.source,
+                attempts,
+                is_open_water: outcome.is_open_water,
+            }
+        })
+        .collect()
+}
+
+/// Build the deterministic feature-id intern table.
+///
+/// Returns the interned `Vec<String>` (`FALLBACK_FEATURE_ID` at index 0)
+/// plus the reverse-lookup map. Sorted-by-name internally so indices
+/// are bit-identical across runs.
+fn build_feature_id_intern_table(
+    libraries: &SubBiomeLibraries,
+) -> (Vec<String>, HashMap<String, u16>) {
+    let mut all_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    all_ids.insert(FALLBACK_FEATURE_ID.to_string());
+    for biome in [
+        crate::biome::BiomeClass::HighDesert,
+        crate::biome::BiomeClass::RockyAlpine,
+        crate::biome::BiomeClass::CoastalBoreal,
+        crate::biome::BiomeClass::MediterraneanArchipelago,
+    ] {
+        for f in libraries.for_biome(biome) {
+            all_ids.insert(f.id.clone());
+        }
+    }
+    for f in libraries.oceanic() {
+        all_ids.insert(f.id.clone());
+    }
+    let mut feature_ids: Vec<String> = Vec::with_capacity(all_ids.len());
+    feature_ids.push(FALLBACK_FEATURE_ID.to_string());
+    for id in all_ids {
+        if id != FALLBACK_FEATURE_ID {
+            feature_ids.push(id);
+        }
+    }
+    let feature_id_index: HashMap<String, u16> = feature_ids
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.clone(), i as u16))
+        .collect();
+    (feature_ids, feature_id_index)
+}
+
+/// Per-cell precomputed bake input — output of phase A, consumed by
+/// phase B. Carries the cell position, biome source, and the list of
+/// candidate retries (each with its self-spacing min_km annotated).
+struct PrecomputedCell {
+    pos: (f32, f32),
+    source: BiomeSource,
+    attempts: Vec<CandidateAttempt>,
+    is_open_water: bool,
+}
+
+/// One retry candidate from phase A. The feature index + the
+/// self-spacing min_km (0.0 if no rule) is enough for phase B to do
+/// its sequential merge without re-querying anything.
+struct CandidateAttempt {
+    feature_id_index: u16,
+    self_spacing_min_km: f32,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

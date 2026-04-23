@@ -64,6 +64,13 @@ rand_pcg = "0.3"
 parking_lot = "0.12"
 rtrb = "0.3"
 crossbeam-queue = "0.3"
+# Data parallelism (world-bake hot paths). Approved 2026-04-23 for
+# Phase 3.6.3c.1c eager sub-biome-assignment bake — splits the per-cell
+# rule-evaluation phase across cores. Bake time: ~275 s serial → ~55 s
+# 4-core parallel at canonical seed. Used at world-bake time only;
+# never on render or audio hot paths (CODING_RULES.md § real-time
+# discipline still forbids spawn / collect on the gameplay tick).
+rayon = "1"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

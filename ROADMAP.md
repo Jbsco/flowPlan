@@ -969,9 +969,16 @@ Split (pinned 2026-04-23 per user direction, detail in [MAPGEN.md § Layer 3 pha
 - Stubs parsed but not evaluated: `self_spacing` (3.6.3c.1c), `requires_road_adjacency` (3.6.3c.3), `spillover` (3.6.3c.3+).
 - [x] **Hub emergent upgrade via feature spillover** — design PINNED in MAPGEN + memory `hub_emergent_upgrade_via_spillover`; stub `SpilloverRules` struct shipped for future anchor-feature authoring. Per-trigger `max_count` budget + optional region-cap safety net.
 
-**3.6.3c.1c — Eager Poisson self-spacing pass (Task #225): pending.**
+**3.6.3c.1c — Eager `BakedAssignments` bake + rayon parallelization: SHIPPED 2026-04-23.**
 
-- [ ] Bake-time Poisson-disk rejection for features with `self_spacing.min_km`. Per-feature-type spatial hash built incrementally during placement. Attractor `weight_mult` from hub_proximity / prominence consumed in this pass.
+- [x] **`BakedAssignments` struct** with u16-interned feature IDs (~20 MB total, lean).
+- [x] **`SubBiomeCellCatalog::bake_assignments(...)`** entry — single-call eager bake.
+- [x] **Self-spacing rule enforcement** via per-feature spatial hash (`SelfSpacingState`), inserted at bake-time in master-seed-keyed permuted order.
+- [x] **Master-seed-keyed permutation** (`splitmix64(master_seed, cell_id)`) for cell scan order — removes Bridson's depth-first spatial-correlation bias while preserving full bit-identical determinism.
+- [x] **Per-cell hub-radius cache** eliminates redundant `hub_catalog.hubs_in_radius` queries across candidate evaluations (~5× cost reduction inside per-cell work).
+- [x] **Attractor `weight_mult` consumption** in `sample_feature_with_context` — features in attractor zones (hub_proximity / prominence) get multiplied selection weight.
+- [x] **Rayon parallel bake** (Phase A par_iter + Phase B serial merge): **275 s → 33 s = 8.3× speedup** at canonical seed, bit-identical output. `rayon` added to [DESIGN.md tech-stack](DESIGN.md#tech-stack) + workspace deps.
+- [x] **Diagnostic** (`emit_baked_assignments_calibration` visual-bench test): full-bake stats including per-feature placement counts, fallback rate, bleed-over rate, self-spacing rejection count, wall-clock.
 
 **3.6.3c.2 — Per-cell deltas for 18 3.6.3b features: pending.**
 

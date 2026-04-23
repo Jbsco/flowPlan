@@ -37,6 +37,7 @@ use image::{ImageBuffer, Rgb};
 use flowplan_core as _;
 use glam as _;
 use libm as _;
+use rayon as _;
 use ron as _;
 use serde as _;
 

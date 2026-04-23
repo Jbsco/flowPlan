@@ -39,6 +39,7 @@ use image::{ImageBuffer, Rgb};
 // test target sees but doesn't itself name directly.
 use glam as _;
 use libm as _;
+use rayon as _;
 use ron as _;
 use serde as _;
 

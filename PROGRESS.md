@@ -3,7 +3,77 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
-Last updated: **2026-04-23** (Phase 2.5 **SHIPPED**; Phase 3.2.1 + 3.2.2 + 3.2.3 weather W1/W2/W3 **SHIPPED**; world scope **LOCKED to Option A toroidal**; progression data-model locked; **scenario-realism audit COMPLETE**; **flight-model realism pass COMPLETE**; **water-physics hardening COMPLETE**; **Phase 3.6.0 through 3.6.2 SHIPPED**; **Phase 3.6.3a SHIPPED**; **Phase 3.6.3b SHIPPED** — palette adaptation via biome-receives HSV shift + simple-primitives render direction, 18 cross-biome features authored in RON with palettes + categories, full-spec placement rules; **Phase 3.6.3c.1 SHIPPED** — `PlacementRules` nested schema (7 categories) + `evaluate_placement_rules` function evaluating 5 rule categories (hub_proximity / hub_exclusion / prominence / hydrology_coupling / climate_window), wired into `assign_feature` via optional `PlacementRulesContext`, 18 features authored with rules per FEATURES.md table, canonical-seed calibration shows 2.84 % cell-reassignment rate; bench at ~70 scenarios + 501 unit tests, full gate green. **Now: Phase 3.6.3c.1c** — eager Poisson self-spacing pass.).
+Last updated: **2026-04-23** (Phase 2.5 **SHIPPED**; Phase 3.2.1 + 3.2.2 + 3.2.3 weather W1/W2/W3 **SHIPPED**; world scope **LOCKED to Option A toroidal**; progression data-model locked; **scenario-realism audit COMPLETE**; **flight-model realism pass COMPLETE**; **water-physics hardening COMPLETE**; **Phase 3.6.0 through 3.6.2 SHIPPED**; **Phase 3.6.3a SHIPPED**; **Phase 3.6.3b SHIPPED** — palette adaptation via biome-receives HSV shift + simple-primitives render direction, 18 cross-biome features authored in RON with palettes + categories, full-spec placement rules; **Phase 3.6.3c.1 SHIPPED** — `PlacementRules` nested schema (7 categories) + `evaluate_placement_rules` function (5 rule categories evaluated lazily); **Phase 3.6.3c.1c SHIPPED** — `BakedAssignments` eager-bake materializes per-cell sub-biome assignments with self-spacing + attractor `weight_mult` biasing; rayon parallel two-phase architecture (Phase A read-only par_iter + Phase B serial permuted-order merge) hits **8.3× speedup** (275 s → 33 s at canonical seed), bit-identical output. ~20 MB world-state memory budget (u16-interned feature ids); rayon added to DESIGN.md tech-stack + workspace deps. Bench at ~70 scenarios + 501 unit tests, full gate green. **Now: Phase 3.6.3c.2** — per-cell deltas for 18 3.6.3b features + over-strict-rule tuning.).
+
+## 2026-04-23 (iteration 8) — Phase 3.6.3c.1c (Eager BakedAssignments + parallel bake)
+
+Closes the self-spacing-rule gap from 3.6.3c.1. `BakedAssignments` is the eager-bake product that materializes per-cell sub-biome assignments with self-spacing enforcement + attractor `weight_mult` biasing. Two-phase parallel-merge architecture; rayon dependency approved + documented in DESIGN.md tech-stack.
+
+- **`BakedAssignments` struct** (`crates/world/src/baked_assignments.rs`, ~430 LOC): u16-interned per-cell feature ids (~20 MB total memory budget — lean vs. naive String-cached ~150 MB), `BiomeSource` per cell, `SelfSpacingState` post-bake spatial query, `BakeStats` (cell count, fallback rate, bleed-over rate, self-spacing rejections, wall-clock).
+- **`SubBiomeCellCatalog::bake_assignments(...)`** entry point. Single-call eager bake from terrain + hydrology + hub_catalog. Output is `O(1)` lookup via `BakedAssignments::feature_at_cell(cell_id)`.
+- **Master-seed-keyed permutation** (`splitmix64(master_seed, cell_id)`) for cell scan order — removes Bridson's depth-first spatial-correlation bias while preserving full bit-identical determinism. See MAPGEN § Bake performance budget.
+- **Per-cell hub-radius cache** (~25 µs once per cell) eliminates redundant `hub_catalog.hubs_in_radius` calls across candidate evaluations. `MAX_RULE_HUB_RADIUS_M = 100 km` covers all authored placement rules with margin.
+- **Attractor `weight_mult` consumption** in `sample_feature_with_context`: `selection_weight × rule_weight_mult` per candidate. Features in hub-proximity / prominence attractor zones become statistically more likely to win the weighted RNG roll.
+
+### Parallelization (rayon, SHIPPED)
+
+User-approved mid-session: rayon dep added to workspace + DESIGN.md tech-stack. Bake is split into:
+- **Phase A (parallel via `rayon::par_iter`)**: per-cell rule evaluation read-only against terrain / hydrology / hub_catalog / climate samplers. Embarrassingly parallel.
+- **Phase B (serial in permuted order)**: walks per-cell candidate lists; first non-self-spacing-violating wins; insert into `SelfSpacingState` + write u16 feature index.
+
+Bit-identical output preserved (Phase B's deterministic walk is the source of truth; Phase A's iteration order is irrelevant because each cell is independent).
+
+**Measured speedup at canonical seed `0xF10_1A11`**:
+- Serial (single-thread, with per-cell hub cache): **275.7 s** ↦ above the 60 s bake-budget target.
+- Parallel (8-core): **33.3 s** = **8.3× speedup**, well within budget.
+
+`rayon` is world-bake hot paths only — never on render or audio per CODING_RULES § real-time discipline.
+
+### Bake calibration (canonical seed)
+
+- cell_count: 3 908 876
+- fallback rate: **15.02 %** (+1.9 % over 3.6.3c.1b lazy = small bump from self-spacing rejections; acceptable)
+- bleed-over rate: 18.30 %
+- self-spacing rejections fired: **30 140** (rules working as designed)
+- bake wall-clock: 33.32 s
+
+Per-feature spatial-hash placements (16 features tracked):
+- `dwelling_cluster` 25,562 — most common (5 km spacing)
+- `natural_meadow` 22,245
+- `homestead_clearing` 12,698
+- `fishing_camp` 4,380
+- `remote_compound` 3,904 — hub_exclusion working
+- `creek_valley` 3,558 — Creek-class hydrology gate
+- `general_store` 2,256
+- `bait_shop` 2,024
+- `alpine_meadow` 1,804
+- `tackle_shop` 1,721
+- `gas_station` 945
+- `ferry_dock` 561
+- `river_bend_viewpoint` 252 — RiverBend synth working
+- `abandoned_homestead` 104 — improved from 0 in 3.6.3c.1b lazy (eager bake reveals attractor bias correctly accumulates)
+- `farmland_parcel` 78 — HD home, slope ≤ 2° gates harshly
+- `ranch` 23 — very rare (HD home + 15 km spacing)
+- `scenic_overlook` 0 — over-strict prominence (3.6.3c.2 tuning)
+- `hot_springs` 0 — over-strict climate window (3.6.3c.2 tuning)
+
+### Test state
+
+- **22 sub_biome unit tests pass** (was 21; +1 = `bake_assignments_determinism` smoke test, marked `#[ignore]`).
+- **501 workspace tests pass / 0 fail / 45 ignored** (full gate green; +1 ignored = the new bake calibration test).
+- Full workspace: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo test --doc` all pass.
+- Zero new crate-level lint suppressions. Targeted inline allows where needed (HSV cast, color-math single-char names) all carry justification per CODING_RULES.md §49/§59/§61-62.
+
+### Audit-related fixes
+
+- Mid-session encountered repeated `unused_crate_dependencies` warnings for the 6 visual-bench integration tests (each test target sees rayon as unused). Fixed via the existing `use rayon as _;` pattern (matches existing `use glam as _;` etc. in those files). No suppression needed.
+- Multiple clippy errors during refactor were fixed at source (extracted helper functions for the `bake` fn that had grown past 100 lines, fixed doc-paragraph length issues, etc.). No `#[allow(...)]` shortcuts taken.
+
+### Next milestone
+
+**Phase 3.6.3c.2 — Per-cell deltas for the 18 3.6.3b features**. Implements heightfield deltas in `feature_delta_impls.rs` for developments / resupply / scenery (developments flatten modestly; scenery render-tag-only). Tunes the over-strict `scenic_overlook` and `hot_springs` placement rules based on visual-bench inspection.
+
+---
 
 ## 2026-04-23 (iteration 7) — Phase 3.6.3c.1 (PlacementRules schema + evaluation + wiring)
 
