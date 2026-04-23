@@ -1028,30 +1028,24 @@ pub fn compute_forces(
     // the right-rotating prop; scales linearly with shaft power AND by the
     // airspeed-ramp factor so it doesn't accumulate rotation at V=0.
     // `coupling_airspeed_factor` already computed above (pitch-block precursor).
-    // β-gate + alpha-clamp wing_drop aerodynamics: when sideslip is extreme
-    // (|β| > ~30°) the aircraft is mostly flying sideways — the alpha computed
-    // via atan2 becomes a coordinate-frame artifact (forward_speed collapses)
-    // and the wing-drop model produces spurious huge moments from bogus
-    // "past-stall" alpha values (up to ±56° observed in abusive-input traces).
-    // Real wings don't generate asymmetric stall at 90° beta; they just stall
-    // evenly into a bluff-body drag regime, and post-stall Cl flattens rather
-    // than growing with alpha. Two guards:
-    //   1. Scale by cos⁴(β) — sharper falloff than cos² so moment vanishes
-    //      quickly past β=30°.
-    //   2. Clamp alpha input to ±25° — past deep stall the non-linear Cl
-    //      differential saturates; no physical basis for unbounded growth.
-    // Added 2026-04-22 after abusive-input flip scenario revealed wing_drop was
-    // the dominant flip driver at extreme β + bogus alpha.
-    let beta_aero_scale = libm::cosf(beta).powi(4).max(0.0);
-    let alpha_for_wing_drop = alpha.clamp(-0.436, 0.436); // ±25° in radians
-    let wing_drop_moment = beta_aero_scale
-        * wing_drop_roll_moment(
-            alpha_for_wing_drop,
-            roll_rate,
-            v_damp,
-            q_dyn,
-            wing_area_moments,
-        );
+    // Wing-drop uses q_chord (forward-airspeed dynamic pressure) rather than
+    // q_total. Physical basis: a wing produces asymmetric stall Cl differential
+    // from chord-plane flow (forward + vertical body components), not from
+    // lateral crossflow. At pure β=90°, v_forward=0, q_chord=0 → wing_drop
+    // vanishes automatically without clamps.
+    //
+    // q_chord = q_total × cos²(β) because v_forward² = v_total² × cos²(β).
+    //
+    // Replaces the 2026-04-22 hard clamps (cos⁴(β) scalar + alpha ±25° clamp):
+    // at extreme β the bogus alpha from atan2(−v_y, v_forward) with collapsing
+    // v_forward was producing spurious moments. With q_chord gating, the
+    // (q × moment) product naturally vanishes at high β regardless of what
+    // alpha reports, so alpha can stay at its true atan2 value for honest
+    // stall behavior during normal flight.
+    let cos_beta = libm::cosf(beta);
+    let q_chord = q_dyn * cos_beta * cos_beta;
+    let wing_drop_moment =
+        wing_drop_roll_moment(alpha, roll_rate, v_damp, q_chord, wing_area_moments);
     let torque_roll_moment =
         -TORQUE_ROLL_NM_PER_KW * engine_power_kw_out * coupling_airspeed_factor;
     // Dihedral effect: sideslip β produces a roll moment. Cl_β < 0 makes this
@@ -1060,16 +1054,24 @@ pub fn compute_forces(
     // GA "banked aircraft rolls back to level" behavior. Combined with the
     // wing-drop moment (past-stall differential Cl) into the stability slot.
     //
-    // β CLAMP (post-playtest 2026-04-22): at extreme sideslip (|β| > ~20°)
-    // the dihedral effect stalls aerodynamically — real wings can't produce
-    // unbounded roll moments from sideways flight. Without clamp, abusive
-    // inputs on water (full rudder + full throttle) drive β > 40° which
-    // produces catastrophic roll moment, flipping the aircraft. Physical
-    // maximum for dihedral lateral-flow sensitivity is ~20° β; beyond that,
-    // effective sensitivity drops to zero.
-    let beta_for_dihedral = beta.clamp(-0.35, 0.35); // ±20° in radians
+    // Smooth aerodynamic falloff: replaces the 2026-04-22 hard β-clamp with
+    // `sin(β)·cos(β) = 0.5·sin(2β)`. Physical basis:
+    //   - Linear equivalence at small β: sin(β)·cos(β) ≈ β for |β| < ~15°,
+    //     matching textbook linear `Cl_β × β` behavior in the normal envelope.
+    //   - Peaks at β = 45°: the wing's asymmetric response grows with β
+    //     (captured by sin), but lift authority shrinks as forward flow
+    //     collapses (captured by cos). Product peaks at 45°.
+    //   - Vanishes at β = 90°: wing in pure crossflow cannot generate
+    //     asymmetric lift for dihedral response — matches physical reality
+    //     of wing entering bluff-body drag regime.
+    // Benefit over clamp: no discontinuity at ±20°, provides proper rolloff
+    // for transient sideslip excursions (e.g. during gust response or
+    // rapid maneuvers). Abusive-input cases that earlier drove β > 40° in
+    // water have been fixed at the source (water physics), so smooth
+    // aero response is safe here.
+    let dihedral_factor = libm::sinf(beta) * libm::cosf(beta);
     let dihedral_roll_moment =
-        q_dyn * wing_area_moments * WING_SPAN_M * CL_BETA * beta_for_dihedral;
+        q_dyn * wing_area_moments * WING_SPAN_M * CL_BETA * dihedral_factor;
     let roll_moment = MomentBreakdown {
         control: q_dyn * wing_area_moments * WING_SPAN_M * CL_DELTA_A * state.controls.roll,
         stability: wing_drop_moment + dihedral_roll_moment,

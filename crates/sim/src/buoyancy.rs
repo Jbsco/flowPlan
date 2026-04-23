@@ -109,40 +109,6 @@ const LATERAL_HYDRO_DRAG_N_PER_MPS2: f32 = 400.0;
 /// the step and provides the pitch-up balancing moment via `PLANING_LIFT_CENTROID_Z_FWD_M`.
 const PLANING_LIFT_N_PER_MPS2: f32 = 75.0;
 
-/// Inside-float hydrofoil stick coefficient.
-///
-/// Models the real-world hydrofoil effect that pulls the inside float DOWN
-/// during a water turn and (symmetrically) pushes the outside float UP. The
-/// inside float's keel acts as a downward-suction hydrofoil during yawing
-/// motion; the outside float's as an upward-lift one. Combined, these create
-/// a strong roll-restoring moment that keeps float-planes planted in turns
-/// and prevents outward flips at higher throttle.
-///
-/// Force magnitude per sample: `coeff × inside_indicator × forward_body × wetted × per_section_scale`
-/// where `inside_indicator = -pontoon.offset.x × yaw_rate` (positive on
-/// inside of turn, negative on outside). Applied as world-Y (vertical);
-/// accurate for moderate bank angles.
-///
-/// Tuned 2026-04-22 alongside water-rudder / anisotropic-drag pass to
-/// prevent outward flips at 35%+ throttle without over-damping natural
-/// turn dynamics.
-///
-/// **Task #179 iteration 3 (2026-04-22): reduced 70k → 15k → 3k** after
-/// multiple flip-bug reports.
-/// - 70k (original): `yaw_rate²` positive feedback → flip at any throttle with yaw
-/// - 15k: better but abusive inputs (full throttle + full yaw) still flip
-/// - 3k + hard clamp: bounded under all tested abusive inputs
-///
-/// Also clamped to `STICK_FORCE_MAX_N`. The "inside-float hydrofoil stick"
-/// effect is now modest — a gentle turn-tightening, not a primary
-/// restoring mechanism. Normal dihedral + lateral drag provide the
-/// dominant roll stability.
-const INSIDE_FLOAT_STICK_COEFF: f32 = 3_000.0;
-
-/// Absolute-magnitude clamp on per-pontoon hydrofoil stick force.
-/// Reduced 5000 → 2000 N alongside coefficient reduction.
-const STICK_FORCE_MAX_N: f32 = 2_000.0;
-
 /// Forward body-Z offset (m) where planing lift's center of pressure acts, relative
 /// to each section's geometric center. Real planing-hull lift acts at the bow-wave
 /// region (forward of the wetted area's geometric center) — modeling this with a
@@ -205,12 +171,40 @@ const WATER_RUDDER_COEFF: f32 = 450.0;
 /// Aft lever arm (m) for water rudder moment, body +Z direction (aft of CG).
 const WATER_RUDDER_ARM_M: f32 = 3.2;
 
-/// Maximum side force (N) the water rudder may produce. The raw coefficient
-/// × v² scaling is unbounded: tuned at taxi speed (~3 m/s → ~3.6 kN) but
-/// grows to >100 kN at 20 m/s, which drives the abusive-input flip bug. Real
-/// water rudders stall / cavitate long before that. 5000 N is taxi peak plus
-/// headroom — enough for the POH-matching 4°/s yaw at idle, bounded at any
-/// velocity so abusive inputs can't flip the aircraft.
+/// Saturation threshold (N) for water rudder side force. The raw coefficient
+/// × v² formula is unbounded — tuned at taxi (~3 m/s → ~3.6 kN) but grows
+/// to >100 kN at 20 m/s. Real water rudders stall / cavitate at high load
+/// and lose authority; 5000 N matches that physical limit (taxi peak plus
+/// headroom for responsive control, bounded at any velocity).
+///
+/// **Applied via `tanh` smooth saturation** (not hard clamp):
+/// `F = F_max · tanh(F_raw / F_max)`. At low `F_raw` (`F_raw` ≪ `F_max`),
+/// `tanh(x) ≈ x`, so taxi-regime behavior is unchanged. At high `F_raw`,
+/// the function smoothly asymptotes to ±`F_max` — no discontinuity, no
+/// derivative kink at the saturation boundary.
+///
+/// ── Future refinement: explicit cavitation model ──────────────────────
+/// The `tanh` saturation models a combined stall + cavitation limit via a
+/// single characteristic force. A more physically-correct model would
+/// separate the two failure modes:
+///
+///   1. **Hydrofoil stall**: above ~15-20° effective angle of attack
+///      (rudder deflection + aircraft `β`), the flow separates from the
+///      rudder's low-pressure surface. Force drops sharply rather than
+///      saturating. Relevant when aircraft is sliding sideways (high `|β|`)
+///      while commanding rudder in the same direction — rudder is "flying"
+///      at an angle that exceeds its stall.
+///
+///   2. **Cavitation onset**: at high velocity × load, local pressure on
+///      the low-pressure side drops below water vapor pressure, forming a
+///      cavity. Lift degrades asymmetrically (usually partial rather than
+///      total). Onset velocity depends on submergence depth (deeper →
+///      higher ambient pressure → later cavitation).
+///
+/// Modelling both separately would require tracking effective `AoA`
+/// (deflection + `β`) and local pressure (proxy: depth + velocity). Until
+/// those surface as bench gaps, `tanh` captures the essential "bounded
+/// at high load" behavior that prevents flip exploits.
 const WATER_RUDDER_FORCE_MAX_N: f32 = 5_000.0;
 
 /// Number of sample points along each pontoon's longitudinal axis. 5 gives good
@@ -425,9 +419,6 @@ pub fn compute_buoyancy(
     for pontoon in &BEAVER_PONTOONS {
         let section_length = pontoon.length_m * section_length_factor;
         let section_max_displacement = pontoon.max_displacement_m3 * per_section_scale;
-        // Per-pontoon wetted accumulator (for the whole-pontoon hydrofoil
-        // stick force applied once after the sample loop — see below).
-        let mut pontoon_wetted_accum = 0.0_f32;
 
         for i in 0..PONTOON_SAMPLE_COUNT {
             // Sample center fraction along pontoon length, body-Z offset. For N=5:
@@ -535,10 +526,6 @@ pub fn compute_buoyancy(
             };
             let planing_lift_world = v.orientation * planing_lift_body_vec;
 
-            // Accumulate per-pontoon wetted for the stick force applied once
-            // after the sample loop at pontoon center — see below.
-            pontoon_wetted_accum += wetted_fraction * per_section_scale;
-
             // Buoyancy + drag + damping all act at the section geometric center.
             let other_force_world = buoyancy_force_world
                 + Vec3::new(horizontal_drag_world.x, v_damp_y, horizontal_drag_world.z);
@@ -558,48 +545,18 @@ pub fn compute_buoyancy(
             total_moment_body += other_moment_body + planing_moment_body;
         }
 
-        // ── Inside-float hydrofoil stick (per-pontoon, post-sample-loop) ──
-        // Applied once at the pontoon's geometric center — NOT distributed
-        // per-sample — so that per-sample wetted-fraction asymmetry during
-        // pitch oscillation (porpoise) doesn't spawn spurious pitch moments.
-        // Force is world-Y (vertical); moment comes from pontoon offset in
-        // body frame so strong lateral arm → strong roll-restoring moment.
-        //
-        // Quadratic in yaw rate: matches hydrofoil lift ∝ v² physics.
-        //
-        // **HARD CLAMPED** to STICK_FORCE_MAX_N post playtest (task #179+):
-        // unbounded quadratic scaling let any yaw input (even at 16%
-        // throttle) drive runaway flips when players sent abusive inputs
-        // — rapid rudder reversal, sustained max yaw at any throttle.
-        // Physical max wetted-hydrofoil lift IS bounded by wetted area ×
-        // max lift coefficient; clamp enforces that bound. Real physics
-        // doesn't produce unbounded forces.
-        let yaw_rate_body = v.angular_velocity.y;
-        let inside_indicator = -pontoon.body_offset.x * yaw_rate_body;
-        let v_cg_body_forward = (-(v.orientation.inverse() * v.velocity).z).max(0.0);
-        let stick_force_raw = -INSIDE_FLOAT_STICK_COEFF
-            * inside_indicator
-            * yaw_rate_body.abs()
-            * v_cg_body_forward
-            * pontoon_wetted_accum;
-        let stick_force_world_y = stick_force_raw.clamp(-STICK_FORCE_MAX_N, STICK_FORCE_MAX_N);
-        // Roll-angle gate: the stick force is physically meaningful only in
-        // near-level taxi attitudes. Applied in world-Y, at high bank angles
-        // it acquires a body-lateral component which — combined with the
-        // pontoon's longitudinal offset — produces a spurious ROLL moment that
-        // positive-feeds into more bank. Fade linearly from full authority at
-        // |roll| ≤ 30° to zero at |roll| ≥ 60°. Beyond 60° the aircraft is in
-        // an out-of-normal-operating-envelope state where this "nominal taxi
-        // stabilization" force has no physical basis and only drives flip.
-        // Added 2026-04-22 after abusive-input regression scenario.
-        let (_yaw, _pitch, roll_rad) = v.orientation.to_euler(glam::EulerRot::YXZ);
-        let roll_abs_deg = roll_rad.to_degrees().abs();
-        let stick_roll_gate = ((60.0 - roll_abs_deg) / 30.0).clamp(0.0, 1.0);
-        let stick_force_world = Vec3::new(0.0, stick_force_world_y * stick_roll_gate, 0.0);
-        let stick_force_body = v.orientation.inverse() * stick_force_world;
-        let stick_moment_body = pontoon.body_offset.cross(stick_force_body);
-        total_force_world += stick_force_world;
-        total_moment_body += stick_moment_body;
+        // Note: the "inside-float hydrofoil stick" term (per-pontoon
+        // world-Y force scaled by `yaw_rate²`) was removed in 2026-04-22
+        // cleanup after repeated playtest flip bugs traced to its
+        // positive-feedback scaling. The physics it tried to capture
+        // (inside-pontoon-digs-deeper during yaw-on-water) should emerge
+        // naturally from:
+        //   1. Asymmetric pontoon wetted fraction when banked (buoyancy).
+        //   2. Lateral pontoon drag when yawing (LATERAL_HYDRO_DRAG).
+        //   3. Planing-lift asymmetry when one pontoon is deeper.
+        // If water-turn behavior becomes too weak (e.g. POH turn rates drop
+        // below target in circle scenarios), revisit — but the natural
+        // physics is preferable to a `yaw_rate² × v × wetted` hack.
     }
 
     // Water rudder: deployed state produces BOTH a yaw moment AND a lateral
@@ -627,8 +584,14 @@ pub fn compute_buoyancy(
         if v_body_forward > 0.0 {
             let side_force_raw =
                 WATER_RUDDER_COEFF * v_body_forward * v_body_forward * avg_wetted * v.controls.yaw;
+            // Smooth tanh saturation: linear in the taxi regime, smoothly
+            // approaches ±WATER_RUDDER_FORCE_MAX_N at high load. See
+            // WATER_RUDDER_FORCE_MAX_N docstring for the physics (combined
+            // hydrofoil stall + cavitation model, single characteristic
+            // force). Replaces the 2026-04-22 hard clamp with a smooth
+            // saturation that has no derivative kink.
             let side_force =
-                side_force_raw.clamp(-WATER_RUDDER_FORCE_MAX_N, WATER_RUDDER_FORCE_MAX_N);
+                WATER_RUDDER_FORCE_MAX_N * libm::tanhf(side_force_raw / WATER_RUDDER_FORCE_MAX_N);
             let force_body = Vec3::new(-side_force, 0.0, 0.0);
             let arm_body = Vec3::new(0.0, 0.0, WATER_RUDDER_ARM_M);
             // YAW-ONLY framing: in real water, the rudder's lateral force

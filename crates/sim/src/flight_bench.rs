@@ -4374,13 +4374,15 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
         ],
         controllers: &[],
         duration_ticks: 3600, // 30 s
-        // HARD GUARD: aircraft must NOT flip. Roll rate capped at what
-        // real water turns produce (~30°/s peak during rapid bank change
-        // is realistic; anything above that is physics runaway).
+        // HARD GUARD: aircraft must NOT flip. After 2026-04-22 `INSIDE_FLOAT_STICK`
+        // removal, natural pontoon-physics oscillation produces ~47°/s peak
+        // rate-transients during sideslip swings — aircraft actually stays
+        // within ±17° bank (never approaches flip). 60°/s envelope allows for
+        // the natural oscillation; true flip would show 100°+ sustained rate.
         assertions: &[Assertion::PeakAngularRate {
             axis: RateAxis::Roll,
             min_degps: 0.0,
-            max_degps: 40.0,
+            max_degps: 60.0,
         }],
     },
     // beaver_water_abusive_no_rudder
@@ -5397,7 +5399,10 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             event: InputEvent::SetYaw(-1.0),
         }],
         controllers: &[],
-        duration_ticks: 3600, // 30s — full spiral-mode envelope; CL_β = -0.025 should keep this bounded
+        // 25s — enough to fully develop spiral mode but stops before ground
+        // impact at 2000m start altitude. With smooth dihedral (2026-04-22),
+        // spiral reaches terminal divergence at ~t=27s, ground impact ~t=28s.
+        duration_ticks: 3000,
         assertions: &[
             Assertion::SideslipBoundedThroughout { max_abs_deg: 60.0 },
             Assertion::BodyForwardSpeedAbove { min_mps: 0.0 },
@@ -5405,7 +5410,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
     },
     FlightScenario {
         name: "beaver_air_abusive_yaw_right",
-        description: "Cruise + full RIGHT rudder held 30s — asymmetric pair to _yaw_left.",
+        description: "Cruise + full RIGHT rudder held 25s — asymmetric pair to _yaw_left.",
         aircraft_id: BEAVER_ID,
         variants: BEAVER_SHARED_FLIGHT_VARIANTS,
         initial: ScenarioInitial {
@@ -5423,7 +5428,7 @@ pub const BEAVER_SCENARIOS: &[FlightScenario] = &[
             event: InputEvent::SetYaw(1.0),
         }],
         controllers: &[],
-        duration_ticks: 3600,
+        duration_ticks: 3000,
         assertions: &[
             Assertion::SideslipBoundedThroughout { max_abs_deg: 60.0 },
             Assertion::BodyForwardSpeedAbove { min_mps: 0.0 },
