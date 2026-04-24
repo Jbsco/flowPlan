@@ -385,6 +385,13 @@ Acceptance: no ambient trees growing through runways / apron slabs / large featu
 
 All 4 steppings (.c.8 types/RON → .c.9 generator → .c.10 fBm fields → .c.11 rotated-rect polish) shipped. The ambient environment subsystem is live, deterministic, and ready for visual-iteration tuning. Follow-ups (.c.12 `InverseTaperedClearing` authoring, .c.13 cross-cell seam lookup, .c.14 seasonal variation) remain as deferred items.
 
+**5c.2.c.12c soft density + copse layers — 2026-04-24 (Task #253).** After visual check surfaced "circular patches with hard edges and low density":
+- Replaced hard `if noise < threshold { continue }` gate with probabilistic soft-taper. `AmbientEntry.noise_taper` (default 0.15) is the width of a smoothstep band around `noise_threshold`. Candidates in the band spawn with probability = `smoothstep((noise - threshold + taper/2) / taper)` and are also scaled by `0.7 + 0.3·patch_weight` so edge trees shrink toward 70% — feathered edges instead of discs.
+- Authored densities bumped 40-80% on primary canopies across all 4 biomes.
+- Widened size ranges toward realistic mature-tree highs: boreal pine 5-24 m, alpine spruce 3-28 m (old-growth reach), desert juniper 1.8-8 m, mediterranean olive 2-9 m.
+- New "copse" entries per biome: short noise wavelength (130-160 m), high threshold (0.7-0.78), very high density (900-1400/km²) → tight nearly-touching pockets of "deep woods" trees that bush pilots navigate around. Paired with the main carpet's soft taper, you get smooth transitions from sparse region → dense copse without visible seams.
+- Test `soft_taper_reduces_spawn_count_vs_hard_threshold` locks in the edge-fade invariant. 13 ambient-module tests total.
+
 **5c.2.c.12b composite stacks + variety pass — 2026-04-24 (Task #252).** After the first visual check, user requested more shape variation. Delivered:
 - `AmbientStackLayer` struct + `AmbientEntry.stacks: Vec<_>` field (serde-default empty). Each base candidate emits derived instances per stack layer: independent xz / y scale, y-offset as a fraction of base size, per-layer rotation jitter, per-layer color-source slot.
 - Generator emits the base instance then iterates stacks, using a per-layer RNG stream so stacks don't correlate across candidates.

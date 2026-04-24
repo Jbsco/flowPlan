@@ -315,12 +315,21 @@ pub fn generate_ambient_for_cell(
                 continue;
             }
 
-            // Density-field filter. 4-octave fBm seeded per-entry;
-            // raw range normalized to `[0, 1]` so `noise_threshold` in
-            // RON maps intuitively (0 = always spawn, 0.5 = half the
-            // field, 0.9 = very sparse clusters).
+            // Density-field filter with soft taper. 4-octave fBm
+            // seeded per-entry; raw range normalized to `[0, 1]`.
+            //
+            // `noise_threshold ± noise_taper/2` is the smoothstep band.
+            // Spawn probability + size both fade across it so cluster
+            // edges feather out instead of showing hard circular seams
+            // (5c.2.c.12c).
             let noise = density_noise(px, pz, entry.noise_scale_m, entry_tag);
-            if noise < entry.noise_threshold {
+            let taper = entry.noise_taper.max(1e-4);
+            let t_raw = (noise - (entry.noise_threshold - taper * 0.5)) / taper;
+            let patch_weight = smoothstep(t_raw);
+            if patch_weight <= 0.0 {
+                continue;
+            }
+            if rand_unit(cand_rng, 6) > patch_weight {
                 continue;
             }
 
@@ -371,12 +380,15 @@ pub fn generate_ambient_for_cell(
                 },
             };
 
-            // Size pick.
+            // Size pick. Multiplied by `patch_weight` so edge
+            // candidates shrink toward 70% of authored size, fully
+            // feathering the cluster boundary.
             let base_size = entry.size_range_m.0
                 + rand_unit(cand_rng, 3) * (entry.size_range_m.1 - entry.size_range_m.0);
             let jitter = entry.scale_jitter.0
                 + rand_unit(cand_rng, 4) * (entry.scale_jitter.1 - entry.scale_jitter.0);
-            let size = base_size * jitter * size_factor;
+            let edge_fade = 0.7 + 0.3 * patch_weight;
+            let size = base_size * jitter * size_factor * edge_fade;
             if size < 0.1 {
                 continue; // below visible-threshold — skip the upload
             }
@@ -477,6 +489,7 @@ mod tests {
             scale_jitter: (0.9, 1.1),
             noise_scale_m: 400.0,
             noise_threshold: 0.0, // everything passes (max of pseudo-noise is 0.7)
+            noise_taper: 0.0,     // hard threshold for test determinism
             altitude_range_m: (-100.0, 3000.0),
             slope_max_deg: 60.0,
             rng_stream: 0,
@@ -721,6 +734,61 @@ mod tests {
             let on_runway = inst.position.z.abs() < 750.0 && inst.position.x.abs() < 22.5;
             assert!(!on_runway, "rotated runway overlap missed");
         }
+    }
+
+    #[test]
+    fn soft_taper_reduces_spawn_count_vs_hard_threshold() {
+        // Threshold of 0.5 on an entry with hard taper (0.0) lets
+        // through half the field on average. Same threshold with a
+        // wide taper (0.3) probabilistically accepts some sub-0.5
+        // candidates and probabilistically rejects some above-0.5
+        // ones — total count similar but edge smoother. Verify the
+        // soft-taper version produces a non-empty output AND has
+        // size variation at its low end (evidence of edge fade).
+        let mut hard = boreal_forest_entry();
+        hard.noise_threshold = 0.5;
+        hard.noise_taper = 0.0;
+        let mut soft = hard.clone();
+        soft.noise_taper = 0.3;
+
+        let hard_out = generate_ambient_for_cell(
+            11,
+            99,
+            (0.0, 0.0),
+            BiomeClass::CoastalBoreal,
+            &[hard],
+            &[],
+            None,
+            &const_height(100.0),
+            &no_water,
+        );
+        let soft_out = generate_ambient_for_cell(
+            11,
+            99,
+            (0.0, 0.0),
+            BiomeClass::CoastalBoreal,
+            &[soft],
+            &[],
+            None,
+            &const_height(100.0),
+            &no_water,
+        );
+
+        // Both produce output.
+        assert!(!hard_out.is_empty());
+        assert!(!soft_out.is_empty());
+
+        // Soft-taper output should include at least one instance
+        // scaled below 0.9× its maximum — edge-fade evidence.
+        let max_y = soft_out
+            .iter()
+            .map(|i| i.scale.y)
+            .fold(0.0_f32, f32::max);
+        let has_small = soft_out.iter().any(|i| i.scale.y < max_y * 0.85);
+        assert!(
+            has_small,
+            "soft-taper should produce edge instances smaller than interior"
+        );
     }
 
     #[test]

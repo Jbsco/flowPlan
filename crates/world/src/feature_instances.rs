@@ -212,6 +212,10 @@ pub enum FeatureAmbientControl {
 ///
 /// See [MAPGEN § Ambient environment objects → RON schema](../../../MAPGEN.md#ambient-environment-objects-phase-363c5c8)
 /// for authoring guidelines.
+const fn default_noise_taper() -> f32 {
+    0.15
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct AmbientEntry {
     /// Which primitive renders each ambient instance.
@@ -233,9 +237,18 @@ pub struct AmbientEntry {
     /// fBm wavelength controlling density-field variation (m). Larger
     /// = broader forest/meadow patches; smaller = tighter clustering.
     pub noise_scale_m: f32,
-    /// Density-field sample threshold. Candidate spawns only when the
-    /// noise sample exceeds this. Higher threshold = sparser coverage.
+    /// Density-field sample threshold. Candidates with noise above
+    /// `noise_threshold + noise_taper/2` always spawn; candidates
+    /// below `noise_threshold - noise_taper/2` never spawn; in the
+    /// taper band, spawn probability + size fade smoothly via
+    /// smoothstep. Higher threshold = sparser coverage.
     pub noise_threshold: f32,
+    /// Width of the soft-taper band around `noise_threshold` (in
+    /// normalized noise units). Default `0.15` produces ~100 m
+    /// feathered patch edges at `noise_scale_m = 400`. Set to `0` for
+    /// hard threshold (pre-5c.2.c.12c behavior).
+    #[serde(default = "default_noise_taper")]
+    pub noise_taper: f32,
     /// (min, max) altitude range (m). Candidates outside this are
     /// rejected before expensive checks.
     pub altitude_range_m: (f32, f32),
