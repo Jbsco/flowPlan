@@ -236,6 +236,20 @@ struct Runtime {
     /// Water rebuild timings — same pattern.
     last_water_rebuild_cpu_ms: f32,
     last_water_rebuild_gpu_ms: f32,
+    /// Debug-fly camera (Phase 3.6.3c.5a). Always allocated; only drives
+    /// rendering when `key_state.debug_active` is true. See
+    /// `crate::debug_camera::DebugCamera`.
+    debug_camera: crate::debug_camera::DebugCamera,
+    /// Mouse-delta accumulator (pixels). Cleared each frame after
+    /// applying to `debug_camera`.
+    debug_mouse_delta: (f32, f32),
+    /// True while the OS cursor is captured + hidden for debug mouse-look.
+    /// Entering debug mode captures; ESC releases; re-clicking in the
+    /// window can re-capture (future polish).
+    mouse_captured: bool,
+    /// EMA of frame times (seconds) for HUD readout. Alpha = 0.1 →
+    /// stable on short timescales while responsive to sustained changes.
+    frametime_ema_s: f32,
     /// Depth (meters) from the vehicle mesh's CG/origin down to its lowest point
     /// (floats / wheels). Used to lift the spawn altitude and each-tick `min_altitude`
     /// so those contact points clear terrain / water.
@@ -337,7 +351,12 @@ impl ApplicationHandler for GameApp {
             WindowEvent::KeyboardInput {
                 event: key_event, ..
             } => {
-                if is_escape_pressed(&key_event) {
+                // ESC quits the app in normal mode; in debug-camera mode
+                // it releases mouse capture (handled via KeyState flags
+                // + tick_and_render). We check debug_active BEFORE
+                // dispatching so the exit path only fires when debug is
+                // inactive.
+                if is_escape_pressed(&key_event) && !rt.key_state.debug_active {
                     event_loop.exit();
                     return;
                 }
@@ -361,6 +380,36 @@ impl ApplicationHandler for GameApp {
                 rt.window.request_redraw();
             },
             _ => {},
+        }
+    }
+
+    /// Raw device events — used to capture mouse-motion deltas (dx, dy)
+    /// for the debug-fly camera.
+    ///
+    /// Regular `WindowEvent::CursorMoved` gives absolute positions (jumps
+    /// when cursor leaves window), but `DeviceEvent::MouseMotion` gives
+    /// raw relative motion even when the cursor is locked + hidden
+    /// (FPS-game pattern).
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        let Some(rt) = self.runtime.as_mut() else {
+            return;
+        };
+        if let winit::event::DeviceEvent::MouseMotion { delta } = event {
+            // Only accumulate when debug mode is active AND the cursor
+            // is captured — otherwise the mouse is for regular GUI use.
+            // Mouse delta is f64 (subpixel precision from the OS); cast
+            // to f32 for our math. Per-frame values are tiny (<100 px),
+            // so truncation is harmless.
+            #[allow(clippy::cast_possible_truncation)]
+            if rt.key_state.debug_active && rt.mouse_captured {
+                rt.debug_mouse_delta.0 += delta.0 as f32;
+                rt.debug_mouse_delta.1 += delta.1 as f32;
+            }
         }
     }
 
@@ -696,6 +745,10 @@ impl Runtime {
             last_terrain_rebuild_gpu_ms: 0.0,
             last_water_rebuild_cpu_ms: 0.0,
             last_water_rebuild_gpu_ms: 0.0,
+            debug_camera: crate::debug_camera::DebugCamera::default(),
+            debug_mouse_delta: (0.0, 0.0),
+            mouse_captured: false,
+            frametime_ema_s: 1.0 / 60.0,
             vehicle_float_offset,
             hud_format,
             sim,
@@ -729,6 +782,30 @@ impl Runtime {
         (self.config.width, self.config.height)
     }
 
+    /// Grab / hide the OS cursor for FPS-style mouse-look.
+    ///
+    /// `true` = entering debug mode / re-capturing after a previous
+    /// release. `false` = releasing (on ESC or exit of debug mode).
+    ///
+    /// Swallows errors because cursor-grab support varies by platform
+    /// (X11 can fail transiently; Wayland works differently); we degrade
+    /// to "no cursor grab" gracefully rather than crashing.
+    fn window_set_cursor_captured(&self, captured: bool) {
+        use winit::window::CursorGrabMode;
+        if captured {
+            // Try Locked first (hides cursor + confines to window); fall
+            // back to Confined if Locked isn't supported (some Wayland).
+            let locked = self.window.set_cursor_grab(CursorGrabMode::Locked);
+            if locked.is_err() {
+                drop(self.window.set_cursor_grab(CursorGrabMode::Confined));
+            }
+            self.window.set_cursor_visible(false);
+        } else {
+            drop(self.window.set_cursor_grab(CursorGrabMode::None));
+            self.window.set_cursor_visible(true);
+        }
+    }
+
     fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -749,6 +826,74 @@ impl Runtime {
         let elapsed = now.duration_since(self.last_frame_time).as_secs_f32();
         self.last_frame_time = now;
         self.tick_budget = (self.tick_budget + elapsed).min(0.25); // cap = 250 ms
+
+        // Track frame time via EMA for the debug HUD readout (3.6.3c.5a).
+        // Alpha 0.1 = roughly 10-frame smoothing at 60 Hz, responsive but
+        // not jittery.
+        self.frametime_ema_s = 0.9 * self.frametime_ema_s + 0.1 * elapsed;
+
+        // ---- Debug-camera edge-triggered events (3.6.3c.5a) ----
+        // Backtick toggle: enter / leave debug mode. On entry, snap the
+        // debug camera to the current sim-camera pose so the view is
+        // seamless; on exit, we keep the stored pose for the next entry.
+        if self.key_state.debug_toggle_pending {
+            self.key_state.debug_toggle_pending = false;
+            if self.key_state.debug_active {
+                // Leaving debug mode.
+                self.key_state.debug_active = false;
+                self.key_state.clear_debug_inputs();
+                self.mouse_captured = false;
+                self.window_set_cursor_captured(false);
+                tracing::info!(target: "debug_camera", "exit debug mode");
+            } else {
+                // Entering debug mode. Snap to sim-camera pose.
+                let (_, curr) = self.snapshots.read();
+                self.debug_camera =
+                    crate::debug_camera::DebugCamera::spawn_at(curr.camera.position);
+                self.key_state.debug_active = true;
+                self.key_state.clear_aircraft_inputs();
+                self.debug_mouse_delta = (0.0, 0.0);
+                self.mouse_captured = true;
+                self.window_set_cursor_captured(true);
+                tracing::info!(
+                    target: "debug_camera",
+                    pos_x = curr.camera.position.x,
+                    pos_y = curr.camera.position.y,
+                    pos_z = curr.camera.position.z,
+                    "enter debug mode at sim-camera pose"
+                );
+            }
+        }
+        if self.key_state.debug_cycle_speed_pending {
+            self.key_state.debug_cycle_speed_pending = false;
+            self.debug_camera.cycle_speed();
+            tracing::info!(
+                target: "debug_camera",
+                speed_mps = self.debug_camera.current_speed_mps(),
+                "cycle speed tier"
+            );
+        }
+        if self.key_state.debug_release_mouse_pending {
+            self.key_state.debug_release_mouse_pending = false;
+            self.mouse_captured = false;
+            self.window_set_cursor_captured(false);
+            tracing::info!(target: "debug_camera", "mouse released (ESC)");
+        }
+
+        // ---- Debug-camera per-frame motion update ----
+        if self.key_state.debug_active {
+            // Apply accumulated mouse delta since last frame.
+            let (dx, dy) = self.debug_mouse_delta;
+            self.debug_mouse_delta = (0.0, 0.0);
+            if self.mouse_captured {
+                self.debug_camera.apply_mouse_delta(dx, dy);
+            }
+            // Apply WASD / Shift / Ctrl motion.
+            let (fb, rl, ud) = self.key_state.debug_motion();
+            if fb != 0.0 || rl != 0.0 || ud != 0.0 {
+                self.debug_camera.integrate(fb, rl, ud, elapsed);
+            }
+        }
 
         // Advance the sim by fixed-timestep ticks while we have budget.
         let mut tick_count = 0u32;
@@ -915,6 +1060,44 @@ impl Runtime {
 
         let (prev, curr) = self.snapshots.read();
 
+        // Build ActiveCamera early — it's the single source of truth
+        // for both render and streaming. In normal play it wraps the
+        // sim camera; in debug mode it wraps the debug-fly camera.
+        let active_camera = if self.key_state.debug_active {
+            crate::streaming::ActiveCamera {
+                position: self.debug_camera.position,
+                orientation: self.debug_camera.orientation(),
+                fov_y_radians: self.debug_camera.fov_y_radians,
+                debug_active: true,
+            }
+        } else {
+            crate::streaming::ActiveCamera::from_sim(curr.camera)
+        };
+        let active_cam_pos_xz = active_camera.position_xz();
+
+        // 3.6.3c.5a: if debug camera is active, synthesize prev/curr
+        // snapshots with the debug camera pose replacing the sim camera.
+        // Renderer interpolates between prev.camera and curr.camera; using
+        // the same pose in both means no interpolation drift, which is
+        // what we want for a free-fly camera (user motion is frame-exact,
+        // not smoothed). Reads orientation + fov_y_radians fields from
+        // ActiveCamera (the single-source-of-truth per 3.6.3c.5b design).
+        let (prev, curr) = if active_camera.debug_active {
+            let debug_snap = flowplan_sim::CameraSnapshot::from_state(&flowplan_sim::Camera {
+                position: active_camera.position,
+                orientation: active_camera.orientation,
+                fov_y_radians: active_camera.fov_y_radians,
+                ..flowplan_sim::Camera::default()
+            });
+            let mut prev_overridden = prev;
+            let mut curr_overridden = curr;
+            prev_overridden.camera = debug_snap;
+            curr_overridden.camera = debug_snap;
+            (prev_overridden, curr_overridden)
+        } else {
+            (prev, curr)
+        };
+
         // Drive the scene uniform from the sim's time-of-day: sun direction updates as
         // the day advances. Fog / ambient / sun color stay at render defaults for now;
         // per-biome tuning arrives alongside the weather system. Wall-clock seconds
@@ -940,13 +1123,9 @@ impl Runtime {
         // 3D cockpit instruments as additional consumers of the same struct.
         let telemetry = Telemetry::derive(&curr);
 
-        // 3.6.3c.5b: Render streaming. Recenter terrain + water meshes on
-        // the active camera if it has moved beyond REBUILD_THRESHOLD_M.
-        // `ActiveCamera` is the single-source-of-truth abstraction;
-        // 3.6.3c.5a's debug-fly camera will write here when toggled on.
-        // Until then `from_sim` wraps the interpolated-per-tick sim camera.
-        let active_camera = crate::streaming::ActiveCamera::from_sim(curr.camera);
-        let active_cam_pos_xz = active_camera.position_xz();
+        // `active_camera` + `active_cam_pos_xz` were built earlier from
+        // the snapshot read. In debug mode they follow the debug camera;
+        // otherwise the sim camera. Streaming recenter uses them below.
         if let Some(st) = self.streaming_terrain.as_mut() {
             // Main-thread cost is now just channel probe + possible
             // worker spawn — sub-millisecond. The worker measures its
@@ -1024,6 +1203,33 @@ impl Runtime {
             Some(&self.attitude_batch),
         );
         // Debug HUD pass on top of the main scene, rendered via the linear view.
+        // In debug-camera mode we substitute the aircraft-HUD panels with
+        // the debug-camera overlay per 3.6.3c.5a.
+        let debug_overlay = if self.key_state.debug_active {
+            Some(crate::debug_hud::DebugCameraOverlay {
+                position: self.debug_camera.position,
+                heading_deg: self.debug_camera.heading_deg(),
+                pitch_deg: self.debug_camera.pitch * 180.0 / core::f32::consts::PI,
+                speed_mps: self.debug_camera.current_speed_mps(),
+                active_cell_count: self
+                    .streaming_cells
+                    .as_ref()
+                    .map_or(0, crate::streaming::StreamingCellSet::active_count),
+                last_terrain_cpu_ms: self.last_terrain_rebuild_cpu_ms,
+                last_terrain_gpu_ms: self.last_terrain_rebuild_gpu_ms,
+                rebuild_in_flight: self
+                    .streaming_terrain
+                    .as_ref()
+                    .is_some_and(crate::streaming::StreamingTerrain::rebuild_in_flight),
+                terrain_mesh_center: self
+                    .streaming_terrain
+                    .as_ref()
+                    .map_or(glam::Vec2::ZERO, crate::streaming::StreamingTerrain::center),
+                _phantom: core::marker::PhantomData,
+            })
+        } else {
+            None
+        };
         self.debug_hud.render(
             &self.device,
             &self.queue,
@@ -1033,6 +1239,7 @@ impl Runtime {
             &telemetry,
             self.ticks_last_frame,
             self.sim.aircraft.as_ref(),
+            debug_overlay.as_ref(),
         );
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();

@@ -76,18 +76,12 @@ pub struct ActiveCamera {
     pub position: glam::Vec3,
     /// Current camera orientation (used by renderer; streaming only
     /// uses position). Consumed in 3.6.3c.5a.
-    // TODO(3.6.3c.5a/5c): remove this allow when the listed consumer lands.
-    #[allow(dead_code)]
     pub orientation: glam::Quat,
     /// Field of view (used by renderer). Consumed in 3.6.3c.5a.
-    // TODO(3.6.3c.5a/5c): remove this allow when the listed consumer lands.
-    #[allow(dead_code)]
     pub fov_y_radians: f32,
     /// True when the debug-fly camera is active (3.6.3c.5a). Streaming
     /// behavior is identical regardless; the flag is for HUD + input
     /// gating in the debug-camera milestone.
-    // TODO(3.6.3c.5a/5c): remove this allow when the listed consumer lands.
-    #[allow(dead_code)]
     pub debug_active: bool,
 }
 
@@ -288,7 +282,6 @@ impl StreamingTerrain {
     /// Worker-measured CPU time (ms) of the most recent rebuild.
     /// 0 if no rebuild has completed yet.
     #[must_use]
-    #[allow(dead_code)] // TODO(3.6.3c.5a): consumed by debug HUD
     pub const fn last_rebuild_cpu_ms(&self) -> f32 {
         self.last_rebuild_cpu_ms
     }
@@ -296,7 +289,6 @@ impl StreamingTerrain {
     /// True iff a worker rebuild is currently in flight. Useful for
     /// HUD status ("rebuilding...") + debugging.
     #[must_use]
-    #[allow(dead_code)] // TODO(3.6.3c.5a): consumed by debug HUD
     pub const fn rebuild_in_flight(&self) -> bool {
         self.pending.is_some()
     }
@@ -311,8 +303,6 @@ impl StreamingTerrain {
     /// center at X, Y" for streaming diagnostics). Allow per `CODING_RULES`
     /// §61 — consumer queued on Task #223.
     #[must_use]
-    // TODO(3.6.3c.5a/5c): remove this allow when the listed consumer lands.
-    #[allow(dead_code)]
     pub const fn center(&self) -> Vec2 {
         self.center
     }
@@ -381,8 +371,6 @@ impl StreamingWater {
     /// Current mesh center. Read by 3.6.3c.5a debug HUD. Allow per
     /// `CODING_RULES` §61 — consumer queued on Task #223.
     #[must_use]
-    // TODO(3.6.3c.5a/5c): remove this allow when the listed consumer lands.
-    #[allow(dead_code)]
     pub const fn center(&self) -> Vec2 {
         self.center
     }
@@ -470,9 +458,9 @@ impl StreamingCellSet {
     /// feature-instance streaming + 3.6.3c.5a debug HUD (shows active
     /// count). Allow per `CODING_RULES` §61 — consumers queued on Tasks
     /// #223 + future 3.6.3c.5c.
-    #[must_use]
-    // TODO(3.6.3c.5a/5c): remove this allow when the listed consumer lands.
+    // TODO(3.6.3c.5c — Task #227): remove this allow when feature-instance streaming consumes active().
     #[allow(dead_code)]
+    #[must_use]
     pub fn active(&self) -> &[CellId] {
         &self.active
     }
@@ -480,9 +468,9 @@ impl StreamingCellSet {
     /// Cells that entered on the most recent refresh. Consumed by
     /// 3.6.3c.5c for per-cell resource allocation (spawn feature
     /// instances, allocate per-cell buffers).
-    #[must_use]
-    // TODO(3.6.3c.5a/5c): remove this allow when the listed consumer lands.
+    // TODO(3.6.3c.5c — Task #227): remove this allow when feature-instance streaming consumes entered().
     #[allow(dead_code)]
+    #[must_use]
     pub fn entered(&self) -> &[CellId] {
         &self.entered
     }
@@ -490,17 +478,15 @@ impl StreamingCellSet {
     /// Cells that exited on the most recent refresh. Consumed by
     /// 3.6.3c.5c for per-cell resource release (free feature instances,
     /// deallocate per-cell buffers).
-    #[must_use]
-    // TODO(3.6.3c.5a/5c): remove this allow when the listed consumer lands.
+    // TODO(3.6.3c.5c — Task #227): remove this allow when feature-instance streaming consumes exited().
     #[allow(dead_code)]
+    #[must_use]
     pub fn exited(&self) -> &[CellId] {
         &self.exited
     }
 
     /// Number of active cells. Consumed by 3.6.3c.5a debug HUD.
     #[must_use]
-    // TODO(3.6.3c.5a/5c): remove this allow when the listed consumer lands.
-    #[allow(dead_code)]
     pub fn active_count(&self) -> usize {
         self.active.len()
     }

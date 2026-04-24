@@ -64,6 +64,7 @@ impl DebugHud {
         telemetry: &Telemetry,
         pending_ticks_last_frame: u32,
         aircraft: Option<&AircraftSpec>,
+        debug_overlay: Option<&DebugCameraOverlay<'_>>,
     ) {
         let now = Instant::now();
         let dt_ms = now.duration_since(self.last_frame_time).as_secs_f32() * 1000.0;
@@ -73,13 +74,21 @@ impl DebugHud {
 
         let raw_input = self.state.take_egui_input(window);
         let full_output = self.ctx.run(raw_input, |ctx| {
-            build_ui(
-                ctx,
-                telemetry,
-                aircraft,
-                self.frame_time_ms_ema,
-                pending_ticks_last_frame,
-            );
+            if let Some(overlay) = debug_overlay {
+                // Debug-camera mode: hide the aircraft flight-instrument
+                // panels (dynamics / glide / debug). Show the camera
+                // overlay with position / heading / speed-tier / FPS /
+                // active-cell-count / rebuild-status.
+                build_debug_camera_ui(ctx, self.frame_time_ms_ema, overlay);
+            } else {
+                build_ui(
+                    ctx,
+                    telemetry,
+                    aircraft,
+                    self.frame_time_ms_ema,
+                    pending_ticks_last_frame,
+                );
+            }
         });
         self.state
             .handle_platform_output(window, full_output.platform_output);
@@ -397,5 +406,101 @@ fn build_ui(
                 "L/D    --  (level / climbing)".to_string()
             };
             ui.label(ld_label);
+        });
+}
+
+/// Per-frame debug-camera HUD inputs.
+///
+/// Bundled as a reference-struct because passing 10+ args through
+/// `render()` is silly.
+///
+/// Populated by `tick_and_render` from `self.debug_camera`, `self.streaming_*`,
+/// and `self.last_*_rebuild_*` — all state already exists for 3.6.3c.5b.
+pub struct DebugCameraOverlay<'a> {
+    /// World-space camera position.
+    pub position: glam::Vec3,
+    /// Heading in degrees (0-360, 0 = north / -Z).
+    pub heading_deg: f32,
+    /// Pitch in degrees (+ up, - down).
+    pub pitch_deg: f32,
+    /// Current speed tier (m/s).
+    pub speed_mps: f32,
+    /// Active sub-biome cell count from `StreamingCellSet.active_count()`.
+    pub active_cell_count: usize,
+    /// Most recent terrain mesh-rebuild CPU cost (worker thread).
+    pub last_terrain_cpu_ms: f32,
+    /// Most recent terrain mesh-rebuild GPU upload cost.
+    pub last_terrain_gpu_ms: f32,
+    /// True if a worker rebuild is currently in flight.
+    pub rebuild_in_flight: bool,
+    /// Streaming terrain mesh center (reassuring "yes, the mesh is
+    /// under the camera" readout).
+    pub terrain_mesh_center: glam::Vec2,
+    /// Borrow of the scenario-playback controller states isn't needed
+    /// here; lifetime parameter is for future extensions that may
+    /// carry borrowed slices (e.g. cell-active-set for display).
+    pub _phantom: core::marker::PhantomData<&'a ()>,
+}
+
+#[allow(clippy::too_many_lines)]
+fn build_debug_camera_ui(ctx: &Context, frame_ms: f32, o: &DebugCameraOverlay<'_>) {
+    // Main debug-camera panel: position / heading / speed-tier / FPS /
+    // frame time. Anchored top-left; compact enough to fit a 1080p HUD.
+    egui::Window::new("debug camera")
+        .anchor(egui::Align2::LEFT_TOP, egui::vec2(10.0, 10.0))
+        .resizable(false)
+        .collapsible(false)
+        .show(ctx, |ui| {
+            ui.label(format!(
+                "pos   x={:>+9.1}  y={:>+9.1}  z={:>+9.1}",
+                o.position.x, o.position.y, o.position.z
+            ));
+            ui.label(format!(
+                "look  heading={:>6.1}°  pitch={:>+6.1}°",
+                o.heading_deg, o.pitch_deg
+            ));
+            ui.label(format!("speed  {:>5.0} m/s   (Tab to cycle)", o.speed_mps));
+            ui.separator();
+            let fps = if frame_ms > 0.0 {
+                1000.0 / frame_ms
+            } else {
+                0.0
+            };
+            ui.label(format!("fps   {fps:>6.1}   frame {frame_ms:>5.2} ms"));
+            ui.separator();
+            ui.label("bindings:  WASD  ⇧LShift /⇧LCtrl  mouse  Tab  ` toggle  ESC release");
+        });
+
+    // Streaming-layer panel: mesh center, active-cell count, rebuild
+    // status. Useful diagnostic while flying across the world to verify
+    // streaming keeps up.
+    egui::Window::new("streaming")
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-10.0, 10.0))
+        .resizable(false)
+        .collapsible(false)
+        .show(ctx, |ui| {
+            ui.label(format!(
+                "terrain mesh center  ({:>+9.1}, {:>+9.1})",
+                o.terrain_mesh_center.x, o.terrain_mesh_center.y
+            ));
+            let from_center = (o.position.x - o.terrain_mesh_center.x)
+                .hypot(o.position.z - o.terrain_mesh_center.y);
+            ui.label(format!("distance from mesh center  {from_center:>6.0} m"));
+            ui.separator();
+            ui.label(format!("active cells  {}", o.active_cell_count));
+            ui.separator();
+            let (status_color, status_text) = if o.rebuild_in_flight {
+                (
+                    egui::Color32::from_rgb(240, 200, 80),
+                    "rebuild in flight".to_string(),
+                )
+            } else {
+                (egui::Color32::from_rgb(120, 220, 120), "idle".to_string())
+            };
+            ui.colored_label(status_color, format!("status:  {status_text}"));
+            ui.label(format!(
+                "last rebuild  cpu={:>6.1} ms   gpu={:>5.2} ms",
+                o.last_terrain_cpu_ms, o.last_terrain_gpu_ms
+            ));
         });
 }

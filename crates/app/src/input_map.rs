@@ -69,6 +69,35 @@ pub struct KeyState {
     /// state, the two may drift until the user presses `T` again. Gamepad /
     /// remap UI in Phase 4.7b resolves this properly.
     pub water_rudder_deployed: bool,
+    // ------------------------------------------------------------------
+    // Debug-camera state (3.6.3c.5a).
+    //
+    // Routed through KeyState because the input dispatcher (main loop)
+    // already holds this struct; a second parallel state would duplicate
+    // the on-key/off-key tracking. When `debug_active` is true, the
+    // aircraft-control keys (W/S throttle + pitch / roll / yaw) are
+    // *also* routed to debug-camera motion — W = forward, S = back, etc.
+    // Emission of aircraft `InputEvent`s is suppressed while debug mode
+    // is active so the background aircraft stays in its current state.
+    // ------------------------------------------------------------------
+    /// True when the debug-fly camera is active. Toggled by backtick.
+    pub debug_active: bool,
+    /// Debug-camera forward/back (W/S) when `debug_active`.
+    pub debug_fwd: bool,
+    pub debug_back: bool,
+    /// Debug-camera strafe (A/D).
+    pub debug_left: bool,
+    pub debug_right: bool,
+    /// Debug-camera vertical (`LShift` / `LCtrl`).
+    pub debug_up: bool,
+    pub debug_down: bool,
+    /// Edge-triggered: backtick was just pressed this frame. Consumer
+    /// clears after handling.
+    pub debug_toggle_pending: bool,
+    /// Edge-triggered: Tab was just pressed (cycle speed).
+    pub debug_cycle_speed_pending: bool,
+    /// Edge-triggered: ESC was just pressed in debug mode (release mouse).
+    pub debug_release_mouse_pending: bool,
 }
 
 impl KeyState {
@@ -82,6 +111,38 @@ impl KeyState {
             return;
         };
         let pressed = ev.state == ElementState::Pressed;
+
+        // ---------------- Debug-camera toggle + debug-mode keys ----------
+        // Backtick is the global toggle — works in both modes.
+        if code == KeyCode::Backquote && pressed && !ev.repeat {
+            self.debug_toggle_pending = true;
+            return;
+        }
+
+        // When debug mode is active, WASD + Shift/Ctrl drive the debug
+        // camera; Tab cycles speed; ESC releases mouse. Aircraft controls
+        // are intentionally suppressed — sim keeps running but the
+        // aircraft receives no input (its current state persists).
+        if self.debug_active {
+            match code {
+                KeyCode::KeyW => self.debug_fwd = pressed,
+                KeyCode::KeyS => self.debug_back = pressed,
+                KeyCode::KeyA => self.debug_left = pressed,
+                KeyCode::KeyD => self.debug_right = pressed,
+                KeyCode::ShiftLeft => self.debug_up = pressed,
+                KeyCode::ControlLeft => self.debug_down = pressed,
+                KeyCode::Tab if pressed && !ev.repeat => {
+                    self.debug_cycle_speed_pending = true;
+                },
+                KeyCode::Escape if pressed && !ev.repeat => {
+                    self.debug_release_mouse_pending = true;
+                },
+                _ => {},
+            }
+            return; // Suppress aircraft events while debug is active.
+        }
+
+        // ---------------- Aircraft controls (normal mode) ----------------
         match code {
             KeyCode::KeyW => self.throttle_up = pressed,
             KeyCode::KeyS => self.throttle_down = pressed,
@@ -135,6 +196,39 @@ impl KeyState {
             },
             _ => {},
         }
+    }
+
+    /// Clear all held aircraft-control keys. Called when entering debug
+    /// mode so the aircraft doesn't keep receiving stale inputs.
+    pub fn clear_aircraft_inputs(&mut self) {
+        self.throttle_up = false;
+        self.throttle_down = false;
+        self.pitch_up = false;
+        self.pitch_down = false;
+        self.roll_left = false;
+        self.roll_right = false;
+        self.yaw_left = false;
+        self.yaw_right = false;
+    }
+
+    /// Clear all held debug-camera keys. Called when exiting debug mode.
+    pub fn clear_debug_inputs(&mut self) {
+        self.debug_fwd = false;
+        self.debug_back = false;
+        self.debug_left = false;
+        self.debug_right = false;
+        self.debug_up = false;
+        self.debug_down = false;
+    }
+
+    /// Current debug-camera motion axes as signed unit vector
+    /// `(forward_back, right_left, up_down)` for feeding `DebugCamera::integrate`.
+    #[must_use]
+    pub fn debug_motion(&self) -> (f32, f32, f32) {
+        let fb = f32::from(i8::from(self.debug_fwd) - i8::from(self.debug_back));
+        let rl = f32::from(i8::from(self.debug_right) - i8::from(self.debug_left));
+        let ud = f32::from(i8::from(self.debug_up) - i8::from(self.debug_down));
+        (fb, rl, ud)
     }
 
     /// Push the continuous-axis events for this tick based on current held-state.
