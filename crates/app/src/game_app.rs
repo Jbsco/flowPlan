@@ -252,6 +252,22 @@ struct Runtime {
     /// cell. None for scenario playback + during the 33 s bake window
     /// when the optional is taken by a background builder (5c.2+).
     baked_assignments: Option<flowplan_world::baked_assignments::BakedAssignments>,
+    /// Hydrology graph — retained after bake so ambient generation can
+    /// query water-surface presence per (x, z). Same `Option` discipline
+    /// as `baked_assignments`: `None` outside `FLOWPLAN_FEATURE_INSTANCES`
+    /// mode.
+    hydrology: Option<flowplan_world::HydrologyGraph>,
+    /// Per-cell lazy ambient cache (Phase 3.6.3c.5c.2.c.11 polish —
+    /// streaming-hitch fix 2026-04-24). Key = active-set `CellId`,
+    /// value = the ambient `FeatureInstance` list generated at
+    /// cell-enter. Populated from `entered()`, evicted from `exited()`,
+    /// looked up during the active-set upload walk. Prevents the
+    /// every-delta regeneration of ~300 cells × ~300 candidates per
+    /// camera cross of a cell boundary.
+    ambient_cache: std::collections::HashMap<
+        flowplan_world::SubBiomeCellId,
+        Vec<flowplan_world::feature_instances::FeatureInstance>,
+    >,
     /// Most-recent terrain mesh-rebuild CPU time (milliseconds). Includes
     /// `CpuMesh::terrain_patch_at` — the parallel height-sampling pass.
     /// Persists between rebuilds so the debug HUD can display stale-but-
@@ -676,7 +692,7 @@ impl Runtime {
         let instances_enabled = std::env::var("FLOWPLAN_FEATURE_INSTANCES")
             .map(|v| v == "1")
             .unwrap_or(false);
-        let baked_assignments = match (
+        let (baked_assignments, hydrology) = match (
             scenario.is_none(),
             instances_enabled,
             sub_biome_catalog.as_ref(),
@@ -747,9 +763,9 @@ impl Runtime {
                         d / 1000.0
                     );
                 }
-                Some(baked)
+                (Some(baked), Some(hydrology))
             },
-            _ => None,
+            _ => (None, None),
         };
 
         // 3.6.3c.5c.1 diagnostic: `FLOWPLAN_SPAWN_NEAR_INSTANCE=1` puts
@@ -939,6 +955,8 @@ impl Runtime {
             streaming_cells,
             sub_biome_catalog,
             baked_assignments,
+            hydrology,
+            ambient_cache: std::collections::HashMap::new(),
             last_terrain_rebuild_cpu_ms: 0.0,
             last_terrain_rebuild_gpu_ms: 0.0,
             last_water_rebuild_cpu_ms: 0.0,
@@ -1446,8 +1464,74 @@ impl Runtime {
             if let Some(baked) = self.baked_assignments.as_ref() {
                 if !cells.entered().is_empty() || !cells.exited().is_empty() {
                     use flowplan_world::feature_instances::PrimitiveKind;
-                    // Per-kind buckets, exhaustively matched so a new
-                    // PrimitiveKind variant is a compile error.
+
+                    // Phase 1 — ambient cache maintenance. Evict exited
+                    // cells, generate + insert for newly-entered ones.
+                    // This is the ONLY place per-cell ambient is
+                    // generated; the active-set upload below reuses it.
+                    for &cell_id in cells.exited() {
+                        self.ambient_cache.remove(&cell_id);
+                    }
+                    if !cells.entered().is_empty() {
+                        let libs = flowplan_world::sub_biome::SubBiomeLibraries::shared();
+                        let terrain_ref = &self.terrain;
+                        let hydrology_ref = self.hydrology.as_ref();
+                        let height_at = |x: f32, z: f32| {
+                            flowplan_world::terrain::HeightSampler::height(terrain_ref, x, z)
+                        };
+                        let is_water = |x: f32, z: f32| {
+                            hydrology_ref.is_some_and(|h| {
+                                h.water_surface_at(x, z).is_some_and(|s| {
+                                    !matches!(
+                                        s.class,
+                                        flowplan_world::WaterClass::DryChannel
+                                    )
+                                })
+                            })
+                        };
+                        for &cell_id in cells.entered() {
+                            let seed_pos = catalog.seeds()[cell_id as usize].position;
+                            let host_biome = flowplan_world::biome::biome_at(
+                                WORLD_SEED,
+                                seed_pos.0,
+                                seed_pos.1,
+                            );
+                            let ambient_entries = libs.ambient_for_biome(host_biome);
+                            if ambient_entries.is_empty() {
+                                continue;
+                            }
+                            let feat_insts = baked.instances_at_cell(cell_id);
+                            let assignment = baked.feature_at_cell(cell_id);
+                            let feature = libs
+                                .find(
+                                    assignment.source.feature_source_biome(),
+                                    &assignment.feature_id,
+                                )
+                                .or_else(|| {
+                                    libs.oceanic()
+                                        .iter()
+                                        .find(|f| f.id == assignment.feature_id)
+                                });
+                            let ambient_control = feature.and_then(|f| f.ambient_control);
+                            let ambient_insts =
+                                flowplan_world::ambient::generate_ambient_for_cell(
+                                    WORLD_SEED,
+                                    cell_id,
+                                    seed_pos,
+                                    host_biome,
+                                    ambient_entries,
+                                    feat_insts,
+                                    ambient_control,
+                                    &height_at,
+                                    &is_water,
+                                );
+                            self.ambient_cache.insert(cell_id, ambient_insts);
+                        }
+                    }
+
+                    // Phase 2 — active-set bucket rebuild. Feature
+                    // instances are cheap `Vec`-index lookups; ambient
+                    // is a `HashMap` hit served from the cache.
                     let mut boxes: Vec<flowplan_render::InstanceGpuData> = Vec::new();
                     let mut cones: Vec<flowplan_render::InstanceGpuData> = Vec::new();
                     let mut cylinders: Vec<flowplan_render::InstanceGpuData> = Vec::new();
@@ -1456,19 +1540,11 @@ impl Runtime {
                     let mut flat_quads: Vec<flowplan_render::InstanceGpuData> = Vec::new();
                     let mut populated_in_active = 0_usize;
                     let mut ambient_uploaded = 0_usize;
-                    // Libraries + terrain sampler for 5c.2.c.9
-                    // ambient generation.
-                    let libs = flowplan_world::sub_biome::SubBiomeLibraries::shared();
-                    let terrain_ref = &self.terrain;
-                    let height_at = |x: f32, z: f32| {
-                        flowplan_world::terrain::HeightSampler::height(terrain_ref, x, z)
-                    };
                     for &cell_id in cells.active() {
                         let insts = baked.instances_at_cell(cell_id);
                         if !insts.is_empty() {
                             populated_in_active += 1;
                         }
-                        // Bucket feature instances.
                         for inst in insts {
                             let gpu = flowplan_render::InstanceGpuData::from_fields(
                                 inst.position.to_array(),
@@ -1485,54 +1561,23 @@ impl Runtime {
                                 PrimitiveKind::FlatQuad => flat_quads.push(gpu),
                             }
                         }
-                        // 5c.2.c.9: lazy ambient generation per cell.
-                        // Biome from sub-biome-catalog lookup; feature
-                        // from baked assignment; ambient entries from
-                        // the shared library.
-                        let seed_pos = catalog.seeds()[cell_id as usize].position;
-                        let host_biome =
-                            flowplan_world::biome::biome_at(WORLD_SEED, seed_pos.0, seed_pos.1);
-                        let ambient_entries = libs.ambient_for_biome(host_biome);
-                        if ambient_entries.is_empty() {
-                            continue;
-                        }
-                        let assignment = baked.feature_at_cell(cell_id);
-                        let feature = libs
-                            .find(
-                                assignment.source.feature_source_biome(),
-                                &assignment.feature_id,
-                            )
-                            .or_else(|| {
-                                libs.oceanic()
-                                    .iter()
-                                    .find(|f| f.id == assignment.feature_id)
-                            });
-                        let ambient_control = feature.and_then(|f| f.ambient_control);
-                        let ambient_insts = flowplan_world::ambient::generate_ambient_for_cell(
-                            WORLD_SEED,
-                            cell_id,
-                            seed_pos,
-                            host_biome,
-                            ambient_entries,
-                            insts,
-                            ambient_control,
-                            &height_at,
-                        );
-                        ambient_uploaded += ambient_insts.len();
-                        for inst in &ambient_insts {
-                            let gpu = flowplan_render::InstanceGpuData::from_fields(
-                                inst.position.to_array(),
-                                inst.rotation_y_rad,
-                                inst.scale.to_array(),
-                                inst.color,
-                            );
-                            match inst.primitive {
-                                PrimitiveKind::Box => boxes.push(gpu),
-                                PrimitiveKind::Cone => cones.push(gpu),
-                                PrimitiveKind::Cylinder => cylinders.push(gpu),
-                                PrimitiveKind::Sphere => spheres.push(gpu),
-                                PrimitiveKind::HalfCylinder => half_cylinders.push(gpu),
-                                PrimitiveKind::FlatQuad => flat_quads.push(gpu),
+                        if let Some(ambient) = self.ambient_cache.get(&cell_id) {
+                            ambient_uploaded += ambient.len();
+                            for inst in ambient {
+                                let gpu = flowplan_render::InstanceGpuData::from_fields(
+                                    inst.position.to_array(),
+                                    inst.rotation_y_rad,
+                                    inst.scale.to_array(),
+                                    inst.color,
+                                );
+                                match inst.primitive {
+                                    PrimitiveKind::Box => boxes.push(gpu),
+                                    PrimitiveKind::Cone => cones.push(gpu),
+                                    PrimitiveKind::Cylinder => cylinders.push(gpu),
+                                    PrimitiveKind::Sphere => spheres.push(gpu),
+                                    PrimitiveKind::HalfCylinder => half_cylinders.push(gpu),
+                                    PrimitiveKind::FlatQuad => flat_quads.push(gpu),
+                                }
                             }
                         }
                     }

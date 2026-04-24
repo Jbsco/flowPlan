@@ -385,6 +385,12 @@ Acceptance: no ambient trees growing through runways / apron slabs / large featu
 
 All 4 steppings (.c.8 types/RON → .c.9 generator → .c.10 fBm fields → .c.11 rotated-rect polish) shipped. The ambient environment subsystem is live, deterministic, and ready for visual-iteration tuning. Follow-ups (.c.12 `InverseTaperedClearing` authoring, .c.13 cross-cell seam lookup, .c.14 seasonal variation) remain as deferred items.
 
+**5c.2.c.12a regression fixes — 2026-04-24 (Task #251).** Two issues surfaced in the first in-game run:
+1. *Streaming hitch on camera motion*: `generate_ambient_for_cell` was being called for all ~300 active cells on every cell-boundary crossing (~300 cells × ~300 candidates × 4-octave fBm ≈ 75 ms hitch). Fix: per-cell `ambient_cache: HashMap<CellId, Vec<FeatureInstance>>` in `GameApp`. Generate only for `cells.entered()`, evict on `cells.exited()`, look up during the active-set bucket rebuild. Delta-event work now scales with the handful of entered/exited cells, not the full active set.
+2. *Trees in water occasionally*: ambient altitude filter couldn't catch elevated lakes (terrain > 0 but water > terrain). Fix: threaded `is_water: &dyn Fn(f32, f32) -> bool` through `generate_ambient_for_cell`. The app closes over a retained `HydrologyGraph` (now a `GameApp` field). Test `water_filter_rejects_candidates_under_water_surface` locks the invariant in.
+
+Both shipped in the same PR-scope. 11 ambient-module tests pass; 559 workspace tests pass; clippy `-D warnings` clean.
+
 ### Deferred / follow-up
 
 - **5c.2.c.12 — `InverseTaperedClearing`** if authoring use case emerges (abandoned homestead saplings, ancient_ruins ivy).

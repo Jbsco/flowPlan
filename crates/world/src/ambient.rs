@@ -241,12 +241,19 @@ fn ground_anchor_y(kind: PrimitiveKind, size_m: f32, ground_y: f32) -> (f32, gla
 /// - `ambient_control`: the cell-assigned feature's control mode.
 ///   `None` (the default Option) = fully wild.
 /// - `height_at`: terrain sampler for altitude + ground anchor.
+/// - `is_water`: closure returning `true` if `(x, z)` is under a
+///   water surface (sea / lake / river). The caller owns the
+///   hydrology reference; tests pass `|_, _| false`. Water candidates
+///   are rejected regardless of altitude range — catches elevated
+///   lakes (terrain > 0 but water > terrain) that an altitude-only
+///   filter misses.
 ///
 /// Returns `Vec<FeatureInstance>` tagged with primitive kind + color;
 /// the renderer pipeline consumes them via the same upload path as
 /// feature instances.
 #[must_use]
 #[allow(clippy::too_many_lines)] // linear per-candidate pipeline; splitting hurts readability
+#[allow(clippy::too_many_arguments)] // per-cell context is what it is
 pub fn generate_ambient_for_cell(
     master_seed: u64,
     cell_id: CellId,
@@ -256,6 +263,7 @@ pub fn generate_ambient_for_cell(
     feature_instances: &[FeatureInstance],
     ambient_control: Option<FeatureAmbientControl>,
     height_at: &dyn Fn(f32, f32) -> f32,
+    is_water: &dyn Fn(f32, f32) -> bool,
 ) -> Vec<FeatureInstance> {
     if entries.is_empty() {
         return Vec::new();
@@ -280,6 +288,12 @@ pub fn generate_ambient_for_cell(
             let radius = rand_unit(cand_rng, 2).sqrt() * AMBIENT_CELL_RADIUS_M;
             let px = cell_pos.0 + radius * angle.cos();
             let pz = cell_pos.1 + radius * angle.sin();
+
+            // Water filter — cheap O(1) hydrology lookup, runs first
+            // so we skip altitude sampling for water candidates.
+            if is_water(px, pz) {
+                continue;
+            }
 
             // Altitude filter.
             let alt = height_at(px, pz);
@@ -404,6 +418,10 @@ mod tests {
         move |_x, _z| h
     }
 
+    fn no_water(_x: f32, _z: f32) -> bool {
+        false
+    }
+
     fn boreal_forest_entry() -> AmbientEntry {
         AmbientEntry {
             kind: PrimitiveKind::Cone,
@@ -431,6 +449,7 @@ mod tests {
             &[],
             None,
             &const_height(100.0),
+            &no_water,
         );
         assert!(
             !insts.is_empty(),
@@ -458,6 +477,7 @@ mod tests {
             &[],
             None,
             &const_height(100.0),
+            &no_water,
         );
         assert!(insts.is_empty());
     }
@@ -474,6 +494,7 @@ mod tests {
             &[],
             None,
             &const_height(50.0),
+            &no_water,
         );
         let b = generate_ambient_for_cell(
             42,
@@ -484,6 +505,7 @@ mod tests {
             &[],
             None,
             &const_height(50.0),
+            &no_water,
         );
         assert_eq!(a.len(), b.len());
         for (l, r) in a.iter().zip(b.iter()) {
@@ -516,6 +538,7 @@ mod tests {
                 clear_radius_m: 100.0,
             }),
             &const_height(100.0),
+            &no_water,
         );
         for inst in &insts {
             let d = inst.position.x.hypot(inst.position.z);
@@ -552,6 +575,7 @@ mod tests {
                 taper_radius_m: 100.0,
             }),
             &const_height(100.0),
+            &no_water,
         );
 
         // Partition: close = distance < 60, far = distance > 100.
@@ -593,6 +617,7 @@ mod tests {
             core::slice::from_ref(&runway),
             None,
             &const_height(100.0),
+            &no_water,
         );
 
         // No ambient should land ON the runway rect (|x| < 750, |z| < 22.5).
@@ -643,11 +668,37 @@ mod tests {
             &[runway],
             None,
             &const_height(100.0),
+            &no_water,
         );
         for inst in &insts {
             let on_runway = inst.position.z.abs() < 750.0 && inst.position.x.abs() < 22.5;
             assert!(!on_runway, "rotated runway overlap missed");
         }
+    }
+
+    #[test]
+    fn water_filter_rejects_candidates_under_water_surface() {
+        // Terrain at +5 m (above entry's -10 floor) but flagged as
+        // water. The altitude filter would accept these; the water
+        // filter must reject them. Simulates elevated-lake case where
+        // terrain height > 0 but water sits on top.
+        let entries = vec![boreal_forest_entry()];
+        let everywhere_water = |_x: f32, _z: f32| true;
+        let insts = generate_ambient_for_cell(
+            42,
+            0,
+            (0.0, 0.0),
+            BiomeClass::CoastalBoreal,
+            &entries,
+            &[],
+            None,
+            &const_height(5.0),
+            &everywhere_water,
+        );
+        assert!(
+            insts.is_empty(),
+            "water filter must reject all candidates regardless of altitude"
+        );
     }
 
     #[test]
@@ -670,6 +721,7 @@ mod tests {
             &[feature],
             None, // wild — no clearing
             &const_height(100.0),
+            &no_water,
         );
         // Verify no ambient is INSIDE the 1m cylinder footprint
         // (scale.x / 2 = 1 m).
