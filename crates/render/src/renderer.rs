@@ -531,12 +531,8 @@ impl Renderer {
         );
 
         // Prime camera uniform to a sensible default so the first frame does not stutter.
-        let default_view_proj = perspective_view_proj(
-            Vec3::new(0.0, 5.0, 15.0),
-            Quat::IDENTITY,
-            60_f32.to_radians(),
-            aspect(initial_size),
-        );
+        let default_view_proj =
+            perspective_view_proj(Quat::IDENTITY, 60_f32.to_radians(), aspect(initial_size));
         queue.write_buffer(
             &camera_buf,
             0,
@@ -807,7 +803,7 @@ impl Renderer {
             .slerp(snapshot_curr.camera.orientation, alpha);
         // FOV is typically constant across one tick; just take current.
         let fov = snapshot_curr.camera.fov_y_radians;
-        let view_proj = perspective_view_proj(cam_pos, cam_orient, fov, aspect(size));
+        let view_proj = perspective_view_proj(cam_orient, fov, aspect(size));
         queue.write_buffer(
             &self.camera_buf,
             0,
@@ -1426,10 +1422,27 @@ fn aspect((w, h): (u32, u32)) -> f32 {
     }
 }
 
-fn perspective_view_proj(pos: Vec3, orient: Quat, fov_y: f32, aspect: f32) -> Mat4 {
+/// Camera-relative view-projection (Phase 3.6.3c.5d).
+///
+/// Returns `proj * view_rot_only` — the view matrix has no translation
+/// component. Vertex shaders must subtract `camera.view_pos` from
+/// world-space vertex positions before applying this matrix; that
+/// subtraction happens at similar magnitudes so the result is small
+/// and the subsequent matmul stays precise.
+///
+/// Without this split, flying the camera hundreds of km from origin
+/// produces visible z-fighting / vertex jitter / artifacting because
+/// the view matrix's translation column contains values in the millions
+/// and f32 precision is lost during `proj * view` intermediate terms.
+/// See PROGRESS.md Phase 3.6.3c.5d for the incident + fix.
+fn perspective_view_proj(orient: Quat, fov_y: f32, aspect: f32) -> Mat4 {
     let forward = orient * Vec3::NEG_Z;
     let up = orient * Vec3::Y;
-    let view = Mat4::look_to_rh(pos, forward, up);
+    // look_to_rh with origin=0 gives a pure rotation matrix (no
+    // translation). The actual camera position is delivered to shaders
+    // via `CameraUniform.view_pos`; vertex shaders subtract it from
+    // world positions before applying this matrix.
+    let view = Mat4::look_to_rh(Vec3::ZERO, forward, up);
     let proj = Mat4::perspective_rh(fov_y, aspect, NEAR, FAR);
     proj * view
 }
@@ -1453,14 +1466,28 @@ mod tests {
 
     #[test]
     fn view_proj_is_finite() {
-        let m = perspective_view_proj(
-            Vec3::new(0.0, 5.0, 15.0),
-            Quat::IDENTITY,
-            60_f32.to_radians(),
-            16.0 / 9.0,
-        );
+        let m = perspective_view_proj(Quat::IDENTITY, 60_f32.to_radians(), 16.0 / 9.0);
         for col in m.to_cols_array() {
             assert!(col.is_finite());
         }
+    }
+
+    #[test]
+    fn view_proj_has_no_translation_column() {
+        // Camera-relative rendering (Phase 3.6.3c.5d): the view-proj
+        // matrix must be rotation + projection only. Translation is
+        // applied CPU-side via `CameraUniform.view_pos`; vertex shaders
+        // subtract it before the matmul. Regression guard — if this
+        // assertion fails, review where translation re-entered.
+        let m = perspective_view_proj(Quat::IDENTITY, 60_f32.to_radians(), 16.0 / 9.0);
+        // With camera at origin and identity orientation, a point at
+        // (10, 0, -1) should project to NDC at approximately the same
+        // clip-space coord regardless of "imagined" camera position.
+        let cols = m.to_cols_array_2d();
+        // The translation column is column 3 (last). For a rotation-
+        // only + proj matrix, col[3] should have only perspective-divide
+        // components (zeros in x/y rows, z-row carries (2*far*near)/(near-far)).
+        assert!(cols[3][0].abs() < 1e-3, "col3.x nonzero: {}", cols[3][0]);
+        assert!(cols[3][1].abs() < 1e-3, "col3.y nonzero: {}", cols[3][1]);
     }
 }

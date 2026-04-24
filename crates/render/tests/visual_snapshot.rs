@@ -602,3 +602,97 @@ fn instance_preview() {
     std::fs::write(&path, &png).expect("write instance_preview.png");
     println!("wrote {} ({} instances)", path.display(), instances.len());
 }
+
+/// Camera-relative-rendering regression shot (Phase 3.6.3c.5d).
+///
+/// Same scene geometry as `instance_preview` but offset by 2.5 Mm in x
+/// and z (world scale where the 5000 km toroidal world is worst-case
+/// for f32 precision). Before the camera-relative fix, this renders as
+/// a flickering mess; after, it should look identical to the origin
+/// version modulo static ~0.3m quantization error. Diff the two PNGs
+/// to verify.
+///
+/// Output: `target/instance_preview/instance_preview_far.png`.
+#[cfg(feature = "hardware-tests")]
+#[test]
+fn instance_preview_far() {
+    let (device, queue) = init_wgpu();
+
+    // World-scale offset — cells wrap at 5 Mm, so 2.5 Mm is the
+    // worst-case f32-precision position in the toroidal world.
+    let off_x = 2_500_000.0_f32;
+    let off_z = 1_800_000.0_f32;
+
+    let terrain = CpuMesh::terrain_patch_at(64, 200.0, (off_x, off_z), |x, z| {
+        let lx = x - off_x;
+        let lz = z - off_z;
+        ((lx * 0.02).sin() + (lz * 0.02).cos()) * 1.0
+    });
+    let water = CpuMesh::water_grid(16, 200.0, WATER_COLOR);
+    let placeholder = CpuMesh::cube(0.1, [0.0, 0.0, 0.0, 0.0]);
+
+    #[allow(clippy::items_after_statements)]
+    const INSTANCE_SIZE: (u32, u32) = (800, 600);
+
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        FORMAT,
+        INSTANCE_SIZE,
+        &terrain,
+        TERRAIN_SHADING,
+        &water,
+        WATER_SHADING,
+        &placeholder,
+        VEHICLE_SHADING,
+    );
+    renderer.set_vehicle_visible(false);
+
+    // Same 6-box ring as `instance_preview`, translated to the far
+    // coordinate.
+    #[allow(clippy::many_single_char_names)]
+    let instances: Vec<InstanceGpuData> = (0..6_u32)
+        .map(|i| {
+            let angle = (i as f32) * core::f32::consts::TAU / 6.0;
+            let rx = 12.0 * angle.cos();
+            let rz = 12.0 * angle.sin();
+            let width = 6.0 + (i as f32 % 3.0);
+            let height = 4.0 + (i as f32 % 2.0);
+            let depth = 8.0 + ((i as f32) * 1.5) % 3.0;
+            let red = 130 + ((i * 20) % 60) as u8;
+            let green = 85 + ((i * 15) % 40) as u8;
+            let blue = 70 + ((i * 10) % 30) as u8;
+            InstanceGpuData::from_fields(
+                [off_x + rx, height * 0.5, off_z + rz],
+                angle * 0.7,
+                [width, height, depth],
+                [red, green, blue, 255],
+            )
+        })
+        .collect();
+    renderer.upload_instances(&device, &queue, &instances);
+
+    // Camera pose mirrors `instance_preview` but at the far offset.
+    let snap = build_camera_snapshot(
+        Vec3::new(off_x, 15.0, off_z + 25.0),
+        Vec3::new(off_x, 3.0, off_z),
+        60.0,
+        Vec3::new(0.0, -1000.0, 0.0),
+    );
+
+    let png = capture_png(&device, &queue, &mut renderer, &snap, INSTANCE_SIZE);
+    let out_dir = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../target/instance_preview"
+    ));
+    std::fs::create_dir_all(&out_dir).expect("mkdir target/instance_preview");
+    let path = out_dir.join("instance_preview_far.png");
+    std::fs::write(&path, &png).expect("write instance_preview_far.png");
+    println!(
+        "wrote {} ({} instances at offset x={}, z={})",
+        path.display(),
+        instances.len(),
+        off_x,
+        off_z
+    );
+}

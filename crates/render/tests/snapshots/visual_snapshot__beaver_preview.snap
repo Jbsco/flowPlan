@@ -1,6 +1,6 @@
 ---
 source: crates/render/tests/visual_snapshot.rs
-assertion_line: 277
+assertion_line: 282
 expression: png
 extension: png
 snapshot_kind: binary

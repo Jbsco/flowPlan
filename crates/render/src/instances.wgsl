@@ -84,8 +84,13 @@ fn vs_instance(in: VsIn, @builtin(instance_index) instance_id: u32) -> VsOut {
         -n_unscaled.x * sin_y + n_unscaled.z * cos_y,
     ));
 
+    // Camera-relative clip computation (Phase 3.6.3c.5d). view_proj is
+    // rotation + projection only; subtract cam world pos here so the
+    // matmul operates on small values regardless of absolute world
+    // coord magnitude.
+    let rel_to_cam = world - camera.view_pos.xyz;
     var out: VsOut;
-    out.clip_pos = camera.view_proj * vec4<f32>(world, 1.0);
+    out.clip_pos = camera.view_proj * vec4<f32>(rel_to_cam, 1.0);
     out.world_pos = world;
     out.world_normal = n_rotated;
     out.inst_color = inst.color;

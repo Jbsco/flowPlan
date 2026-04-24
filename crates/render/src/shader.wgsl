@@ -61,8 +61,14 @@ struct VsOut {
 fn vs_main(in: VsIn) -> VsOut {
     let world = model.model * vec4<f32>(in.position, 1.0);
     let n = normalize((model.normal_mat * vec4<f32>(in.normal, 0.0)).xyz);
+    // Camera-relative clip computation (Phase 3.6.3c.5d). view_proj is
+    // rotation + projection ONLY; translation is applied here via
+    // f32 subtraction at similar magnitudes (camera ≈ world) so the
+    // result is small and the matmul stays precise at world coords
+    // far from origin.
+    let rel_to_cam = world.xyz - camera.view_pos.xyz;
     var out: VsOut;
-    out.clip_pos = camera.view_proj * world;
+    out.clip_pos = camera.view_proj * vec4<f32>(rel_to_cam, 1.0);
     out.world_pos = world.xyz;
     out.world_normal = n;
     out.vert_color = in.color * model.tint;

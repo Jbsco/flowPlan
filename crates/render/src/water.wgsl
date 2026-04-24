@@ -312,8 +312,12 @@ fn vs_water(in: VsIn) -> VsOut {
     let displaced = world0 + offset + vec3<f32>(0.0, noise_displacement, 0.0);
     let n = normalize(n_acc);
 
+    // Camera-relative clip computation (Phase 3.6.3c.5d). view_proj is
+    // rotation + projection only; subtract cam world pos here to keep
+    // matmul precise at world coords far from origin.
+    let rel_to_cam = displaced - camera.view_pos.xyz;
     var out: VsOut;
-    out.clip_pos = camera.view_proj * vec4<f32>(displaced, 1.0);
+    out.clip_pos = camera.view_proj * vec4<f32>(rel_to_cam, 1.0);
     out.world_pos = displaced;
     out.world_normal = n;
     out.vert_color = in.color * model.tint;
