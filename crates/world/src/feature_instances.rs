@@ -160,6 +160,94 @@ pub enum PlacementPattern {
     },
 }
 
+/// Feature-parent-controller for ambient objects in surrounding area
+/// (5c.2.c.8 schema). Default `None` — features opt IN to clearing.
+///
+/// See [MAPGEN § Ambient environment objects](../../../MAPGEN.md#ambient-environment-objects-phase-363c5c8)
+/// for full design + the per-feature classification table.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+pub enum FeatureAmbientControl {
+    /// No clearing. Ambient objects appear at full size right up to
+    /// feature primitives; only per-primitive instance-overlap is
+    /// rejected. For natural / remote / rustic features — the default
+    /// behavior when `ambient_control` is omitted from RON.
+    None,
+
+    /// Tapered clearing. Inside `clear_radius_m`: no ambient. Between
+    /// `clear_radius_m` and `taper_radius_m`: ambient size scales 0→1
+    /// via smoothstep so trees shrink as they approach the feature
+    /// edge. Beyond `taper_radius_m`: full size. For cultivated /
+    /// groomed features (airports, dwellings, farmland, marinas).
+    TaperedClearing {
+        clear_radius_m: f32,
+        taper_radius_m: f32,
+    },
+
+    /// Hard binary clearing. No ambient within `clear_radius_m`; full
+    /// size everywhere else. For small sanitized features (gas
+    /// stations, helipads, watchtowers, mining camps).
+    HardClearing { clear_radius_m: f32 },
+
+    /// Inverse tapered clearing — pioneering growth on/near feature.
+    /// Ambient size ramps UP with distance from feature (tiny sprouts
+    /// near, full size far). Reserved for future authoring use cases
+    /// (`ancient_ruins` ivy, `abandoned_homestead` saplings on
+    /// foundation). Mechanism: inside `clear_radius_m` → full size at
+    /// 0 scale climbing; between clear and taper → size
+    /// `smoothstep((taper-D)/(taper-clear))`; beyond taper → full
+    /// size again. For MVP, `None` + biome ambient defaults usually
+    /// covers the "nature reclaims" look without this variant.
+    InverseTaperedClearing {
+        clear_radius_m: f32,
+        taper_radius_m: f32,
+    },
+}
+
+/// One ambient-cover entry in a biome's scatter schema (5c.2.c.8).
+///
+/// Represents a single layer of scattered biome-wide cover — e.g. a
+/// forest-density layer uses `kind: Cone` with a `120 density_per_km2`
+/// across `CoastalBoreal`. Multiple entries per biome compose (forest +
+/// understory shrubs + boulders).
+///
+/// See [MAPGEN § Ambient environment objects → RON schema](../../../MAPGEN.md#ambient-environment-objects-phase-363c5c8)
+/// for authoring guidelines.
+#[derive(Clone, Debug, Deserialize)]
+pub struct AmbientEntry {
+    /// Which primitive renders each ambient instance.
+    pub kind: PrimitiveKind,
+    /// Color source — which palette slot (or explicit RGB) drives the
+    /// instance's baked color. Same semantics as
+    /// [`PrimitiveComponent.color_source`].
+    pub color_source: ColorSource,
+    /// Target instance density (instances per square km). Authors tune
+    /// via visual-bench iteration; ~50–200 for forest canopy;
+    /// ~10–40 for boulders or sparse shrubs.
+    pub density_per_km2: f32,
+    /// Per-instance size (m). Each instance picks a uniform random
+    /// value in this range for its primary dimension (width/diameter/
+    /// height depending on primitive). Kept as `(min, max)` tuple.
+    pub size_range_m: (f32, f32),
+    /// Per-instance uniform-scale jitter applied on top of `size_range`.
+    pub scale_jitter: (f32, f32),
+    /// fBm wavelength controlling density-field variation (m). Larger
+    /// = broader forest/meadow patches; smaller = tighter clustering.
+    pub noise_scale_m: f32,
+    /// Density-field sample threshold. Candidate spawns only when the
+    /// noise sample exceeds this. Higher threshold = sparser coverage.
+    pub noise_threshold: f32,
+    /// (min, max) altitude range (m). Candidates outside this are
+    /// rejected before expensive checks.
+    pub altitude_range_m: (f32, f32),
+    /// Max terrain slope at the candidate position (degrees). Scrubbed
+    /// from steep slopes so shrubs don't hang off cliffs.
+    pub slope_max_deg: f32,
+    /// Distinct per-entry RNG stream offset so overlapping layers
+    /// (forest cones + shrub spheres at the same cell) don't
+    /// correlate their placements.
+    pub rng_stream: u64,
+}
+
 /// One entry in a feature's primitive composition (5c.2.b RON schema).
 ///
 /// Declarative replacement for the hardcoded `compose_dwelling_cluster`
@@ -649,6 +737,73 @@ mod tests {
                 !instances.is_empty(),
                 "{id} composition produced zero instances"
             );
+        }
+    }
+
+    #[test]
+    fn ambient_entries_load_per_biome() {
+        // 5c.2.c.8 smoke test: verify each biome has authored ambient
+        // entries + all fields parse. Guards against RON schema drift
+        // in the new ambient section.
+        let libs = SubBiomeLibraries::shared();
+        for biome in [
+            BiomeClass::CoastalBoreal,
+            BiomeClass::HighDesert,
+            BiomeClass::RockyAlpine,
+            BiomeClass::MediterraneanArchipelago,
+        ] {
+            let entries = libs.ambient_for_biome(biome);
+            assert!(
+                !entries.is_empty(),
+                "biome {biome:?} should have ambient entries authored"
+            );
+            for entry in entries {
+                assert!(entry.density_per_km2 > 0.0);
+                assert!(entry.size_range_m.0 <= entry.size_range_m.1);
+                assert!(entry.noise_scale_m > 0.0);
+                assert!(entry.slope_max_deg > 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn feature_ambient_control_variants_present() {
+        // 5c.2.c.8: verify the classification ladder — features
+        // authored `None` stay `None`, TaperedClearing parses, and
+        // HardClearing parses with the right radii.
+        let libs = SubBiomeLibraries::shared();
+
+        // `abandoned_homestead` stays wild → None (natural, remote).
+        let wild = libs
+            .find(BiomeClass::CoastalBoreal, "abandoned_homestead")
+            .unwrap();
+        assert!(
+            wild.ambient_control.is_none(),
+            "abandoned_homestead is 'wild' — no ambient clearing"
+        );
+
+        // `dwelling_cluster` → TaperedClearing(40, 70).
+        let tapered = libs
+            .find(BiomeClass::CoastalBoreal, "dwelling_cluster")
+            .unwrap();
+        match tapered.ambient_control {
+            Some(FeatureAmbientControl::TaperedClearing {
+                clear_radius_m,
+                taper_radius_m,
+            }) => {
+                assert!((clear_radius_m - 40.0).abs() < 1e-4);
+                assert!((taper_radius_m - 70.0).abs() < 1e-4);
+            },
+            other => panic!("dwelling_cluster should be TaperedClearing, got {other:?}"),
+        }
+
+        // `gas_station` → HardClearing(20).
+        let hard = libs.find(BiomeClass::CoastalBoreal, "gas_station").unwrap();
+        match hard.ambient_control {
+            Some(FeatureAmbientControl::HardClearing { clear_radius_m }) => {
+                assert!((clear_radius_m - 20.0).abs() < 1e-4);
+            },
+            other => panic!("gas_station should be HardClearing, got {other:?}"),
         }
     }
 

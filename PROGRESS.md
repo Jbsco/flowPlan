@@ -299,7 +299,7 @@ Zero persistent storage: generated per-cell at streaming cell-enter from seed `(
 
 ### Execution order (gated, ship each independently)
 
-**5c.2.c.8 — Types + RON extension** (Task #247, PENDING).
+**5c.2.c.8 — Types + RON extension** (Task #247, SHIPPED 2026-04-24).
 
 *Goal:* author the data model end-to-end with zero code changes to renderer / game_app. Text-only authoring iteration from here.
 
@@ -312,6 +312,15 @@ Zero persistent storage: generated per-cell at streaming cell-enter from seed `(
 - [ ] Test: RON parse round-trip + existing tests unaffected.
 
 Acceptance: all 49 features have an `ambient_control` (most `None`), all 4 biomes have `ambient: [...]` lists, all tests pass. No renderer changes, no visual effect yet.
+
+**Shipped summary (5c.2.c.8)**:
+- `FeatureAmbientControl` enum (4 variants) + `AmbientEntry` struct added to `feature_instances.rs`
+- `SubBiomeFeature.ambient_control: Option<FeatureAmbientControl>` added with `#[serde(default)]`
+- `SubBiomeFeaturesRon.biome_ambient` root-level field + `SubBiomeLibraries.biome_ambient` + `ambient_for_biome(BiomeClass)` accessor
+- RON authored: 3 ambient entries per biome × 4 biomes = 12 entries total (Cone + Sphere-shrub + Sphere-boulder layers per biome). Tuning starts here; visual-iterate later.
+- RON authored: `ambient_control` on 28 features (19 TaperedClearing + 9 HardClearing); 21 stay `None` by default
+- 2 new tests: `ambient_entries_load_per_biome`, `feature_ambient_control_variants_present`
+- 259 workspace lib tests pass. Full gate green.
 
 **5c.2.c.9 — Ambient generator** (Task #248, PENDING, blocked on .c.8).
 

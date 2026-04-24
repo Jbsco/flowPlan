@@ -236,6 +236,7 @@
                         rng_stream: 768,
                     ),
                 ]),
+                ambient_control: Some(TaperedClearing(clear_radius_m: 90.0, taper_radius_m: 120.0)),
             ),
             // Working ranch — barn + outbuildings + corral + dirt yard
             // + dry-grass paddock. Bleed-over enables the "winter ranch"
@@ -339,6 +340,7 @@
                         rng_stream: 1024,
                     ),
                 ]),
+                ambient_control: Some(TaperedClearing(clear_radius_m: 35.0, taper_radius_m: 60.0)),
             ),
 
             // ─── New HighDesert developed features (5c.2.c.5) ───────
@@ -399,6 +401,7 @@
                         rng_stream: 512,
                     ),
                 ]),
+                ambient_control: Some(TaperedClearing(clear_radius_m: 30.0, taper_radius_m: 55.0)),
             ),
 
             // Ghost town — abandoned frontier-era settlement. A row of
@@ -538,6 +541,7 @@
                         rng_stream: 768,
                     ),
                 ]),
+                ambient_control: Some(HardClearing(clear_radius_m: 25.0)),
             ),
 
             // Solar farm — utility-scale photovoltaic array. Rows of
@@ -627,6 +631,7 @@
                         rng_stream: 512,
                     ),
                 ]),
+                ambient_control: Some(TaperedClearing(clear_radius_m: 50.0, taper_radius_m: 80.0)),
             ),
 
             // ─── More HighDesert features (5c.2.c.6) ────────────────
@@ -692,6 +697,7 @@
                         rng_stream: 256,
                     ),
                 ]),
+                ambient_control: Some(HardClearing(clear_radius_m: 15.0)),
             ),
 
             // Wind farm — tall tower turbines spaced out across ridges.
@@ -758,6 +764,7 @@
                         rng_stream: 256,
                     ),
                 ]),
+                ambient_control: Some(TaperedClearing(clear_radius_m: 100.0, taper_radius_m: 150.0)),
             ),
 
             // Grain elevator — Midwestern-agricultural signature:
@@ -821,6 +828,7 @@
                         rng_stream: 256,
                     ),
                 ]),
+                ambient_control: Some(TaperedClearing(clear_radius_m: 25.0, taper_radius_m: 45.0)),
             ),
 
             // ─── New HighDesert landscape POIs (5c.2.c.7) ───────────
@@ -1261,6 +1269,7 @@
                         rng_stream: 512,
                     ),
                 ]),
+                ambient_control: Some(TaperedClearing(clear_radius_m: 30.0, taper_radius_m: 55.0)),
             ),
 
             // ─── More RockyAlpine developed features (5c.2.c.5) ─────
@@ -1323,6 +1332,7 @@
                         rng_stream: 256,
                     ),
                 ]),
+                ambient_control: Some(HardClearing(clear_radius_m: 8.0)),
             ),
 
             // Mine entrance — half-cylinder adit into the hillside +
@@ -1505,6 +1515,7 @@
                         rng_stream: 768,
                     ),
                 ]),
+                ambient_control: Some(TaperedClearing(clear_radius_m: 25.0, taper_radius_m: 45.0)),
             ),
 
             // ─── More RockyAlpine features (5c.2.c.6) ───────────────
@@ -1646,6 +1657,7 @@
                         rng_stream: 512,
                     ),
                 ]),
+                ambient_control: Some(HardClearing(clear_radius_m: 50.0)),
             ),
 
             // Radio tower — tall latticed cylinder with red safety
@@ -1703,6 +1715,7 @@
                         rng_stream: 256,
                     ),
                 ]),
+                ambient_control: Some(HardClearing(clear_radius_m: 10.0)),
             ),
 
             // ─── New RockyAlpine landscape POIs (5c.2.c.7) ──────────
@@ -2355,6 +2368,7 @@
                         rng_stream: 512,
                     ),
                 ]),
+                ambient_control: Some(TaperedClearing(clear_radius_m: 18.0, taper_radius_m: 30.0)),
             ),
             // Fishing camp — shoreline shack + dock + drying nets +
             // small skiff. Resupply candidate (fuel + bait + repair).
@@ -2640,6 +2654,7 @@
                         rng_stream: 256,
                     ),
                 ]),
+                ambient_control: Some(TaperedClearing(clear_radius_m: 40.0, taper_radius_m: 70.0)),
             ),
             // Gas station — small-format fuel stop + convenience store.
             // Phase 4.5 refuel economy anchor: when player lands within
@@ -2764,6 +2779,7 @@
                         rng_stream: 768,
                     ),
                 ]),
+                ambient_control: Some(HardClearing(clear_radius_m: 20.0)),
             ),
             // General store — small-town mercantile: groceries + basic
             // cargo + hardware. Resupply + light-cargo mission anchor
@@ -3006,6 +3022,7 @@
                         rng_stream: 768,
                     ),
                 ]),
+                ambient_control: Some(TaperedClearing(clear_radius_m: 80.0, taper_radius_m: 120.0)),
             ),
 
             // Regional airport — paved 800 m runway, proper apron,
@@ -3122,6 +3139,7 @@
                         rng_stream: 1280,
                     ),
                 ]),
+                ambient_control: Some(TaperedClearing(clear_radius_m: 150.0, taper_radius_m: 210.0)),
             ),
 
             // Major airport — two parallel runways (1500 m × 45 m),
@@ -3252,6 +3270,7 @@
                         rng_stream: 1280,
                     ),
                 ]),
+                ambient_control: Some(TaperedClearing(clear_radius_m: 200.0, taper_radius_m: 280.0)),
             ),
 
             // Seaplane base — dock on water, shoreside hangars + office.
@@ -3329,6 +3348,7 @@
                         rng_stream: 768,
                     ),
                 ]),
+                ambient_control: Some(TaperedClearing(clear_radius_m: 40.0, taper_radius_m: 60.0)),
             ),
 
             // ─── More CoastalBoreal features (5c.2.c.6) ─────────────
@@ -3563,6 +3583,7 @@
                         rng_stream: 512,
                     ),
                 ]),
+                ambient_control: Some(HardClearing(clear_radius_m: 12.0)),
             ),
         ],
 
@@ -3813,6 +3834,7 @@
                         rng_stream: 768,
                     ),
                 ]),
+                ambient_control: Some(TaperedClearing(clear_radius_m: 15.0, taper_radius_m: 25.0)),
             ),
 
             // ─── New Mediterranean features (5c.2.c.4) ──────────────
@@ -3900,6 +3922,7 @@
                         rng_stream: 512,
                     ),
                 ]),
+                ambient_control: Some(HardClearing(clear_radius_m: 12.0)),
             ),
 
             // ─── More Mediterranean developed features (5c.2.c.5) ───
@@ -3967,6 +3990,7 @@
                         rng_stream: 256,
                     ),
                 ]),
+                ambient_control: Some(TaperedClearing(clear_radius_m: 30.0, taper_radius_m: 50.0)),
             ),
 
             // Olive grove — regular grid of olive trees, small farmstead
@@ -4025,6 +4049,7 @@
                         rng_stream: 512,
                     ),
                 ]),
+                ambient_control: Some(TaperedClearing(clear_radius_m: 5.0, taper_radius_m: 15.0)),
             ),
 
             // Watchtower — stone cylindrical tower with conical roof.
@@ -4071,6 +4096,7 @@
                         rng_stream: 128,
                     ),
                 ]),
+                ambient_control: Some(HardClearing(clear_radius_m: 8.0)),
             ),
 
             // Marina — recreational harbor with piers, moored boats
@@ -4153,6 +4179,7 @@
                         rng_stream: 768,
                     ),
                 ]),
+                ambient_control: Some(TaperedClearing(clear_radius_m: 20.0, taper_radius_m: 40.0)),
             ),
 
             // ─── More Mediterranean features (5c.2.c.6) ─────────────
@@ -4243,6 +4270,7 @@
                         rng_stream: 512,
                     ),
                 ]),
+                ambient_control: Some(TaperedClearing(clear_radius_m: 5.0, taper_radius_m: 15.0)),
             ),
 
             // Ancient ruins — stone ruins: scattered column cylinders +
@@ -4454,5 +4482,197 @@
             "textile":          (hue_shift_deg: 10.0,  saturation_mult: 1.15, value_mult: 1.10),
             "default":          (hue_shift_deg: 10.0,  saturation_mult: 1.00, value_mult: 1.10),
         },
+    },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Per-biome ambient-object scatter schema (Phase 3.6.3c.5c.8 PINNED).
+    // ═══════════════════════════════════════════════════════════════════════
+    //
+    // Each entry describes one layer of biome-wide ambient cover (forest,
+    // shrub, boulder, grass). The generator samples per-biome fBm density
+    // fields at candidate positions and emits primitives where threshold
+    // is crossed. Feature-cell footprints are cleared according to the
+    // cell-assigned feature's `ambient_control`.
+    //
+    // Tuning guidance:
+    // - density_per_km2: forest canopy ~80–150, shrub ~30–60, boulders
+    //   ~5–30, grass tufts ~150–300 (finer / cheaper primitives).
+    // - noise_scale_m: ~400 for forest pockets, ~150 for understory
+    //   clumping, ~800 for sparse boulder fields.
+    // - noise_threshold: higher = sparser; tune against visual-bench.
+    //
+    // Full spec: MAPGEN § Ambient environment objects.
+    biome_ambient: {
+        // ── CoastalBoreal ambient: conifer forest + shrub + boulders ──
+        "CoastalBoreal": [
+            (
+                kind: Cone,
+                color_source: Secondary,
+                density_per_km2: 120.0,
+                size_range_m: (3.0, 12.0),
+                scale_jitter: (0.8, 1.2),
+                noise_scale_m: 400.0,
+                noise_threshold: 0.25,
+                altitude_range_m: (-10.0, 1500.0),
+                slope_max_deg: 35.0,
+                rng_stream: 0,
+            ),
+            (
+                // Understory shrubs (spheres).
+                kind: Sphere,
+                color_source: Secondary,
+                density_per_km2: 50.0,
+                size_range_m: (0.5, 1.2),
+                scale_jitter: (0.7, 1.3),
+                noise_scale_m: 150.0,
+                noise_threshold: 0.3,
+                altitude_range_m: (-10.0, 1800.0),
+                slope_max_deg: 50.0,
+                rng_stream: 1,
+            ),
+            (
+                // Scattered glacial boulders.
+                kind: Sphere,
+                color_source: Primary,
+                density_per_km2: 12.0,
+                size_range_m: (0.8, 2.5),
+                scale_jitter: (0.7, 1.8),
+                noise_scale_m: 800.0,
+                noise_threshold: 0.5,
+                altitude_range_m: (100.0, 2500.0),
+                slope_max_deg: 60.0,
+                rng_stream: 2,
+            ),
+        ],
+
+        // ── HighDesert ambient: sparse juniper / sage / rocks ─────────
+        "HighDesert": [
+            (
+                // Juniper / pinyon cones — sparser than boreal forest.
+                kind: Cone,
+                color_source: Secondary,
+                density_per_km2: 30.0,
+                size_range_m: (1.8, 5.0),
+                scale_jitter: (0.7, 1.3),
+                noise_scale_m: 500.0,
+                noise_threshold: 0.4,
+                altitude_range_m: (400.0, 2400.0),
+                slope_max_deg: 40.0,
+                rng_stream: 0,
+            ),
+            (
+                // Sage / rabbitbrush clumps.
+                kind: Sphere,
+                color_source: Secondary,
+                density_per_km2: 80.0,
+                size_range_m: (0.3, 0.8),
+                scale_jitter: (0.7, 1.3),
+                noise_scale_m: 120.0,
+                noise_threshold: 0.2,
+                altitude_range_m: (200.0, 2800.0),
+                slope_max_deg: 50.0,
+                rng_stream: 1,
+            ),
+            (
+                // Slickrock boulders / weathered rubble.
+                kind: Sphere,
+                color_source: Primary,
+                density_per_km2: 18.0,
+                size_range_m: (0.6, 2.2),
+                scale_jitter: (0.6, 1.6),
+                noise_scale_m: 600.0,
+                noise_threshold: 0.35,
+                altitude_range_m: (200.0, 3000.0),
+                slope_max_deg: 65.0,
+                rng_stream: 2,
+            ),
+        ],
+
+        // ── RockyAlpine ambient: conifer + talus + moraine ─────────────
+        "RockyAlpine": [
+            (
+                // Alpine conifers (spruce, fir). Denser at mid-altitude,
+                // fades above treeline via `altitude_range_m` cap.
+                kind: Cone,
+                color_source: Secondary,
+                density_per_km2: 100.0,
+                size_range_m: (3.0, 10.0),
+                scale_jitter: (0.75, 1.25),
+                noise_scale_m: 350.0,
+                noise_threshold: 0.28,
+                altitude_range_m: (1200.0, 2800.0),
+                slope_max_deg: 40.0,
+                rng_stream: 0,
+            ),
+            (
+                // Talus / scree boulders — abundant high-altitude.
+                kind: Sphere,
+                color_source: Primary,
+                density_per_km2: 45.0,
+                size_range_m: (0.7, 2.5),
+                scale_jitter: (0.6, 1.8),
+                noise_scale_m: 400.0,
+                noise_threshold: 0.3,
+                altitude_range_m: (1800.0, 3800.0),
+                slope_max_deg: 70.0,
+                rng_stream: 1,
+            ),
+            (
+                // Alpine shrub / krummholz at treeline transition.
+                kind: Sphere,
+                color_source: Secondary,
+                density_per_km2: 30.0,
+                size_range_m: (0.3, 0.9),
+                scale_jitter: (0.7, 1.3),
+                noise_scale_m: 180.0,
+                noise_threshold: 0.35,
+                altitude_range_m: (2400.0, 3400.0),
+                slope_max_deg: 55.0,
+                rng_stream: 2,
+            ),
+        ],
+
+        // ── MediterraneanArchipelago ambient: olive / maquis / rocks ──
+        "MediterraneanArchipelago": [
+            (
+                // Olive trees + pines.
+                kind: Cone,
+                color_source: Secondary,
+                density_per_km2: 50.0,
+                size_range_m: (2.0, 6.0),
+                scale_jitter: (0.8, 1.3),
+                noise_scale_m: 400.0,
+                noise_threshold: 0.3,
+                altitude_range_m: (0.0, 800.0),
+                slope_max_deg: 45.0,
+                rng_stream: 0,
+            ),
+            (
+                // Maquis shrubland (dense low scrub).
+                kind: Sphere,
+                color_source: Secondary,
+                density_per_km2: 100.0,
+                size_range_m: (0.4, 1.1),
+                scale_jitter: (0.7, 1.3),
+                noise_scale_m: 140.0,
+                noise_threshold: 0.25,
+                altitude_range_m: (0.0, 1200.0),
+                slope_max_deg: 55.0,
+                rng_stream: 1,
+            ),
+            (
+                // Limestone boulders / rocky outcrops.
+                kind: Sphere,
+                color_source: Primary,
+                density_per_km2: 20.0,
+                size_range_m: (0.6, 2.0),
+                scale_jitter: (0.6, 1.7),
+                noise_scale_m: 500.0,
+                noise_threshold: 0.4,
+                altitude_range_m: (-5.0, 1800.0),
+                slope_max_deg: 70.0,
+                rng_stream: 2,
+            ),
+        ],
     },
 )

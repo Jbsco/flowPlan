@@ -218,6 +218,13 @@ pub struct SubBiomeFeature {
     /// `data/world/sub_biome_features.ron`.
     #[serde(default)]
     pub composition: Option<Vec<crate::feature_instances::PrimitiveComponent>>,
+    /// Feature-parent control for surrounding ambient objects (Phase
+    /// 3.6.3c.5c.8). Default `None` = wild (no clearing; only
+    /// per-primitive instance-overlap rejected). Features opt IN to
+    /// `TaperedClearing` / `HardClearing` where sanitized zones are
+    /// appropriate. See [MAPGEN § Ambient environment objects](../../../MAPGEN.md#ambient-environment-objects-phase-363c5c8).
+    #[serde(default)]
+    pub ambient_control: Option<crate::feature_instances::FeatureAmbientControl>,
 }
 
 /// Nested placement-rule schema (3.6.3c.1).
@@ -377,6 +384,12 @@ struct SubBiomeFeaturesRon {
     /// etc. or `"default"`).
     #[serde(default)]
     biome_receiving_adaptations: HashMap<String, HashMap<String, PaletteHsvShift>>,
+    /// Per-biome ambient-object scatter entries (Phase 3.6.3c.5c.8).
+    /// Keyed by biome name; each value is an ordered list of
+    /// `AmbientEntry`s (forest / shrub / boulder / grass layers).
+    /// Missing biome → no ambient cover (defaults to empty vec).
+    #[serde(default)]
+    biome_ambient: HashMap<String, Vec<crate::feature_instances::AmbientEntry>>,
 }
 
 /// Per-biome feature libraries, parsed once from the embedded RON.
@@ -392,6 +405,10 @@ pub struct SubBiomeLibraries {
     /// Per-biome receiving-adaptation HSV-shift tables, used by
     /// [`adapt_palette`] when a feature bleeds into a host biome.
     biome_receiving_adaptations: HashMap<BiomeClass, HashMap<String, PaletteHsvShift>>,
+    /// Per-biome ambient-object scatter schema (5c.2.c.8+).
+    /// Consumed by the ambient generator at streaming cell-enter.
+    /// Missing biome → empty vec (no ambient cover).
+    biome_ambient: HashMap<BiomeClass, Vec<crate::feature_instances::AmbientEntry>>,
 }
 
 impl SubBiomeLibraries {
@@ -417,6 +434,14 @@ impl SubBiomeLibraries {
             }
         }
 
+        let mut biome_ambient: HashMap<BiomeClass, Vec<crate::feature_instances::AmbientEntry>> =
+            HashMap::new();
+        for (biome_key, entries) in root.biome_ambient {
+            if let Some(biome) = parse_biome_key(&biome_key) {
+                biome_ambient.insert(biome, entries);
+            }
+        }
+
         Self {
             high_desert: root.biomes.get("HighDesert").cloned().unwrap_or_default(),
             rocky_alpine: root.biomes.get("RockyAlpine").cloned().unwrap_or_default(),
@@ -432,7 +457,18 @@ impl SubBiomeLibraries {
                 .unwrap_or_default(),
             oceanic: root.biomes.get("Oceanic").cloned().unwrap_or_default(),
             biome_receiving_adaptations,
+            biome_ambient,
         }
+    }
+
+    /// Ambient-cover entries authored for the given biome (5c.2.c.8).
+    /// Returns `&[]` when no entries are authored.
+    #[must_use]
+    pub fn ambient_for_biome(
+        &self,
+        biome: BiomeClass,
+    ) -> &[crate::feature_instances::AmbientEntry] {
+        self.biome_ambient.get(&biome).map_or(&[], Vec::as_slice)
     }
 
     /// Receiving-adaptation table for a given host biome, if authored.
@@ -1763,6 +1799,7 @@ mod tests {
             palette_category: None,
             placement_rules: None,
             composition: None,
+            ambient_control: None,
         };
         // All pass.
         let ok = PlacementContext {
@@ -1814,6 +1851,7 @@ mod tests {
             palette_category: None,
             placement_rules: None,
             composition: None,
+            ambient_control: None,
         };
         let forb = SubBiomeFeature {
             water_adjacency: WaterAdjacency::Forbidden,
@@ -1964,6 +2002,7 @@ mod tests {
             palette_category: Some(PaletteCategory::BuildingWooden),
             placement_rules: None,
             composition: None,
+            ambient_control: None,
         };
         let libs = SubBiomeLibraries::shared();
         let adapted = adapt_palette(&feature, BiomeClass::RockyAlpine, libs);
@@ -1996,6 +2035,7 @@ mod tests {
             palette_category: Some(PaletteCategory::BuildingWooden),
             placement_rules: None,
             composition: None,
+            ambient_control: None,
         };
         let libs = SubBiomeLibraries::shared();
         let adapted = adapt_palette(&feature, BiomeClass::RockyAlpine, libs);
@@ -2030,6 +2070,7 @@ mod tests {
             palette_category: None,
             placement_rules: None,
             composition: None,
+            ambient_control: None,
         };
         let libs = SubBiomeLibraries::shared();
         let adapted = adapt_palette(&feature, BiomeClass::HighDesert, libs);
@@ -2053,6 +2094,7 @@ mod tests {
             palette_category: None,
             placement_rules: None,
             composition: None,
+            ambient_control: None,
         };
         let libs = SubBiomeLibraries::shared();
         let adapted = adapt_palette(&feature, BiomeClass::HighDesert, libs);
@@ -2076,6 +2118,7 @@ mod tests {
             palette_category: None,
             placement_rules: None,
             composition: None,
+            ambient_control: None,
         };
         // We can't easily construct a real HubCatalog + HydrologyGraph in
         // a unit test. Assert only the short-circuit path (rules=None):
