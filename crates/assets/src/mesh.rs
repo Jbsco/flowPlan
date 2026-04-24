@@ -126,6 +126,35 @@ impl CpuMesh {
         center: (f32, f32),
         sample_height: impl Fn(f32, f32) -> f32 + Sync,
     ) -> Self {
+        // Square mesh = disc with radius so large it clips nothing.
+        // Using f32::INFINITY triggers NaN via multiplication, so use a
+        // large finite value (1e9 m ≫ any realistic world extent).
+        Self::terrain_patch_disc_at(cells_per_side, half_extent, f32::MAX * 0.5, center, sample_height)
+    }
+
+    /// Build a terrain mesh where vertices outside `disc_radius` of the
+    /// center are skipped (height not sampled) and triangles with any
+    /// out-of-disc vertex are not emitted. Net result: a circular mesh
+    /// inscribed in the `2 × half_extent` square bounding box.
+    ///
+    /// Saves the expensive `sample_height` calls for out-of-disc
+    /// vertices (~22% of the square's area at `disc_radius = half_extent`)
+    /// while keeping the indexing logic rectangular (in-disc vertex
+    /// indices are the same as if the full grid were emitted). Verts
+    /// outside the disc are still emitted as dummy positions (at y=0)
+    /// because the index remap cost would exceed the savings — they're
+    /// just never referenced by any emitted triangle, so GPU ignores
+    /// them beyond the memory footprint.
+    ///
+    /// Used by the streaming-render layer for 20 km-radius disc mode
+    /// (3.6.3c.5b-followup). See `streaming_render_architecture` memory.
+    pub fn terrain_patch_disc_at(
+        cells_per_side: u32,
+        half_extent: f32,
+        disc_radius: f32,
+        center: (f32, f32),
+        sample_height: impl Fn(f32, f32) -> f32 + Sync,
+    ) -> Self {
         use rayon::prelude::*;
 
         let mut mesh = Self::new("terrain");
@@ -133,11 +162,8 @@ impl CpuMesh {
         let verts_per_side = cells + 1;
         let step = (half_extent * 2.0) / cells as f32;
         let total_verts = (verts_per_side as usize) * (verts_per_side as usize);
+        let disc_radius_sq = disc_radius * disc_radius;
 
-        // Build vertices in parallel — `terrain.height` calls dominate
-        // wall-clock for the 1 M-vertex default patch. Each vertex is
-        // independent (samples 4 neighbors for normal + height for
-        // color), so `par_iter().map().collect()` is safe and clean.
         mesh.vertices = (0..total_verts)
             .into_par_iter()
             .map(|i| {
@@ -145,15 +171,24 @@ impl CpuMesh {
                 let iz = (i / verts_per_side as usize) as u32;
                 let x = center.0 - half_extent + ix as f32 * step;
                 let z = center.1 - half_extent + iz as f32 * step;
-                let y = sample_height(x, z);
+                // Skip expensive height() sampling for out-of-disc verts.
+                let dx = x - center.0;
+                let dz = z - center.1;
+                if dx * dx + dz * dz > disc_radius_sq {
+                    return Vertex {
+                        position: [x, 0.0, z],
+                        normal: [0.0, 1.0, 0.0],
+                        uv: [ix as f32 / cells as f32, iz as f32 / cells as f32],
+                        color: [0.0, 0.0, 0.0, 0.0],
+                    };
+                }
 
-                // Approximate normal via central differences on the height function.
+                let y = sample_height(x, z);
                 let eps = step * 0.5;
                 let dy_dx = (sample_height(x + eps, z) - sample_height(x - eps, z)) / (2.0 * eps);
                 let dy_dz = (sample_height(x, z + eps) - sample_height(x, z - eps)) / (2.0 * eps);
                 let normal = Vec3::new(-dy_dx, 1.0, -dy_dz).normalize_or(Vec3::Y);
 
-                // Multi-tier color ramp by height. Sand -> field -> forest -> rock.
                 let color = terrain_color_for_height(y);
 
                 Vertex {
@@ -165,12 +200,27 @@ impl CpuMesh {
             })
             .collect();
 
-        // Build indices (two triangles per cell). Sequential — cheap +
-        // independent of vertex order.
+        // Emit triangles only where ALL FOUR corner vertices of the cell
+        // are inside the disc. Cells straddling the boundary get
+        // dropped; the mesh's visible edge is a blocky approximation of
+        // a circle but with small cells (20-30 m at typical config)
+        // reads as smooth at the 20 km view distance.
         mesh.indices
             .reserve((cells as usize) * (cells as usize) * 6);
+        let in_disc = |x_w: f32, z_w: f32| -> bool {
+            let dx = x_w - center.0;
+            let dz = z_w - center.1;
+            dx * dx + dz * dz <= disc_radius_sq
+        };
         for iz in 0..cells {
             for ix in 0..cells {
+                let x0 = center.0 - half_extent + ix as f32 * step;
+                let x1 = x0 + step;
+                let z0 = center.1 - half_extent + iz as f32 * step;
+                let z1 = z0 + step;
+                if !(in_disc(x0, z0) && in_disc(x1, z0) && in_disc(x0, z1) && in_disc(x1, z1)) {
+                    continue;
+                }
                 let row = verts_per_side;
                 let tl = iz * row + ix;
                 let tr = iz * row + ix + 1;
@@ -195,6 +245,64 @@ impl CpuMesh {
     /// position. Vertex positions in world coordinates (no model-matrix
     /// translation needed). Used by the streaming-render layer
     /// (Phase 3.6.3c.5b) to keep water aligned with the active camera.
+    /// Build a flat water grid clipped to a disc of `disc_radius`.
+    /// Same pattern as [`Self::terrain_patch_disc_at`] — rectangular
+    /// vertex grid, triangles only emitted inside the disc.
+    #[must_use]
+    pub fn water_grid_disc_at(
+        cells_per_side: u32,
+        half_extent: f32,
+        disc_radius: f32,
+        center: (f32, f32),
+        color: [f32; 4],
+    ) -> Self {
+        let mut mesh = Self::new("water");
+        let cells = cells_per_side.max(1);
+        let verts_per_side = cells + 1;
+        let step = (half_extent * 2.0) / cells as f32;
+        let disc_radius_sq = disc_radius * disc_radius;
+
+        // All vertices are emitted (positions are cheap); out-of-disc
+        // verts are just never indexed by any triangle.
+        for iz in 0..verts_per_side {
+            for ix in 0..verts_per_side {
+                let x = center.0 - half_extent + ix as f32 * step;
+                let z = center.1 - half_extent + iz as f32 * step;
+                mesh.vertices.push(Vertex {
+                    position: [x, 0.0, z],
+                    normal: [0.0, 1.0, 0.0],
+                    uv: [ix as f32 / cells as f32, iz as f32 / cells as f32],
+                    color,
+                });
+            }
+        }
+
+        // Emit only cells fully inside the disc.
+        let in_disc = |x_w: f32, z_w: f32| -> bool {
+            let dx = x_w - center.0;
+            let dz = z_w - center.1;
+            dx * dx + dz * dz <= disc_radius_sq
+        };
+        for iz in 0..cells {
+            for ix in 0..cells {
+                let x0 = center.0 - half_extent + ix as f32 * step;
+                let x1 = x0 + step;
+                let z0 = center.1 - half_extent + iz as f32 * step;
+                let z1 = z0 + step;
+                if !(in_disc(x0, z0) && in_disc(x1, z0) && in_disc(x0, z1) && in_disc(x1, z1)) {
+                    continue;
+                }
+                let row = verts_per_side;
+                let tl = iz * row + ix;
+                let tr = iz * row + ix + 1;
+                let bl = (iz + 1) * row + ix;
+                let br = (iz + 1) * row + ix + 1;
+                mesh.indices.extend_from_slice(&[tl, bl, tr, tr, bl, br]);
+            }
+        }
+        mesh
+    }
+
     #[must_use]
     pub fn water_grid_at(
         cells_per_side: u32,

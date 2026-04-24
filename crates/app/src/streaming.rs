@@ -23,39 +23,51 @@ use flowplan_world::terrain::{HeightSampler, Terrain};
 use flowplan_world::voronoi_cells::{CellId, SubBiomeCellCatalog};
 use glam::Vec2;
 
-/// Streaming terrain default half-extent (m). Patch is 2× this on a
-/// side: 10 km half-extent = 20 km × 20 km mesh. Performance slider
-/// in Phase 4.8 settings UI exposes this for player tuning.
-pub const TERRAIN_HALF_EXTENT_M: f32 = 10_000.0;
-
-/// Streaming terrain default cells per side. 1000 = 20 m per cell at
-/// the default 10 km half-extent. ~1 M vertices total.
-pub const TERRAIN_CELLS: u32 = 1000;
-
-/// Streaming water default half-extent (m). Matches terrain at 10 km
-/// per user direction (rivers / coastlines visible at distance look
-/// wrong with smaller water mesh).
-pub const WATER_HALF_EXTENT_M: f32 = 10_000.0;
-
-/// Streaming water default cells per side. Coarser than terrain (water
-/// mesh is flat in 3.6.3c.5b; FFT ocean displacement adds detail later
-/// per `weather_water_fft_second_pass` memory).
-pub const WATER_CELLS: u32 = 200;
-
-/// Camera-movement threshold that triggers a mesh rebuild. Measured
-/// from the current mesh center.
+/// Streaming terrain disc radius (m). Terrain mesh is a circular disc
+/// of this radius, rendered in a rectangular bounding-box grid with
+/// out-of-disc triangles dropped. 20 km radius gives consistent
+/// horizon distance in all directions (square mesh would show 14 km
+/// on axes vs 20 km at corners, visibly inconsistent).
 ///
-/// Default 2 km = half the radius the camera can travel inside the
-/// 10 km mesh before hitting the edge. Smaller threshold → more
-/// rebuilds (smoother edge); larger → fewer rebuilds (mesh edge
-/// approaches camera). 2 km is the engineering compromise.
-pub const REBUILD_THRESHOLD_M: f32 = 2_000.0;
+/// Performance-slider candidate for Phase 4.8 settings UI.
+pub const TERRAIN_DISC_RADIUS_M: f32 = 20_000.0;
+
+/// Streaming terrain half-extent (m) = disc radius; the bounding-box
+/// grid spans 2× this on a side (40 km × 40 km before disc-clip).
+pub const TERRAIN_HALF_EXTENT_M: f32 = TERRAIN_DISC_RADIUS_M;
+
+/// Cells per side on the bounding-box rectangular grid. 1333 ≈ 30 m
+/// per cell at the 20 km disc radius. Disc-clip drops ~22% of cells
+/// (outside circle) → ~1.4 M effective vertices. Async worker rebuild
+/// at this size measures ~1.5-2 s per user direction.
+pub const TERRAIN_CELLS: u32 = 1333;
+
+/// Water disc radius. Matches terrain for consistent horizon.
+pub const WATER_DISC_RADIUS_M: f32 = 20_000.0;
+
+/// Water half-extent = disc radius.
+pub const WATER_HALF_EXTENT_M: f32 = WATER_DISC_RADIUS_M;
+
+/// Water cells per side on the bounding-box grid. Coarser than terrain
+/// — water is flat in 3.6.3c.5b (FFT ocean displacement later).
+/// 400 ≈ 100 m per cell at 20 km.
+pub const WATER_CELLS: u32 = 400;
+
+/// Camera-movement threshold that triggers a mesh rebuild.
+///
+/// Default 5 km gives substantial room inside the 20 km disc before
+/// the edge approaches. At DHC-2 cruise (~60 m/s) = rebuild every
+/// ~83 sec. At 500 m/s debug-cam = every ~10 sec. Async worker
+/// finalizes on a later frame regardless of player motion, so rebuild
+/// frequency is a budget decision not a responsiveness one.
+pub const REBUILD_THRESHOLD_M: f32 = 5_000.0;
 
 /// Voronoi-cell streaming radius. Cells whose seed position is within
 /// this distance of the active camera are in the active set; others
 /// are not. Used by Layer 2 content streaming (feature instances,
-/// future LOD, hub markers, weather overlays, audio sources).
-pub const STREAM_RADIUS_M: f32 = 10_000.0;
+/// future LOD, hub markers, weather overlays, audio sources). Matches
+/// terrain disc so loaded content never exceeds visible terrain.
+pub const STREAM_RADIUS_M: f32 = 20_000.0;
 
 /// Source-of-truth for the camera pose used by both streaming layers
 /// and the renderer.
@@ -156,12 +168,14 @@ pub struct StreamingTerrain {
 
 impl StreamingTerrain {
     /// Initial bake — synchronous on the main thread so the first
-    /// frame has a mesh to render.
+    /// frame has a mesh to render. Builds a disc-shaped mesh of
+    /// radius = `half_extent` (3.6.3c.5b-followup: circular load zone).
     #[must_use]
     pub fn new(half_extent: f32, resolution: u32, initial_center: Vec2, terrain: &Terrain) -> Self {
-        let cpu_mesh = CpuMesh::terrain_patch_at(
+        let cpu_mesh = CpuMesh::terrain_patch_disc_at(
             resolution,
             half_extent,
+            half_extent, // disc_radius == half_extent (circle inscribed in square)
             (initial_center.x, initial_center.y),
             |x, z| terrain.height(x, z),
         );
@@ -231,9 +245,10 @@ impl StreamingTerrain {
                 .name("streaming-terrain-build".into())
                 .spawn(move || {
                     let t0 = std::time::Instant::now();
-                    let mesh = CpuMesh::terrain_patch_at(
+                    let mesh = CpuMesh::terrain_patch_disc_at(
                         resolution,
                         half_extent,
+                        half_extent, // disc_radius
                         (target_center.x, target_center.y),
                         |x, z| terrain_clone.height(x, z),
                     );
@@ -323,12 +338,15 @@ pub struct StreamingWater {
 }
 
 impl StreamingWater {
-    /// Initial bake at the given center.
+    /// Initial bake at the given center. Builds a disc-shaped water
+    /// mesh of radius = `half_extent` for consistent-horizon rendering
+    /// (3.6.3c.5b-followup).
     #[must_use]
     pub fn new(half_extent: f32, resolution: u32, initial_center: Vec2, color: [f32; 4]) -> Self {
-        let cpu_mesh = CpuMesh::water_grid_at(
+        let cpu_mesh = CpuMesh::water_grid_disc_at(
             resolution,
             half_extent,
+            half_extent, // disc_radius == half_extent
             (initial_center.x, initial_center.y),
             color,
         );
@@ -345,8 +363,9 @@ impl StreamingWater {
     /// Rebuild if camera has moved more than [`REBUILD_THRESHOLD_M`].
     pub fn maybe_rebuild(&mut self, camera_pos_xz: Vec2) {
         if camera_pos_xz.distance(self.center) > REBUILD_THRESHOLD_M {
-            self.cpu_mesh = CpuMesh::water_grid_at(
+            self.cpu_mesh = CpuMesh::water_grid_disc_at(
                 self.resolution,
+                self.half_extent,
                 self.half_extent,
                 (camera_pos_xz.x, camera_pos_xz.y),
                 self.color,
@@ -520,9 +539,10 @@ mod tests {
 
     #[test]
     fn stream_radius_reasonable_default() {
-        // 10 km radius at 2 km cell spacing → ~80 cells active.
-        const _: () = assert!(STREAM_RADIUS_M >= 9_000.0);
-        const _: () = assert!(STREAM_RADIUS_M <= 12_000.0);
+        // 20 km radius disc × 2 km Voronoi cell spacing ≈ 314 active cells.
+        // Bounds here are just regression guards on the order-of-magnitude.
+        const _: () = assert!(STREAM_RADIUS_M >= 5_000.0);
+        const _: () = assert!(STREAM_RADIUS_M <= 50_000.0);
     }
 
     #[test]
