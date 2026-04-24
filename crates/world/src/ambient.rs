@@ -315,17 +315,20 @@ pub fn generate_ambient_for_cell(
                 continue;
             }
 
-            // Density-field filter with soft taper. 4-octave fBm
-            // seeded per-entry; raw range normalized to `[0, 1]`.
+            // Density-field modulation. 4-octave fBm seeded per-entry;
+            // raw range normalized to `[0, 1]`.
             //
-            // `noise_threshold ± noise_taper/2` is the smoothstep band.
-            // Spawn probability + size both fade across it so cluster
-            // edges feather out instead of showing hard circular seams
-            // (5c.2.c.12c).
+            // `noise_floor` sets the minimum spawn weight — with
+            // `noise_floor > 0` the below-threshold region still
+            // spawns at reduced density / size, producing uniform
+            // cover with continuous density variation (no circular
+            // patches). See MAPGEN § Density modulation vs gating
+            // (PINNED 2026-04-24).
             let noise = density_noise(px, pz, entry.noise_scale_m, entry_tag);
             let taper = entry.noise_taper.max(1e-4);
             let t_raw = (noise - (entry.noise_threshold - taper * 0.5)) / taper;
-            let patch_weight = smoothstep(t_raw);
+            let floor = entry.noise_floor.clamp(0.0, 1.0);
+            let patch_weight = floor + (1.0 - floor) * smoothstep(t_raw);
             if patch_weight <= 0.0 {
                 continue;
             }
@@ -490,6 +493,7 @@ mod tests {
             noise_scale_m: 400.0,
             noise_threshold: 0.0, // everything passes (max of pseudo-noise is 0.7)
             noise_taper: 0.0,     // hard threshold for test determinism
+            noise_floor: 0.0,     // classic gating for test determinism
             altitude_range_m: (-100.0, 3000.0),
             slope_max_deg: 60.0,
             rng_stream: 0,
@@ -734,6 +738,54 @@ mod tests {
             let on_runway = inst.position.z.abs() < 750.0 && inst.position.x.abs() < 22.5;
             assert!(!on_runway, "rotated runway overlap missed");
         }
+    }
+
+    #[test]
+    fn noise_floor_keeps_below_threshold_candidates_alive() {
+        // High threshold (0.7) with floor=0 should produce few
+        // instances (most noise values reject). With floor=0.5, the
+        // below-threshold area still spawns at 50% base rate, so the
+        // count jumps significantly.
+        let mut gated = boreal_forest_entry();
+        gated.density_per_km2 = 80.0;
+        gated.noise_threshold = 0.7;
+        gated.noise_taper = 0.15;
+        gated.noise_floor = 0.0;
+        let mut modulated = gated.clone();
+        modulated.noise_floor = 0.5;
+
+        let gated_out = generate_ambient_for_cell(
+            99,
+            21,
+            (1234.0, -5678.0),
+            BiomeClass::CoastalBoreal,
+            &[gated],
+            &[],
+            None,
+            &const_height(100.0),
+            &no_water,
+        );
+        let modulated_out = generate_ambient_for_cell(
+            99,
+            21,
+            (1234.0, -5678.0),
+            BiomeClass::CoastalBoreal,
+            &[modulated],
+            &[],
+            None,
+            &const_height(100.0),
+            &no_water,
+        );
+
+        // Modulated should produce MORE instances (below-threshold
+        // candidates are kept probabilistically, not rejected).
+        assert!(
+            modulated_out.len() > gated_out.len() * 2,
+            "floor=0.5 should spawn noticeably more than floor=0 at the same threshold: \
+             gated={} modulated={}",
+            gated_out.len(),
+            modulated_out.len()
+        );
     }
 
     #[test]

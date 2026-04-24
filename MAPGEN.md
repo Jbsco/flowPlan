@@ -1101,9 +1101,35 @@ Each entry becomes a `(density-field × primitive-emit)` pair. Authors tune `den
 
 ### Noise-density fields
 
-Per biome × per ambient entry, one 2D fBm noise field. Specified by seed + wavelength in RON. Sampled at candidate world position; threshold selects whether to spawn. Natural variation across the biome — dense forest pockets, sparse meadows, open areas — without any authored per-location data.
+Per biome × per ambient entry, one 2D fBm noise field. Specified by seed + wavelength in RON. Sampled at candidate world position; value modulates spawn probability + size.
 
 Noise primitives from `crate::noise` (already in use for terrain L1). Deterministic per `(master_seed, biome_id, ambient_entry_idx)`.
+
+### Density modulation vs gating (PINNED 2026-04-24)
+
+**Rule:** Noise fields controlling scatter density should MODULATE spawn probability + size continuously, not GATE candidates with a hard threshold. This is a project-wide principle — not just ambient.
+
+**Why:** A hard `if noise < threshold: reject` reveals the underlying fBm lobe structure. Since fBm local maxima are roughly circular, you get disc-shaped "patches" of density with empty space between. Soft-tapering the rim of the patch doesn't help — the *patch itself* is still a visible circle. Only by modulating density continuously across the noise range do circles disappear into smooth spatial variation.
+
+**Generator formula** (ambient + any future scatter system):
+
+```
+spawn_weight = noise_floor + (1.0 - noise_floor) * smoothstep((noise - threshold + taper/2) / taper)
+size *= 0.6 + 0.4 * spawn_weight
+if rand > spawn_weight: reject
+```
+
+**Author-facing `noise_floor` field** (default `0.0` preserves old gating behavior):
+
+| `noise_floor` | Behavior | Authoring use case |
+|---|---|---|
+| `0.0` | Pocket-only: noise above threshold → spawn, below → nothing | Copse entries, hoodoos, rare-feature clusters |
+| `0.2–0.4` | Uniform presence with density variation | Primary forest carpet, maquis shrub, sage scrub, talus |
+| `~1.0` | Full density everywhere regardless of noise | Ground-cover grass (once authored) |
+
+**Performance coupling:** higher `noise_floor` → more candidates pass filters → higher total instance count. When promoting an entry from `0.0` → `0.3`, cut authored `density_per_km²` by ~30% to keep runtime population roughly constant.
+
+**Generalizes to:** weather-intensity fields (rain shafts, fog, lightning), wildlife spawn density, debris scattering, any visual system painted by procedural values. Pinned as a project-wide pattern, not an ambient-only detail.
 
 ### Cell-boundary behavior
 
@@ -1117,11 +1143,23 @@ No new pipeline. Ambient instances produce `FeatureInstance` structs (same type 
 
 ### Performance
 
-- **Per cell-enter cost:** density-field sample × ~100–200 candidates + instance-overlap checks. Typical: ~5 ms per cell on 8-core host. Amortized over streaming (cell enters are sporadic).
+- **Per cell-enter cost:** density-field sample × per-candidate filter × stack-layer emit. Richer authoring (6,800 candidates in the dense CoastalBoreal biome) pushes this to ~40 ms per cell. Too heavy for synchronous main-thread generation; see background worker below.
 - **Per-frame upload delta:** on cell-set change, re-pack instance buffer once. ~10 KB upload per change. Same as feature pipeline.
-- **Runtime memory:** ~300 KB extra in instance buffer for typical active-set density. Trivial.
+- **Runtime memory:** ~300 KB extra in instance buffer per typical active-set cell.
 
-No new bake phase, no new persistent storage, no new pipeline. Architectural footprint is minimal.
+### Background scatter worker — spiral-out priority (PINNED 2026-04-24)
+
+Ambient generation runs on a background thread with a priority-queued input. Main thread enqueues `AmbientJob { cell_id, biome, feat_insts, ambient_control, priority = distance_to_camera }` on cell-enter; worker pops highest-priority (nearest) first, runs `generate_ambient_for_cell`, sends `AmbientResult { cell_id, instances }` back via channel. Main thread drains results into `ambient_cache` each frame.
+
+**Why spiral-out:** player sees nearest cells first. Worker always works the most-visible pending cell. At normal speeds the visible area is populated long before the player can notice; at debug-cam max speeds, briefly-empty cells are far from view and catch up as the camera settles.
+
+**Shared state:** `Arc<Terrain>`, `Arc<HydrologyGraph>` for read-only clones. `SubBiomeLibraries::shared()` is `&'static`. `BakedAssignments` stays on main thread — feature instances + biome + ambient-control are pre-fetched into the job before enqueue.
+
+**Determinism:** preserved. Per-cell generation is pure; order of completion doesn't affect output. Visible content can vary frame-to-frame during queue drain but converges to the same cache state for a given `(seed, camera_trajectory)`.
+
+**Backpressure:** main thread `try_send` (drop on full queue). Cells that exit before their result returns → main thread discards the stale result on recv.
+
+**Precedent:** `StreamingTerrain::pending` already uses this pattern for async mesh rebuild. The ambient worker is a second instance of the same shape; future LOD fills, NPC spawns, weather-cell init would be third/fourth.
 
 ### Authoring discipline
 

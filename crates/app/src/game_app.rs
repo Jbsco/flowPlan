@@ -252,11 +252,19 @@ struct Runtime {
     /// cell. None for scenario playback + during the 33 s bake window
     /// when the optional is taken by a background builder (5c.2+).
     baked_assignments: Option<flowplan_world::baked_assignments::BakedAssignments>,
-    /// Hydrology graph — retained after bake so ambient generation can
-    /// query water-surface presence per (x, z). Same `Option` discipline
-    /// as `baked_assignments`: `None` outside `FLOWPLAN_FEATURE_INSTANCES`
-    /// mode.
-    hydrology: Option<flowplan_world::HydrologyGraph>,
+    /// Hydrology graph — retained after bake. `Arc` so the background
+    /// ambient worker holds a read-only clone. Kept on main thread
+    /// too for future water-surface queries (audio, feature streaming,
+    /// debug HUD). `None` outside `FLOWPLAN_FEATURE_INSTANCES` mode.
+    #[allow(dead_code)] // retained for future main-thread water queries
+    hydrology: Option<std::sync::Arc<flowplan_world::HydrologyGraph>>,
+    /// Background ambient-generation worker (Phase 3.6.3c.5c.2.c.12d).
+    /// Spawned alongside `baked_assignments` + `hydrology`. Main thread
+    /// enqueues `AmbientJob` on cell-enter with priority =
+    /// distance-to-camera; worker drains nearest-first and sends back
+    /// `AmbientResult`. `None` in scenario mode or without
+    /// `FLOWPLAN_FEATURE_INSTANCES`.
+    ambient_worker: Option<crate::ambient_worker::AmbientWorker>,
     /// Per-cell lazy ambient cache (Phase 3.6.3c.5c.2.c.11 polish —
     /// streaming-hitch fix 2026-04-24). Key = active-set `CellId`,
     /// value = the ambient `FeatureInstance` list generated at
@@ -763,10 +771,20 @@ impl Runtime {
                         d / 1000.0
                     );
                 }
-                (Some(baked), Some(hydrology))
+                (Some(baked), Some(std::sync::Arc::new(hydrology)))
             },
             _ => (None, None),
         };
+
+        // Spawn background ambient worker alongside the bake (5c.2.c.12d).
+        // Only when we have hydrology to share with it.
+        let ambient_worker = hydrology.as_ref().map(|hydro| {
+            crate::ambient_worker::AmbientWorker::spawn(
+                WORLD_SEED,
+                terrain.clone(),
+                std::sync::Arc::clone(hydro),
+            )
+        });
 
         // 3.6.3c.5c.1 diagnostic: `FLOWPLAN_SPAWN_NEAR_INSTANCE=1` puts
         // the debug camera 200 m south + 100 m above the populated cell
@@ -956,6 +974,7 @@ impl Runtime {
             sub_biome_catalog,
             baked_assignments,
             hydrology,
+            ambient_worker,
             ambient_cache: std::collections::HashMap::new(),
             last_terrain_rebuild_cpu_ms: 0.0,
             last_terrain_rebuild_gpu_ms: 0.0,
@@ -1456,79 +1475,85 @@ impl Runtime {
         ) {
             cells.refresh(active_cam_pos_xz, catalog);
 
+            // Drain any worker-completed ambient results every frame
+            // so late results (for cells still active) land in the
+            // cache even at standstill. Stale results (cell has since
+            // exited) are dropped here.
+            let mut any_ambient_drained = false;
+            if let Some(worker) = self.ambient_worker.as_ref() {
+                while let Some(result) = worker.try_recv() {
+                    if cells.active().binary_search(&result.cell_id).is_ok() {
+                        self.ambient_cache
+                            .insert(result.cell_id, result.instances);
+                        any_ambient_drained = true;
+                    }
+                }
+            }
+
             // 3.6.3c.5c.1 + 5c.2.a: feature-instance upload. Rebuild
             // the active-set instance lists (grouped per PrimitiveKind)
             // and upload per kind. Full rebuild is O(active cells ×
             // per-cell instance lookup) = cheap; per-frame incremental
             // ranges are a 5c.2+ optimization.
             if let Some(baked) = self.baked_assignments.as_ref() {
-                if !cells.entered().is_empty() || !cells.exited().is_empty() {
+                if !cells.entered().is_empty()
+                    || !cells.exited().is_empty()
+                    || any_ambient_drained
+                {
                     use flowplan_world::feature_instances::PrimitiveKind;
 
-                    // Phase 1 — ambient cache maintenance. Evict exited
-                    // cells, generate + insert for newly-entered ones.
-                    // This is the ONLY place per-cell ambient is
-                    // generated; the active-set upload below reuses it.
+                    // Phase 1 — ambient cache maintenance.
+                    //
+                    // Evict exited cells. For newly-entered cells,
+                    // enqueue an `AmbientJob` on the background worker
+                    // (5c.2.c.12d). Results arrive asynchronously and
+                    // are drained in Phase 1b below. Cells without a
+                    // cache entry yet render feature instances only;
+                    // the ambient fills in within a frame or two.
                     for &cell_id in cells.exited() {
                         self.ambient_cache.remove(&cell_id);
                     }
                     if !cells.entered().is_empty() {
-                        let libs = flowplan_world::sub_biome::SubBiomeLibraries::shared();
-                        let terrain_ref = &self.terrain;
-                        let hydrology_ref = self.hydrology.as_ref();
-                        let height_at = |x: f32, z: f32| {
-                            flowplan_world::terrain::HeightSampler::height(terrain_ref, x, z)
-                        };
-                        let is_water = |x: f32, z: f32| {
-                            hydrology_ref.is_some_and(|h| {
-                                h.water_surface_at(x, z).is_some_and(|s| {
-                                    !matches!(
-                                        s.class,
-                                        flowplan_world::WaterClass::DryChannel
-                                    )
-                                })
-                            })
-                        };
-                        for &cell_id in cells.entered() {
-                            let seed_pos = catalog.seeds()[cell_id as usize].position;
-                            let host_biome = flowplan_world::biome::biome_at(
-                                WORLD_SEED,
-                                seed_pos.0,
-                                seed_pos.1,
-                            );
-                            let ambient_entries = libs.ambient_for_biome(host_biome);
-                            if ambient_entries.is_empty() {
-                                continue;
-                            }
-                            let feat_insts = baked.instances_at_cell(cell_id);
-                            let assignment = baked.feature_at_cell(cell_id);
-                            let feature = libs
-                                .find(
-                                    assignment.source.feature_source_biome(),
-                                    &assignment.feature_id,
-                                )
-                                .or_else(|| {
-                                    libs.oceanic()
-                                        .iter()
-                                        .find(|f| f.id == assignment.feature_id)
-                                });
-                            let ambient_control = feature.and_then(|f| f.ambient_control);
-                            let ambient_insts =
-                                flowplan_world::ambient::generate_ambient_for_cell(
+                        if let Some(worker) = self.ambient_worker.as_ref() {
+                            let libs = flowplan_world::sub_biome::SubBiomeLibraries::shared();
+                            for &cell_id in cells.entered() {
+                                let seed_pos = catalog.seeds()[cell_id as usize].position;
+                                let host_biome = flowplan_world::biome::biome_at(
                                     WORLD_SEED,
+                                    seed_pos.0,
+                                    seed_pos.1,
+                                );
+                                let ambient_entries = libs.ambient_for_biome(host_biome);
+                                if ambient_entries.is_empty() {
+                                    continue;
+                                }
+                                let feat_insts = baked.instances_at_cell(cell_id).to_vec();
+                                let assignment = baked.feature_at_cell(cell_id);
+                                let feature = libs
+                                    .find(
+                                        assignment.source.feature_source_biome(),
+                                        &assignment.feature_id,
+                                    )
+                                    .or_else(|| {
+                                        libs.oceanic()
+                                            .iter()
+                                            .find(|f| f.id == assignment.feature_id)
+                                    });
+                                let ambient_control =
+                                    feature.and_then(|f| f.ambient_control);
+                                let dx = seed_pos.0 - active_cam_pos_xz.x;
+                                let dz = seed_pos.1 - active_cam_pos_xz.y;
+                                worker.enqueue(crate::ambient_worker::AmbientJob {
                                     cell_id,
                                     seed_pos,
-                                    host_biome,
-                                    ambient_entries,
+                                    biome: host_biome,
                                     feat_insts,
                                     ambient_control,
-                                    &height_at,
-                                    &is_water,
-                                );
-                            self.ambient_cache.insert(cell_id, ambient_insts);
+                                    priority_dist_m: dx.hypot(dz),
+                                });
+                            }
                         }
                     }
-
                     // Phase 2 — active-set bucket rebuild. Feature
                     // instances are cheap `Vec`-index lookups; ambient
                     // is a `HashMap` hit served from the cache.

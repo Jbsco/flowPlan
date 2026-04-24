@@ -385,6 +385,19 @@ Acceptance: no ambient trees growing through runways / apron slabs / large featu
 
 All 4 steppings (.c.8 types/RON → .c.9 generator → .c.10 fBm fields → .c.11 rotated-rect polish) shipped. The ambient environment subsystem is live, deterministic, and ready for visual-iteration tuning. Follow-ups (.c.12 `InverseTaperedClearing` authoring, .c.13 cross-cell seam lookup, .c.14 seasonal variation) remain as deferred items.
 
+**5c.2.c.12d uniform-carpet modulation + background scatter worker — 2026-04-24 (Task #254).** Second visual check surfaced that soft-taper only fixes patch *rims*; the patches themselves are still disc-shaped fBm lobes. Concurrent perf issue: CoastalBoreal cell ambient ran ~40 ms (up from ~5 ms) with richer authoring, main-thread frame time went 0.2 ms → >1 ms with hitches. Two design-lifting outcomes pinned in memory + MAPGEN + DESIGN:
+
+1. **Scattering = modulate, don't gate (PINNED).** Project-wide principle — for any procedural system using a noise field to control density, the noise value MODULATES spawn probability + size continuously. Hard thresholds reveal the fBm lobe structure as circular patches. `AmbientEntry.noise_floor` (default 0.0 preserves gating) is the author-facing dial: 0 = pocket-only, 0.3 = uniform with variation, 1 = full everywhere. Generalizes to future weather intensity, wildlife, debris, any scatter.
+2. **Background scatter worker — spiral-out priority (PINNED).** Non-blocking best-effort generation of streaming content on a worker thread with distance-to-camera priority queue. Main thread queues on cell-enter, drains results into `ambient_cache` each frame via channel. Mirrors existing `StreamingTerrain::pending` pattern. Future fits: hub-LOD, NPC spawn, weather-cell init.
+
+Implementation scope:
+- `AmbientEntry.noise_floor` field + generator formula `spawn_weight = noise_floor + (1 - noise_floor) * smoothstep((noise - threshold + taper/2) / taper); size *= 0.6 + 0.4 * spawn_weight`.
+- RON re-tune: primary carpets get `noise_floor=0.3`, `threshold` lowered, `taper` widened, `density_per_km²` cut ~30%. Copse entries keep `noise_floor=0.0` (pocket-gated).
+- `crates/world/src/ambient_worker.rs` (new module): worker-thread scaffold + `AmbientJob`/`AmbientResult`/channel types. `GameApp` owns a `Option<AmbientWorker>` alongside `ambient_cache`. Cell-enter → priority job → worker. Each frame: try_recv into cache.
+- Shared read-only state: `Arc<Terrain>`, `Arc<HydrologyGraph>` cloned once at bake completion.
+
+Acceptance: visual check shows no discrete circular patches (continuous density variation across terrain), frame time back under 0.5 ms with no hitches even on fast cell-enter bursts.
+
 **5c.2.c.12c soft density + copse layers — 2026-04-24 (Task #253).** After visual check surfaced "circular patches with hard edges and low density":
 - Replaced hard `if noise < threshold { continue }` gate with probabilistic soft-taper. `AmbientEntry.noise_taper` (default 0.15) is the width of a smoothstep band around `noise_threshold`. Candidates in the band spawn with probability = `smoothstep((noise - threshold + taper/2) / taper)` and are also scaled by `0.7 + 0.3·patch_weight` so edge trees shrink toward 70% — feathered edges instead of discs.
 - Authored densities bumped 40-80% on primary canopies across all 4 biomes.

@@ -249,6 +249,14 @@ pub struct AmbientEntry {
     /// hard threshold (pre-5c.2.c.12c behavior).
     #[serde(default = "default_noise_taper")]
     pub noise_taper: f32,
+    /// Minimum spawn weight even when noise is at its minimum. Default
+    /// `0.0` = classic gated behavior (below-threshold candidates are
+    /// rejected outright). Raise to 0.2–0.4 for "uniform carpet"
+    /// behavior — sparse presence everywhere in the valid zone, dense
+    /// peaks where noise is high. See MAPGEN § Density modulation vs
+    /// gating (PINNED 2026-04-24) for the project-wide principle.
+    #[serde(default)]
+    pub noise_floor: f32,
     /// (min, max) altitude range (m). Candidates outside this are
     /// rejected before expensive checks.
     pub altitude_range_m: (f32, f32),
