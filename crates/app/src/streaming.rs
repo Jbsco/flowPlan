@@ -112,24 +112,57 @@ impl ActiveCamera {
     }
 }
 
+/// Completed-rebuild message sent from the worker thread back to the
+/// main thread via `mpsc::channel`. Carries the freshly-built mesh + its
+/// new center + the wall-clock CPU cost for instrumentation.
+struct FinishedRebuild {
+    mesh: CpuMesh,
+    center: Vec2,
+    cpu_ms: f32,
+}
+
 /// Layer 1 — uniform terrain mesh that recenters on the active camera.
 ///
 /// Holds the current `CpuMesh` (CPU-side data); GPU buffer ownership
 /// is the renderer's job. After rebuild, the renderer's terrain
 /// `GpuMesh` must be updated via `Renderer::update_terrain`
 /// (caller's responsibility).
+///
+/// **Async rebuild (3.6.3c.5b-followup, 2026-04-23)**: mesh builds
+/// happen on a worker thread to avoid blocking the render loop. When
+/// the camera crosses [`REBUILD_THRESHOLD_M`], a worker is spawned
+/// holding a cloned `Terrain`; the main thread continues rendering the
+/// current mesh. On each frame, [`Self::maybe_rebuild`] first tries to
+/// finalize any in-flight worker (non-blocking `try_recv`); then
+/// decides whether to kick off a new rebuild. The 1100 ms-ish
+/// `terrain.height`-dominated cost becomes invisible to the player —
+/// hitch removed per profiling data from canonical fly-test 2026-04-23.
 pub struct StreamingTerrain {
     cpu_mesh: CpuMesh,
     center: Vec2,
     half_extent: f32,
     resolution: u32,
-    /// True iff `maybe_rebuild` rebuilt on the most recent call.
-    /// Caller checks this to decide whether to re-upload to GPU.
+    /// True iff `maybe_rebuild` finalized a worker rebuild on the most
+    /// recent call (i.e. mesh was swapped). Caller checks this to
+    /// decide whether to re-upload to GPU.
     just_rebuilt: bool,
+    /// Last finalized rebuild's worker-measured CPU time (ms). Exposed
+    /// for instrumentation / HUD readout.
+    last_rebuild_cpu_ms: f32,
+    /// Set when a worker rebuild is in-flight; cleared when the worker
+    /// sends its result back (or when we observe disconnection).
+    pending: Option<std::sync::mpsc::Receiver<FinishedRebuild>>,
+    /// Center-position the in-flight worker targets. If the camera
+    /// moves to a materially-different position while the worker is
+    /// mid-build, we DON'T kick off another rebuild (only one in flight
+    /// at a time); the next frame's `maybe_rebuild` will chain a fresh
+    /// one once the current finishes.
+    pending_center: Option<Vec2>,
 }
 
 impl StreamingTerrain {
-    /// Initial bake at world origin (or wherever camera starts).
+    /// Initial bake — synchronous on the main thread so the first
+    /// frame has a mesh to render.
     #[must_use]
     pub fn new(half_extent: f32, resolution: u32, initial_center: Vec2, terrain: &Terrain) -> Self {
         let cpu_mesh = CpuMesh::terrain_patch_at(
@@ -144,31 +177,128 @@ impl StreamingTerrain {
             half_extent,
             resolution,
             just_rebuilt: true,
+            last_rebuild_cpu_ms: 0.0,
+            pending: None,
+            pending_center: None,
         }
     }
 
-    /// Rebuild if camera has moved more than [`REBUILD_THRESHOLD_M`]
-    /// from the current mesh center. No-op otherwise.
+    /// Per-frame entry point.
+    ///
+    /// **Finalize phase**: non-blocking `try_recv` on any in-flight
+    /// worker. If the worker has finished, swap its mesh in, set
+    /// `just_rebuilt = true`, clear pending state.
+    ///
+    /// **Kick-off phase**: if no worker is in flight AND camera has
+    /// moved past [`REBUILD_THRESHOLD_M`] from current center, spawn
+    /// a new worker with a cloned `Terrain`.
+    ///
+    /// Main thread work per frame is effectively free — a channel probe
+    /// plus a spawn decision. The 1 s-ish mesh-build cost lives on the
+    /// worker thread, invisible to the render loop.
     pub fn maybe_rebuild(&mut self, camera_pos_xz: Vec2, terrain: &Terrain) {
-        if camera_pos_xz.distance(self.center) > REBUILD_THRESHOLD_M {
-            self.cpu_mesh = CpuMesh::terrain_patch_at(
-                self.resolution,
-                self.half_extent,
-                (camera_pos_xz.x, camera_pos_xz.y),
-                |x, z| terrain.height(x, z),
-            );
-            self.center = camera_pos_xz;
-            self.just_rebuilt = true;
-        } else {
-            self.just_rebuilt = false;
+        self.just_rebuilt = false;
+
+        // Phase 1 — finalize any in-flight worker.
+        if let Some(rx) = &self.pending {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.cpu_mesh = result.mesh;
+                    self.center = result.center;
+                    self.last_rebuild_cpu_ms = result.cpu_ms;
+                    self.just_rebuilt = true;
+                    self.pending = None;
+                    self.pending_center = None;
+                },
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Worker still running; don't start another.
+                },
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // Worker panicked or dropped the sender. Clear
+                    // state so a future rebuild can kick off.
+                    tracing::warn!(
+                        target: "streaming",
+                        "terrain rebuild worker disconnected without sending result"
+                    );
+                    self.pending = None;
+                    self.pending_center = None;
+                },
+            }
+        }
+
+        // Phase 2 — kick off a new rebuild if needed.
+        if self.pending.is_none() && camera_pos_xz.distance(self.center) > REBUILD_THRESHOLD_M {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let terrain_clone = terrain.clone();
+            let resolution = self.resolution;
+            let half_extent = self.half_extent;
+            let target_center = camera_pos_xz;
+            let spawn_result = std::thread::Builder::new()
+                .name("streaming-terrain-build".into())
+                .spawn(move || {
+                    let t0 = std::time::Instant::now();
+                    let mesh = CpuMesh::terrain_patch_at(
+                        resolution,
+                        half_extent,
+                        (target_center.x, target_center.y),
+                        |x, z| terrain_clone.height(x, z),
+                    );
+                    let cpu_ms = t0.elapsed().as_secs_f32() * 1000.0;
+                    // Receiver dropped ⇒ main thread gave up on us
+                    // (e.g. app closing). Explicit drop of the
+                    // `Result` is the documented "fire and forget"
+                    // pattern; clippy's let_underscore_drop lint
+                    // flags the shorthand `let _ = ...`.
+                    drop(tx.send(FinishedRebuild {
+                        mesh,
+                        center: target_center,
+                        cpu_ms,
+                    }));
+                });
+
+            // If the OS couldn't spawn the thread (ulimit, exhausted
+            // stack reservation, etc.), log + stay on the current mesh.
+            // We're NOT `.expect()`-ing per CODING_RULES — spawn failure
+            // is recoverable (we'll just render the stale mesh and try
+            // again next frame after clearing pending).
+            match spawn_result {
+                Ok(_handle) => {
+                    self.pending = Some(rx);
+                    self.pending_center = Some(target_center);
+                },
+                Err(e) => {
+                    tracing::error!(
+                        target: "streaming",
+                        error = %e,
+                        "failed to spawn terrain-build worker; continuing with stale mesh"
+                    );
+                },
+            }
         }
     }
 
-    /// True iff the most recent `maybe_rebuild` call rebuilt the mesh.
-    /// Caller should re-upload to GPU when this returns true.
+    /// True iff the most recent `maybe_rebuild` call swapped in a
+    /// worker-built mesh. Caller should re-upload to GPU when this
+    /// returns true.
     #[must_use]
     pub const fn just_rebuilt(&self) -> bool {
         self.just_rebuilt
+    }
+
+    /// Worker-measured CPU time (ms) of the most recent rebuild.
+    /// 0 if no rebuild has completed yet.
+    #[must_use]
+    #[allow(dead_code)] // TODO(3.6.3c.5a): consumed by debug HUD
+    pub const fn last_rebuild_cpu_ms(&self) -> f32 {
+        self.last_rebuild_cpu_ms
+    }
+
+    /// True iff a worker rebuild is currently in flight. Useful for
+    /// HUD status ("rebuilding...") + debugging.
+    #[must_use]
+    #[allow(dead_code)] // TODO(3.6.3c.5a): consumed by debug HUD
+    pub const fn rebuild_in_flight(&self) -> bool {
+        self.pending.is_some()
     }
 
     /// Borrow the current CPU mesh (for GPU upload).
@@ -434,21 +564,42 @@ mod tests {
     #[test]
     fn streaming_terrain_rebuilds_at_threshold() {
         // Small terrain + small threshold scope so the test is fast.
+        // Async rebuild: `maybe_rebuild` kicks off a worker; we poll
+        // subsequent frames until finalize.
         let terrain = Terrain::from_seed(TEST_SEED);
         let mut st = StreamingTerrain::new(SMALL_EXTENT, SMALL_CELLS, glam::Vec2::ZERO, &terrain);
-        assert!(st.just_rebuilt(), "initial build is a rebuild");
+        assert!(st.just_rebuilt(), "initial (sync) build is a rebuild");
         assert_eq!(st.center(), glam::Vec2::ZERO);
 
-        // Movement below threshold should NOT rebuild.
+        // Movement below threshold should NOT kick off a rebuild.
         st.maybe_rebuild(glam::Vec2::new(REBUILD_THRESHOLD_M * 0.5, 0.0), &terrain);
         assert!(!st.just_rebuilt());
+        assert!(!st.rebuild_in_flight());
         assert_eq!(st.center(), glam::Vec2::ZERO, "center unchanged");
 
-        // Movement past threshold SHOULD rebuild.
+        // Movement past threshold kicks off a worker. Poll until
+        // finalize swaps the mesh in.
         let new_pos = glam::Vec2::new(REBUILD_THRESHOLD_M * 1.5, 0.0);
         st.maybe_rebuild(new_pos, &terrain);
-        assert!(st.just_rebuilt());
-        assert_eq!(st.center(), new_pos, "center tracked");
+        assert!(
+            st.rebuild_in_flight() || st.just_rebuilt(),
+            "expected worker in flight or immediate finalize"
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            st.maybe_rebuild(new_pos, &terrain);
+            if st.just_rebuilt() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "worker never finalized — deadline exceeded"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(st.center(), new_pos, "center tracked after finalize");
+        assert!(st.last_rebuild_cpu_ms() > 0.0, "worker reported cpu time");
     }
 
     #[test]

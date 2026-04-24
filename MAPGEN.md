@@ -859,10 +859,12 @@ World-bake state (hydrology + hub_catalog + BakedAssignments + terrain) totals ~
 
 #### Performance
 
-- **Mesh rebuild**: ~50-100 ms CPU (1 M `terrain.height` calls) → reduced to ~15-25 ms with `rayon::par_iter` on the patch construction (rayon already in workspace per 3.6.3c.1c). GPU upload ~10-20 ms.
-- **Rebuild frequency**: every 2 km of camera motion. At 100 m/s = every 20 sec. At 500 m/s = every 4 sec.
+- **Mesh rebuild CPU cost**: measured ~1140 ms CPU at the 1 M-vertex default (canonical-seed fly-test 2026-04-23). `terrain.height` is dominant (multi-octave Perlin-fBm); rayon parallelization helps but the per-call cost is inherent to the noise function.
+- **GPU upload**: measured ~6 ms (VBO + IBO creation + transfer). Not a bottleneck.
+- **Rebuild frequency**: every 2 km of camera motion. At 60-65 m/s DHC-2 cruise = every ~30-35 sec (matched measurements).
 - **Cell active-set refresh**: <1 ms per frame.
-- **Hot-path impact**: NONE per-frame except the single rebuild stutter every N km.
+- **Async rebuild (3.6.3c.5b-followup, SHIPPED 2026-04-23)**: the 1100 ms CPU work runs on a worker thread (`std::thread` + `std::sync::mpsc`); main thread stays free to render. Rebuild becomes an invisible background task — no frame stutter at threshold crossings. Main-thread cost per frame is ~µs (channel probe + optional spawn). Worker reports its own CPU time via `FinishedRebuild.cpu_ms` for continued instrumentation.
+- **Hot-path impact**: NONE. The rebuild stutter is architecturally eliminated.
 
 #### Future-improvement candidates
 

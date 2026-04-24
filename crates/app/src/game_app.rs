@@ -948,14 +948,16 @@ impl Runtime {
         let active_camera = crate::streaming::ActiveCamera::from_sim(curr.camera);
         let active_cam_pos_xz = active_camera.position_xz();
         if let Some(st) = self.streaming_terrain.as_mut() {
-            let t_cpu = Instant::now();
+            // Main-thread cost is now just channel probe + possible
+            // worker spawn — sub-millisecond. The worker measures its
+            // own CPU cost + reports via `last_rebuild_cpu_ms`.
             st.maybe_rebuild(active_cam_pos_xz, &self.terrain);
-            let cpu_ms = t_cpu.elapsed().as_secs_f32() * 1000.0;
             if st.just_rebuilt() {
                 let t_gpu = Instant::now();
                 self.renderer
                     .update_terrain_mesh(&self.device, st.cpu_mesh());
                 let gpu_ms = t_gpu.elapsed().as_secs_f32() * 1000.0;
+                let cpu_ms = st.last_rebuild_cpu_ms();
                 self.last_terrain_rebuild_cpu_ms = cpu_ms;
                 self.last_terrain_rebuild_gpu_ms = gpu_ms;
                 tracing::info!(
@@ -964,7 +966,7 @@ impl Runtime {
                     gpu_ms = gpu_ms,
                     center_x = st.center().x,
                     center_z = st.center().y,
-                    "terrain mesh rebuild"
+                    "terrain mesh rebuild (async worker)"
                 );
             }
         }
