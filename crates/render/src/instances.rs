@@ -1,35 +1,40 @@
-//! Feature-instance renderer (Phase 3.6.3c.5c.1).
+//! Feature-instance renderer (Phase 3.6.3c.5c.1 + 5c.2.a).
 //!
-//! Draws a single primitive mesh (a unit box) replicated per-instance
-//! from a GPU storage buffer. Per-instance data = position, rotation
-//! around world Y, per-axis scale, baked color — computed at bake time
-//! (crate `flowplan-world`, `feature_instances`) and streamed to the
-//! renderer by `game_app`'s active-cell-set loop.
+//! Draws multiple primitive meshes (box / cone / cylinder / sphere)
+//! replicated per-instance from per-primitive GPU storage buffers.
+//! Per-instance data = position, rotation around world Y, per-axis
+//! scale, baked color — computed at bake time (crate `flowplan-world`,
+//! `feature_instances`) and streamed to the renderer by `game_app`'s
+//! active-cell-set loop.
 //!
 //! # Pipeline overview
 //!
-//! - Vertex buffer: one primitive mesh's worth of vertices (box = 24
-//!   verts) uploaded once.
-//! - Index buffer: one primitive mesh's worth of indices (36 for the
-//!   box) uploaded once.
-//! - Storage buffer: `InstanceGpuData` per instance. Grows as needed
-//!   via `upload`. Bound to `@group(1) @binding(0)`.
+//! One `wgpu::RenderPipeline` shared across primitives (vertex layout +
+//! shader are identical). Per primitive kind, the renderer owns:
+//!
+//! - Vertex buffer: mesh verts uploaded once at construction.
+//! - Index buffer: mesh indices uploaded once.
+//! - Storage buffer: growable; holds the live instance list for this
+//!   primitive kind. Bound to `@group(1) @binding(0)` when drawing.
 //! - Draw call: `draw_indexed(mesh.indices, 0, 0..instance_count)`.
 //!   Vertex shader reads `instance_id = @builtin(instance_index)` and
 //!   indexes into `instances[instance_id]`.
 //!
-//! # Incremental active-set updates (5c.1 MVP)
+//! `record` issues one draw call per primitive kind with non-zero
+//! instance count (typically 4 draw calls max for 5c.2.a).
 //!
-//! 5c.1 uploads the full active-set buffer whenever it changes (active
-//! set churns slowly — roughly once per rebuild event, not per frame).
-//! Upload is 200 × 48 B = 9.6 KB at upper bound, which is negligible.
-//! Incremental `write_buffer` at per-cell offsets is an optimization
-//! reserved for 5c.2 when the total instance count rises.
+//! # Grouping responsibility
+//!
+//! Caller groups instances by `PrimitiveKind` and calls
+//! `upload_kind(kind, data)` once per kind per rebuild. Keeps the
+//! renderer simple (no per-frame instance-by-kind re-partition) and
+//! lets the caller's grouping match its own iteration order.
 
 #![deny(unsafe_code)]
 
 use bytemuck::{Pod, Zeroable};
 use flowplan_assets::{CpuMesh, Vertex};
+use flowplan_world::feature_instances::PrimitiveKind;
 use wgpu::util::DeviceExt;
 
 use crate::renderer::DEPTH_FORMAT;
@@ -74,29 +79,33 @@ impl InstanceGpuData {
     }
 }
 
-/// Renderer for instanced feature primitives. Owns the primitive mesh
-/// buffers + the growable instance storage buffer + the pipeline.
-pub struct InstanceRenderer {
-    pipeline: wgpu::RenderPipeline,
-    // Primitive mesh (unit box).
+/// Per-primitive GPU resources — mesh buffers + instance storage.
+/// Held inside the renderer; the caller never sees this directly.
+struct PrimitiveSlot {
     vbo: wgpu::Buffer,
     ibo: wgpu::Buffer,
     index_count: u32,
-
-    // Instance storage buffer + bind group.
-    instance_bgl: wgpu::BindGroupLayout,
     instance_buf: wgpu::Buffer,
     instance_bg: wgpu::BindGroup,
-    /// Capacity of the storage buffer in instances (not bytes). Grows
-    /// via `upload` when an upload exceeds it.
+    /// Capacity in instances (not bytes). Grows via `upload_kind`.
     capacity: u32,
-    /// Number of instances currently resident. Drives the `draw_indexed`
-    /// instance range.
+    /// Live instance count driving the draw range.
     instance_count: u32,
 }
 
-/// Initial capacity in instances. Sized to comfortably hold the 5c.1
-/// active-set upper bound (~25 cells × ~8 houses). Doubled on overflow.
+/// Renderer for instanced feature primitives. Shares a single pipeline
+/// across primitives; owns a [`PrimitiveSlot`] per [`PrimitiveKind`].
+pub struct InstanceRenderer {
+    pipeline: wgpu::RenderPipeline,
+    instance_bgl: wgpu::BindGroupLayout,
+    /// Parallel to [`PrimitiveKind::ALL`] — index via
+    /// [`Self::kind_index`] so adding a primitive is a single-location
+    /// change (extend `PrimitiveKind::ALL` + pass the matching mesh).
+    slots: Vec<PrimitiveSlot>,
+}
+
+/// Initial capacity per-primitive in instances. Sized for the 5c.1
+/// active-set upper bound (~25 cells × ~8 houses). Grows via doubling.
 const INITIAL_CAPACITY: u32 = 512;
 
 /// Baked-in WGSL source; exposed to lib-test so the shader-presence
@@ -105,15 +114,25 @@ pub const INSTANCES_WGSL_SOURCE: &str = include_str!("instances.wgsl");
 
 impl InstanceRenderer {
     /// Construct the renderer: compile shader, build pipeline, upload
-    /// the primitive mesh, allocate empty instance storage buffer.
+    /// one mesh + allocate one empty storage buffer per primitive kind.
+    ///
+    /// `meshes` must have one entry per variant of [`PrimitiveKind::ALL`]
+    /// in the same order. Callers use [`Self::build_primitive_meshes`]
+    /// or construct manually.
     #[must_use]
     pub fn new(
         device: &wgpu::Device,
         camera_bgl: &wgpu::BindGroupLayout,
         scene_bgl: &wgpu::BindGroupLayout,
         surface_format: wgpu::TextureFormat,
-        primitive_mesh: &CpuMesh,
+        meshes: &[&CpuMesh],
     ) -> Self {
+        assert_eq!(
+            meshes.len(),
+            PrimitiveKind::ALL.len(),
+            "expected one mesh per PrimitiveKind variant"
+        );
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("flowplan-instances-shader"),
             source: wgpu::ShaderSource::Wgsl(INSTANCES_WGSL_SOURCE.into()),
@@ -143,92 +162,156 @@ impl InstanceRenderer {
 
         let pipeline = build_instance_pipeline(device, &pipeline_layout, &shader, surface_format);
 
-        // Upload the primitive mesh.
-        let vbo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(&format!("{}-vbo", primitive_mesh.label)),
-            contents: bytemuck::cast_slice(&primitive_mesh.vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let ibo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(&format!("{}-ibo", primitive_mesh.label)),
-            contents: bytemuck::cast_slice(&primitive_mesh.indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-        let index_count = primitive_mesh.indices.len() as u32;
-
-        let (instance_buf, instance_bg) =
-            create_instance_storage(device, &instance_bgl, INITIAL_CAPACITY);
+        let slots = meshes
+            .iter()
+            .map(|mesh| {
+                let vbo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(&format!("{}-vbo", mesh.label)),
+                    contents: bytemuck::cast_slice(&mesh.vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                let ibo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(&format!("{}-ibo", mesh.label)),
+                    contents: bytemuck::cast_slice(&mesh.indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+                let (instance_buf, instance_bg) =
+                    create_instance_storage(device, &instance_bgl, INITIAL_CAPACITY);
+                PrimitiveSlot {
+                    vbo,
+                    ibo,
+                    index_count: mesh.indices.len() as u32,
+                    instance_buf,
+                    instance_bg,
+                    capacity: INITIAL_CAPACITY,
+                    instance_count: 0,
+                }
+            })
+            .collect();
 
         Self {
             pipeline,
-            vbo,
-            ibo,
-            index_count,
             instance_bgl,
-            instance_buf,
-            instance_bg,
-            capacity: INITIAL_CAPACITY,
-            instance_count: 0,
+            slots,
         }
     }
 
-    /// Replace the entire active-set instance list. Grows the storage
-    /// buffer if needed (doubles capacity until it fits). Uploads the
-    /// full buffer in one `queue.write_buffer` call.
+    /// Build the default primitive mesh set in the canonical order
+    /// matching `PrimitiveKind::ALL`. Returned `Vec<CpuMesh>` lives
+    /// long enough for the caller to pass `&[&CpuMesh]` to
+    /// [`Self::new`].
     ///
-    /// 5c.1 MVP: called by `game_app` when the active cell set changes.
-    /// 5c.2+ may add `upload_range` for incremental cell swap-in/out.
-    pub fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, data: &[InstanceGpuData]) {
+    /// Default polygon counts tuned for readable silhouettes at flyby
+    /// distance without overtessellating: 8-sided cone + cylinder +
+    /// half-cylinder; 12×8 UV sphere; 2-triangle flat quad.
+    #[must_use]
+    pub fn build_primitive_meshes() -> Vec<CpuMesh> {
+        vec![
+            CpuMesh::primitive_box(),
+            CpuMesh::primitive_cone(8),
+            CpuMesh::primitive_cylinder(8),
+            CpuMesh::primitive_sphere(12, 8),
+            CpuMesh::primitive_half_cylinder(8),
+            CpuMesh::primitive_flat_quad(),
+        ]
+    }
+
+    /// Replace the active-set instance list for a single primitive
+    /// kind. Grows that slot's storage buffer if needed (doubles
+    /// capacity until the upload fits). Uploads the full buffer in
+    /// one `queue.write_buffer` call.
+    ///
+    /// Call once per kind per rebuild. An empty slice clears the
+    /// kind's draw (no-op on record).
+    pub fn upload_kind(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        kind: PrimitiveKind,
+        data: &[InstanceGpuData],
+    ) {
+        let slot_idx = Self::kind_index(kind);
+        let slot = &mut self.slots[slot_idx];
         let need = data.len() as u32;
-        if need > self.capacity {
-            let mut new_cap = self.capacity.max(1);
+        if need > slot.capacity {
+            let mut new_cap = slot.capacity.max(1);
             while new_cap < need {
                 new_cap = new_cap.saturating_mul(2);
             }
             let (buf, bg) = create_instance_storage(device, &self.instance_bgl, new_cap);
-            self.instance_buf = buf;
-            self.instance_bg = bg;
-            self.capacity = new_cap;
+            slot.instance_buf = buf;
+            slot.instance_bg = bg;
+            slot.capacity = new_cap;
         }
         if !data.is_empty() {
-            queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(data));
+            queue.write_buffer(&slot.instance_buf, 0, bytemuck::cast_slice(data));
         }
-        self.instance_count = need;
+        slot.instance_count = need;
     }
 
-    /// Number of live instances in the buffer (drives the draw call).
+    /// Total live instance count across all primitive kinds. HUD /
+    /// telemetry consumer.
     #[must_use]
-    pub const fn instance_count(&self) -> u32 {
-        self.instance_count
+    pub fn instance_count(&self) -> u32 {
+        self.slots.iter().map(|s| s.instance_count).sum()
     }
 
-    /// Current storage-buffer capacity (instances, not bytes).
+    /// Live instance count for a single primitive kind. Useful for
+    /// per-kind diagnostics.
     #[must_use]
-    pub const fn capacity(&self) -> u32 {
-        self.capacity
+    pub fn instance_count_for(&self, kind: PrimitiveKind) -> u32 {
+        self.slots[Self::kind_index(kind)].instance_count
     }
 
-    /// Record the instance draw into the scene pass. Binds camera (0),
-    /// instance storage (1), scene (2), then issues one indexed draw
-    /// with `0..instance_count` as the instance range.
+    /// Current storage capacity (instances) for a primitive kind.
+    #[must_use]
+    pub fn capacity_for(&self, kind: PrimitiveKind) -> u32 {
+        self.slots[Self::kind_index(kind)].capacity
+    }
+
+    /// Record all non-empty primitive-kind draw calls into the scene
+    /// pass. Binds camera (0), per-kind instance storage (1), scene
+    /// (2); issues one indexed draw per kind.
     ///
-    /// No-op when `instance_count == 0`.
+    /// Pipeline is bound once (all primitives share it). Kinds with
+    /// `instance_count == 0` are skipped (no draw call submitted).
     pub fn record<'a>(
         &'a self,
         pass: &mut wgpu::RenderPass<'a>,
         camera_bg: &'a wgpu::BindGroup,
         scene_bg: &'a wgpu::BindGroup,
     ) {
-        if self.instance_count == 0 {
+        // Early-out if every slot is empty.
+        if self.slots.iter().all(|s| s.instance_count == 0) {
             return;
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, camera_bg, &[]);
-        pass.set_bind_group(1, &self.instance_bg, &[]);
         pass.set_bind_group(2, scene_bg, &[]);
-        pass.set_vertex_buffer(0, self.vbo.slice(..));
-        pass.set_index_buffer(self.ibo.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..self.index_count, 0, 0..self.instance_count);
+        for slot in &self.slots {
+            if slot.instance_count == 0 {
+                continue;
+            }
+            pass.set_bind_group(1, &slot.instance_bg, &[]);
+            pass.set_vertex_buffer(0, slot.vbo.slice(..));
+            pass.set_index_buffer(slot.ibo.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..slot.index_count, 0, 0..slot.instance_count);
+        }
+    }
+
+    /// Map a `PrimitiveKind` to its index in `PrimitiveKind::ALL` (and
+    /// therefore into `self.slots`). Single point of truth; grep-
+    /// findable when extending the enum — the compiler's exhaustive
+    /// match will flag any new variant added without a slot.
+    const fn kind_index(kind: PrimitiveKind) -> usize {
+        match kind {
+            PrimitiveKind::Box => 0,
+            PrimitiveKind::Cone => 1,
+            PrimitiveKind::Cylinder => 2,
+            PrimitiveKind::Sphere => 3,
+            PrimitiveKind::HalfCylinder => 4,
+            PrimitiveKind::FlatQuad => 5,
+        }
     }
 }
 
@@ -313,11 +396,14 @@ fn build_instance_pipeline(
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
             front_face: wgpu::FrontFace::Ccw,
-            // `CpuMesh::cube` (source of `primitive_box`) has mixed
-            // face winding — some triangles are CCW, others CW. The
-            // main scene pipeline also disables culling for this
-            // reason. Re-enable once primitives get authored-mesh
-            // replacements with consistent winding (5c.5+).
+            // `primitive_box` still uses `CpuMesh::cube` which has
+            // mixed face winding (some CCW, others CW). Cone /
+            // cylinder / sphere were authored CCW-from-outside in
+            // 5c.2.a and would back-cull cleanly on their own, but
+            // the shared pipeline has to accommodate the box too.
+            // Re-enable `Face::Back` once the box mesh is re-authored
+            // (tracked in `simple_primitives_render_direction` memory
+            // follow-up).
             cull_mode: None,
             polygon_mode: wgpu::PolygonMode::Fill,
             unclipped_depth: false,

@@ -1,8 +1,8 @@
 //! Per-cell feature instance data for sub-biome primitive rendering
-//! (Phase 3.6.3c.5c.1).
+//! (Phase 3.6.3c.5c).
 //!
-//! A `FeatureInstance` is a single renderable primitive (box, cone,
-//! sphere, etc.) placed within a Voronoi cell's world footprint.
+//! A [`FeatureInstance`] is a single renderable primitive (box, cone,
+//! cylinder, sphere) placed within a Voronoi cell's world footprint.
 //! Instances are computed at bake-time from a cell's feature assignment
 //! plus cell-seed RNG plus palette adaptation, and stored sparse in
 //! `BakedAssignments` indexed by `CellId`. At render time, the active
@@ -10,40 +10,187 @@
 //!
 //! # Primitive vocabulary
 //!
-//! Pinned in memory `simple_primitives_render_direction`. MVP (5c.1)
-//! ships [`PrimitiveKind::Box`] only; remaining primitives (cone,
-//! cylinder, sphere, half-cylinder, flat-quad, stick-tree) extend the
-//! enum in 5c.2 without breaking the instance schema.
+//! Pinned in memory `simple_primitives_render_direction`. 5c.2.a ships
+//! `Box` / `Cone` / `Cylinder` / `Sphere`; later milestones may add
+//! `HalfCylinder`, `FlatQuad`, `StickTree` (composite) without breaking
+//! the [`FeatureInstance`] schema.
 //!
-//! # Feature composition
+//! # Feature composition (5c.2.b — RON-driven)
 //!
-//! The sub-biome RON entries include render-primitive notes in
-//! comments (e.g. `dwelling_cluster = 5-8× box (houses) + 4× cone
-//! (trees)`). 5c.1 hardcodes one composition (`dwelling_cluster`) in
-//! `compose_instances_for_feature`. 5c.2+ will either parse RON or
-//! expand to cover all feature ids.
+//! Each [`crate::sub_biome::SubBiomeFeature`] carries an optional
+//! `composition: Vec<PrimitiveComponent>`. [`compose_instances_for_feature`]
+//! iterates the list and delegates to [`emit_component`] for each
+//! entry, producing the concrete [`FeatureInstance`]s.
+//!
+//! A [`PrimitiveComponent`] declares:
+//! - `kind` — which primitive mesh
+//! - `count` — (min, max) inclusive instance count
+//! - `base_size_m` — per-axis base dimensions
+//! - `scale_jitter` — per-instance uniform-scale multiplier range
+//! - `color_source` — which palette slot (or explicit RGB)
+//! - `placement` — spatial pattern (`Single` / `RadialCluster`; more in 5c.2.c)
+//! - `rng_stream` — distinct per-component RNG offset so components
+//!   don't correlate
+//!
+//! Features with `composition: None` emit no instances. 5c.2.b authors
+//! `dwelling_cluster` (5-8 houses + 3-6 trees); 5c.2.c extends to the
+//! remaining 17 developments / resupply / scenery features.
 //!
 //! # Determinism
 //!
 //! Instance generation is a pure function of
-//! `(master_seed, cell_id, feature_id, cell_pos, palette)`. Same inputs
+//! `(master_seed, cell_id, feature, cell_pos, palette)`. Same inputs
 //! produce bit-identical instance lists across runs.
 
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_possible_truncation)]
+
+use serde::Deserialize;
 
 use crate::sub_biome::{adapt_palette, BiomeSource, Palette, SubBiomeFeature, SubBiomeLibraries};
 use crate::voronoi_cells::CellId;
 
 /// Primitive kind — which hardcoded mesh this instance renders as.
 ///
-/// Extended in 5c.2 with `Cone`, `Cylinder`, `Sphere`, `HalfCylinder`,
-/// `FlatQuad`, `StickTree` (composite).
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+/// 5c.2.a ships `Box` / `Cone` / `Cylinder` / `Sphere`. 5c.2.c.1 adds
+/// `HalfCylinder` (quonset-hut hangar roofs) + `FlatQuad` (runways /
+/// tarmac / road surfaces). Later milestones may add `StickTree`
+/// (composite) per memory `simple_primitives_render_direction`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Deserialize)]
 pub enum PrimitiveKind {
     /// Axis-aligned box; unit dimensions scaled per-instance. Used for
     /// buildings, sheds, cabins, shops.
     Box,
+    /// Unit cone, apex-up. Trees (conifer canopy), spires, signage
+    /// cones, rooftop details.
+    Cone,
+    /// Unit cylinder. Pillars, silos, gas-station support columns,
+    /// tree trunks, fence posts.
+    Cylinder,
+    /// Unit sphere (smooth-shaded). Boulders, floats, decorative
+    /// spherical features.
+    Sphere,
+    /// Half-cylinder (quonset / hangar roof shape). Flat base on -Y,
+    /// arc roof with apex at +Y, length runs along Z. Used for
+    /// hangars, quonset huts, arched roofs.
+    HalfCylinder,
+    /// Flat axis-aligned quad in the XZ plane, +Y normal. Used for
+    /// runway surfaces, tarmac, apron slabs, road segments, signage
+    /// panels. Zero Y-extent in the unit mesh — set `base_size_m.y`
+    /// in the composition to encode anti-z-fight lift above ground.
+    FlatQuad,
+}
+
+impl PrimitiveKind {
+    /// All variants in a stable order — used to enumerate primitive
+    /// pipelines in the renderer. Keep aligned with the enum
+    /// declaration so grouping/lookup is consistent.
+    pub const ALL: &'static [Self] = &[
+        Self::Box,
+        Self::Cone,
+        Self::Cylinder,
+        Self::Sphere,
+        Self::HalfCylinder,
+        Self::FlatQuad,
+    ];
+}
+
+/// Which palette slot drives a primitive's color (5c.2.b RON schema).
+///
+/// `Explicit([r, g, b])` escape hatch for features where the palette
+/// doesn't apply (signage paint, branded red accents, etc.). Alpha
+/// stays hardcoded at 255 — alpha is reserved for later blend effects
+/// and should not vary per-composition-entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+pub enum ColorSource {
+    /// Use `palette.primary` — typical for structural elements
+    /// (building walls, plinths, main masses).
+    Primary,
+    /// Use `palette.secondary` — foliage / organic accent / trim.
+    Secondary,
+    /// Use `palette.accent` — sign trim, highlight detail.
+    Accent,
+    /// Override with a literal RGB triple. Use sparingly; RON-authored
+    /// feature compositions should prefer palette slots so the
+    /// 3.6.3b palette-adaptation pipeline applies.
+    Explicit([u8; 3]),
+}
+
+/// Placement pattern for a primitive component (5c.2.b + 5c.2.c.1 RON
+/// schema).
+///
+/// Determines how the component's `count` instances are spatially
+/// arranged within the cell's ~200 m footprint. Extend with new
+/// variants as feature compositions demand (e.g. `GridField { spacing,
+/// extent }` for farmland rows).
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+pub enum PlacementPattern {
+    /// Single instance at a fixed offset from cell center. Used for
+    /// hero features that should sit at a stable position (anchor
+    /// buildings, signage, single boulders).
+    Single {
+        /// World-space (x, z) offset from cell center (m).
+        offset_m: (f32, f32),
+    },
+    /// Randomly scattered within a disc of given radius from cell
+    /// center. Uses square-root distribution for area-uniform
+    /// placement. Used for clustered features (houses, trees, scattered
+    /// rocks).
+    RadialCluster {
+        /// Disc radius (m) within which instances are distributed.
+        radius_m: f32,
+    },
+    /// Instances placed along a straight line. Used for hangars
+    /// arranged along a taxiway, runway edge lights, perimeter fence
+    /// posts, linear building rows. The `count` drawn from
+    /// [`PrimitiveComponent::count`] determines how many instances
+    /// actually emit; authors set `count: (10, 10)` for exactly 10
+    /// with no variance.
+    LinearChain {
+        /// World-space (x, z) offset from cell center for the first
+        /// instance.
+        start_m: (f32, f32),
+        /// Line direction measured counterclockwise from +X (radians).
+        /// `0.0` = +X, `PI/2` = +Z, `PI` = -X, etc. Kept as a scalar
+        /// (not a unit vector) for RON authoring simplicity.
+        direction_rad: f32,
+        /// Distance between consecutive instances (m). Total chain
+        /// length = `(count - 1) × spacing_m`.
+        spacing_m: f32,
+    },
+}
+
+/// One entry in a feature's primitive composition (5c.2.b RON schema).
+///
+/// Declarative replacement for the hardcoded `compose_dwelling_cluster`
+/// logic. A feature's `composition: Vec<PrimitiveComponent>` lists
+/// each primitive layer; the bake iterates and produces
+/// `FeatureInstance`s accordingly.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PrimitiveComponent {
+    /// Which primitive mesh renders each instance.
+    pub kind: PrimitiveKind,
+    /// Instance count (inclusive `(min, max)`). A random integer in
+    /// this range is picked from the cell RNG.
+    pub count: (u32, u32),
+    /// Base (width, height, depth) in meters at `scale_jitter=1.0`.
+    /// For axis-symmetric primitives (cone / cylinder / sphere) width
+    /// + depth are typically equal (diameter).
+    pub base_size_m: (f32, f32, f32),
+    /// Per-instance uniform-scale jitter multiplier range. `(0.8, 1.2)`
+    /// = each instance scales uniformly by a random factor in [0.8,
+    /// 1.2]. Set to `(1.0, 1.0)` for no jitter.
+    pub scale_jitter: (f32, f32),
+    /// Color source — which palette slot (or explicit RGB) drives the
+    /// instance's baked color.
+    pub color_source: ColorSource,
+    /// Spatial arrangement of the `count` instances within the cell.
+    pub placement: PlacementPattern,
+    /// RNG stream offset. Distinct per-component values make
+    /// house/tree/etc. placements uncorrelated within a cell. Author
+    /// 0 for the first component, 0x100 for the second, 0x200 for the
+    /// third, etc. — or any distinct values.
+    pub rng_stream: u64,
 }
 
 /// One placed primitive instance.
@@ -112,76 +259,119 @@ pub fn compose_instances_for_feature(
     libraries: &SubBiomeLibraries,
     height_at: &dyn Fn(f32, f32) -> f32,
 ) -> Vec<FeatureInstance> {
-    // Resolve the adapted palette per 3.6.3b mechanism.
+    let Some(composition) = feature.composition.as_ref() else {
+        return Vec::new();
+    };
     let adapted = adapt_palette(feature, source.host_biome(), libraries);
-
-    // Per-feature composition — hardcoded for 5c.1 MVP.
-    match feature.id.as_str() {
-        "dwelling_cluster" => {
-            compose_dwelling_cluster(master_seed, cell_id, cell_pos, &adapted, height_at)
-        },
-        _ => Vec::new(),
-    }
-}
-
-/// Compose `dwelling_cluster` as 5-8 box-primitives representing houses,
-/// placed within a ~200 m radius of the cell center with random
-/// rotation + modest scale variation (± 20%).
-///
-/// Per-house dimensions: 6-10 m wide × 4-6 m tall × 8-12 m deep.
-/// Color: primary palette tone (weathered wood / house walls).
-/// Y is anchored to terrain height at the instance's (x, z) + half-
-/// height so the house base sits on the ground.
-fn compose_dwelling_cluster(
-    master_seed: u64,
-    cell_id: CellId,
-    cell_pos: (f32, f32),
-    palette: &Palette,
-    height_at: &dyn Fn(f32, f32) -> f32,
-) -> Vec<FeatureInstance> {
     let seed = mix_seed(master_seed, FEATURE_INSTANCE_TAG);
     let cell_rng = mix_seed(seed, u64::from(cell_id));
 
-    // House count 5-8 (integer, from cell RNG).
-    let house_count = 5 + (mix_seed(cell_rng, 0) & 3) as u32; // 5, 6, 7, or 8
+    let mut instances = Vec::new();
+    for component in composition {
+        emit_component(
+            cell_rng,
+            cell_pos,
+            component,
+            &adapted,
+            height_at,
+            &mut instances,
+        );
+    }
+    instances
+}
 
-    let mut instances = Vec::with_capacity(house_count as usize);
-    for i in 0..house_count {
-        let sub_rng = mix_seed(cell_rng, u64::from(i));
-        // Position: radial offset up to 200 m from cell center.
-        let angle = rand_unit(sub_rng, 1) * core::f32::consts::TAU;
-        let radius = rand_unit(sub_rng, 2).sqrt() * 200.0; // sqrt for area-uniform
-        let ox = radius * libm::cosf(angle);
-        let oz = radius * libm::sinf(angle);
-        let px = cell_pos.0 + ox;
-        let pz = cell_pos.1 + oz;
+/// Emit `component.count` instances according to its RON-declared
+/// parameters. RNG streams are keyed by `component.rng_stream` so
+/// components within one composition don't correlate. Called once per
+/// component per cell from [`compose_instances_for_feature`].
+fn emit_component(
+    cell_rng: u64,
+    cell_pos: (f32, f32),
+    component: &PrimitiveComponent,
+    palette: &Palette,
+    height_at: &dyn Fn(f32, f32) -> f32,
+    out: &mut Vec<FeatureInstance>,
+) {
+    let component_rng = mix_seed(cell_rng, component.rng_stream);
+    // Integer count in [count.0, count.1] inclusive. Picked from the
+    // component RNG so same seed → same count.
+    let count_range = component.count.1.saturating_sub(component.count.0) + 1;
+    let count = if count_range == 0 {
+        component.count.0
+    } else {
+        let roll = (mix_seed(component_rng, 0xC0) as u32) % count_range;
+        component.count.0 + roll
+    };
 
-        // Scale: house-sized with variance.
-        let base_w = 8.0;
-        let base_h = 5.0;
-        let base_d = 10.0;
-        let scale_jitter = 0.8 + rand_unit(sub_rng, 3) * 0.4; // 0.8-1.2×
-        let sw = base_w * scale_jitter;
-        let sh = base_h * scale_jitter;
-        let sd = base_d * scale_jitter;
+    let base_color = match component.color_source {
+        ColorSource::Primary => [palette.primary.0, palette.primary.1, palette.primary.2],
+        ColorSource::Secondary => [
+            palette.secondary.0,
+            palette.secondary.1,
+            palette.secondary.2,
+        ],
+        ColorSource::Accent => [palette.accent.0, palette.accent.1, palette.accent.2],
+        ColorSource::Explicit(rgb) => rgb,
+    };
+    let color = [base_color[0], base_color[1], base_color[2], 255];
 
-        // Rotation around world Y — houses face plausibly random headings.
-        let rot_y = rand_unit(sub_rng, 4) * core::f32::consts::TAU;
+    let (base_w, base_h, base_d) = component.base_size_m;
+    let (jitter_min, jitter_max) = component.scale_jitter;
+    let jitter_span = (jitter_max - jitter_min).max(0.0);
 
-        // Anchor to terrain: base of the box sits on the ground at (px, pz),
-        // so the box's center (our `position`) is half-height above.
+    for i in 0..count {
+        let sub_rng = mix_seed(component_rng, u64::from(i));
+
+        let (px, pz) = match component.placement {
+            PlacementPattern::Single { offset_m } => {
+                (cell_pos.0 + offset_m.0, cell_pos.1 + offset_m.1)
+            },
+            PlacementPattern::RadialCluster { radius_m } => {
+                let angle = rand_unit(sub_rng, 1) * core::f32::consts::TAU;
+                let radius = rand_unit(sub_rng, 2).sqrt() * radius_m; // area-uniform
+                (
+                    cell_pos.0 + radius * libm::cosf(angle),
+                    cell_pos.1 + radius * libm::sinf(angle),
+                )
+            },
+            PlacementPattern::LinearChain {
+                start_m,
+                direction_rad,
+                spacing_m,
+            } => {
+                let offset_along = (i as f32) * spacing_m;
+                let dx = offset_along * libm::cosf(direction_rad);
+                let dz = offset_along * libm::sinf(direction_rad);
+                (cell_pos.0 + start_m.0 + dx, cell_pos.1 + start_m.1 + dz)
+            },
+        };
+
+        let jitter = jitter_min + rand_unit(sub_rng, 3) * jitter_span;
+        let sw = base_w * jitter;
+        let sh = base_h * jitter;
+        let sd = base_d * jitter;
+
+        // Rotation: Single + RadialCluster use random yaw (houses /
+        // trees face plausibly-random directions). LinearChain
+        // aligns to its direction axis (hangars along a taxiway /
+        // runway edge lights all point the same way). Authors who
+        // want random-in-chain can use many Single components with
+        // distinct offsets.
+        let rot_y = match component.placement {
+            PlacementPattern::LinearChain { direction_rad, .. } => direction_rad,
+            _ => rand_unit(sub_rng, 4) * core::f32::consts::TAU,
+        };
         let ground_y = height_at(px, pz);
         let py = ground_y + sh * 0.5;
 
-        instances.push(FeatureInstance {
-            primitive: PrimitiveKind::Box,
+        out.push(FeatureInstance {
+            primitive: component.kind,
             position: glam::Vec3::new(px, py, pz),
             scale: glam::Vec3::new(sw, sh, sd),
             rotation_y_rad: rot_y,
-            color: [palette.primary.0, palette.primary.1, palette.primary.2, 255],
+            color,
         });
     }
-    instances
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -201,12 +391,12 @@ mod tests {
     }
 
     #[test]
-    fn dwelling_cluster_produces_5_to_8_boxes() {
+    fn dwelling_cluster_produces_houses_and_trees() {
         let libs = SubBiomeLibraries::shared();
         let feature = libs
             .find(BiomeClass::CoastalBoreal, "dwelling_cluster")
             .unwrap();
-        // Try multiple cell ids; expect 5-8 each time.
+        // 5-8 houses (boxes) + 3-6 trees (cones) = 8-14 total.
         for cell_id in 0..10 {
             let instances = compose_instances_for_feature(
                 42,
@@ -217,14 +407,23 @@ mod tests {
                 libs,
                 &height_stub(0.0),
             );
+            let box_count = instances
+                .iter()
+                .filter(|i| i.primitive == PrimitiveKind::Box)
+                .count();
+            let cone_count = instances
+                .iter()
+                .filter(|i| i.primitive == PrimitiveKind::Cone)
+                .count();
             assert!(
-                (5..=8).contains(&instances.len()),
-                "expected 5-8 instances, got {}",
-                instances.len()
+                (5..=8).contains(&box_count),
+                "expected 5-8 house boxes, got {box_count}"
+            );
+            assert!(
+                (3..=6).contains(&cone_count),
+                "expected 3-6 tree cones, got {cone_count}"
             );
             for inst in &instances {
-                assert_eq!(inst.primitive, PrimitiveKind::Box);
-                assert!(inst.scale.x > 5.0 && inst.scale.x < 15.0);
                 assert!(inst.color[3] == 255);
             }
         }
@@ -306,6 +505,273 @@ mod tests {
         assert_eq!(home.len(), bleed.len());
         // First-instance color should differ (bleed applies HSV shift).
         assert_ne!(home[0].color, bleed[0].color);
+    }
+
+    #[test]
+    fn ron_schema_round_trip_parses() {
+        // Validate the 5c.2.b composition schema parses from RON as
+        // authored in sub_biome_features.ron. Catches schema drift
+        // (adding a field in Rust without updating RON, etc.).
+        let ron = r"[
+            (
+                kind: Box,
+                count: (5, 8),
+                base_size_m: (8.0, 5.0, 10.0),
+                scale_jitter: (0.8, 1.2),
+                color_source: Primary,
+                placement: RadialCluster(radius_m: 200.0),
+                rng_stream: 0,
+            ),
+            (
+                kind: Cone,
+                count: (3, 6),
+                base_size_m: (4.0, 11.0, 4.0),
+                scale_jitter: (0.75, 1.25),
+                color_source: Secondary,
+                placement: RadialCluster(radius_m: 200.0),
+                rng_stream: 256,
+            ),
+            (
+                kind: Cylinder,
+                count: (1, 1),
+                base_size_m: (1.5, 7.0, 1.5),
+                scale_jitter: (1.0, 1.0),
+                color_source: Accent,
+                placement: Single(offset_m: (10.0, 0.0)),
+                rng_stream: 512,
+            ),
+            (
+                kind: Sphere,
+                count: (1, 1),
+                base_size_m: (3.0, 3.0, 3.0),
+                scale_jitter: (1.0, 1.0),
+                color_source: Explicit((180, 170, 140)),
+                placement: Single(offset_m: (0.0, 0.0)),
+                rng_stream: 768,
+            ),
+        ]";
+        let parsed: Vec<PrimitiveComponent> = ron::from_str(ron).unwrap();
+        assert_eq!(parsed.len(), 4);
+        assert_eq!(parsed[0].kind, PrimitiveKind::Box);
+        assert_eq!(parsed[1].kind, PrimitiveKind::Cone);
+        assert_eq!(parsed[2].kind, PrimitiveKind::Cylinder);
+        assert_eq!(parsed[3].kind, PrimitiveKind::Sphere);
+        assert!(matches!(
+            parsed[2].placement,
+            PlacementPattern::Single { .. }
+        ));
+        assert!(matches!(parsed[3].color_source, ColorSource::Explicit(_)));
+    }
+
+    #[test]
+    fn authored_features_load_with_nonempty_compositions() {
+        // 5c.2.c.2 / .c.3 / .c.4 smoke test — verify the 19 authored
+        // features each parse from RON with a composition and produce
+        // instances when composed. Catches RON regression + schema
+        // drift in one check.
+        let libs = SubBiomeLibraries::shared();
+        let cases: &[(BiomeClass, &str)] = &[
+            // Airports (c.2 + c.3).
+            (BiomeClass::CoastalBoreal, "bush_strip"),
+            (BiomeClass::CoastalBoreal, "airport_local"),
+            (BiomeClass::CoastalBoreal, "airport_regional"),
+            (BiomeClass::CoastalBoreal, "airport_major"),
+            (BiomeClass::CoastalBoreal, "seaplane_base"),
+            // Dwellings + homesteads (c.4).
+            (BiomeClass::CoastalBoreal, "dwelling_cluster"),
+            (BiomeClass::CoastalBoreal, "abandoned_homestead"),
+            (BiomeClass::CoastalBoreal, "remote_compound"),
+            (BiomeClass::CoastalBoreal, "homestead_clearing"),
+            // Resupply (c.4).
+            (BiomeClass::CoastalBoreal, "fishing_camp"),
+            (BiomeClass::CoastalBoreal, "tackle_shop"),
+            (BiomeClass::CoastalBoreal, "bait_shop"),
+            (BiomeClass::CoastalBoreal, "gas_station"),
+            (BiomeClass::CoastalBoreal, "general_store"),
+            // HighDesert developments (c.4 + c.5 + c.6).
+            (BiomeClass::HighDesert, "farmland_parcel"),
+            (BiomeClass::HighDesert, "ranch"),
+            (BiomeClass::HighDesert, "adobe_village"),
+            (BiomeClass::HighDesert, "ghost_town"),
+            (BiomeClass::HighDesert, "mining_camp"),
+            (BiomeClass::HighDesert, "solar_farm"),
+            (BiomeClass::HighDesert, "oil_derrick"),
+            (BiomeClass::HighDesert, "wind_farm"),
+            (BiomeClass::HighDesert, "grain_elevator"),
+            (BiomeClass::HighDesert, "natural_arch"),
+            (BiomeClass::HighDesert, "hoodoo_field"),
+            // RockyAlpine developments (c.4 + c.5 + c.6).
+            (BiomeClass::RockyAlpine, "mountain_lodge"),
+            (BiomeClass::RockyAlpine, "fire_lookout_tower"),
+            (BiomeClass::RockyAlpine, "mine_entrance"),
+            (BiomeClass::RockyAlpine, "alpine_cabin"),
+            (BiomeClass::RockyAlpine, "chairlift_terminal"),
+            (BiomeClass::RockyAlpine, "campground"),
+            (BiomeClass::RockyAlpine, "quarry"),
+            (BiomeClass::RockyAlpine, "radio_tower"),
+            (BiomeClass::RockyAlpine, "moraine_field"),
+            (BiomeClass::RockyAlpine, "geyser_field"),
+            (BiomeClass::RockyAlpine, "natural_bridge"),
+            (BiomeClass::RockyAlpine, "spire_formation"),
+            // CoastalBoreal c.6 additions.
+            (BiomeClass::CoastalBoreal, "logging_camp"),
+            (BiomeClass::CoastalBoreal, "boathouse"),
+            (BiomeClass::CoastalBoreal, "helipad"),
+            // Mediterranean developments (c.4 + c.5 + c.6).
+            (BiomeClass::MediterraneanArchipelago, "ferry_dock"),
+            (BiomeClass::MediterraneanArchipelago, "lighthouse"),
+            (BiomeClass::MediterraneanArchipelago, "coastal_village"),
+            (BiomeClass::MediterraneanArchipelago, "olive_grove"),
+            (BiomeClass::MediterraneanArchipelago, "watchtower"),
+            (BiomeClass::MediterraneanArchipelago, "marina"),
+            (BiomeClass::MediterraneanArchipelago, "vineyard"),
+            (BiomeClass::MediterraneanArchipelago, "ancient_ruins"),
+            (BiomeClass::MediterraneanArchipelago, "monastery"),
+        ];
+        for &(biome, id) in cases {
+            let feature = libs
+                .find(biome, id)
+                .unwrap_or_else(|| panic!("feature missing: {id} in {biome:?}"));
+            assert!(
+                feature.composition.is_some(),
+                "{id} should have a composition"
+            );
+            let instances = compose_instances_for_feature(
+                42,
+                1,
+                (0.0, 0.0),
+                feature,
+                BiomeSource::Primary(biome),
+                libs,
+                &height_stub(0.0),
+            );
+            assert!(
+                !instances.is_empty(),
+                "{id} composition produced zero instances"
+            );
+        }
+    }
+
+    #[test]
+    fn airport_major_includes_half_cylinders_and_flat_quads() {
+        // Major airport uses the full primitive vocabulary — verify
+        // HalfCylinder roofs + FlatQuad runways are both present.
+        let libs = SubBiomeLibraries::shared();
+        let feature = libs
+            .find(BiomeClass::CoastalBoreal, "airport_major")
+            .unwrap();
+        let instances = compose_instances_for_feature(
+            42,
+            1,
+            (0.0, 0.0),
+            feature,
+            BiomeSource::Primary(BiomeClass::CoastalBoreal),
+            libs,
+            &height_stub(0.0),
+        );
+        let halfcyl_count = instances
+            .iter()
+            .filter(|i| i.primitive == PrimitiveKind::HalfCylinder)
+            .count();
+        let flatquad_count = instances
+            .iter()
+            .filter(|i| i.primitive == PrimitiveKind::FlatQuad)
+            .count();
+        assert!(
+            halfcyl_count >= 8,
+            "airport_major should place at least 8 hangar roofs (got {halfcyl_count})"
+        );
+        assert!(
+            flatquad_count >= 3,
+            "airport_major should place at least 3 flat surfaces (got {flatquad_count})"
+        );
+    }
+
+    #[test]
+    fn linear_chain_places_evenly_spaced_aligned_instances() {
+        // 5 instances along +X at 10 m spacing from cell_pos + (20, 0).
+        // Expect: x positions 20, 30, 40, 50, 60; z = 0; rot_y = 0.
+        let component = PrimitiveComponent {
+            kind: PrimitiveKind::Box,
+            count: (5, 5),
+            base_size_m: (3.0, 5.0, 3.0),
+            scale_jitter: (1.0, 1.0),
+            color_source: ColorSource::Primary,
+            placement: PlacementPattern::LinearChain {
+                start_m: (20.0, 0.0),
+                direction_rad: 0.0, // +X
+                spacing_m: 10.0,
+            },
+            rng_stream: 7,
+        };
+        let palette = Palette {
+            primary: (100, 100, 100),
+            secondary: (0, 0, 0),
+            accent: (0, 0, 0),
+        };
+        let mut out = Vec::new();
+        emit_component(
+            mix_seed(1, 2),
+            (0.0, 0.0),
+            &component,
+            &palette,
+            &|_, _| 0.0,
+            &mut out,
+        );
+        assert_eq!(out.len(), 5);
+        for (i, inst) in out.iter().enumerate() {
+            let expected_x = 20.0 + (i as f32) * 10.0;
+            assert!(
+                (inst.position.x - expected_x).abs() < 1e-4,
+                "instance {i} x={} expected {expected_x}",
+                inst.position.x
+            );
+            assert!(inst.position.z.abs() < 1e-4);
+            assert!(
+                inst.rotation_y_rad.abs() < 1e-4,
+                "rotation aligns with direction_rad=0",
+            );
+        }
+    }
+
+    #[test]
+    fn single_placement_respects_count_and_offset() {
+        // A Single-placement component with count=(1, 1) emits one
+        // instance at cell_pos + offset. count=(3, 3) would emit three
+        // instances all at the same position (useful for stacking).
+        let component = PrimitiveComponent {
+            kind: PrimitiveKind::Sphere,
+            count: (1, 1),
+            base_size_m: (2.0, 2.0, 2.0),
+            scale_jitter: (1.0, 1.0),
+            color_source: ColorSource::Explicit([10, 20, 30]),
+            placement: PlacementPattern::Single {
+                offset_m: (5.0, -7.0),
+            },
+            rng_stream: 42,
+        };
+        let palette = Palette {
+            primary: (0, 0, 0),
+            secondary: (0, 0, 0),
+            accent: (0, 0, 0),
+        };
+        let mut out = Vec::new();
+        emit_component(
+            mix_seed(1, 2),
+            (100.0, 200.0),
+            &component,
+            &palette,
+            &|_, _| 0.0,
+            &mut out,
+        );
+        assert_eq!(out.len(), 1);
+        let inst = out[0];
+        assert_eq!(inst.primitive, PrimitiveKind::Sphere);
+        assert!((inst.position.x - 105.0).abs() < 1e-5);
+        assert!((inst.position.z - 193.0).abs() < 1e-5);
+        assert_eq!(inst.color, [10, 20, 30, 255]);
+        // Y = ground + half-height = 0 + 1 = 1.
+        assert!((inst.position.y - 1.0).abs() < 1e-5);
     }
 
     #[test]

@@ -100,13 +100,470 @@ impl CpuMesh {
     /// white. The instance shader reads (position, scale, `rotation_y`,
     /// color) from a storage buffer and applies them per draw; the
     /// mesh itself is uploaded once and reused for every box instance.
-    ///
-    /// 5c.1 MVP: this is the only instance primitive. 5c.2+ will add
-    /// cone / cylinder / sphere / etc.
     #[must_use]
     pub fn primitive_box() -> Self {
         let mut mesh = Self::cube(1.0, [1.0, 1.0, 1.0, 1.0]);
         mesh.label = "primitive_box".to_string();
+        mesh
+    }
+
+    /// Unit-size primitive cone for instance rendering (Phase 3.6.3c.5c.2).
+    ///
+    /// Apex at y=+0.5, base at y=-0.5 with radius 0.5 (unit diameter).
+    /// Vertex color white; per-instance data applies scale + rotation +
+    /// tint. Flat-faceted sides with per-triangle normals for
+    /// cel-shading band crispness; base is a single-normal fan.
+    ///
+    /// `sides` controls the base polygon count; default 8 gives a
+    /// readable octagonal cone for tree canopies / signage cones /
+    /// rooftop spires without overtessellating.
+    #[must_use]
+    pub fn primitive_cone(sides: u32) -> Self {
+        let sides = sides.max(3);
+        let mut mesh = Self::new("primitive_cone");
+        let apex_y = 0.5_f32;
+        let base_y = -0.5_f32;
+        let radius = 0.5_f32;
+        let color = [1.0_f32, 1.0, 1.0, 1.0];
+
+        let apex = Vec3::new(0.0, apex_y, 0.0);
+
+        // Side triangles — flat-faceted (one unique per-face normal
+        // replicated across the triangle's three vertices). Winding:
+        // apex → base[i] → base[i+1] is CCW as seen from outside, so
+        // front-face-culling sees the outward surface correctly.
+        for i in 0..sides {
+            let theta0 = (i as f32) * core::f32::consts::TAU / sides as f32;
+            let theta1 = ((i + 1) as f32) * core::f32::consts::TAU / sides as f32;
+            let p0 = Vec3::new(radius * theta0.cos(), base_y, radius * theta0.sin());
+            let p1 = Vec3::new(radius * theta1.cos(), base_y, radius * theta1.sin());
+            let normal = (apex - p0).cross(p1 - p0).normalize_or_zero();
+
+            let start = mesh.vertices.len() as u32;
+            let u_left = i as f32 / sides as f32;
+            let u_right = (i + 1) as f32 / sides as f32;
+            for (pos, uv) in [
+                (p0, Vec2::new(u_left, 1.0)),
+                (p1, Vec2::new(u_right, 1.0)),
+                (apex, Vec2::new((u_left + u_right) * 0.5, 0.0)),
+            ] {
+                mesh.vertices.push(Vertex {
+                    position: [pos.x, pos.y, pos.z],
+                    normal: [normal.x, normal.y, normal.z],
+                    uv: [uv.x, uv.y],
+                    color,
+                });
+            }
+            mesh.indices
+                .extend_from_slice(&[start, start + 1, start + 2]);
+        }
+
+        // Base disc — flat -Y normal, fan from center. Winding is
+        // center → ring[(i+1) % sides] → ring[i] (reversed from the
+        // sides so the normal points -Y outward).
+        let base_center_idx = mesh.vertices.len() as u32;
+        mesh.vertices.push(Vertex {
+            position: [0.0, base_y, 0.0],
+            normal: [0.0, -1.0, 0.0],
+            uv: [0.5, 0.5],
+            color,
+        });
+        let base_ring_start = mesh.vertices.len() as u32;
+        for i in 0..sides {
+            let theta = (i as f32) * core::f32::consts::TAU / sides as f32;
+            mesh.vertices.push(Vertex {
+                position: [radius * theta.cos(), base_y, radius * theta.sin()],
+                normal: [0.0, -1.0, 0.0],
+                uv: [0.5 + theta.cos() * 0.5, 0.5 + theta.sin() * 0.5],
+                color,
+            });
+        }
+        for i in 0..sides {
+            mesh.indices.push(base_center_idx);
+            mesh.indices.push(base_ring_start + ((i + 1) % sides));
+            mesh.indices.push(base_ring_start + i);
+        }
+
+        mesh
+    }
+
+    /// Unit-size primitive cylinder for instance rendering
+    /// (Phase 3.6.3c.5c.2).
+    ///
+    /// From y=-0.5 to y=+0.5 with radius 0.5 (unit diameter, unit
+    /// height). Vertex color white. Flat-faceted sides + flat caps
+    /// for cel-shading. Used for pillars, towers, silos, road
+    /// markers, gas-station columns.
+    ///
+    /// `sides` controls the polygon count; default 8 gives readable
+    /// octagonal silhouette without overtessellating.
+    #[must_use]
+    pub fn primitive_cylinder(sides: u32) -> Self {
+        let sides = sides.max(3);
+        let mut mesh = Self::new("primitive_cylinder");
+        let top_y = 0.5_f32;
+        let bottom_y = -0.5_f32;
+        let radius = 0.5_f32;
+        let color = [1.0_f32, 1.0, 1.0, 1.0];
+
+        // Side quads — flat-faceted (single normal per quad, replicated
+        // on its 4 vertices). Winding:
+        //   top[i] → bottom[i] → bottom[i+1] → top[i+1]
+        // as seen from outside the cylinder is CCW.
+        for i in 0..sides {
+            let theta0 = (i as f32) * core::f32::consts::TAU / sides as f32;
+            let theta1 = ((i + 1) as f32) * core::f32::consts::TAU / sides as f32;
+            let t0 = Vec3::new(radius * theta0.cos(), top_y, radius * theta0.sin());
+            let b0 = Vec3::new(radius * theta0.cos(), bottom_y, radius * theta0.sin());
+            let t1 = Vec3::new(radius * theta1.cos(), top_y, radius * theta1.sin());
+            let b1 = Vec3::new(radius * theta1.cos(), bottom_y, radius * theta1.sin());
+            // Outward radial normal at the midpoint of this face.
+            let mid_theta = (theta0 + theta1) * 0.5;
+            let normal = Vec3::new(mid_theta.cos(), 0.0, mid_theta.sin());
+
+            let start = mesh.vertices.len() as u32;
+            let u_left = i as f32 / sides as f32;
+            let u_right = (i + 1) as f32 / sides as f32;
+            for (pos, uv) in [
+                (t0, Vec2::new(u_left, 0.0)),
+                (b0, Vec2::new(u_left, 1.0)),
+                (b1, Vec2::new(u_right, 1.0)),
+                (t1, Vec2::new(u_right, 0.0)),
+            ] {
+                mesh.vertices.push(Vertex {
+                    position: [pos.x, pos.y, pos.z],
+                    normal: [normal.x, normal.y, normal.z],
+                    uv: [uv.x, uv.y],
+                    color,
+                });
+            }
+            // Two triangles per quad: (t0, b0, b1) + (t0, b1, t1) = CCW
+            // from outside.
+            mesh.indices.extend_from_slice(&[
+                start,
+                start + 1,
+                start + 2,
+                start,
+                start + 2,
+                start + 3,
+            ]);
+        }
+
+        // Top cap (+Y normal). Fan from center. Winding:
+        // center → ring[i] → ring[(i+1) % sides] gives +Y CCW.
+        let top_center_idx = mesh.vertices.len() as u32;
+        mesh.vertices.push(Vertex {
+            position: [0.0, top_y, 0.0],
+            normal: [0.0, 1.0, 0.0],
+            uv: [0.5, 0.5],
+            color,
+        });
+        let top_ring_start = mesh.vertices.len() as u32;
+        for i in 0..sides {
+            let theta = (i as f32) * core::f32::consts::TAU / sides as f32;
+            mesh.vertices.push(Vertex {
+                position: [radius * theta.cos(), top_y, radius * theta.sin()],
+                normal: [0.0, 1.0, 0.0],
+                uv: [0.5 + theta.cos() * 0.5, 0.5 + theta.sin() * 0.5],
+                color,
+            });
+        }
+        for i in 0..sides {
+            mesh.indices.push(top_center_idx);
+            mesh.indices.push(top_ring_start + i);
+            mesh.indices.push(top_ring_start + ((i + 1) % sides));
+        }
+
+        // Bottom cap (-Y normal). Reversed winding:
+        // center → ring[(i+1) % sides] → ring[i] gives -Y CCW.
+        let bot_center_idx = mesh.vertices.len() as u32;
+        mesh.vertices.push(Vertex {
+            position: [0.0, bottom_y, 0.0],
+            normal: [0.0, -1.0, 0.0],
+            uv: [0.5, 0.5],
+            color,
+        });
+        let bot_ring_start = mesh.vertices.len() as u32;
+        for i in 0..sides {
+            let theta = (i as f32) * core::f32::consts::TAU / sides as f32;
+            mesh.vertices.push(Vertex {
+                position: [radius * theta.cos(), bottom_y, radius * theta.sin()],
+                normal: [0.0, -1.0, 0.0],
+                uv: [0.5 + theta.cos() * 0.5, 0.5 + theta.sin() * 0.5],
+                color,
+            });
+        }
+        for i in 0..sides {
+            mesh.indices.push(bot_center_idx);
+            mesh.indices.push(bot_ring_start + ((i + 1) % sides));
+            mesh.indices.push(bot_ring_start + i);
+        }
+
+        mesh
+    }
+
+    /// Unit-size primitive half-cylinder for instance rendering
+    /// (Phase 3.6.3c.5c.2.c.1).
+    ///
+    /// Quonset-hut / hangar-roof shape. The cylinder is split along the
+    /// XZ plane (y=0): the upper half (y ≥ 0) is the curved roof, the
+    /// bottom (y=0) is a flat rectangular floor. The length axis runs
+    /// along Z (from z=-0.5 to z=+0.5); the rounded arc spans from
+    /// x=-0.5 (arc start) up over the top (y=+0.5) to x=+0.5 (arc
+    /// end). Unit diameter × unit length; per-instance scale shapes it.
+    ///
+    /// Faces (all CCW-from-outside):
+    /// - curved arc → N flat-faceted quads along the length
+    /// - flat rectangular base → one quad with -Y normal
+    /// - two semicircular end caps (±Z) → fans from cap center, each
+    ///   with a single axial normal
+    ///
+    /// `sides` controls the semicircle segmentation; default 8 gives a
+    /// readable octagonal-ish arc.
+    #[must_use]
+    pub fn primitive_half_cylinder(sides: u32) -> Self {
+        let sides = sides.max(3);
+        let mut mesh = Self::new("primitive_half_cylinder");
+        let half_len = 0.5_f32;
+        let radius = 0.5_f32;
+        let color = [1.0_f32, 1.0, 1.0, 1.0];
+
+        // Arc angles go from 0 to π (not 0 to TAU). Theta=0 is +X;
+        // theta=π is -X; theta=π/2 is +Y (top of dome).
+        //
+        // Curved side quads — flat-faceted. Winding per quad (CCW from
+        // outside): near_top → near_bottom → far_bottom → far_top,
+        // where "top" means the more-recent arc position (higher index).
+        //
+        // Actually we need to be careful: walking theta from 0 (at +X)
+        // toward π (at -X), consecutive arc points go counterclockwise
+        // as seen from +Z (looking in -Z direction). For a quad facing
+        // outward radially, the visible side's winding is:
+        //   near[i]  → far[i] → far[i+1] → near[i+1]
+        // where near = Z=-0.5 end (closer to viewer from +Z), far = Z=+0.5.
+        for i in 0..sides {
+            let theta0 = (i as f32) * core::f32::consts::PI / sides as f32;
+            let theta1 = ((i + 1) as f32) * core::f32::consts::PI / sides as f32;
+            let n_bot_start = Vec3::new(radius * theta0.cos(), radius * theta0.sin(), -half_len);
+            let n_bot_end = Vec3::new(radius * theta1.cos(), radius * theta1.sin(), -half_len);
+            let f_bot_start = Vec3::new(radius * theta0.cos(), radius * theta0.sin(), half_len);
+            let f_bot_end = Vec3::new(radius * theta1.cos(), radius * theta1.sin(), half_len);
+            let mid_theta = (theta0 + theta1) * 0.5;
+            let normal = Vec3::new(mid_theta.cos(), mid_theta.sin(), 0.0);
+
+            let start = mesh.vertices.len() as u32;
+            let u0 = i as f32 / sides as f32;
+            let u1 = (i + 1) as f32 / sides as f32;
+            for (pos, uv) in [
+                (n_bot_start, Vec2::new(u0, 0.0)),
+                (f_bot_start, Vec2::new(u0, 1.0)),
+                (f_bot_end, Vec2::new(u1, 1.0)),
+                (n_bot_end, Vec2::new(u1, 0.0)),
+            ] {
+                mesh.vertices.push(Vertex {
+                    position: [pos.x, pos.y, pos.z],
+                    normal: [normal.x, normal.y, normal.z],
+                    uv: [uv.x, uv.y],
+                    color,
+                });
+            }
+            // Two tris per quad: (0, 1, 2) + (0, 2, 3).
+            mesh.indices.extend_from_slice(&[
+                start,
+                start + 1,
+                start + 2,
+                start,
+                start + 2,
+                start + 3,
+            ]);
+        }
+
+        // Flat rectangular base (-Y normal). Four corners at y=0,
+        // spanning x=±radius, z=±half_len.
+        // Winding CCW from below (outside): we want the normal to
+        // point -Y, so when viewed from -Y (looking up), go CW.
+        // From +Y (looking down), order is: (+X,+Z) → (-X,+Z) → (-X,-Z) → (+X,-Z)
+        // Reverse for -Y facing: (+X,-Z) → (-X,-Z) → (-X,+Z) → (+X,+Z)
+        let base_start = mesh.vertices.len() as u32;
+        let base_normal = [0.0, -1.0, 0.0];
+        for (pos, uv) in [
+            (Vec3::new(radius, 0.0, -half_len), Vec2::new(1.0, 0.0)),
+            (Vec3::new(-radius, 0.0, -half_len), Vec2::new(0.0, 0.0)),
+            (Vec3::new(-radius, 0.0, half_len), Vec2::new(0.0, 1.0)),
+            (Vec3::new(radius, 0.0, half_len), Vec2::new(1.0, 1.0)),
+        ] {
+            mesh.vertices.push(Vertex {
+                position: [pos.x, pos.y, pos.z],
+                normal: base_normal,
+                uv: [uv.x, uv.y],
+                color,
+            });
+        }
+        mesh.indices.extend_from_slice(&[
+            base_start,
+            base_start + 1,
+            base_start + 2,
+            base_start,
+            base_start + 2,
+            base_start + 3,
+        ]);
+
+        // End caps — semicircular fans.
+        //
+        // Far cap at z=+half_len, normal +Z. Winding: center → arc[i]
+        // → arc[i+1] is CCW as seen from +Z (outside).
+        //
+        // Near cap at z=-half_len, normal -Z. Reversed winding:
+        // center → arc[i+1] → arc[i].
+        for (z_val, normal, reversed) in [
+            (half_len, [0.0_f32, 0.0, 1.0_f32], false),
+            (-half_len, [0.0, 0.0, -1.0], true),
+        ] {
+            let center_idx = mesh.vertices.len() as u32;
+            mesh.vertices.push(Vertex {
+                position: [0.0, 0.0, z_val],
+                normal,
+                uv: [0.5, 0.5],
+                color,
+            });
+            // Include the two base-level endpoints (x=±radius at y=0)
+            // AND the arc points (sides+1 points from 0 to π).
+            let arc_start = mesh.vertices.len() as u32;
+            // Add the +X base corner first (theta=0).
+            // Then arc points at theta = dtheta, 2*dtheta, ..., π-dtheta.
+            // Then the -X base corner last (theta=π).
+            for i in 0..=sides {
+                let theta = (i as f32) * core::f32::consts::PI / sides as f32;
+                let x = radius * theta.cos();
+                let y = radius * theta.sin();
+                mesh.vertices.push(Vertex {
+                    position: [x, y, z_val],
+                    normal,
+                    uv: [0.5 + x, 0.5 - y], // arbitrary; cel shading uses normal, not UV
+                    color,
+                });
+            }
+            // Also include the base endpoints so the fan is closed.
+            // Base endpoints are already at i=0 (+X, y=0) and i=sides
+            // (-X, y=0) of the arc loop — perfect.
+            // Fan triangles: center → arc[i] → arc[i+1] (or reversed).
+            for i in 0..sides {
+                mesh.indices.push(center_idx);
+                let (b, c) = if reversed {
+                    (arc_start + i + 1, arc_start + i)
+                } else {
+                    (arc_start + i, arc_start + i + 1)
+                };
+                mesh.indices.push(b);
+                mesh.indices.push(c);
+            }
+        }
+
+        mesh
+    }
+
+    /// Unit-size primitive flat quad for instance rendering
+    /// (Phase 3.6.3c.5c.2.c.1).
+    ///
+    /// Single axis-aligned quad in the XZ plane at y=0, spanning
+    /// x=[-0.5, +0.5] × z=[-0.5, +0.5]. Normal points +Y. Used for
+    /// runway surfaces, tarmac / apron slabs, road segments, signage
+    /// panels, anything that's essentially a 2D patch.
+    ///
+    /// Because the quad has zero thickness, `base_size_m.y` in a
+    /// [`crate::primitive_component_doc_stub`]-style RON composition
+    /// encodes anti-z-fight lift above ground rather than height —
+    /// e.g. `(30.0, 0.1, 600.0)` = 30 m × 600 m runway floating 5 cm
+    /// above terrain to avoid flickering where depth buffer precision
+    /// tiebreaks in the terrain's favor.
+    ///
+    /// Only the +Y face is drawn; callers should not rotate the quad
+    /// below horizontal (the backside isn't visible).
+    #[must_use]
+    pub fn primitive_flat_quad() -> Self {
+        let mut mesh = Self::new("primitive_flat_quad");
+        let half = 0.5_f32;
+        let color = [1.0_f32, 1.0, 1.0, 1.0];
+        let normal = [0.0_f32, 1.0, 0.0];
+
+        // Winding CCW from +Y (above): (-X,-Z) → (+X,-Z) → (+X,+Z) → (-X,+Z).
+        for (pos, uv) in [
+            (Vec3::new(-half, 0.0, -half), Vec2::new(0.0, 0.0)),
+            (Vec3::new(half, 0.0, -half), Vec2::new(1.0, 0.0)),
+            (Vec3::new(half, 0.0, half), Vec2::new(1.0, 1.0)),
+            (Vec3::new(-half, 0.0, half), Vec2::new(0.0, 1.0)),
+        ] {
+            mesh.vertices.push(Vertex {
+                position: [pos.x, pos.y, pos.z],
+                normal,
+                uv: [uv.x, uv.y],
+                color,
+            });
+        }
+        mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+        mesh
+    }
+
+    /// Unit-size primitive sphere for instance rendering
+    /// (Phase 3.6.3c.5c.2).
+    ///
+    /// Unit diameter (radius 0.5) centered at origin. Vertex color
+    /// white. UV-sphere construction with smooth per-vertex normals —
+    /// unlike the faceted box/cone/cylinder, spheres benefit from
+    /// smooth normals for cel-shading's banded transitions curving
+    /// around the surface. Used for boulders, floats, spherical
+    /// building features.
+    ///
+    /// `lon_segments` + `lat_segments` default to 12 and 8. Raising
+    /// either costs ~quadratic vertex count; keep low for distant
+    /// LODs in 5c.2+.
+    #[must_use]
+    pub fn primitive_sphere(lon_segments: u32, lat_segments: u32) -> Self {
+        let lon = lon_segments.max(3);
+        let lat = lat_segments.max(2);
+        let mut mesh = Self::new("primitive_sphere");
+        let radius = 0.5_f32;
+        let color = [1.0_f32, 1.0, 1.0, 1.0];
+
+        // Generate vertices in a grid: lat=0 is top pole, lat=lat is
+        // bottom pole. Longitude wraps, so emit lon+1 columns with the
+        // last matching the first (seamless UV + normals).
+        for lat_i in 0..=lat {
+            let phi = (lat_i as f32) * core::f32::consts::PI / (lat as f32);
+            let y = radius * phi.cos();
+            let ring_r = radius * phi.sin();
+            for lon_i in 0..=lon {
+                let theta = (lon_i as f32) * core::f32::consts::TAU / (lon as f32);
+                let x = ring_r * theta.cos();
+                let z = ring_r * theta.sin();
+                let pos = Vec3::new(x, y, z);
+                let normal = pos.normalize_or_zero();
+                mesh.vertices.push(Vertex {
+                    position: [pos.x, pos.y, pos.z],
+                    normal: [normal.x, normal.y, normal.z],
+                    uv: [lon_i as f32 / lon as f32, lat_i as f32 / lat as f32],
+                    color,
+                });
+            }
+        }
+
+        // Indices: quads between latitude rings, wound CCW from
+        // outside. Pole caps degenerate into triangles naturally
+        // because the top/bottom rings have all-the-same y vertices.
+        let row = lon + 1;
+        for lat_i in 0..lat {
+            for lon_i in 0..lon {
+                let tl = lat_i * row + lon_i;
+                let tr = lat_i * row + lon_i + 1;
+                let bl = (lat_i + 1) * row + lon_i;
+                let br = (lat_i + 1) * row + lon_i + 1;
+                // Two triangles per quad. Winding: tl → bl → br → tr
+                // is CCW from outside (looking down the radial axis
+                // with +Y up).
+                mesh.indices.extend_from_slice(&[tl, bl, br, tl, br, tr]);
+            }
+        }
+
         mesh
     }
 
@@ -483,6 +940,145 @@ mod tests {
         let m = CpuMesh::cube(2.0, [1.0, 0.0, 0.0, 1.0]);
         assert_eq!(m.vertex_count(), 24);
         assert_eq!(m.index_count(), 36);
+    }
+
+    #[test]
+    fn primitive_cone_has_expected_vertex_count() {
+        // Sides=8: 8 side triangles × 3 unique verts = 24 side verts
+        //        + 1 base center + 8 base ring = 33 verts.
+        // Indices: 8 side tris × 3 + 8 base tris × 3 = 48.
+        let m = CpuMesh::primitive_cone(8);
+        assert_eq!(m.vertex_count(), 33);
+        assert_eq!(m.index_count(), 48);
+    }
+
+    #[test]
+    fn primitive_cone_apex_is_above_base() {
+        let m = CpuMesh::primitive_cone(8);
+        let max_y = m
+            .vertices
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let min_y = m
+            .vertices
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::INFINITY, f32::min);
+        assert!((max_y - 0.5).abs() < 1e-5, "apex at y=0.5");
+        assert!((min_y - -0.5).abs() < 1e-5, "base at y=-0.5");
+    }
+
+    #[test]
+    fn primitive_cone_side_normals_have_outward_xz_component() {
+        // Side normals should not point straight up/down — they tilt
+        // outward + up. Base vertices have normal [0, -1, 0].
+        let m = CpuMesh::primitive_cone(8);
+        let mut side_count = 0;
+        for v in &m.vertices {
+            let n = v.normal;
+            if n[1] > 0.0 && (n[0].powi(2) + n[2].powi(2)) > 0.01 {
+                side_count += 1;
+            }
+        }
+        // 8 sides × 3 verts (apex + 2 base) = 24 side-normal vertices.
+        assert_eq!(side_count, 24);
+    }
+
+    #[test]
+    fn primitive_cylinder_has_expected_vertex_count() {
+        // Sides=8: 8 side quads × 4 unique verts = 32 side verts
+        //        + (1 + 8) top cap + (1 + 8) bottom cap = 50 verts.
+        // Indices: 8 side quads × 6 + 8 top tris × 3 + 8 bottom tris × 3 = 96.
+        let m = CpuMesh::primitive_cylinder(8);
+        assert_eq!(m.vertex_count(), 50);
+        assert_eq!(m.index_count(), 96);
+    }
+
+    #[test]
+    fn primitive_cylinder_bounds_are_unit() {
+        let m = CpuMesh::primitive_cylinder(8);
+        for v in &m.vertices {
+            assert!(v.position[0].abs() <= 0.5 + 1e-5);
+            assert!(v.position[1].abs() <= 0.5 + 1e-5);
+            assert!(v.position[2].abs() <= 0.5 + 1e-5);
+        }
+    }
+
+    #[test]
+    fn primitive_sphere_has_smooth_normals() {
+        // Every vertex's normal should equal its position direction
+        // (sphere of radius 0.5, normals are position / 0.5 ≈ unit).
+        let m = CpuMesh::primitive_sphere(12, 8);
+        for v in &m.vertices {
+            let pos = Vec3::new(v.position[0], v.position[1], v.position[2]);
+            let n = Vec3::new(v.normal[0], v.normal[1], v.normal[2]);
+            if pos.length() > 1e-4 {
+                let expected = pos.normalize();
+                assert!(
+                    (n - expected).length() < 1e-4,
+                    "vertex normal != position dir"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn primitive_half_cylinder_bounds() {
+        // Half-cylinder spans x=[-0.5, +0.5], y=[0, +0.5], z=[-0.5, +0.5].
+        let m = CpuMesh::primitive_half_cylinder(8);
+        let mut min_y = f32::INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for v in &m.vertices {
+            assert!(v.position[0].abs() <= 0.5 + 1e-5);
+            assert!(v.position[2].abs() <= 0.5 + 1e-5);
+            min_y = min_y.min(v.position[1]);
+            max_y = max_y.max(v.position[1]);
+        }
+        assert!((min_y - 0.0).abs() < 1e-5, "bottom at y=0 (flat base)");
+        assert!((max_y - 0.5).abs() < 1e-5, "peak at y=+0.5 (arc top)");
+    }
+
+    #[test]
+    fn primitive_half_cylinder_has_base_normal_down() {
+        // The flat base should have exactly 4 vertices whose normal
+        // matches (0, -1, 0). Side / end-cap vertices have different
+        // normals.
+        let m = CpuMesh::primitive_half_cylinder(8);
+        let base_count = m
+            .vertices
+            .iter()
+            .filter(|v| {
+                v.normal[0].abs() < 1e-5
+                    && (v.normal[1] - -1.0).abs() < 1e-5
+                    && v.normal[2].abs() < 1e-5
+            })
+            .count();
+        assert_eq!(base_count, 4, "exactly 4 base-quad vertices face -Y");
+    }
+
+    #[test]
+    fn primitive_flat_quad_is_unit_xz_plane() {
+        let m = CpuMesh::primitive_flat_quad();
+        assert_eq!(m.vertex_count(), 4);
+        assert_eq!(m.index_count(), 6);
+        for v in &m.vertices {
+            assert!(v.position[1].abs() < 1e-5, "quad is flat at y=0");
+            assert!(v.normal[0].abs() < 1e-5, "normal x is 0");
+            assert!((v.normal[1] - 1.0).abs() < 1e-5, "normal y is 1");
+            assert!(v.normal[2].abs() < 1e-5, "normal z is 0");
+            assert!(v.position[0].abs() <= 0.5 + 1e-5);
+            assert!(v.position[2].abs() <= 0.5 + 1e-5);
+        }
+    }
+
+    #[test]
+    fn primitive_sphere_vertex_count_grid() {
+        // (lon+1) * (lat+1) = 13 * 9 = 117 verts.
+        let m = CpuMesh::primitive_sphere(12, 8);
+        assert_eq!(m.vertex_count(), 117);
+        // Indices: lon × lat × 6 = 12 × 8 × 6 = 576.
+        assert_eq!(m.index_count(), 576);
     }
 
     #[test]

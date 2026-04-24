@@ -1438,14 +1438,22 @@ impl Runtime {
         ) {
             cells.refresh(active_cam_pos_xz, catalog);
 
-            // 3.6.3c.5c.1: feature-instance upload. Rebuild the active
-            // instance list + upload only when the cell set changed
-            // (entered or exited non-empty). Full rebuild is O(active
-            // cells × per-cell instance lookup) = cheap; per-frame
-            // incremental ranges are a 5c.2+ optimization.
+            // 3.6.3c.5c.1 + 5c.2.a: feature-instance upload. Rebuild
+            // the active-set instance lists (grouped per PrimitiveKind)
+            // and upload per kind. Full rebuild is O(active cells ×
+            // per-cell instance lookup) = cheap; per-frame incremental
+            // ranges are a 5c.2+ optimization.
             if let Some(baked) = self.baked_assignments.as_ref() {
                 if !cells.entered().is_empty() || !cells.exited().is_empty() {
-                    let mut buf: Vec<flowplan_render::InstanceGpuData> = Vec::new();
+                    use flowplan_world::feature_instances::PrimitiveKind;
+                    // Per-kind buckets, exhaustively matched so a new
+                    // PrimitiveKind variant is a compile error.
+                    let mut boxes: Vec<flowplan_render::InstanceGpuData> = Vec::new();
+                    let mut cones: Vec<flowplan_render::InstanceGpuData> = Vec::new();
+                    let mut cylinders: Vec<flowplan_render::InstanceGpuData> = Vec::new();
+                    let mut spheres: Vec<flowplan_render::InstanceGpuData> = Vec::new();
+                    let mut half_cylinders: Vec<flowplan_render::InstanceGpuData> = Vec::new();
+                    let mut flat_quads: Vec<flowplan_render::InstanceGpuData> = Vec::new();
                     let mut populated_in_active = 0_usize;
                     for &cell_id in cells.active() {
                         let insts = baked.instances_at_cell(cell_id);
@@ -1453,27 +1461,81 @@ impl Runtime {
                             populated_in_active += 1;
                         }
                         for inst in insts {
-                            buf.push(flowplan_render::InstanceGpuData::from_fields(
+                            let gpu = flowplan_render::InstanceGpuData::from_fields(
                                 inst.position.to_array(),
                                 inst.rotation_y_rad,
                                 inst.scale.to_array(),
                                 inst.color,
-                            ));
+                            );
+                            match inst.primitive {
+                                PrimitiveKind::Box => boxes.push(gpu),
+                                PrimitiveKind::Cone => cones.push(gpu),
+                                PrimitiveKind::Cylinder => cylinders.push(gpu),
+                                PrimitiveKind::Sphere => spheres.push(gpu),
+                                PrimitiveKind::HalfCylinder => half_cylinders.push(gpu),
+                                PrimitiveKind::FlatQuad => flat_quads.push(gpu),
+                            }
                         }
                     }
+                    let total_uploaded = boxes.len()
+                        + cones.len()
+                        + cylinders.len()
+                        + spheres.len()
+                        + half_cylinders.len()
+                        + flat_quads.len();
                     tracing::info!(
                         target: "streaming",
                         active = cells.active().len(),
                         entered = cells.entered().len(),
                         exited = cells.exited().len(),
                         populated_in_active = populated_in_active,
-                        instances_uploaded = buf.len(),
+                        instances_uploaded = total_uploaded,
+                        boxes = boxes.len(),
+                        cones = cones.len(),
+                        cylinders = cylinders.len(),
+                        spheres = spheres.len(),
+                        half_cylinders = half_cylinders.len(),
+                        flat_quads = flat_quads.len(),
                         cam_x = active_cam_pos_xz.x,
                         cam_z = active_cam_pos_xz.y,
                         "instance-buffer rebuild"
                     );
-                    self.renderer
-                        .upload_instances(&self.device, &self.queue, &buf);
+                    self.renderer.upload_instances_for(
+                        &self.device,
+                        &self.queue,
+                        PrimitiveKind::Box,
+                        &boxes,
+                    );
+                    self.renderer.upload_instances_for(
+                        &self.device,
+                        &self.queue,
+                        PrimitiveKind::Cone,
+                        &cones,
+                    );
+                    self.renderer.upload_instances_for(
+                        &self.device,
+                        &self.queue,
+                        PrimitiveKind::Cylinder,
+                        &cylinders,
+                    );
+                    self.renderer.upload_instances_for(
+                        &self.device,
+                        &self.queue,
+                        PrimitiveKind::Sphere,
+                        &spheres,
+                    );
+                    self.renderer.upload_instances_for(
+                        &self.device,
+                        &self.queue,
+                        PrimitiveKind::HalfCylinder,
+                        &half_cylinders,
+                    );
+                    self.renderer.upload_instances_for(
+                        &self.device,
+                        &self.queue,
+                        PrimitiveKind::FlatQuad,
+                        &flat_quads,
+                    );
                 }
             }
         }

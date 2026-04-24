@@ -1,4 +1,4 @@
-//! Feature-delta implementations (Phase 3.6.3a).
+//! Feature-delta implementations (Phase 3.6.3a + 5c.2.c.7).
 //!
 //! Pure functions returning the L3 heightfield correction for each
 //! feature type. Each delta uses the shared [`DeltaContext`] + falloff
@@ -6,14 +6,24 @@
 //!
 //! ## Delta pattern categories
 //!
-//! | Category | Shape | Features |
+//! | Category | Shape | Example features |
 //! |---|---|---|
-//! | Bowl | Negative gaussian-ish depression | lake_cluster, alpine_tarn, cirque, protected_cove, glacier_dammed_lake, dry_lake_bed |
-//! | Plateau | Positive flattop + cliff edge | mesa_top, book_cliffs |
-//! | Cliff | Sharp altitude drop | cliff_coast |
-//! | Ramp | Smooth shore ramp | sandy_beach |
-//! | Dune | High-freq positive noise | dune_field |
-//! | Flatten | Local bias toward cell mean | bush_strip_clearing |
+//! | Bowl | Negative gaussian depression | lake_cluster, alpine_tarn, hot_springs, oxbow_lake, blowhole |
+//! | Asymmetric bowl | Steeper on one side | cirque |
+//! | Plateau | Positive flattop + cliff edge | mesa_top, book_cliffs, canyon_rim |
+//! | Cliff coast | Raise interior, drop at edge | cliff_coast |
+//! | Shore ramp | Slopes toward center | sandy_beach |
+//! | Dune field | Layered-sine positive bias | dune_field |
+//! | Channel | Narrow linear negative band | slickrock_canyon, slot_canyon, dry_wash, creek_valley, fjord_entrance, avalanche_chute |
+//! | V-valley | Symmetric linear negative | scrub_valley, narrow_valley |
+//! | U-valley | Wide flat-bottomed negative | alpine_valley |
+//! | Ridge | Linear positive | ridge_traverse, rocky_ridge, moraine_field |
+//! | Mound | Positive gaussian | rocky_islet, pine_headland, sea_stack, natural_arch, natural_bridge, hoodoo_field, spire_formation |
+//! | Slope | Asymmetric cross-cell gradient | talus_slope |
+//! | Bumpy | High-freq small amplitude | (reserved) |
+//! | Prominence | Sharp tall peak | scenic_overlook, volcanic_cone |
+//! | Step | Sharp elevation change one side | waterfall |
+//! | Flatten | Gentle pull toward cell mean | bush_strip_clearing, alpine_meadow, natural_meadow, river_floodplain, coastal_plain, salt_flat |
 //! | HubFoundation | Tier-adaptive flatten + skirt | hub_foundation_{major,regional,local,remote} |
 //!
 //! Parameters per feature (depth, radius, cliff offsets) are tuned
@@ -44,11 +54,16 @@ pub fn natural_delta(feature_id: &str, ctx: &DeltaContext) -> f32 {
         "glacier_dammed_lake" => bowl_delta(ctx, 60.0),
         "dry_lake_bed" => bowl_delta(ctx, 12.0),
         "protected_cove" => bowl_delta(ctx, 18.0),
+        "hot_springs" => bowl_delta(ctx, 4.0),
+        "small_harbor" => bowl_delta(ctx, 6.0),
+        "oxbow_lake" => bowl_delta(ctx, 15.0),
+        "blowhole" => bowl_delta(ctx, 3.0),
         "cirque" => asymmetric_bowl_delta(ctx, 70.0),
 
         // ── Plateaus / cliffs ───────────────────────────────────────
         "mesa_top" => plateau_delta(ctx, 140.0, 0.75),
         "book_cliffs" => plateau_delta(ctx, 380.0, 0.55),
+        "canyon_rim" => plateau_delta(ctx, 220.0, 0.5),
         "cliff_coast" => cliff_coast_delta(ctx, 90.0),
 
         // ── Shore ramp ──────────────────────────────────────────────
@@ -57,8 +72,49 @@ pub fn natural_delta(feature_id: &str, ctx: &DeltaContext) -> f32 {
         // ── Dune field ──────────────────────────────────────────────
         "dune_field" => dune_delta(ctx, 22.0),
 
-        // ── Local flatten ───────────────────────────────────────────
+        // ── Channels (narrow linear cuts) ───────────────────────────
+        "slickrock_canyon" => channel_delta(ctx, 60.0, 0.3),
+        "slot_canyon" => channel_delta(ctx, 45.0, 0.12),
+        "dry_wash" => channel_delta(ctx, 8.0, 0.25),
+        "creek_valley" => channel_delta(ctx, 15.0, 0.3),
+        "avalanche_chute" => channel_delta(ctx, 25.0, 0.25),
+        "fjord_entrance" => channel_delta(ctx, 120.0, 0.4),
+
+        // ── Valleys ─────────────────────────────────────────────────
+        "scrub_valley" => v_valley_delta(ctx, 30.0),
+        "narrow_valley" => v_valley_delta(ctx, 90.0),
+        "alpine_valley" => u_valley_delta(ctx, 75.0, 0.4),
+
+        // ── Ridges ──────────────────────────────────────────────────
+        "ridge_traverse" => ridge_delta(ctx, 85.0),
+        "rocky_ridge" => ridge_delta(ctx, 65.0),
+        "moraine_field" => ridge_delta(ctx, 35.0),
+
+        // ── Mounds ──────────────────────────────────────────────────
+        "rocky_islet" => mound_delta(ctx, 22.0),
+        "pine_headland" => mound_delta(ctx, 40.0),
+        "sea_stack" => mound_delta(ctx, 45.0),
+        "natural_arch" => mound_delta(ctx, 18.0),
+        "natural_bridge" => mound_delta(ctx, 28.0),
+        "hoodoo_field" => mound_delta(ctx, 15.0),
+        "spire_formation" => mound_delta(ctx, 50.0),
+
+        // ── Slope (asymmetric cross-cell) ───────────────────────────
+        "talus_slope" => slope_delta(ctx, 55.0),
+
+        // ── Prominences (sharp peaks) ───────────────────────────────
+        "scenic_overlook" => prominence_delta(ctx, 45.0, 1.4),
+        "volcanic_cone" => prominence_delta(ctx, 180.0, 2.0),
+
+        // ── Step (waterfall) ────────────────────────────────────────
+        "waterfall" => step_delta(ctx, 35.0),
+
+        // ── Flattens (gentle smoothing) ─────────────────────────────
         "bush_strip_clearing" => flatten_delta(ctx, 0.75),
+        "alpine_meadow" => flatten_delta(ctx, 0.45),
+        "natural_meadow" | "coastal_plain" => flatten_delta(ctx, 0.5),
+        "river_floodplain" => flatten_delta(ctx, 0.55),
+        "salt_flat" => flatten_delta(ctx, 0.95),
 
         // All other feature ids (including `plain`, oceanic types,
         // scenery tags, developments/infra/resupply from 3.6.3b)
@@ -200,6 +256,137 @@ fn flatten_delta(ctx: &DeltaContext, strength: f32) -> f32 {
     // context and compute a proper blend.
     let local_variation_proxy = 5.0_f32; // ~m of simulated variation to smooth
     -local_variation_proxy * strength * f
+}
+
+/// Channel — narrow linear negative band running across the cell. Used
+/// for canyons, washes, avalanche chutes, fjords. The channel aligns
+/// with the cell's x-axis; rotational randomization lands in a later
+/// polish pass. `width_fraction` is the band half-width relative to
+/// cell radius (0.12 = slot canyon, 0.4 = broad fjord).
+///
+/// The cut is deepest at the center-line (z = cell_center_z) and falls
+/// smoothly to zero at ±width_fraction × cell_radius.
+fn channel_delta(ctx: &DeltaContext, depth_m: f32, width_fraction: f32) -> f32 {
+    let cross_axis_dist = (ctx.z - ctx.cell_center_z).abs();
+    let width = width_fraction * ctx.cell_radius_m;
+    if cross_axis_dist >= width {
+        return 0.0;
+    }
+    // Within the band: smooth profile perpendicular to the channel,
+    // plus standard cell-edge falloff along the channel's long axis.
+    let cross_t = cross_axis_dist / width;
+    let perp_profile = 1.0 - smoothstep(cross_t);
+    let long_axis_falloff = ctx.falloff();
+    -depth_m * perp_profile * long_axis_falloff
+}
+
+/// V-valley — symmetric linear negative with triangular cross-section.
+/// Gentler and broader than `channel_delta`; used for scrub_valley,
+/// narrow_valley. Peak depth at the cell's center-line.
+fn v_valley_delta(ctx: &DeltaContext, depth_m: f32) -> f32 {
+    let cross = (ctx.z - ctx.cell_center_z).abs() / ctx.cell_radius_m;
+    if cross >= 1.0 {
+        return 0.0;
+    }
+    // V-profile: linear rise from center (max) to edge (zero).
+    let perp_profile = 1.0 - cross;
+    let long_falloff = ctx.falloff();
+    -depth_m * perp_profile * long_falloff
+}
+
+/// U-valley — wide flat-bottomed negative channel. The central
+/// `flat_fraction × cell_radius` is uniform max depth; outside that
+/// ramps smoothly to zero at the cell radius. Matches glacial valleys
+/// (e.g. alpine_valley).
+fn u_valley_delta(ctx: &DeltaContext, depth_m: f32, flat_fraction: f32) -> f32 {
+    let cross = (ctx.z - ctx.cell_center_z).abs() / ctx.cell_radius_m;
+    if cross >= 1.0 {
+        return 0.0;
+    }
+    let perp_profile = if cross <= flat_fraction {
+        1.0
+    } else {
+        let t = (cross - flat_fraction) / (1.0 - flat_fraction);
+        1.0 - smoothstep(t)
+    };
+    let long_falloff = ctx.falloff();
+    -depth_m * perp_profile * long_falloff
+}
+
+/// Ridge — linear positive bump. Mirror image of `v_valley_delta` but
+/// adding height along a center-line rather than cutting depth.
+/// Orientation fixed along cell's x-axis for this first-pass; per-cell
+/// rotation is a 5c.2.c.8+ polish item.
+fn ridge_delta(ctx: &DeltaContext, height_m: f32) -> f32 {
+    let cross = (ctx.z - ctx.cell_center_z).abs() / ctx.cell_radius_m;
+    if cross >= 1.0 {
+        return 0.0;
+    }
+    let perp_profile = 1.0 - cross;
+    let long_falloff = ctx.falloff();
+    height_m * perp_profile * long_falloff
+}
+
+/// Mound — positive gaussian bump centered on cell. Simple inverse of
+/// `bowl_delta`. Sea stacks / rocky islets / arches etc. rise above the
+/// base terrain by `height_m`.
+fn mound_delta(ctx: &DeltaContext, height_m: f32) -> f32 {
+    height_m * ctx.falloff()
+}
+
+/// Slope — asymmetric cross-cell elevation gradient. One side of the
+/// cell is `height_m` higher than the other; deterministic per-cell
+/// direction. Used for talus slopes and hillside flanks.
+fn slope_delta(ctx: &DeltaContext, height_m: f32) -> f32 {
+    // Normalize the x-offset into [-1, +1], then into [0, 1] so the
+    // lower side is 0 and upper side is full height. Apply cell-edge
+    // falloff so neighbors blend cleanly.
+    let norm_x = (ctx.x - ctx.cell_center_x) / ctx.cell_radius_m;
+    let side_t = (norm_x.clamp(-1.0, 1.0) + 1.0) * 0.5;
+    height_m * side_t * ctx.falloff()
+}
+
+/// Bumpy — small-amplitude high-frequency noise overlay. Used for
+/// talus-field surface detail, moraine roughness. Cheaper than full
+/// Perlin; sinusoidal pattern keyed off query position. Bias toward
+/// zero-mean so it adds texture without net altitude change.
+#[allow(dead_code)] // reserved for badlands / moraine surface detail
+fn bumpy_delta(ctx: &DeltaContext, amplitude_m: f32) -> f32 {
+    let f = ctx.falloff();
+    // Shorter wavelengths than dune_delta for finer texture.
+    let k1 = 2.0 * PI / 18.0;
+    let k2 = 2.0 * PI / 30.0;
+    let n1 = libm::sinf(k1 * ctx.x) * libm::cosf(k1 * ctx.z);
+    let n2 = libm::sinf(k2 * ctx.x + 1.7) * libm::sinf(k2 * ctx.z + 0.4);
+    amplitude_m * (0.6 * n1 + 0.4 * n2) * f
+}
+
+/// Prominence — sharp tall peak. Like `mound_delta` but with `sharpness`
+/// exponent applied to the falloff so the top is narrower and steeper.
+/// Scenic overlooks, volcanic cones. `sharpness = 1.0` = same as mound;
+/// `sharpness = 2.0` = noticeably pointier.
+fn prominence_delta(ctx: &DeltaContext, height_m: f32, sharpness: f32) -> f32 {
+    let f = ctx.falloff().powf(sharpness.max(0.5));
+    height_m * f
+}
+
+/// Step — sharp elevation change running across the cell. Used for
+/// waterfalls: one side of the cell is `step_m` higher than the other,
+/// with a narrow transition zone at the center. Differs from `slope_delta`
+/// in having a discrete jump rather than a smooth gradient.
+fn step_delta(ctx: &DeltaContext, step_m: f32) -> f32 {
+    let norm_x = (ctx.x - ctx.cell_center_x) / ctx.cell_radius_m;
+    // Narrow transition band at the cell center (±5% of radius).
+    let band = 0.05;
+    let side_t = if norm_x < -band {
+        1.0 // upper (raised) side
+    } else if norm_x > band {
+        0.0 // lower (base) side
+    } else {
+        // Linear blend inside the band.
+        (band - norm_x) / (2.0 * band)
+    };
+    step_m * side_t * ctx.falloff()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -361,5 +548,103 @@ mod tests {
         assert!(natural_delta("mesa_top", &ctx) > 0.0);
         assert!(natural_delta("book_cliffs", &ctx) > 0.0);
         assert!(natural_delta("cliff_coast", &ctx) > 0.0);
+    }
+
+    fn ctx_at_xz(x: f32, z: f32, cell_cx: f32, cell_cz: f32, cell_r: f32, t: f32) -> DeltaContext {
+        DeltaContext {
+            x,
+            z,
+            cell_center_x: cell_cx,
+            cell_center_z: cell_cz,
+            cell_radius_m: cell_r,
+            base_altitude_m: 100.0,
+            normalized_distance: t,
+        }
+    }
+
+    #[test]
+    fn channel_delta_deep_at_centerline_zero_past_band() {
+        // Cell centered at origin, radius 1000, channel width 30%.
+        // Query on centerline (z=0) = max depth; past band (z=400) = 0.
+        let on_line = ctx_at_xz(0.0, 0.0, 0.0, 0.0, 1000.0, 0.0);
+        let past = ctx_at_xz(0.0, 400.0, 0.0, 0.0, 1000.0, 0.0);
+        let d_line = channel_delta(&on_line, 60.0, 0.3);
+        let d_past = channel_delta(&past, 60.0, 0.3);
+        assert!(
+            d_line < -50.0,
+            "expected deep cut at centerline, got {d_line}"
+        );
+        assert!(
+            d_past.abs() < 1e-3,
+            "expected no cut past band, got {d_past}"
+        );
+    }
+
+    #[test]
+    fn v_valley_delta_linear_profile() {
+        let on_line = ctx_at_xz(0.0, 0.0, 0.0, 0.0, 1000.0, 0.0);
+        let at_half = ctx_at_xz(0.0, 500.0, 0.0, 0.0, 1000.0, 0.5);
+        let at_edge = ctx_at_xz(0.0, 999.0, 0.0, 0.0, 1000.0, 0.999);
+        assert!(v_valley_delta(&on_line, 50.0) < -40.0);
+        // Half distance → half depth (before falloff factor makes it
+        // shallower still).
+        assert!(v_valley_delta(&at_half, 50.0) > v_valley_delta(&on_line, 50.0));
+        assert!(v_valley_delta(&at_edge, 50.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn u_valley_delta_flat_floor() {
+        // Within flat_fraction → uniform max depth (modulo long-axis falloff).
+        let near_center = ctx_at_xz(0.0, 100.0, 0.0, 0.0, 1000.0, 0.1);
+        let in_flat = ctx_at_xz(0.0, 300.0, 0.0, 0.0, 1000.0, 0.3);
+        let d_center = u_valley_delta(&near_center, 50.0, 0.4);
+        let d_flat = u_valley_delta(&in_flat, 50.0, 0.4);
+        // Both within flat_fraction=0.4 of cell_radius — should be
+        // nearly equal (after long-axis falloff).
+        assert!(d_center < 0.0);
+        assert!(d_flat < 0.0);
+    }
+
+    #[test]
+    fn ridge_delta_positive() {
+        let on_line = ctx_at_xz(0.0, 0.0, 0.0, 0.0, 1000.0, 0.0);
+        let d = ridge_delta(&on_line, 80.0);
+        assert!(d > 0.0, "ridge should raise terrain");
+    }
+
+    #[test]
+    fn mound_delta_positive_at_center() {
+        let ctx = ctx_at(0.0, 100.0);
+        let d = mound_delta(&ctx, 50.0);
+        assert!((d - 50.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn slope_delta_asymmetric() {
+        let left = ctx_at_xz(-500.0, 0.0, 0.0, 0.0, 1000.0, 0.5);
+        let right = ctx_at_xz(500.0, 0.0, 0.0, 0.0, 1000.0, 0.5);
+        let dl = slope_delta(&left, 60.0);
+        let dr = slope_delta(&right, 60.0);
+        assert!(dr > dl, "right side should be higher than left");
+    }
+
+    #[test]
+    fn prominence_delta_sharper_than_mound() {
+        // Sharpness > 1 should produce a smaller value mid-cell than
+        // the equivalent mound.
+        let ctx = ctx_at(0.5, 100.0);
+        let mound = mound_delta(&ctx, 100.0);
+        let prom = prominence_delta(&ctx, 100.0, 2.0);
+        assert!(prom < mound, "sharper prominence should be lower at mid-t");
+    }
+
+    #[test]
+    fn step_delta_sides_differ() {
+        let upper = ctx_at_xz(-500.0, 0.0, 0.0, 0.0, 1000.0, 0.5);
+        let lower = ctx_at_xz(500.0, 0.0, 0.0, 0.0, 1000.0, 0.5);
+        let du = step_delta(&upper, 40.0);
+        let dl = step_delta(&lower, 40.0);
+        assert!(du > 20.0, "upper side should be raised");
+        assert!(dl.abs() < 1e-3, "lower side should be at zero");
     }
 }

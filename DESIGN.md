@@ -314,6 +314,16 @@ The 5000 km toroidal world puts camera positions routinely past 10⁶ m from ori
 
 **Deferred CPU-side precision work**: sim-side `sim.camera.position` and `sim.vehicle.position` remain `Vec3` (f32). Past ~1 Mm world coords, chase-camera smoothing + aircraft integration both quantize to their f32 ULP (~0.25 m at 2.5 Mm), producing frame-to-frame jitter on dynamic objects. Static geometry (terrain, water, baked instances) is unaffected — their vertex positions are fixed f32 at bake time. Jitter only manifests on debug-cam teleport scenarios (aircraft reaches 1 Mm+ from origin only after hours of normal-play flight). See memory `render_precision_at_world_scale` for the three fix options (A: document + defer — current; B: debug-mode render-origin rebasing; C: full end-to-end camera-relative CPU refactor including potential `DVec3` upgrade for sim-side positions).
 
+### Ambient environment objects (Phase 3.6.3c.5c.8+ invariant)
+
+Ambient biome cover (forest, shrub, boulders, grass scatter) sits alongside authored features to fill visual voids in "plain"-assignment cells. Full spec in [MAPGEN.md § Ambient environment objects](MAPGEN.md#ambient-environment-objects-phase-363c5c8). Invariants:
+
+- **Zero persistent storage.** Ambient instances are regenerated per-cell at streaming cell-enter from deterministic seed `(master_seed, cell_id, ambient_entry_idx)`. Nothing baked into `BakedAssignments`. Dropped on cell-exit.
+- **Features parent-control surroundings.** Each `SubBiomeFeature` carries an `ambient_control: Option<FeatureAmbientControl>` defaulting to `None` (wild — no clearing imposed). Features opt IN to `TaperedClearing` (groomed + fade-out zone), `HardClearing` (sanitized), or `InverseTaperedClearing` (pioneering-growth — future) where the surroundings should be shaped.
+- **Instance-overlap universally.** Every mode rejects ambient positions within feature-instance primitive footprints (`footprint_radius(kind, scale)` table in MAPGEN.md). Natural trees don't grow inside a dwelling's walls even under `None`.
+- **Same render pipeline.** Ambient instances produce `FeatureInstance` structs and upload through existing per-primitive-kind `InstanceRenderer` slots. The renderer has no "ambient" concept — it's a CPU-side generation source distinction.
+- **RON-driven churn.** Per-biome `ambient: Vec<AmbientEntry>` lists specify `(kind, density_per_km2, size_range_m, noise_scale_m, noise_threshold, altitude_range, slope_max, color_source)`. Authors iterate text-only; zero code changes per tuning pass.
+
 ---
 
 ## Audio Architecture

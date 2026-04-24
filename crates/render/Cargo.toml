@@ -26,15 +26,17 @@ hardware-tests = []
 [dependencies]
 flowplan-assets = { workspace = true }
 flowplan-sim = { workspace = true }
+# Phase 3.6.3c.5c.2: instance renderer dispatches per-primitive-kind
+# draw calls; PrimitiveKind enum lives in world crate.
+flowplan-world = { workspace = true }
 wgpu = { workspace = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
 notify = { version = "6", optional = true }
-# flowplan-core + flowplan-world added in Phase 2 when render uses their types directly.
+# flowplan-core added in Phase 2 when render uses its types directly.
 # tracing added alongside render instrumentation spans.
 
 [dev-dependencies]
 insta = "1.34"
 image = "0.25"
 pollster = { workspace = true }
-flowplan-world = { workspace = true }

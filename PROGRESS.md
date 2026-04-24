@@ -41,6 +41,332 @@ Hardware-gated reference renders: `target/instance_preview/instance_preview.png`
 
 ---
 
+## 2026-04-24 (iteration 12) — Phase 3.6.3c.5c.2.a (Primitive vocabulary + multi-primitive InstanceRenderer)
+
+First of three sub-milestones for 5c.2. Infrastructure-only: adds the primitive set + render plumbing so 5c.2.b (RON) and 5c.2.c (content authoring) have a working target.
+
+- **`CpuMesh::primitive_cone(sides)` / `primitive_cylinder(sides)` / `primitive_sphere(lon, lat)`** — unit-size mesh builders with consistent CCW winding (from-outside). Cone + cylinder are flat-faceted with per-face normals (cel-shading band crispness); sphere is smooth-shaded with per-vertex radial normals (curvature bands flow around it). Default polygon counts: 8-sided cone + cylinder; 12×8 UV sphere.
+- **`PrimitiveKind` enum extended** with `Cone`, `Cylinder`, `Sphere` variants. `PrimitiveKind::ALL` constant enumerates all four in stable order for renderer-side indexing.
+- **`InstanceRenderer` refactored** to host a per-primitive `PrimitiveSlot` (mesh VBO/IBO + growable storage buffer + capacity tracker). One shared `wgpu::RenderPipeline` across primitives — vertex layout + shader are identical. `record()` issues up to 4 draw calls (one per kind with non-zero instance count).
+- **Upload API**: `Renderer::upload_instances_for(kind, data)` replaces `upload_instances(data)`. Caller groups instances by kind via exhaustive `match inst.primitive { ... }` — compiler flags any future `PrimitiveKind` variant not routed.
+- **`compose_dwelling_cluster` exercise**: now produces 5-8 house boxes + 3-6 tree cones (secondary-palette foliage green, biome-adapted). Demonstrates multi-primitive composition end-to-end. 5c.2.b will move this to RON data.
+- **Cull mode stays `None`** — `CpuMesh::cube` (source of `primitive_box`) has mixed winding. Cone/cylinder/sphere alone would back-cull cleanly. Re-enable `Face::Back` when the box mesh is re-authored (tracked in `simple_primitives_render_direction` memory follow-up).
+- **`flowplan-world` promoted from dev-dep to regular dep** of `flowplan-render` — instance pipeline now references `PrimitiveKind` directly.
+- **Visual verification**: `instance_preview` hardware-gated test updated to render 6 boxes + 4 cones + 2 cylinders + 1 sphere in one scene. PNG confirms all primitives render with proper cel-shading + depth ordering. Sphere's smooth shading produces clean curvature bands.
+- **Tests added**: `primitive_cone_has_expected_vertex_count`, `primitive_cone_apex_is_above_base`, `primitive_cone_side_normals_have_outward_xz_component`, `primitive_cylinder_has_expected_vertex_count`, `primitive_cylinder_bounds_are_unit`, `primitive_sphere_has_smooth_normals`, `primitive_sphere_vertex_count_grid` (7 new, all passing). Existing `dwelling_cluster_produces_5_to_8_boxes` → `dwelling_cluster_produces_houses_and_trees` validates both primitive kinds.
+
+All workspace lib tests pass (8 new tests across assets + world: 7 primitive-mesh verification tests in `flowplan-assets`, 1 renamed `dwelling_cluster_produces_houses_and_trees` in `flowplan-world` covers both primitive kinds). 7/7 visual_snapshot hardware tests pass. Full gate green.
+
+**Next: Phase 3.6.3c.5c.2.b** — RON-authored composition schema + loader. Extend `SubBiomeFeature` RON with `composition: Vec<PrimitiveComponent>`; port `dwelling_cluster` to RON to validate the mechanism before 5c.2.c's content sprint.
+
+---
+
+## 2026-04-24 (iteration 13) — Phase 3.6.3c.5c.2.b (RON-authored composition schema)
+
+Second of three 5c.2 sub-milestones. Composition logic moves from hardcoded Rust match to RON data.
+
+- **New types in `crates/world/src/feature_instances.rs`**: `ColorSource` (Primary / Secondary / Accent / Explicit(RGB)), `PlacementPattern` (Single with `offset_m` / RadialCluster with `radius_m`), `PrimitiveComponent` (kind + count range + base size + scale jitter + color source + placement + rng stream offset). All `#[derive(Deserialize)]` for RON parsing.
+- **`SubBiomeFeature.composition: Option<Vec<PrimitiveComponent>>`** added. `#[serde(default)]` so features without a composition (most of the 17 yet-to-author) parse as `None`.
+- **`compose_instances_for_feature` rewritten** from hardcoded `match feature.id` to generic `for component in composition { emit_component(...) }`. Removes the `compose_dwelling_cluster` dead-code function; data now drives behavior.
+- **`emit_component`** — shared emission logic: resolve color source, compute count from (min, max) + RNG, iterate placement pattern, anchor Y to terrain. Handles both `Single` (fixed offset, one position) and `RadialCluster` (area-uniform random within a disc) patterns.
+- **`dwelling_cluster` ported to RON** in `data/world/sub_biome_features.ron` — 2 components (5-8 boxes at 8×5×10m primary, 3-6 cones at 4×11×4m secondary) with distinct `rng_stream` values (0, 256) matching the 5c.2.a hardcoded behavior.
+- **Schema validation test** (`ron_schema_round_trip_parses`) — parses a 4-component composition covering all primitive kinds + all color sources + both placement patterns. Catches schema drift (adding a field in Rust without updating RON, or vice versa).
+- **Single-placement unit test** (`single_placement_respects_count_and_offset`) — verifies Single placement lands at cell_pos + offset with correct color and Y anchoring.
+
+Changes: 7 → all pass on `cargo test -p flowplan-world --lib feature_instances`. 246 total world lib tests pass. Full gate green.
+
+**Next: Phase 3.6.3c.5c.2.c** — content sprint: author RON compositions for the 17 features currently returning empty instance lists. Best done with visual-feedback loop (spawn-near + iterate).
+
+---
+
+## 2026-04-24 (iteration 14) — Phase 3.6.3c.5c.2.c.1 + .c.2 + .c.3 (Airport primitives + airport compositions)
+
+Primitive vocabulary expanded for hub infrastructure + 5 airport variants authored.
+
+### 5c.2.c.1 — `HalfCylinder` + `FlatQuad` primitives + `LinearChain` placement
+
+- **`CpuMesh::primitive_half_cylinder(sides)`** — quonset/hangar-roof shape. Flat rectangular base on -Y, arched roof with apex at +Y, length along Z. Flat-faceted side quads with outward-radial normals, flat base, semicircular end caps. Default 8-sided arc.
+- **`CpuMesh::primitive_flat_quad()`** — single 4-vertex quad in XZ plane at y=0 with +Y normal. For runways, tarmac, road surfaces, signage panels. Zero Y-extent in unit mesh; `base_size_m.y` in RON encodes anti-z-fight lift above ground.
+- **`PrimitiveKind`** extended with `HalfCylinder` + `FlatQuad` → 6 total variants. `PrimitiveKind::ALL` order updated; renderer slot count grows to 6. Exhaustive match in `game_app` instance upload routes each kind to its slot.
+- **`PlacementPattern::LinearChain { start_m, direction_rad, spacing_m }`** — instances placed along a straight line, uniformly spaced. Rotation locked to `direction_rad` (hangars-along-taxiway, runway lights, fence posts point the same way).
+- **Visual verification**: hardware-gated `instance_preview_airport` test renders 5 box hangars + half-cylinder roofs + runway + apron + treeline + control tower. PNG shows half-cylinder curvature shading cleanly.
+- **3 new assets tests** (half-cylinder bounds, half-cylinder base-normal-down, flat-quad unit-plane). **1 new world test** (LinearChain evenly-spaced-aligned verification).
+
+### 5c.2.c.2 + .c.3 — 5 airport RON compositions
+
+Authored in `data/world/sub_biome_features.ron` under CoastalBoreal (home) with `is_bleed_over_candidate: true` so palette adaptation handles biome drift. Each is tier-gated via `hub_proximity`:
+
+- **`bush_strip`** — Remote/Isolated hubs. 100m dirt strip + 1 shed. Rustic.
+- **`airport_local`** — Local hubs (≤3 km). 300m paved runway + apron + 3 T-hangars + FBO.
+- **`airport_regional`** — Regional hubs (≤2.5 km). 800m runway + taxiway + apron + 5 hangars + terminal + control tower.
+- **`airport_major`** — Major hubs (≤3 km). Two parallel 1500m runways + huge apron + passenger terminal + 2 cargo terminals + 8 hangars + tall control tower.
+- **`seaplane_base`** — Regional/Local hubs, water-adjacent. 35m floating dock + 2 shoreside hangars + office.
+
+**Self-spacing** values escalate with tier (20 km bush, 15 km local, 40 km regional, 80 km major, 30 km seaplane) so world-scale feels right — one major airport per metropolitan area, not three stacked on top of each other. **Runway orientation** currently fixed along world +X; per-cell randomization across a small set (0, π/6, π/3, π/2) is a 5c.2.c.4+ polish item.
+
+- **2 new world tests**: `airport_features_load_with_nonempty_compositions` (all 5 parse + produce instances) + `airport_major_includes_half_cylinders_and_flat_quads` (verifies primitive vocabulary usage).
+
+All 249 workspace lib tests pass. Full gate green.
+
+**Next: Phase 3.6.3c.5c.2.c.4** — remaining development / resupply / homestead compositions (farmland_parcel, ranch, remote_compound, gas_station, bait_shop, general_store, fishing_camp, tackle_shop, ferry_dock, homestead_clearing, abandoned_homestead). Natural + scenery features stay `composition: None` — terrain delta does the work.
+
+---
+
+## 2026-04-24 (iteration 15) — Phase 3.6.3c.5c.2.c.4 (Remaining development / resupply compositions + biome-variety features)
+
+Final sub-milestone of 5c.2. Authored 11 composition entries for existing development/resupply features + 2 new biome-specific developed features so HighDesert / RockyAlpine / Mediterranean all have identity-building man-made setpieces (not just CoastalBoreal).
+
+### Compositions added to existing features (11)
+
+- **`farmland_parcel`** (HighDesert home) — large crop-field flat quad + farmhouse + barn + silo cylinder.
+- **`ranch`** (HighDesert home) — ranch house + barn + tall windmill cylinder + fence-post linear chain + windbreak cones.
+- **`abandoned_homestead`** (CoastalBoreal home) — collapsed cabin + chimney remnant cylinder + dense encroaching forest (10-14 cones reclaiming the clearing).
+- **`remote_compound`** (CoastalBoreal home) — tight 3-building cluster (cabin+shed+outhouse) + water-tank cylinder + sparse conifer windbreak.
+- **`homestead_clearing`** (CoastalBoreal home) — single cabin + woodshed + dense conifer perimeter ring (clearing-as-hero pattern).
+- **`fishing_camp`** (CoastalBoreal home) — shoreline shack + wooden dock flat quad + half-cylinder smoker + piling linear chain.
+- **`tackle_shop`** (CoastalBoreal home) — shop building + signage panel + icebox cylinder.
+- **`bait_shop`** (CoastalBoreal home) — hut + live-bait tank + orange-accent signage.
+- **`gas_station`** (CoastalBoreal home) — canopy flat quad + 8-column support linear chains + pump island + shop + branded vertical signage box.
+- **`general_store`** (CoastalBoreal home) — store building + awning flat quad + signage + icebox.
+- **`ferry_dock`** (Mediterranean home) — main dock quad + gangway + ticket kiosk + piling linear chain + red safety bollard.
+
+### New features for biome variety (2)
+
+- **`lighthouse`** (Mediterranean home, bleed-over CoastalBoreal/HighDesert/RockyAlpine) — tall white cylinder tower + cone lantern cap + red safety band cylinder + keeper's cottage. Placement: Regional 50 km / Local 30 km, self-spacing 60 km (rare + iconic, ~1-2 per regional coastline).
+- **`mountain_lodge`** (RockyAlpine home, bleed-over to all) — large lodge box + tall stone chimney cylinder + 3-4 scattered guest cabins + conifer backdrop cluster. Regional 20 km / Local 10 km, self-spacing 25 km.
+
+### Scope decisions
+
+- Natural features (`lake_cluster`, `alpine_tarn`, `cirque`, `dune_field`, `sandy_beach`, `cliff_coast`, `mesa_top`, `book_cliffs`, etc.) stay `composition: None` — terrain delta (feature_delta_impls.rs) handles their visual expression. Per user direction 2026-04-24: "scenery and natural features will likely be primarily terrain deltas".
+- Scenery features (`scenic_overlook`, `hot_springs`) stay `composition: None` for the same reason.
+- `abandoned_homestead` + `homestead_clearing` retain boxes but lean on encroaching-forest cones per user: "encroaching growth, more remote" aesthetic.
+
+### Verification
+
+- `authored_features_load_with_nonempty_compositions` — unified regression test covering all 19 authored features (5 airports + 11 existing developments/resupply + 2 new biome-specific + `dwelling_cluster`). Catches RON schema drift in one assertion per feature.
+- `airport_major_includes_half_cylinders_and_flat_quads` — regression for primitive-vocabulary coverage.
+- 249 workspace lib tests pass. Full gate green (fmt + clippy `-D warnings --all-features` + tests).
+
+### Total 5c.2 footprint
+
+| Category | Count | Notes |
+|---|---|---|
+| Primitive kinds | 6 | Box/Cone/Cylinder/Sphere/HalfCylinder/FlatQuad |
+| Placement patterns | 3 | Single / RadialCluster / LinearChain |
+| Color sources | 4 | Primary/Secondary/Accent/Explicit |
+| Authored compositions | 19 | 5 airports + 14 developments/resupply/scenery (13 existing + 2 new for biome variety) |
+| New test coverage | 5 | primitive bounds tests + LinearChain + all-features regression + schema round-trip |
+
+**Next: Phase 3.6.3c.5c.2.c.5** — visual-check pass with spawn-near iteration. Run the app with `FLOWPLAN_FEATURE_INSTANCES=1 FLOWPLAN_SPAWN_NEAR_INSTANCE=1`, fly to known hub locations, verify each airport tier + each resupply feature renders with correct proportions. Note: spawn-near still targets the nearest populated `dwelling_cluster`; flying to hub coordinates requires using the 5 km/s debug speed tier.
+
+---
+
+## 2026-04-24 (iteration 16) — Phase 3.6.3c.5c.2.c.5 (Biome-density parity)
+
+Content sprint to raise feature density in the three underfilled biomes to roughly match CoastalBoreal's catalog depth. 12 new developed features authored (4 per biome); each includes primitive composition + placement rules + palette adaptation.
+
+### New HighDesert features (4)
+
+- **`adobe_village`** — tight cluster of 5-7 earth-toned stucco buildings with flat roofs + central courtyard plaza (flat quad) + bell tower. Southwestern / Pueblo idiom. Regional 15 km / Local 8 km.
+- **`ghost_town`** — abandoned frontier settlement: main-street flat quad + two rows of 6 and 5 weathered boxes along LinearChains. Rare + evocative (mission anchor). Excluded near Regional+ hubs; self-spacing 60 km.
+- **`mining_camp`** — active ore extraction: half-cylinder adit into hillside + headframe box + ore-storage cylinder + 2 bunkhouses in LinearChain. Remote 25 / Local 15 km.
+- **`solar_farm`** — utility-scale PV array: 3 rows of 12 tilted flat-quad panels via LinearChain + switchyard box + transmission monopole cylinder. Modern/rare; near Major hubs only.
+
+### New RockyAlpine features (4)
+
+- **`fire_lookout_tower`** — tall wooden-frame cylinder + glass-cab box at top + access structure. Prominence-gated (50m+ rise) so it tops ridges. Remote 40 / Isolated 80 km; rare.
+- **`mine_entrance`** — smaller sibling of HighDesert mining_camp: half-cylinder adit + shed + ore-cart dump cylinder. Remote 20 / Local 12 km.
+- **`alpine_cabin`** — single isolated box cabin + dense 8-12 conifer ring. Backcountry-shelter idiom; frequent, many possible locations.
+- **`chairlift_terminal`** — ski-area: lower terminal box + 6-tower LinearChain running up-slope + upper terminal + red accent banner. Regional 20 / Local 8 km.
+
+### New Mediterranean features (4)
+
+- **`coastal_village`** — 6-10 white-stucco buildings with terracotta color (primary white / secondary red in palette) + cypress/olive cones. Water-adjacent, Regional 20 / Local 8 km. Bleeds to CoastalBoreal/HighDesert/RockyAlpine with matching stucco-palette adaptations.
+- **`olive_grove`** — dirt-path flat quad + dense 20-28 olive-tree cones in RadialCluster + small farmstead. Local 20 / Regional 30 km.
+- **`watchtower`** — medieval stone defense: thick cylinder tower + cone cap. Prominence-gated (40m+ rise); self-spacing 40 km.
+- **`marina`** — recreational harbor: main pier flat quad + 3 finger piers via LinearChain + 6-9 moored-boat spheres + harbor office + red no-wake cylinder marker. Regional 5 / Local 3 km.
+
+### Density parity achieved
+
+| Biome | Developed features with compositions |
+|---|---|
+| CoastalBoreal | 14 (dwelling + abandoned/remote/homestead + 5 resupply + 5 airports) |
+| HighDesert | 6 (farmland + ranch + adobe + ghost_town + mining + solar) |
+| RockyAlpine | 5 (mountain_lodge + lookout + mine + alpine_cabin + chairlift) |
+| Mediterranean | 6 (ferry + lighthouse + village + olive + watchtower + marina) |
+
+31 features total with authored compositions (was 19 before this iteration). `authored_features_load_with_nonempty_compositions` test now covers all 31 — catches RON drift across the full catalog in one assertion per feature.
+
+All 249 workspace lib tests pass. Full gate green.
+
+**Biome character idioms established**:
+- HighDesert: adobe + frontier + industrial (southwestern red-rock country)
+- RockyAlpine: forest-service + backcountry + ski (mountain infrastructure)
+- CoastalBoreal: fishing + bush + aviation (floatplane / GA core)
+- Mediterranean: stucco + stone + agricultural (Aegean / Sardinia)
+
+**Next: Phase 3.6.3c.5c.2.c.6 (visual-check pass)** — run the game with `FLOWPLAN_FEATURE_INSTANCES=1 FLOWPLAN_SPAWN_NEAR_INSTANCE=1`, cycle through spawn-near targets in each biome, iterate on any compositions that look wrong at scale. Once visuals are acceptable, ship 5c.2 as complete and move to 5c.3 (FeatureGroup multi-cell engine for roads + infrastructure).
+
+---
+
+## 2026-04-24 (iteration 17) — Phase 3.6.3c.5c.2.c.6 (+12 more features: industrial / recreational / cultural variety)
+
+Third content-expansion pass. Added 12 more features (3 per biome) for broader industrial, recreational, and cultural variety.
+
+### HighDesert (+3)
+
+- **`oil_derrick`** — iconic Texas/Oklahoma pumpjack site: tall cylinder derrick + horizontal slab pumpjack + storage tank cylinders. Regional/Local hubs.
+- **`wind_farm`** — modern siblings to solar_farm: 6-8 tall white cylinder turbine towers in LinearChain along a ridge + nacelle boxes + maintenance shed. Regional hubs, self-spacing 40 km.
+- **`grain_elevator`** — Midwestern agricultural signature: 4-cylinder silo cluster + long head-house box on top + office. Bleeds to CoastalBoreal / Mediterranean where farming scales up.
+
+### RockyAlpine (+3)
+
+- **`campground`** — scattered tent/RV boxes + fire-ring cylinder + pit-toilet outbuilding + surrounding conifer ring. Local/Remote hubs.
+- **`quarry`** — terraced quarry-floor flat quad + processing building + conveyor cylinder + 2 gravel-pile cones. Heavy industry signature.
+- **`radio_tower`** — tall thin cylinder with mid-tower red safety-stripe segment + equipment shack at base. Prominence-gated (60m+ rise) so tops ridges. Bleeds everywhere.
+
+### CoastalBoreal (+3)
+
+- **`logging_camp`** — timber industry: large mill box + 4 horizontal log-pile cylinders in LinearChain + sawdust cone + tall smokestack + office trailer. PNW / Alaska signature.
+- **`boathouse`** — small shore structure: box walls + half-cylinder arched roof + deck flat quad + 2 dock pilings. Water-adjacent.
+- **`helipad`** — simple landing pad: main surface flat quad + 3 white-marking quads forming "H" + small equipment shelter box + red-accent color from Signage palette-category. Bleeds everywhere.
+
+### Mediterranean (+3)
+
+- **`vineyard`** — 3 rows of 12 short cylinder grapevines in parallel LinearChains + winery box + access road. Distinct from olive_grove (regular rows vs scatter).
+- **`ancient_ruins`** — stone platform quad + 6-8 column cylinders (varied heights for brokenness) + 3-5 fallen wall box segments. Mission anchor; rare, evocative.
+- **`monastery`** — walled complex: courtyard quad + chapel box + bell-tower cone + half-cylinder cloister arcade + 4 cypress cones flanking entrance. Rare (70 km spacing), iconic.
+
+### Density
+
+| Biome | Developed features with compositions |
+|---|---|
+| CoastalBoreal | 17 (fishing + bush + aviation + logging + boathouse + helipad) |
+| HighDesert | 9 (farmland + ranch + adobe + frontier + industrial triad) |
+| RockyAlpine | 8 (lodge + lookout + mine + cabin + chairlift + campground + quarry + radio) |
+| Mediterranean | 9 (ferry + lighthouse + village + olive + watchtower + marina + vineyard + ruins + monastery) |
+
+**43 features** total with authored compositions (was 31 before this iteration). Each biome now has substantial character-defining variety.
+
+Test count: `authored_features_load_with_nonempty_compositions` iterates all 43 features × composition-produces-instances. 249 workspace lib tests pass. Full gate green.
+
+**Palette categories in use now**: BuildingWooden, BuildingMasonry, Vegetation, Stone, Water, Signage (6 of 7 — only Textile unused, reserved for future banner/awning features).
+
+---
+
+## 2026-04-24 (iteration 18) — Phase 3.6.3c.5c.7 (Terrain delta vocabulary + landscape POIs)
+
+**Primary delta-pattern expansion** — `feature_delta_impls.rs` grew from 5 patterns (bowl / plateau / cliff / shore-ramp / dune / flatten / hub-foundation) to 14 patterns adding:
+
+- **Channel** — narrow linear negative band (canyon, slot canyon, wash, creek valley, avalanche chute, fjord)
+- **V-valley** — symmetric linear negative (scrub valley, narrow valley)
+- **U-valley** — wide flat-bottomed negative (alpine valley)
+- **Ridge** — linear positive (ridge traverse, rocky ridge, moraine field)
+- **Mound** — positive gaussian (rocky islet, pine headland, sea stack, natural arch, natural bridge, hoodoo field, spire formation)
+- **Slope** — asymmetric cross-cell gradient (talus slope)
+- **Bumpy** — high-freq small amplitude (reserved for badlands/moraine surface detail)
+- **Prominence** — sharp peak with sharpness exponent (scenic overlook, volcanic cone)
+- **Step** — sharp elevation change on one side (waterfall)
+
+~45 features now wired to delta dispatch (was 13). Existing natural/scenery features that previously returned zero delta now produce their authored character (canyon cuts, ridges rising, valleys dipping, prominences peaking, meadows flattening). 10 new delta-pattern unit tests added, total 257 world lib tests pass.
+
+**New landscape POI features (10)**:
+
+HighDesert: `natural_arch` (half-cylinder span + buttress cylinders), `canyon_rim` (delta-only), `volcanic_cone` (delta-only), `hoodoo_field` (20-30 tall cylinders), `salt_flat` (delta-only, strong flatten).
+
+RockyAlpine: `waterfall` (step delta, hydrology-gated), `moraine_field` (ridge delta + boulder spheres), `geyser_field` (sinter quads + plume cylinders), `natural_bridge` (half-cylinder), `spire_formation` (4-7 tall cones).
+
+Total features with compositions: **49** (was 43). Total features with delta dispatch: **~45** (was 13).
+
+**Next: Phase 3.6.3c.5c.8–.11 (Ambient environment objects)** — see below. Design pinned 2026-04-24 in MAPGEN.md § Ambient environment objects + DESIGN.md § Ambient environment objects invariant.
+
+---
+
+## 5c.2.c.8–.11 steppings (Ambient environment objects — AUTHORITATIVE)
+
+**Purpose of this block**: steppings survive session compaction. On cold-start or post-compact resume, a fresh agent should read this section and know exactly where to pick up.
+
+### Design summary (for agent cold-start context)
+
+Ambient biome cover (forest, shrub, boulders, grass scatter) sits alongside authored features. Features are the **parent controller** via per-feature `ambient_control: Option<FeatureAmbientControl>`:
+
+- `None` (default) — wild; only instance-overlap rejected. For natural/remote/rustic features.
+- `TaperedClearing { clear_radius_m, taper_radius_m }` — groomed core + smooth fade-out of ambient size. For cultivated/industrial.
+- `HardClearing { clear_radius_m }` — binary sanitized zone.
+- `InverseTaperedClearing { clear_radius_m, taper_radius_m }` — future variant; pioneering growth on/near feature.
+
+Zero persistent storage: generated per-cell at streaming cell-enter from seed `(master_seed, cell_id, ambient_entry_idx)`. Drops on cell-exit. Uploads through existing `InstanceRenderer` as tagged `FeatureInstance`s — renderer has no "ambient" concept. Full spec: [MAPGEN.md § Ambient environment objects](MAPGEN.md#ambient-environment-objects-phase-363c5c8).
+
+### Execution order (gated, ship each independently)
+
+**5c.2.c.8 — Types + RON extension** (Task #247, PENDING).
+
+*Goal:* author the data model end-to-end with zero code changes to renderer / game_app. Text-only authoring iteration from here.
+
+- [ ] Add `FeatureAmbientControl` enum to `crates/world/src/feature_instances.rs` (or `sub_biome.rs`) with `Deserialize` + all four variants.
+- [ ] Add `ambient_control: Option<FeatureAmbientControl>` field to `SubBiomeFeature` with `#[serde(default)]`.
+- [ ] Add `AmbientEntry` struct (kind, color_source, density_per_km2, size_range_m, scale_jitter, noise_scale_m, noise_threshold, altitude_range_m, slope_max_deg, rng_stream) with `Deserialize`.
+- [ ] Extend `SubBiomeLibraries` to carry per-biome `ambient: Vec<AmbientEntry>` lists parallel to `features`. RON format: biome is now a struct `(features: [...], ambient: [...])` rather than a list. Migration: adjust existing RON entries to the new shape.
+- [ ] Author ambient-entry lists in RON for all 4 biomes (3-5 entries each: forest/shrub/boulder layer).
+- [ ] Author `ambient_control` for the 49 composed features per the MAPGEN.md classification table.
+- [ ] Test: RON parse round-trip + existing tests unaffected.
+
+Acceptance: all 49 features have an `ambient_control` (most `None`), all 4 biomes have `ambient: [...]` lists, all tests pass. No renderer changes, no visual effect yet.
+
+**5c.2.c.9 — Ambient generator** (Task #248, PENDING, blocked on .c.8).
+
+*Goal:* lazy per-cell ambient instances visible in-game at world origin.
+
+- [ ] Implement `generate_ambient_for_cell(cell_id, biome, entries, master_seed) -> Vec<FeatureInstance>` in new module `crates/world/src/ambient.rs`.
+- [ ] For each candidate spawn (density-per-km² × cell-area sampling, seeded by entry_idx + candidate_idx): apply slope/altitude filter, apply `FeatureAmbientControl` rule from containing cell's feature, apply per-primitive instance-overlap check.
+- [ ] Per-primitive footprint-radius helper: `footprint_radius(kind: PrimitiveKind, scale: Vec3) -> f32`. Table in MAPGEN.md.
+- [ ] `TaperedClearing` size-scale math: `smoothstep((D - clear) / (taper - clear))` × authored size.
+- [ ] Wire into `game_app`'s streaming cell-enter path. New active cells generate ambient, drop on exit.
+- [ ] Ambient + feature instances upload to the same per-kind buckets; renderer sees unified list.
+- [ ] Test: unit tests for each clearing mode. Integration check: spawn-near renders trees around a `dwelling_cluster` but not through it.
+
+Acceptance: visual diff on spawn-near shows ambient cover filling cells around features. Performance: cell-enter generation ≤ 5 ms on 8-core.
+
+**5c.2.c.10 — Noise-density fields** (Task #249, PENDING, blocked on .c.9).
+
+*Goal:* biome-scoped variation so ambient clusters and sparses naturally rather than uniform density.
+
+- [ ] Per-biome × per-ambient-entry fBm sampler, seeded from `(master_seed, biome_discriminant, entry_idx)`. Uses existing `crate::noise` primitives.
+- [ ] `noise_scale_m` → wavelength; `noise_threshold` → spawn gate.
+- [ ] Integrate into 5c.2.c.9 generator: each candidate queries its entry's density field, rejects if below threshold.
+- [ ] Visual-iteration pass: tune density_per_km2 + noise_scale_m + threshold per biome via spawn-near screenshots.
+
+Acceptance: forested zones look like forested zones, meadows look like meadows, boulder fields look like boulder fields. No uniform-carpet coverage.
+
+**5c.2.c.11 — Footprint + overlap polish** (Task #250, PENDING, blocked on .c.9).
+
+*Goal:* correctness + performance pass before calling 5c.2.c ambient COMPLETE.
+
+- [ ] Footprint-radius math: rect-to-point for elongated primitives (FlatQuad runway 1500 m × 45 m needs its actual rectangular footprint, not a 1500 m circle). Handle Box and FlatQuad rectangle cases explicitly.
+- [ ] Profile cell-enter cost; optimize hot loops (density-sample, overlap-check).
+- [ ] Optional: 1-ring neighbor-cell lookup for cross-cell clearing if visual-check flags seams. Default: contained cell only.
+- [ ] Test: large-feature (airport_major) overlap check correctly clears ambient over its 1500 m runway quad but allows ambient 50 m outside the runway edge.
+
+Acceptance: no ambient trees growing through runways / apron slabs / large feature footprints. No performance regression vs pre-5c.2.c.9.
+
+### Deferred / follow-up
+
+- **5c.2.c.12 — `InverseTaperedClearing`** if authoring use case emerges (abandoned homestead saplings, ancient_ruins ivy).
+- **5c.2.c.13 — Cross-cell clearing** if visual-check shows seams at Voronoi boundaries near airports.
+- **5c.2.c.14 — Seasonal ambient** when Phase 5 seasons lands (alpine meadow sparser in winter).
+
+### Agent handoff protocol
+
+If you resume this workstream:
+
+1. Read this block (above).
+2. Read MAPGEN.md § Ambient environment objects (~200 lines — full spec).
+3. Read DESIGN.md § Ambient environment objects invariant (cross-link).
+4. Check task status via `TaskList` — currently #247 is the head. Step to the next pending after #247 completes.
+5. Open memory `ambient_environment_objects_design` for the short persistent summary.
+
+---
+
 Last updated: **2026-04-23** (Phase 2.5 **SHIPPED**; Phase 3.2.1 + 3.2.2 + 3.2.3 weather W1/W2/W3 **SHIPPED**; world scope **LOCKED to Option A toroidal**; progression data-model locked; **scenario-realism audit COMPLETE**; **flight-model realism pass COMPLETE**; **water-physics hardening COMPLETE**; **Phase 3.6.0 through 3.6.2 SHIPPED**; **Phase 3.6.3a SHIPPED**; **Phase 3.6.3b SHIPPED** — palette adaptation via biome-receives HSV shift + simple-primitives render direction, 18 cross-biome features authored in RON with palettes + categories, full-spec placement rules; **Phase 3.6.3c.1 SHIPPED** — `PlacementRules` nested schema (7 categories) + `evaluate_placement_rules` function (5 rule categories evaluated lazily); **Phase 3.6.3c.1c SHIPPED** — `BakedAssignments` eager-bake materializes per-cell sub-biome assignments with self-spacing + attractor `weight_mult` biasing; rayon parallel two-phase architecture (Phase A read-only par_iter + Phase B serial permuted-order merge) hits **8.3× speedup** (275 s → 33 s at canonical seed), bit-identical output. ~20 MB world-state memory budget (u16-interned feature ids); rayon added to DESIGN.md tech-stack + workspace deps. Bench at ~70 scenarios + 501 unit tests, full gate green. **Phase 3.6.3c.5b SHIPPED** — render streaming with rayon-parallel mesh build (10 km terrain + water half-extent, ~1 M terrain verts at 20 m cells, 2 km rebuild threshold) + Voronoi cell active set (`StreamingCellSet` for future content streaming); `ActiveCamera` single-source-of-truth abstraction ready for 3.6.3c.5a debug-camera integration; rayon added to DESIGN.md tech-stack + assets crate. 508 workspace tests pass. **Now: Phase 3.6.3c.5a** — debug camera (WASD + mouse + Tab speed cycle + backtick toggle + debug HUD with pos / heading / speed-tier / **FPS + frametime**).).
 
 ## 2026-04-23 (iteration 9) — Phase 3.6.3c.5b (Render streaming — uniform terrain + Voronoi cell active set)

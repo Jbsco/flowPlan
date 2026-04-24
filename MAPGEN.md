@@ -941,6 +941,197 @@ One-line change to the standard Voronoi distance calc. Cells with higher weights
 
 ---
 
+## Ambient environment objects (Phase 3.6.3c.5c.8+)
+
+**Status: design pinned 2026-04-24.** Scope: fills the visual void between placed features. A cell with `plain` assignment or a feature with sparse composition currently renders as bare terrain — ambient objects add baseline biome-appropriate cover (forest, shrub, rock fields, grass tufts, driftwood, etc.) so every cell reads as part of a living biome.
+
+### Why separate from features
+
+Features are **discrete**, **authored individually**, and carry narrative/gameplay meaning (airports, dwellings, POIs). Churn: per-feature design is slow — each needs placement rules, composition, palette adaptation.
+
+Ambient objects are **continuous**, **pattern-driven**, and have **no individual identity**. A CoastalBoreal cell between villages should have trees just because it's forested country, not because a "forest_patch" feature was authored for it. Churn: per-biome parameters are fast — one authored entry covers millions of cells. Noise-density fields + a handful of primitive-emit rules produce visually dense coverage.
+
+**Both layers compose**: features declare how they want to interact with ambient cover (clearing / tapering / none) — the feature is the **parent controller** dictating surrounding ambient behavior. See `FeatureAmbientControl` below.
+
+### Architecture — lazy per-cell generation from seed
+
+**Zero persistent storage.** Ambient instances are NOT in `BakedAssignments`. They're deterministically regenerated per cell as the cell enters the streaming active set, dropped when it exits.
+
+Flow (runs at 3.6.3c.5b streaming refresh boundary, for each newly-entered cell):
+
+1. Look up the cell's biome via existing sub-biome catalog.
+2. Iterate the biome's `ambient: Vec<AmbientEntry>` list.
+3. For each entry, determine candidate spawn positions via `(cell_id, entry_idx)` seed — deterministic.
+4. For each candidate, sample the biome's density noise field at that world position; reject if below threshold.
+5. Query the cell's feature assignment (from `BakedAssignments`). Apply the feature's `FeatureAmbientControl`:
+   - `None`: only instance-overlap check (no radius clearing).
+   - `HardClearing`: reject if within `clear_radius_m` of any feature instance.
+   - `TaperedClearing`: reject if within `clear_radius_m`; scale size by `smoothstep((D - clear) / (taper - clear))` if between clear and taper.
+   - `InverseTaperedClearing` (future): pioneering growth ON / near feature footprint — trees ramp _up_ in size with distance from feature.
+6. Instance-overlap check (all modes): reject if candidate position is within any feature instance's primitive footprint radius (below).
+7. Emit `FeatureInstance` tagged as ambient-sourced (same struct, uploaded through same pipeline as features).
+
+Cell-entry upload adds ambient + feature instances together to the renderer. Cell-exit drops the whole set.
+
+**Storage cost: zero persistent.** Runtime cost: ~80 active cells × ~50–100 ambient per cell × 48 B = ~300 KB extra in the instance storage buffer. Trivial vs. feature instance budget.
+
+**Bake cost: none.** No new bake phase; the 30–60 s world-bake is unchanged. Adding ambient entries is a text-only RON edit that takes effect on next streaming rebuild.
+
+### `FeatureAmbientControl` — feature-as-parent-controller (PINNED 2026-04-24)
+
+Each `SubBiomeFeature` gains an optional `ambient_control: Option<FeatureAmbientControl>` field, defaulting to `None` (wild — no clearing imposed, just instance-overlap avoidance). Features that want to shape surrounding ambient declare one of:
+
+```rust
+pub enum FeatureAmbientControl {
+    /// No clearing. Ambient at full size right up to feature
+    /// primitives; only exact instance-overlap rejected.
+    /// For natural / remote / rustic features:
+    /// natural_arch, ghost_town, abandoned_homestead,
+    /// fishing_camp, campground, scenic_overlook, hot_springs,
+    /// waterfall, monastery.
+    None,
+
+    /// Tapered clearing — sanitized core + smooth fade-out of
+    /// ambient size before the clearing edge. For cultivated /
+    /// groomed features: airports, dwelling_cluster, farmland,
+    /// marina, coastal_village, vineyard.
+    TaperedClearing {
+        /// Full clear radius (m). No ambient inside.
+        clear_radius_m: f32,
+        /// Outer taper radius (m). Ambient at full size beyond.
+        /// Between clear and taper: size scales 0 → 1 via
+        /// smoothstep((D - clear) / (taper - clear)).
+        taper_radius_m: f32,
+    },
+
+    /// Hard binary clearing. No taper zone — either no ambient
+    /// within radius or full-size outside. For small sanitized
+    /// industrial points: gas_station, helipad, quarry,
+    /// lighthouse, watchtower, fire_lookout_tower.
+    HardClearing { clear_radius_m: f32 },
+
+    /// Inverse tapered clearing (future). Pioneering growth that
+    /// grows toward the feature: size ramps UP as D → 0. Thinking
+    /// ghost_town cobwebs, ancient_ruins ivy, abandoned_homestead
+    /// young saplings ON the foundation. Deferred until a specific
+    /// RON authoring use case justifies it; `None` + default
+    /// biome ambient covers the "nature reclaims" look well enough
+    /// for MVP.
+    InverseTaperedClearing {
+        clear_radius_m: f32,
+        taper_radius_m: f32,
+    },
+}
+```
+
+**Default: `None`** — features that don't specify ambient control get wild surroundings. Matches the "less churn" goal; authors opt-IN to sanitization where it matters.
+
+**Sample classification for the current 49-composition catalog:**
+
+| Mode | Example features |
+|---|---|
+| `None` | natural_arch, hoodoo_field, spire_formation, natural_bridge, canyon_rim, waterfall, volcanic_cone, ancient_ruins, ghost_town, abandoned_homestead, fishing_camp, remote_compound, alpine_cabin, boathouse, bush_strip, campground, scenic_overlook, hot_springs, monastery |
+| `TaperedClearing { clear, taper }` | airport_major (200/280), airport_regional (150/210), airport_local (80/120), dwelling_cluster (40/70), adobe_village (30/55), farmland_parcel (90/120), ranch (35/60), solar_farm (50/80), wind_farm (100/150), coastal_village (30/50), olive_grove (5/15), vineyard (5/15), marina (20/40), grain_elevator (25/45), homestead_clearing (18/30), chairlift_terminal (25/45), mountain_lodge (30/55), ferry_dock (15/25), seaplane_base (40/60) |
+| `HardClearing { clear }` | gas_station (20), helipad (12), mining_camp (25), oil_derrick (15), quarry (50), radio_tower (10), fire_lookout_tower (8), lighthouse (12), watchtower (8) |
+
+### Per-primitive footprint radius (instance-overlap check)
+
+Applies universally, even for `None` mode. Candidate ambient position rejected if within `footprint_radius(primitive, scale)` of any feature instance in the cell. Conservative approximation per primitive kind:
+
+| Primitive | Footprint radius |
+|---|---|
+| `Box` | `max(scale_x, scale_z) × 0.6` (inscribed-ish circle for rectangular footprint) |
+| `FlatQuad` | `max(scale_x, scale_z) × 0.7` (slightly larger — quads are flat and visible from above) |
+| `Cylinder` | `max(scale_x, scale_z) × 0.5` (true radius of round footprint) |
+| `Sphere` | `max(scale_x, scale_z) × 0.5` |
+| `Cone` | `max(scale_x, scale_z) × 0.5` |
+| `HalfCylinder` | `max(scale_x, scale_z) × 0.5` |
+
+Example: a `dwelling_cluster` house with scale `(8, 5, 10)` exclues a `max(8, 10) × 0.6 = 6 m` radius of ambient around its position. A natural_arch's 30 m-wide half-cylinder excludes 15 m — the span itself stays clear of trees but ambient grows everywhere else.
+
+### Ambient entry RON schema
+
+Appended per biome alongside the existing `features: [...]` list:
+
+```ron
+"CoastalBoreal": (
+    features: [ ... existing ... ],
+    ambient: [
+        (
+            kind: Cone,
+            color_source: Secondary,         // foliage green, biome-adapted
+            density_per_km2: 120,            // expected instances per sq-km
+            size_range_m: (3.0, 12.0),       // random base size
+            scale_jitter: (0.8, 1.2),
+            noise_scale_m: 400,              // fBm wavelength of density field
+            noise_threshold: 0.25,           // spawn when sample > threshold
+            altitude_range_m: (-10.0, 1500.0),
+            slope_max_deg: 35.0,
+            rng_stream: 0,                   // distinct per ambient entry
+        ),
+        (                                    // understory / shrub layer
+            kind: Sphere,
+            color_source: Secondary,
+            density_per_km2: 40,
+            size_range_m: (0.4, 1.2),
+            scale_jitter: (0.7, 1.3),
+            noise_scale_m: 150,
+            noise_threshold: 0.35,
+            altitude_range_m: (-10.0, 2000.0),
+            slope_max_deg: 50.0,
+            rng_stream: 1,
+        ),
+        (                                    // scattered boulders
+            kind: Sphere,
+            color_source: Primary,
+            density_per_km2: 15,
+            size_range_m: (0.8, 3.0),
+            scale_jitter: (0.7, 1.8),
+            noise_scale_m: 800,
+            noise_threshold: 0.55,
+            altitude_range_m: (200.0, 3500.0),
+            slope_max_deg: 60.0,
+            rng_stream: 2,
+        ),
+    ],
+)
+```
+
+Each entry becomes a `(density-field × primitive-emit)` pair. Authors tune `density_per_km2` + `noise_threshold` + `size_range` with visual-bench iteration. Biome palette drives color (so forest in CoastalBoreal = conifer green, in HighDesert = olive/scrub via palette adaptation).
+
+### Noise-density fields
+
+Per biome × per ambient entry, one 2D fBm noise field. Specified by seed + wavelength in RON. Sampled at candidate world position; threshold selects whether to spawn. Natural variation across the biome — dense forest pockets, sparse meadows, open areas — without any authored per-location data.
+
+Noise primitives from `crate::noise` (already in use for terrain L1). Deterministic per `(master_seed, biome_id, ambient_entry_idx)`.
+
+### Cell-boundary behavior
+
+**First pass (MVP):** only consider the containing cell's feature for clearing. Adjacent cells' features don't reach across — simple, fast, good enough because clear radii (≤300 m) are typically smaller than cell radii (~1 km average).
+
+**Deferred refinement (if visual-check shows seams):** walk 1-ring of neighbor cells; if any neighbor's feature has `taper_radius_m > distance_to_boundary`, apply that neighbor's clearing rule for candidates near the shared boundary. Revisit in 5c.2.c.12+ polish.
+
+### Integration with rendering
+
+No new pipeline. Ambient instances produce `FeatureInstance` structs (same type as features), go through the same `game_app` bucketing, upload to the same `InstanceRenderer` slots, render in the same scene pass. Rendering doesn't know "ambient vs feature" — it's a pure CPU-side distinction for generation.
+
+### Performance
+
+- **Per cell-enter cost:** density-field sample × ~100–200 candidates + instance-overlap checks. Typical: ~5 ms per cell on 8-core host. Amortized over streaming (cell enters are sporadic).
+- **Per-frame upload delta:** on cell-set change, re-pack instance buffer once. ~10 KB upload per change. Same as feature pipeline.
+- **Runtime memory:** ~300 KB extra in instance buffer for typical active-set density. Trivial.
+
+No new bake phase, no new persistent storage, no new pipeline. Architectural footprint is minimal.
+
+### Authoring discipline
+
+- **Every biome declares baseline cover.** Even sparse biomes get a minimal "grass tuft" ambient entry so bare terrain never reads as empty.
+- **Tree / rock entries coordinate with terrain delta.** Dunes should NOT have tree ambient; Frozen tundra should have sparse rock scatter, not forest. Authors tune `altitude_range_m` + `slope_max_deg` + `noise_threshold` against the biome's terrain character.
+- **Palette-driven color** — ambient entries prefer `color_source: Primary/Secondary/Accent`. Biome-adapted palettes automatically shift forest cones green-in-boreal, olive-in-mediterranean, desert-scrub-in-high-desert.
+- **Performance guard**: if a biome's total `density_per_km2` exceeds ~400 across all ambient entries, the generator warns + caps. Protects against accidental catalog churn blowing out runtime memory.
+
+---
+
 ## Three-layer weather composition (second application of the pattern)
 
 The three-layer composable architecture used for terrain (Topographic base × Voronoi partition × Feature deltas) applies directly to weather. Same pattern, different scale, different state, temporal drift.

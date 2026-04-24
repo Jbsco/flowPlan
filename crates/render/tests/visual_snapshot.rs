@@ -527,7 +527,10 @@ fn water_topdown_wide() {
 /// an iterative debug tool.
 #[cfg(feature = "hardware-tests")]
 #[test]
+#[allow(clippy::too_many_lines)] // linear scene-assembly test; splitting hurts readability
 fn instance_preview() {
+    use flowplan_world::feature_instances::PrimitiveKind;
+
     let (device, queue) = init_wgpu();
 
     // Gentle terrain centered at origin, ground ≈ 0 m.
@@ -557,12 +560,12 @@ fn instance_preview() {
     );
     renderer.set_vehicle_visible(false);
 
-    // 6 house boxes arranged in a ring at radius 12 m from origin.
-    // Ground y ≈ 0, houses sit on it (center y = half-height). Varied
-    // sizes and rotations + distinct colors to verify per-instance data
-    // is actually reaching the shader.
+    // 6 house boxes arranged in a ring at radius 12 m from origin, +
+    // 4 tree cones + 2 decoration cylinders + 1 feature sphere, all
+    // visible together to verify the multi-primitive render path
+    // (5c.2.a).
     #[allow(clippy::many_single_char_names)]
-    let instances: Vec<InstanceGpuData> = (0..6_u32)
+    let boxes: Vec<InstanceGpuData> = (0..6_u32)
         .map(|i| {
             let angle = (i as f32) * core::f32::consts::TAU / 6.0;
             let rx = 12.0 * angle.cos();
@@ -570,7 +573,6 @@ fn instance_preview() {
             let width = 6.0 + (i as f32 % 3.0);
             let height = 4.0 + (i as f32 % 2.0);
             let depth = 8.0 + ((i as f32) * 1.5) % 3.0;
-            // Weathered-wood palette varied per house.
             let red = 130 + ((i * 20) % 60) as u8;
             let green = 85 + ((i * 15) % 40) as u8;
             let blue = 70 + ((i * 10) % 30) as u8;
@@ -582,13 +584,57 @@ fn instance_preview() {
             )
         })
         .collect();
-    renderer.upload_instances(&device, &queue, &instances);
 
-    // Camera: 15 m above ground, 25 m south, pitched -20° at the cluster.
+    // 4 trees (cones) at a larger ring (r=20 m), conifer green.
+    let cones: Vec<InstanceGpuData> = (0..4_u32)
+        .map(|i| {
+            let angle = (i as f32 + 0.5) * core::f32::consts::TAU / 4.0;
+            let rx = 20.0 * angle.cos();
+            let rz = 20.0 * angle.sin();
+            let diameter = 4.0;
+            let height = 11.0;
+            InstanceGpuData::from_fields(
+                [rx, height * 0.5, rz],
+                angle,
+                [diameter, height, diameter],
+                [55, 95, 70, 255], // dark forest green
+            )
+        })
+        .collect();
+
+    // 2 pillar cylinders (thin + tall), near-origin for prominence.
+    let cylinders: Vec<InstanceGpuData> = (0..2_u32)
+        .map(|i| {
+            let x = if i == 0 { -4.0 } else { 4.0 };
+            let diameter = 1.5;
+            let height = 7.0;
+            InstanceGpuData::from_fields(
+                [x, height * 0.5, -4.0],
+                0.0,
+                [diameter, height, diameter],
+                [180, 170, 140, 255], // weathered stone
+            )
+        })
+        .collect();
+
+    // 1 boulder sphere at the center for contrast.
+    let spheres: Vec<InstanceGpuData> = vec![InstanceGpuData::from_fields(
+        [0.0, 2.0, 4.0],
+        0.0,
+        [3.5, 3.5, 3.5],
+        [120, 110, 95, 255], // gray rock
+    )];
+
+    renderer.upload_instances_for(&device, &queue, PrimitiveKind::Box, &boxes);
+    renderer.upload_instances_for(&device, &queue, PrimitiveKind::Cone, &cones);
+    renderer.upload_instances_for(&device, &queue, PrimitiveKind::Cylinder, &cylinders);
+    renderer.upload_instances_for(&device, &queue, PrimitiveKind::Sphere, &spheres);
+
+    // Camera: pulled back + up to see the whole cluster (ring+cones+sphere).
     let snap = build_camera_snapshot(
-        Vec3::new(0.0, 15.0, 25.0),
+        Vec3::new(0.0, 22.0, 38.0),
         Vec3::new(0.0, 3.0, 0.0),
-        60.0,
+        55.0,
         Vec3::new(0.0, -1000.0, 0.0), // vehicle hidden anyway
     );
 
@@ -600,7 +646,16 @@ fn instance_preview() {
     std::fs::create_dir_all(&out_dir).expect("mkdir target/instance_preview");
     let path = out_dir.join("instance_preview.png");
     std::fs::write(&path, &png).expect("write instance_preview.png");
-    println!("wrote {} ({} instances)", path.display(), instances.len());
+    let total = boxes.len() + cones.len() + cylinders.len() + spheres.len();
+    println!(
+        "wrote {} ({} instances: {} boxes + {} cones + {} cylinders + {} spheres)",
+        path.display(),
+        total,
+        boxes.len(),
+        cones.len(),
+        cylinders.len(),
+        spheres.len()
+    );
 }
 
 /// Camera-relative-rendering regression shot (Phase 3.6.3c.5d).
@@ -670,7 +725,12 @@ fn instance_preview_far() {
             )
         })
         .collect();
-    renderer.upload_instances(&device, &queue, &instances);
+    renderer.upload_instances_for(
+        &device,
+        &queue,
+        flowplan_world::feature_instances::PrimitiveKind::Box,
+        &instances,
+    );
 
     // Camera pose mirrors `instance_preview` but at the far offset.
     let snap = build_camera_snapshot(
@@ -694,5 +754,177 @@ fn instance_preview_far() {
         instances.len(),
         off_x,
         off_z
+    );
+}
+
+/// Phase 3.6.3c.5c.2.c.1 verification shot — airport primitives.
+///
+/// Scene: small grass airstrip. Long flat quad = runway; row of box
+/// hangars along one side with half-cylinder roofs on top; one small
+/// tarmac quad at the apron; tree cones behind hangars for
+/// perimeter. Tests that the new HalfCylinder + FlatQuad primitives
+/// render correctly alongside existing kinds and that a LinearChain-
+/// style row of hangars lines up cleanly.
+///
+/// Output: `target/instance_preview/instance_preview_airport.png`.
+#[cfg(feature = "hardware-tests")]
+#[test]
+#[allow(clippy::too_many_lines)]
+fn instance_preview_airport() {
+    use flowplan_world::feature_instances::PrimitiveKind;
+
+    let (device, queue) = init_wgpu();
+
+    // Larger terrain patch — airstrip is ~300 m long.
+    let terrain = CpuMesh::terrain_patch(64, 400.0, |x, z| {
+        ((x * 0.01).sin() + (z * 0.01).cos()) * 0.5
+    });
+    let water = CpuMesh::water_grid(16, 400.0, WATER_COLOR);
+    let placeholder = CpuMesh::cube(0.1, [0.0, 0.0, 0.0, 0.0]);
+
+    #[allow(clippy::items_after_statements)]
+    const AIRPORT_SIZE: (u32, u32) = (1024, 640);
+
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        FORMAT,
+        AIRPORT_SIZE,
+        &terrain,
+        TERRAIN_SHADING,
+        &water,
+        WATER_SHADING,
+        &placeholder,
+        VEHICLE_SHADING,
+    );
+    renderer.set_vehicle_visible(false);
+
+    // Runway: single flat quad, 300 m × 20 m, lifted 10 cm above ground.
+    let runway: Vec<InstanceGpuData> = vec![InstanceGpuData::from_fields(
+        [0.0, 0.05, 0.0],
+        0.0, // aligned with world X axis
+        [300.0, 0.1, 20.0],
+        [80, 80, 80, 255], // asphalt gray
+    )];
+
+    // Apron: smaller quad next to the runway, offset toward -Z.
+    let apron: Vec<InstanceGpuData> = vec![InstanceGpuData::from_fields(
+        [-80.0, 0.06, -35.0],
+        0.0,
+        [80.0, 0.1, 40.0],
+        [90, 88, 82, 255], // slightly warmer gray
+    )];
+
+    // Hangars: 5 in a row along the apron edge. Box bases + half-cyl roofs.
+    let hangar_count = 5;
+    let hangar_spacing = 16.0;
+    let hangar_start_x = -112.0;
+    let hangar_z = -60.0;
+    let hangar_w = 12.0;
+    let hangar_d = 14.0;
+    let hangar_base_h = 4.0;
+    let hangar_roof_h = 4.5;
+    let hangar_color: [u8; 4] = [150, 85, 60, 255]; // weathered red
+
+    let hangar_boxes: Vec<InstanceGpuData> = (0..hangar_count)
+        .map(|i| {
+            let x = hangar_start_x + (i as f32) * hangar_spacing;
+            InstanceGpuData::from_fields(
+                [x, hangar_base_h * 0.5, hangar_z],
+                0.0,
+                [hangar_w, hangar_base_h, hangar_d],
+                hangar_color,
+            )
+        })
+        .collect();
+    let hangar_roofs: Vec<InstanceGpuData> = (0..hangar_count)
+        .map(|i| {
+            let x = hangar_start_x + (i as f32) * hangar_spacing;
+            // Roof center sits directly on top of the box (box top =
+            // hangar_base_h). Half-cyl unit mesh goes y=0..0.5 →
+            // scaled y=0..hangar_roof_h; center pos y = hangar_base_h
+            // keeps the flat base of the roof at the top of the box.
+            InstanceGpuData::from_fields(
+                [x, hangar_base_h, hangar_z],
+                0.0, // length axis along Z, matching hangar depth
+                [hangar_w, hangar_roof_h, hangar_d],
+                [175, 110, 85, 255], // warmer roof tint
+            )
+        })
+        .collect();
+
+    // Treeline behind hangars.
+    let trees: Vec<InstanceGpuData> = (0..8_u32)
+        .map(|i| {
+            let x = -140.0 + (i as f32) * 20.0;
+            let z = -85.0;
+            let diameter = 5.0;
+            let height = 12.0;
+            InstanceGpuData::from_fields(
+                [x, height * 0.5, z],
+                (i as f32) * 0.3,
+                [diameter, height, diameter],
+                [60, 95, 65, 255], // forest green
+            )
+        })
+        .collect();
+
+    // One control tower: cylinder (shaft) + box (cab on top).
+    let tower_x = 60.0;
+    let tower_z = -40.0;
+    let shaft_h = 12.0;
+    let shaft_d = 2.5;
+    let cab_h = 3.0;
+    let cab_w = 5.0;
+    let cab_d = 5.0;
+    let towers: Vec<InstanceGpuData> = vec![InstanceGpuData::from_fields(
+        [tower_x, shaft_h * 0.5, tower_z],
+        0.0,
+        [shaft_d, shaft_h, shaft_d],
+        [180, 180, 180, 255], // concrete
+    )];
+    let tower_cabs: Vec<InstanceGpuData> = vec![InstanceGpuData::from_fields(
+        [tower_x, shaft_h + cab_h * 0.5, tower_z],
+        0.0,
+        [cab_w, cab_h, cab_d],
+        [60, 80, 100, 255], // dark glass
+    )];
+
+    // FlatQuads: runway + apron.
+    let mut flat_quads = runway;
+    flat_quads.extend(apron);
+    // Boxes: hangar bases + tower cabs.
+    let mut all_boxes = hangar_boxes;
+    all_boxes.extend(tower_cabs);
+
+    renderer.upload_instances_for(&device, &queue, PrimitiveKind::FlatQuad, &flat_quads);
+    renderer.upload_instances_for(&device, &queue, PrimitiveKind::Box, &all_boxes);
+    renderer.upload_instances_for(&device, &queue, PrimitiveKind::HalfCylinder, &hangar_roofs);
+    renderer.upload_instances_for(&device, &queue, PrimitiveKind::Cone, &trees);
+    renderer.upload_instances_for(&device, &queue, PrimitiveKind::Cylinder, &towers);
+
+    // Camera: closer oblique view from south-west looking at the
+    // hangar row + tower. 25 m altitude, 70 m from the hangars so the
+    // half-cylinder roofs read clearly.
+    let snap = build_camera_snapshot(
+        Vec3::new(-30.0, 25.0, 20.0),
+        Vec3::new(-50.0, 4.0, -55.0),
+        60.0,
+        Vec3::new(0.0, -1000.0, 0.0),
+    );
+
+    let png = capture_png(&device, &queue, &mut renderer, &snap, AIRPORT_SIZE);
+    let out_dir = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../target/instance_preview"
+    ));
+    std::fs::create_dir_all(&out_dir).expect("mkdir target/instance_preview");
+    let path = out_dir.join("instance_preview_airport.png");
+    std::fs::write(&path, &png).expect("write instance_preview_airport.png");
+    println!(
+        "wrote {} — runway + {} hangars + {} trees + control tower",
+        path.display(),
+        hangar_count,
+        trees.len()
     );
 }

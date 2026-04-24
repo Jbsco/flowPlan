@@ -193,6 +193,49 @@
                     )),
                     self_spacing: Some((min_km: 10.0)),
                 )),
+                // 5c.2.c.4: large crop-field quad + farmhouse + barn + silo.
+                composition: Some([
+                    // Crop field (big flat quad, crop-tinted).
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (180.0, 0.1, 140.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Farmhouse.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (9.0, 5.0, 11.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (-95.0, -65.0)),
+                        rng_stream: 256,
+                    ),
+                    // Barn.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (14.0, 6.0, 22.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: Single(offset_m: (-75.0, -68.0)),
+                        rng_stream: 512,
+                    ),
+                    // Silo (tall cylinder).
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (5.0, 11.0, 5.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Explicit((205, 200, 190)),
+                        placement: Single(offset_m: (-60.0, -70.0)),
+                        rng_stream: 768,
+                    ),
+                ]),
             ),
             // Working ranch — barn + outbuildings + corral + dirt yard
             // + dry-grass paddock. Bleed-over enables the "winter ranch"
@@ -237,6 +280,717 @@
                         proximity_km_per_tier: { "Regional": 30.0, "Local": 10.0 },
                     )),
                     self_spacing: Some((min_km: 15.0)),
+                )),
+                // 5c.2.c.4: ranch house + barn + windmill + fence +
+                // windbreak conifers.
+                composition: Some([
+                    // Ranch house.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (10.0, 5.0, 12.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Barn.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (14.0, 6.0, 20.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: Single(offset_m: (25.0, 10.0)),
+                        rng_stream: 256,
+                    ),
+                    // Windmill (thin tall cylinder).
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (0.8, 12.0, 0.8),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Explicit((220, 215, 200)),
+                        placement: Single(offset_m: (-15.0, -20.0)),
+                        rng_stream: 512,
+                    ),
+                    // Fence — linear chain of short cylinders as posts.
+                    (
+                        kind: Cylinder,
+                        count: (8, 8),
+                        base_size_m: (0.3, 1.5, 0.3),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: LinearChain(
+                            start_m: (-40.0, 30.0),
+                            direction_rad: 0.0,
+                            spacing_m: 12.0,
+                        ),
+                        rng_stream: 768,
+                    ),
+                    // Windbreak trees (cones clustered behind the ranch house).
+                    (
+                        kind: Cone,
+                        count: (3, 5),
+                        base_size_m: (4.0, 10.0, 4.0),
+                        scale_jitter: (0.8, 1.2),
+                        color_source: Secondary,
+                        placement: RadialCluster(radius_m: 30.0),
+                        rng_stream: 1024,
+                    ),
+                ]),
+            ),
+
+            // ─── New HighDesert developed features (5c.2.c.5) ───────
+
+            // Adobe village — tight cluster of earth-toned buildings
+            // with flat roofs, central courtyard. Southwestern idiom
+            // (Pueblo / Taos inspiration). Regional/Local hubs.
+            (
+                id: "adobe_village",
+                slope_tolerance_max_deg: 5.0,
+                roughness_tolerance_m: 30.0,
+                water_adjacency: None,
+                altitude_range_m: (800.0, 2200.0),
+                selection_weight: 0.35,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (185, 135, 95),
+                    secondary: (145, 100, 75),
+                    accent: (165, 155, 120),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(BuildingMasonry),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Regional": 15.0, "Local": 8.0 },
+                    )),
+                    self_spacing: Some((min_km: 20.0)),
+                )),
+                composition: Some([
+                    // 5-7 adobe buildings in a tight cluster.
+                    (
+                        kind: Box,
+                        count: (5, 7),
+                        base_size_m: (7.0, 3.5, 8.0),
+                        scale_jitter: (0.85, 1.15),
+                        color_source: Primary,
+                        placement: RadialCluster(radius_m: 25.0),
+                        rng_stream: 0,
+                    ),
+                    // Central courtyard plaza (flat quad).
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (12.0, 0.1, 12.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 256,
+                    ),
+                    // Bell tower / church (taller single box).
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (5.0, 8.0, 5.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (-15.0, -10.0)),
+                        rng_stream: 512,
+                    ),
+                ]),
+            ),
+
+            // Ghost town — abandoned frontier-era settlement. A row of
+            // decaying wooden buildings along a main street. Rare +
+            // evocative (mission anchor: treasure / lore / film set).
+            (
+                id: "ghost_town",
+                slope_tolerance_max_deg: 6.0,
+                roughness_tolerance_m: 40.0,
+                water_adjacency: None,
+                altitude_range_m: (500.0, 2500.0),
+                selection_weight: 0.15,
+                is_bleed_over_candidate: false,
+                home_palette: Some((
+                    primary: (110, 85, 65),
+                    secondary: (85, 70, 55),
+                    accent: (140, 115, 85),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(BuildingWooden),
+                placement_rules: Some((
+                    hub: Some((
+                        exclusion_min_km: 40.0,
+                        exclusion_min_tier: Some("Regional"),
+                    )),
+                    self_spacing: Some((min_km: 60.0)),
+                )),
+                composition: Some([
+                    // Main street (wide flat quad running along +X).
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (80.0, 0.1, 6.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // 6 decaying buildings north side of street.
+                    (
+                        kind: Box,
+                        count: (6, 6),
+                        base_size_m: (7.0, 3.5, 9.0),
+                        scale_jitter: (0.8, 1.2),
+                        color_source: Primary,
+                        placement: LinearChain(
+                            start_m: (-30.0, -8.0),
+                            direction_rad: 0.0,
+                            spacing_m: 12.0,
+                        ),
+                        rng_stream: 256,
+                    ),
+                    // 5 buildings south side (offset from north row).
+                    (
+                        kind: Box,
+                        count: (5, 5),
+                        base_size_m: (6.0, 3.0, 8.0),
+                        scale_jitter: (0.8, 1.2),
+                        color_source: Secondary,
+                        placement: LinearChain(
+                            start_m: (-24.0, 8.0),
+                            direction_rad: 0.0,
+                            spacing_m: 12.0,
+                        ),
+                        rng_stream: 512,
+                    ),
+                ]),
+            ),
+
+            // Mining camp — small ore extraction operation: adit
+            // (half-cylinder tunnel into hillside) + headframe + ore
+            // processing cylinder + outbuildings. Mission anchor.
+            (
+                id: "mining_camp",
+                slope_tolerance_max_deg: 15.0,
+                roughness_tolerance_m: 80.0,
+                water_adjacency: None,
+                altitude_range_m: (800.0, 3200.0),
+                selection_weight: 0.25,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (105, 85, 70),
+                    secondary: (140, 115, 85),
+                    accent: (155, 95, 70),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(BuildingWooden),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Remote": 25.0, "Local": 15.0 },
+                    )),
+                    self_spacing: Some((min_km: 40.0)),
+                )),
+                composition: Some([
+                    // Adit (half-cylinder as tunnel opening into hill).
+                    (
+                        kind: HalfCylinder,
+                        count: (1, 1),
+                        base_size_m: (4.0, 3.0, 6.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Headframe / ore processing (tall narrow box).
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (4.0, 10.0, 5.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (8.0, 3.0)),
+                        rng_stream: 256,
+                    ),
+                    // Ore storage silo (cylinder).
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (3.0, 6.0, 3.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: Single(offset_m: (12.0, -2.0)),
+                        rng_stream: 512,
+                    ),
+                    // Worker bunkhouses (2 small boxes).
+                    (
+                        kind: Box,
+                        count: (2, 2),
+                        base_size_m: (4.0, 3.0, 8.0),
+                        scale_jitter: (0.9, 1.1),
+                        color_source: Primary,
+                        placement: LinearChain(
+                            start_m: (-5.0, 12.0),
+                            direction_rad: 0.0,
+                            spacing_m: 8.0,
+                        ),
+                        rng_stream: 768,
+                    ),
+                ]),
+            ),
+
+            // Solar farm — utility-scale photovoltaic array. Rows of
+            // tilted panels (flat quads) + switchyard box + transmission
+            // monopole. Modern / rare / near Major hubs only.
+            (
+                id: "solar_farm",
+                slope_tolerance_max_deg: 3.0,
+                roughness_tolerance_m: 20.0,
+                water_adjacency: None,
+                altitude_range_m: (400.0, 2000.0),
+                selection_weight: 0.1,
+                is_bleed_over_candidate: false,
+                home_palette: Some((
+                    primary: (45, 55, 75),
+                    secondary: (150, 150, 155),
+                    accent: (190, 185, 175),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(BuildingMasonry),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Major": 40.0, "Regional": 20.0 },
+                    )),
+                    self_spacing: Some((min_km: 60.0)),
+                )),
+                composition: Some([
+                    // Solar panel rows (LinearChain of flat quads).
+                    // Each panel: 8m × 2m, spaced 4m apart.
+                    (
+                        kind: FlatQuad,
+                        count: (12, 12),
+                        base_size_m: (8.0, 1.0, 2.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: LinearChain(
+                            start_m: (-40.0, -20.0),
+                            direction_rad: 0.0,
+                            spacing_m: 7.0,
+                        ),
+                        rng_stream: 0,
+                    ),
+                    (
+                        kind: FlatQuad,
+                        count: (12, 12),
+                        base_size_m: (8.0, 1.0, 2.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: LinearChain(
+                            start_m: (-40.0, -10.0),
+                            direction_rad: 0.0,
+                            spacing_m: 7.0,
+                        ),
+                        rng_stream: 64,
+                    ),
+                    (
+                        kind: FlatQuad,
+                        count: (12, 12),
+                        base_size_m: (8.0, 1.0, 2.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: LinearChain(
+                            start_m: (-40.0, 0.0),
+                            direction_rad: 0.0,
+                            spacing_m: 7.0,
+                        ),
+                        rng_stream: 128,
+                    ),
+                    // Switchyard box.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (8.0, 4.0, 6.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: Single(offset_m: (55.0, 0.0)),
+                        rng_stream: 256,
+                    ),
+                    // Transmission monopole.
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (1.0, 18.0, 1.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: Single(offset_m: (62.0, 0.0)),
+                        rng_stream: 512,
+                    ),
+                ]),
+            ),
+
+            // ─── More HighDesert features (5c.2.c.6) ────────────────
+
+            // Oil derrick — iconic Texas / Oklahoma / Permian Basin
+            // pump-jack site. Tall latticed shaft (approximated with a
+            // tall thin cylinder) + pumpjack box (seesaw-motion
+            // approximated as a horizontal slab) + storage tanks.
+            (
+                id: "oil_derrick",
+                slope_tolerance_max_deg: 3.0,
+                roughness_tolerance_m: 25.0,
+                water_adjacency: None,
+                altitude_range_m: (200.0, 1800.0),
+                selection_weight: 0.2,
+                is_bleed_over_candidate: false,
+                home_palette: Some((
+                    primary: (75, 70, 65),
+                    secondary: (155, 100, 75),
+                    accent: (200, 185, 150),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(BuildingMasonry),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Regional": 25.0, "Local": 12.0 },
+                    )),
+                    self_spacing: Some((min_km: 8.0)),
+                )),
+                composition: Some([
+                    // Derrick tower (tall lattice approximation).
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (2.5, 15.0, 2.5),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Pumpjack (horizontal slab).
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (6.0, 2.0, 1.5),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: Single(offset_m: (4.0, 0.0)),
+                        rng_stream: 128,
+                    ),
+                    // 2 storage tanks (short wide cylinders).
+                    (
+                        kind: Cylinder,
+                        count: (2, 2),
+                        base_size_m: (4.0, 5.0, 4.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: LinearChain(
+                            start_m: (-8.0, 5.0),
+                            direction_rad: 0.0,
+                            spacing_m: 6.0,
+                        ),
+                        rng_stream: 256,
+                    ),
+                ]),
+            ),
+
+            // Wind farm — tall tower turbines spaced out across ridges.
+            // Modern sibling to solar_farm. Rare / hub-gated.
+            (
+                id: "wind_farm",
+                slope_tolerance_max_deg: 15.0,
+                roughness_tolerance_m: 100.0,
+                water_adjacency: None,
+                altitude_range_m: (500.0, 2500.0),
+                selection_weight: 0.15,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (230, 228, 225),
+                    secondary: (180, 180, 185),
+                    accent: (180, 55, 45),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(BuildingMasonry),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Regional": 30.0 },
+                    )),
+                    self_spacing: Some((min_km: 40.0)),
+                )),
+                composition: Some([
+                    // Turbine towers (tall thin white cylinders) along
+                    // a ridge line.
+                    (
+                        kind: Cylinder,
+                        count: (6, 8),
+                        base_size_m: (2.0, 30.0, 2.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: LinearChain(
+                            start_m: (-100.0, 0.0),
+                            direction_rad: 0.0,
+                            spacing_m: 35.0,
+                        ),
+                        rng_stream: 0,
+                    ),
+                    // Nacelle boxes at tower tops (simplified blade hub).
+                    (
+                        kind: Box,
+                        count: (6, 8),
+                        base_size_m: (4.0, 1.5, 1.5),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: LinearChain(
+                            start_m: (-100.0, 0.0),
+                            direction_rad: 0.0,
+                            spacing_m: 35.0,
+                        ),
+                        rng_stream: 128,
+                    ),
+                    // Small maintenance shed at the collecting point.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (6.0, 3.5, 5.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (0.0, -50.0)),
+                        rng_stream: 256,
+                    ),
+                ]),
+            ),
+
+            // Grain elevator — Midwestern-agricultural signature:
+            // tall cylinder cluster + conveyor (angled slab) + small
+            // office. Bleeds to CoastalBoreal / Mediterranean where
+            // farming scales up.
+            (
+                id: "grain_elevator",
+                slope_tolerance_max_deg: 2.0,
+                roughness_tolerance_m: 15.0,
+                water_adjacency: None,
+                altitude_range_m: (200.0, 2000.0),
+                selection_weight: 0.2,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (220, 210, 185),
+                    secondary: (155, 140, 115),
+                    accent: (100, 85, 70),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(BuildingMasonry),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Regional": 20.0, "Local": 10.0 },
+                    )),
+                    self_spacing: Some((min_km: 25.0)),
+                )),
+                composition: Some([
+                    // Silo cluster (4 tall cylinders, tightly spaced).
+                    (
+                        kind: Cylinder,
+                        count: (4, 4),
+                        base_size_m: (5.0, 18.0, 5.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: LinearChain(
+                            start_m: (-8.0, 0.0),
+                            direction_rad: 0.0,
+                            spacing_m: 5.5,
+                        ),
+                        rng_stream: 0,
+                    ),
+                    // Head house on top (long box across silos).
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (18.0, 4.0, 6.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 128,
+                    ),
+                    // Office / weigh station.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (7.0, 3.5, 5.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (12.0, 8.0)),
+                        rng_stream: 256,
+                    ),
+                ]),
+            ),
+
+            // ─── New HighDesert landscape POIs (5c.2.c.7) ───────────
+
+            // Natural arch — iconic red-rock sandstone arch. Mound
+            // delta lifts the feature's terrain; half-cylinder primitive
+            // represents the arched span. Rare, aviation-photography
+            // magnet. Arches / Canyonlands idiom.
+            (
+                id: "natural_arch",
+                slope_tolerance_max_deg: 25.0,
+                roughness_tolerance_m: 150.0,
+                water_adjacency: None,
+                altitude_range_m: (1200.0, 2400.0),
+                selection_weight: 0.08,
+                is_bleed_over_candidate: false,
+                home_palette: Some((
+                    primary: (185, 115, 75),
+                    secondary: (165, 95, 60),
+                    accent: (210, 170, 120),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(Stone),
+                placement_rules: Some((
+                    self_spacing: Some((min_km: 40.0)),
+                    prominence: Some((min_m: 20.0, min_slope_deg: 15.0)),
+                )),
+                composition: Some([
+                    // Arch span — half-cylinder lifted + rotated so the
+                    // arc opens downward. Scale Y inverts (negative) so
+                    // the curve frames sky below rather than ground. Sized
+                    // big enough to read from the air.
+                    (
+                        kind: HalfCylinder,
+                        count: (1, 1),
+                        base_size_m: (30.0, 8.0, 12.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Support buttresses (cylinders at each end of arch).
+                    (
+                        kind: Cylinder,
+                        count: (2, 2),
+                        base_size_m: (6.0, 10.0, 6.0),
+                        scale_jitter: (0.9, 1.1),
+                        color_source: Secondary,
+                        placement: LinearChain(
+                            start_m: (-15.0, 0.0),
+                            direction_rad: 0.0,
+                            spacing_m: 30.0,
+                        ),
+                        rng_stream: 128,
+                    ),
+                ]),
+            ),
+
+            // Canyon rim — plateau edge with steep drop. Terrain-only
+            // feature (delta raises plateau + cliff drop); no primitives
+            // because the cliff face itself is the visual.
+            (
+                id: "canyon_rim",
+                slope_tolerance_max_deg: 5.0,
+                roughness_tolerance_m: 120.0,
+                water_adjacency: None,
+                altitude_range_m: (1000.0, 2500.0),
+                selection_weight: 0.5,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (175, 125, 85),
+                    secondary: (145, 100, 70),
+                    accent: (200, 165, 110),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(Stone),
+                placement_rules: Some((
+                    self_spacing: Some((min_km: 15.0)),
+                    prominence: Some((min_m: 30.0, min_slope_deg: 10.0)),
+                )),
+            ),
+
+            // Volcanic cone — isolated positive peak with crater bowl at
+            // summit. Prominence delta raises + sharpens; no primitives
+            // (the terrain shape IS the feature). Rare.
+            (
+                id: "volcanic_cone",
+                slope_tolerance_max_deg: 30.0,
+                roughness_tolerance_m: 250.0,
+                water_adjacency: None,
+                altitude_range_m: (500.0, 2800.0),
+                selection_weight: 0.1,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (75, 65, 60),
+                    secondary: (130, 95, 75),
+                    accent: (155, 80, 55),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(Stone),
+                placement_rules: Some((
+                    self_spacing: Some((min_km: 80.0)),
+                )),
+            ),
+
+            // Hoodoo field — forest of tall thin sandstone pillars. Mound
+            // delta + many vertical cylinders. Bryce-Canyon-style POI.
+            (
+                id: "hoodoo_field",
+                slope_tolerance_max_deg: 15.0,
+                roughness_tolerance_m: 80.0,
+                water_adjacency: None,
+                altitude_range_m: (1500.0, 2700.0),
+                selection_weight: 0.15,
+                is_bleed_over_candidate: false,
+                home_palette: Some((
+                    primary: (210, 140, 95),
+                    secondary: (175, 105, 70),
+                    accent: (225, 175, 125),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(Stone),
+                placement_rules: Some((
+                    self_spacing: Some((min_km: 30.0)),
+                )),
+                composition: Some([
+                    // Many tall narrow cylinders with varied height.
+                    (
+                        kind: Cylinder,
+                        count: (20, 30),
+                        base_size_m: (2.5, 12.0, 2.5),
+                        scale_jitter: (0.5, 1.4),
+                        color_source: Primary,
+                        placement: RadialCluster(radius_m: 45.0),
+                        rng_stream: 0,
+                    ),
+                    // Shorter secondary pillars (younger / eroded further).
+                    (
+                        kind: Cylinder,
+                        count: (8, 12),
+                        base_size_m: (1.8, 6.0, 1.8),
+                        scale_jitter: (0.6, 1.3),
+                        color_source: Secondary,
+                        placement: RadialCluster(radius_m: 55.0),
+                        rng_stream: 256,
+                    ),
+                ]),
+            ),
+
+            // Salt flat — vast dry lake bed, featureless flat white. Only
+            // delta is a flatten; color comes from the Stone category +
+            // biome-receiving desert adaptations. Bonneville / Grand Mesa
+            // salt pan idiom.
+            (
+                id: "salt_flat",
+                slope_tolerance_max_deg: 1.0,
+                roughness_tolerance_m: 8.0,
+                water_adjacency: None,
+                altitude_range_m: (900.0, 1800.0),
+                selection_weight: 0.15,
+                is_bleed_over_candidate: false,
+                home_palette: Some((
+                    primary: (230, 225, 215),
+                    secondary: (210, 205, 195),
+                    accent: (175, 170, 160),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(Stone),
+                placement_rules: Some((
+                    self_spacing: Some((min_km: 40.0)),
                 )),
             ),
         ],
@@ -421,6 +1175,722 @@
                     self_spacing: Some((min_km: 50.0)),
                     climate: Some((temp_range_c: Some((-50.0, 5.0)))),
                 )),
+            ),
+
+            // ─── New RockyAlpine developed features (5c.2.c.4) ──────
+
+            // Mountain lodge — large central lodge + smaller cabins +
+            // stone fireplace chimney + conifer cluster. Regional /
+            // Local hubs. Bleeds widely (any mountainous biome).
+            (
+                id: "mountain_lodge",
+                slope_tolerance_max_deg: 8.0,
+                roughness_tolerance_m: 40.0,
+                water_adjacency: None,
+                altitude_range_m: (1000.0, 3000.0),
+                selection_weight: 0.4,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (105, 80, 65),
+                    secondary: (165, 170, 175),
+                    accent: (80, 70, 60),
+                )),
+                adaptation_per_host: {
+                    "CoastalBoreal": (
+                        primary: (95, 75, 60),
+                        secondary: (90, 110, 85),
+                        accent: (70, 60, 55),
+                    ),
+                    "HighDesert": (
+                        primary: (150, 115, 85),
+                        secondary: (170, 140, 105),
+                        accent: (95, 75, 60),
+                    ),
+                    "MediterraneanArchipelago": (
+                        primary: (175, 135, 100),
+                        secondary: (195, 180, 145),
+                        accent: (110, 80, 65),
+                    ),
+                },
+                palette_category: Some(BuildingWooden),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Regional": 20.0, "Local": 10.0 },
+                    )),
+                    self_spacing: Some((min_km: 25.0)),
+                )),
+                composition: Some([
+                    // Main lodge building (large, prominent).
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (18.0, 7.0, 22.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Stone chimney (tall narrow cylinder).
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (1.8, 10.0, 1.8),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (8.0, 3.0)),
+                        rng_stream: 128,
+                    ),
+                    // 3 guest cabins scattered around.
+                    (
+                        kind: Box,
+                        count: (3, 4),
+                        base_size_m: (6.0, 4.0, 8.0),
+                        scale_jitter: (0.9, 1.1),
+                        color_source: Primary,
+                        placement: RadialCluster(radius_m: 40.0),
+                        rng_stream: 256,
+                    ),
+                    // Conifer cluster (mountain setting backdrop).
+                    (
+                        kind: Cone,
+                        count: (5, 8),
+                        base_size_m: (4.0, 12.0, 4.0),
+                        scale_jitter: (0.8, 1.2),
+                        color_source: Secondary,
+                        placement: RadialCluster(radius_m: 60.0),
+                        rng_stream: 512,
+                    ),
+                ]),
+            ),
+
+            // ─── More RockyAlpine developed features (5c.2.c.5) ─────
+
+            // Fire lookout tower — tall thin shaft with glass-cab at
+            // top. Iconic forest-service feature, ridge-top location,
+            // Remote / Isolated hubs. Rare (1 per mountain range).
+            (
+                id: "fire_lookout_tower",
+                slope_tolerance_max_deg: 20.0,
+                roughness_tolerance_m: 150.0,
+                water_adjacency: None,
+                altitude_range_m: (2200.0, 3800.0),
+                selection_weight: 0.25,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (130, 100, 75),
+                    secondary: (85, 95, 85),
+                    accent: (55, 65, 75),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(BuildingWooden),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Remote": 40.0, "Isolated": 80.0 },
+                    )),
+                    self_spacing: Some((min_km: 50.0)),
+                    prominence: Some((min_m: 50.0, min_slope_deg: 10.0)),
+                )),
+                composition: Some([
+                    // Tall tower shaft (thin cylinder, wooden leg-frame
+                    // approximation).
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (2.0, 15.0, 2.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Glass-sided cab at the top.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (4.5, 2.5, 4.5),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 128,
+                    ),
+                    // Access ladder / small base structure.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (2.0, 2.0, 2.5),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (3.0, 0.0)),
+                        rng_stream: 256,
+                    ),
+                ]),
+            ),
+
+            // Mine entrance — half-cylinder adit into the hillside +
+            // small shed + ore cart tracks. Smaller than HighDesert's
+            // full mining_camp; subalpine character (snow-capped in
+            // winter). Remote / Local hubs.
+            (
+                id: "mine_entrance",
+                slope_tolerance_max_deg: 25.0,
+                roughness_tolerance_m: 120.0,
+                water_adjacency: None,
+                altitude_range_m: (1500.0, 3500.0),
+                selection_weight: 0.2,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (95, 80, 70),
+                    secondary: (140, 130, 115),
+                    accent: (85, 70, 60),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(BuildingWooden),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Remote": 20.0, "Local": 12.0 },
+                    )),
+                    self_spacing: Some((min_km: 35.0)),
+                )),
+                composition: Some([
+                    // Adit opening.
+                    (
+                        kind: HalfCylinder,
+                        count: (1, 1),
+                        base_size_m: (3.5, 2.5, 5.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Shed / office.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (4.0, 3.0, 5.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (6.0, 3.0)),
+                        rng_stream: 256,
+                    ),
+                    // Ore-cart dump pile (short wide cylinder).
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (3.0, 1.5, 3.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: Single(offset_m: (-6.0, 2.0)),
+                        rng_stream: 512,
+                    ),
+                ]),
+            ),
+
+            // Alpine cabin — single isolated small cabin, dense
+            // conifer ring. The "backcountry shelter" idiom. Remote
+            // or Isolated hubs. Frequent (small scale, many possible
+            // locations).
+            (
+                id: "alpine_cabin",
+                slope_tolerance_max_deg: 12.0,
+                roughness_tolerance_m: 60.0,
+                water_adjacency: None,
+                altitude_range_m: (1800.0, 3200.0),
+                selection_weight: 0.5,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (90, 70, 55),
+                    secondary: (55, 85, 65),
+                    accent: (155, 140, 115),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(BuildingWooden),
+                placement_rules: Some((
+                    hub: Some((
+                        exclusion_min_km: 20.0,
+                        exclusion_min_tier: Some("Regional"),
+                    )),
+                    self_spacing: Some((min_km: 10.0)),
+                )),
+                composition: Some([
+                    // Cabin.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (5.0, 3.5, 6.0),
+                        scale_jitter: (0.9, 1.1),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Dense conifer ring.
+                    (
+                        kind: Cone,
+                        count: (8, 12),
+                        base_size_m: (3.5, 10.0, 3.5),
+                        scale_jitter: (0.8, 1.2),
+                        color_source: Secondary,
+                        placement: RadialCluster(radius_m: 25.0),
+                        rng_stream: 256,
+                    ),
+                ]),
+            ),
+
+            // Chairlift terminal — ski-area base infrastructure: lower
+            // terminal box + LinearChain of lift towers up the
+            // mountain + upper terminal. Requires winter / high
+            // altitude. Regional hubs (ski resort towns).
+            (
+                id: "chairlift_terminal",
+                slope_tolerance_max_deg: 18.0,
+                roughness_tolerance_m: 100.0,
+                water_adjacency: None,
+                altitude_range_m: (1800.0, 3500.0),
+                selection_weight: 0.2,
+                is_bleed_over_candidate: false,
+                home_palette: Some((
+                    primary: (105, 95, 85),
+                    secondary: (160, 170, 175),
+                    accent: (180, 60, 55),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(BuildingMasonry),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Regional": 20.0, "Local": 8.0 },
+                    )),
+                    self_spacing: Some((min_km: 30.0)),
+                )),
+                composition: Some([
+                    // Lower terminal box.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (10.0, 5.0, 12.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Line of lift towers up the slope (LinearChain).
+                    (
+                        kind: Cylinder,
+                        count: (6, 6),
+                        base_size_m: (1.0, 12.0, 1.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: LinearChain(
+                            start_m: (30.0, 0.0),
+                            direction_rad: 0.0,
+                            spacing_m: 30.0,
+                        ),
+                        rng_stream: 256,
+                    ),
+                    // Upper terminal (at far end of tower chain).
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (8.0, 4.0, 10.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (210.0, 0.0)),
+                        rng_stream: 512,
+                    ),
+                    // Accent banner / sign at base (branded red).
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (6.0, 0.1, 2.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (-8.0, 0.0)),
+                        rng_stream: 768,
+                    ),
+                ]),
+            ),
+
+            // ─── More RockyAlpine features (5c.2.c.6) ───────────────
+
+            // Campground — scattered cluster of tent / RV boxes + fire
+            // ring + pit-toilet building + surrounding conifers. Local
+            // hub + Remote. Bleeds everywhere.
+            (
+                id: "campground",
+                slope_tolerance_max_deg: 10.0,
+                roughness_tolerance_m: 50.0,
+                water_adjacency: None,
+                altitude_range_m: (1200.0, 3000.0),
+                selection_weight: 0.4,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (120, 110, 90),
+                    secondary: (75, 95, 75),
+                    accent: (155, 95, 70),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(BuildingWooden),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Local": 12.0, "Remote": 20.0 },
+                    )),
+                    self_spacing: Some((min_km: 15.0)),
+                )),
+                composition: Some([
+                    // 5-8 tent/RV boxes scattered.
+                    (
+                        kind: Box,
+                        count: (5, 8),
+                        base_size_m: (3.0, 2.0, 4.5),
+                        scale_jitter: (0.8, 1.2),
+                        color_source: Primary,
+                        placement: RadialCluster(radius_m: 40.0),
+                        rng_stream: 0,
+                    ),
+                    // Fire ring (accent-red short cylinder at center).
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (2.0, 0.5, 2.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 128,
+                    ),
+                    // Pit toilet / small outbuilding.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (2.0, 2.5, 2.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (-20.0, -15.0)),
+                        rng_stream: 256,
+                    ),
+                    // Surrounding conifer ring.
+                    (
+                        kind: Cone,
+                        count: (8, 12),
+                        base_size_m: (3.5, 10.0, 3.5),
+                        scale_jitter: (0.8, 1.2),
+                        color_source: Secondary,
+                        placement: RadialCluster(radius_m: 55.0),
+                        rng_stream: 512,
+                    ),
+                ]),
+            ),
+
+            // Quarry — extractive terrain scar + processing building +
+            // tall conveyor. Heavy industry signature; rare, distinctive.
+            (
+                id: "quarry",
+                slope_tolerance_max_deg: 12.0,
+                roughness_tolerance_m: 80.0,
+                water_adjacency: None,
+                altitude_range_m: (500.0, 2500.0),
+                selection_weight: 0.15,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (160, 150, 135),
+                    secondary: (110, 100, 90),
+                    accent: (205, 195, 175),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(Stone),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Regional": 30.0, "Local": 15.0 },
+                    )),
+                    self_spacing: Some((min_km: 40.0)),
+                )),
+                composition: Some([
+                    // Large flat quad = terraced quarry floor.
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (60.0, 0.1, 50.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Processing building.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (12.0, 8.0, 15.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (35.0, 0.0)),
+                        rng_stream: 128,
+                    ),
+                    // Conveyor (tall angled cylinder proxy).
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (1.5, 12.0, 1.5),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: Single(offset_m: (25.0, 8.0)),
+                        rng_stream: 256,
+                    ),
+                    // Stockpile cone (gravel heap).
+                    (
+                        kind: Cone,
+                        count: (2, 2),
+                        base_size_m: (8.0, 4.0, 8.0),
+                        scale_jitter: (0.9, 1.1),
+                        color_source: Accent,
+                        placement: LinearChain(
+                            start_m: (-20.0, 15.0),
+                            direction_rad: 0.0,
+                            spacing_m: 15.0,
+                        ),
+                        rng_stream: 512,
+                    ),
+                ]),
+            ),
+
+            // Radio tower — tall latticed cylinder with red safety
+            // stripes + small equipment shack. Ridge-top placement via
+            // prominence gate. Bleeds everywhere — radio towers are
+            // universal.
+            (
+                id: "radio_tower",
+                slope_tolerance_max_deg: 25.0,
+                roughness_tolerance_m: 200.0,
+                water_adjacency: None,
+                altitude_range_m: (500.0, 3500.0),
+                selection_weight: 0.15,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (155, 150, 145),
+                    secondary: (195, 60, 50),
+                    accent: (100, 95, 90),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(BuildingMasonry),
+                placement_rules: Some((
+                    self_spacing: Some((min_km: 30.0)),
+                    prominence: Some((min_m: 60.0, min_slope_deg: 12.0)),
+                )),
+                composition: Some([
+                    // Main tower (tall thin cylinder).
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (1.5, 35.0, 1.5),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Red safety stripe (wider cylinder at mid-height).
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (1.8, 3.0, 1.8),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 128,
+                    ),
+                    // Equipment shack at base.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (4.0, 2.5, 4.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (3.0, 0.0)),
+                        rng_stream: 256,
+                    ),
+                ]),
+            ),
+
+            // ─── New RockyAlpine landscape POIs (5c.2.c.7) ──────────
+
+            // Waterfall — cliff step in a stream course. Step delta
+            // creates the discrete elevation drop; no primitives (water
+            // cascade is a future VFX pass, not instanced geometry).
+            (
+                id: "waterfall",
+                slope_tolerance_max_deg: 30.0,
+                roughness_tolerance_m: 200.0,
+                water_adjacency: Required,
+                altitude_range_m: (800.0, 3200.0),
+                selection_weight: 0.25,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (140, 155, 170),
+                    secondary: (90, 95, 100),
+                    accent: (220, 225, 230),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(Water),
+                placement_rules: Some((
+                    self_spacing: Some((min_km: 15.0)),
+                    prominence: Some((min_m: 25.0, min_slope_deg: 20.0)),
+                    hydrology: Some((required_class: "Creek", min_accumulation: Some(100.0))),
+                )),
+            ),
+
+            // Moraine field — glacial-deposit ridge with boulder scatter.
+            // Ridge delta + boulder sphere primitives.
+            (
+                id: "moraine_field",
+                slope_tolerance_max_deg: 25.0,
+                roughness_tolerance_m: 150.0,
+                water_adjacency: None,
+                altitude_range_m: (1800.0, 3500.0),
+                selection_weight: 0.3,
+                is_bleed_over_candidate: false,
+                home_palette: Some((
+                    primary: (125, 120, 115),
+                    secondary: (105, 100, 95),
+                    accent: (155, 150, 140),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(Stone),
+                placement_rules: Some((
+                    self_spacing: Some((min_km: 20.0)),
+                )),
+                composition: Some([
+                    // Scattered glacial boulders of varying size.
+                    (
+                        kind: Sphere,
+                        count: (15, 25),
+                        base_size_m: (1.5, 1.5, 1.5),
+                        scale_jitter: (0.6, 2.0),
+                        color_source: Primary,
+                        placement: RadialCluster(radius_m: 80.0),
+                        rng_stream: 0,
+                    ),
+                    // Few larger erratics (significantly bigger).
+                    (
+                        kind: Sphere,
+                        count: (2, 4),
+                        base_size_m: (4.0, 3.0, 4.0),
+                        scale_jitter: (0.8, 1.4),
+                        color_source: Secondary,
+                        placement: RadialCluster(radius_m: 60.0),
+                        rng_stream: 256,
+                    ),
+                ]),
+            ),
+
+            // Geyser field — active hydrothermal area: water POI with
+            // erupting-plume cylinders. Mineral-deposit accent tones.
+            (
+                id: "geyser_field",
+                slope_tolerance_max_deg: 5.0,
+                roughness_tolerance_m: 40.0,
+                water_adjacency: None,
+                altitude_range_m: (1500.0, 3000.0),
+                selection_weight: 0.08,
+                is_bleed_over_candidate: false,
+                home_palette: Some((
+                    primary: (220, 215, 200),
+                    secondary: (195, 165, 120),
+                    accent: (230, 220, 175),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(Water),
+                placement_rules: Some((
+                    self_spacing: Some((min_km: 80.0)),
+                )),
+                composition: Some([
+                    // Mineral-deposit ground pattern (flat quads = sinter
+                    // terraces).
+                    (
+                        kind: FlatQuad,
+                        count: (3, 5),
+                        base_size_m: (12.0, 0.2, 12.0),
+                        scale_jitter: (0.7, 1.3),
+                        color_source: Primary,
+                        placement: RadialCluster(radius_m: 30.0),
+                        rng_stream: 0,
+                    ),
+                    // Erupting plumes (tall thin cylinders as proxies —
+                    // future VFX pass replaces with particle plumes).
+                    (
+                        kind: Cylinder,
+                        count: (3, 6),
+                        base_size_m: (1.5, 12.0, 1.5),
+                        scale_jitter: (0.5, 1.5),
+                        color_source: Accent,
+                        placement: RadialCluster(radius_m: 25.0),
+                        rng_stream: 256,
+                    ),
+                ]),
+            ),
+
+            // Natural bridge — rock span arching over a small canyon.
+            // Smaller sibling to natural_arch; alpine character.
+            (
+                id: "natural_bridge",
+                slope_tolerance_max_deg: 30.0,
+                roughness_tolerance_m: 180.0,
+                water_adjacency: None,
+                altitude_range_m: (1500.0, 3200.0),
+                selection_weight: 0.08,
+                is_bleed_over_candidate: false,
+                home_palette: Some((
+                    primary: (135, 125, 110),
+                    secondary: (105, 95, 85),
+                    accent: (175, 165, 145),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(Stone),
+                placement_rules: Some((
+                    self_spacing: Some((min_km: 50.0)),
+                    prominence: Some((min_m: 30.0, min_slope_deg: 20.0)),
+                )),
+                composition: Some([
+                    // Bridge span (half-cylinder arch).
+                    (
+                        kind: HalfCylinder,
+                        count: (1, 1),
+                        base_size_m: (22.0, 6.0, 10.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                ]),
+            ),
+
+            // Spire formation — cluster of tall thin rock pinnacles.
+            // Dolomites / Needles idiom. Tall cones approximate pointed
+            // pinnacles.
+            (
+                id: "spire_formation",
+                slope_tolerance_max_deg: 40.0,
+                roughness_tolerance_m: 250.0,
+                water_adjacency: None,
+                altitude_range_m: (2000.0, 3800.0),
+                selection_weight: 0.15,
+                is_bleed_over_candidate: false,
+                home_palette: Some((
+                    primary: (155, 140, 120),
+                    secondary: (115, 105, 90),
+                    accent: (185, 170, 145),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(Stone),
+                placement_rules: Some((
+                    self_spacing: Some((min_km: 25.0)),
+                    prominence: Some((min_m: 40.0, min_slope_deg: 30.0)),
+                )),
+                composition: Some([
+                    // 4-7 tall cones (pinnacles).
+                    (
+                        kind: Cone,
+                        count: (4, 7),
+                        base_size_m: (8.0, 40.0, 8.0),
+                        scale_jitter: (0.6, 1.4),
+                        color_source: Primary,
+                        placement: RadialCluster(radius_m: 35.0),
+                        rng_stream: 0,
+                    ),
+                ]),
             ),
         ],
 
@@ -690,6 +2160,40 @@
                     )),
                     self_spacing: Some((min_km: 20.0)),
                 )),
+                // 5c.2.c.4: collapsed cabin + chimney remnant + dense
+                // encroaching forest reclaiming the clearing.
+                composition: Some([
+                    // Collapsed cabin — short wide box.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (7.0, 2.0, 8.0),
+                        scale_jitter: (0.9, 1.1),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Chimney remnant.
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (1.2, 3.5, 1.2),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (3.0, 2.0)),
+                        rng_stream: 256,
+                    ),
+                    // Encroaching forest — dense ring of cones reclaiming.
+                    (
+                        kind: Cone,
+                        count: (10, 14),
+                        base_size_m: (3.5, 9.0, 3.5),
+                        scale_jitter: (0.7, 1.3),
+                        color_source: Secondary,
+                        placement: RadialCluster(radius_m: 35.0),
+                        rng_stream: 512,
+                    ),
+                ]),
             ),
             // Remote compound — small cluster of cabin + shed +
             // outhouse, off-grid lifestyle. Mission anchor (delivery,
@@ -736,6 +2240,41 @@
                     )),
                     self_spacing: Some((min_km: 30.0)),
                 )),
+                // 5c.2.c.4: tight 3-building off-grid cluster + water
+                // tank + sparse conifer windbreak.
+                composition: Some([
+                    // Cabin + shed + outhouse — 3 boxes, tight cluster
+                    // via small radius.
+                    (
+                        kind: Box,
+                        count: (3, 3),
+                        base_size_m: (6.0, 4.0, 7.0),
+                        scale_jitter: (0.8, 1.1),
+                        color_source: Primary,
+                        placement: RadialCluster(radius_m: 12.0),
+                        rng_stream: 0,
+                    ),
+                    // Water tank cylinder (tall narrow).
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (2.0, 5.0, 2.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (-12.0, 5.0)),
+                        rng_stream: 256,
+                    ),
+                    // Windbreak conifers (sparse, around edges).
+                    (
+                        kind: Cone,
+                        count: (4, 6),
+                        base_size_m: (3.5, 8.0, 3.5),
+                        scale_jitter: (0.8, 1.2),
+                        color_source: Secondary,
+                        placement: RadialCluster(radius_m: 25.0),
+                        rng_stream: 512,
+                    ),
+                ]),
             ),
             // Homestead clearing — single occupied cabin in a clearing
             // ringed by conifers, often with a small garden plot and
@@ -781,6 +2320,41 @@
                     )),
                     self_spacing: Some((min_km: 8.0)),
                 )),
+                // 5c.2.c.4: occupied cabin + woodshed + dense conifer
+                // perimeter (forest ring pattern — the clearing is the
+                // hero of the composition).
+                composition: Some([
+                    // Cabin.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (8.0, 5.0, 10.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Woodshed.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (4.0, 3.0, 5.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (12.0, 5.0)),
+                        rng_stream: 256,
+                    ),
+                    // Dense encroaching conifer ring.
+                    (
+                        kind: Cone,
+                        count: (8, 12),
+                        base_size_m: (4.0, 11.0, 4.0),
+                        scale_jitter: (0.75, 1.25),
+                        color_source: Secondary,
+                        placement: RadialCluster(radius_m: 40.0),
+                        rng_stream: 512,
+                    ),
+                ]),
             ),
             // Fishing camp — shoreline shack + dock + drying nets +
             // small skiff. Resupply candidate (fuel + bait + repair).
@@ -825,6 +2399,54 @@
                     )),
                     self_spacing: Some((min_km: 20.0)),
                 )),
+                // 5c.2.c.4: shoreline shack + wooden dock + smoker +
+                // piling cluster.
+                composition: Some([
+                    // Shack.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (5.0, 4.0, 6.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 10.0)),
+                        rng_stream: 0,
+                    ),
+                    // Wooden dock flat quad.
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (12.0, 0.15, 3.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (0.0, -5.0)),
+                        rng_stream: 256,
+                    ),
+                    // Smoker (small half-cylinder near shack).
+                    (
+                        kind: HalfCylinder,
+                        count: (1, 1),
+                        base_size_m: (1.5, 1.5, 2.5),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: Single(offset_m: (5.0, 8.0)),
+                        rng_stream: 512,
+                    ),
+                    // Pilings under / beside the dock.
+                    (
+                        kind: Cylinder,
+                        count: (4, 4),
+                        base_size_m: (0.4, 2.0, 0.4),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: LinearChain(
+                            start_m: (-5.5, -5.0),
+                            direction_rad: 0.0,
+                            spacing_m: 3.5,
+                        ),
+                        rng_stream: 768,
+                    ),
+                ]),
             ),
             // Tackle shop — small commercial building near a fishing
             // village, sells gear + license + ice. Resupply candidate.
@@ -852,6 +2474,40 @@
                     )),
                     self_spacing: Some((min_km: 10.0)),
                 )),
+                // 5c.2.c.4: small commercial shop + signage quad + icebox.
+                composition: Some([
+                    // Shop building.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (7.0, 4.5, 9.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Small signage panel (vertical flat quad along the
+                    // shop's front wall — y lifted so it's visible).
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (3.5, 0.1, 1.5),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (0.0, 5.5)),
+                        rng_stream: 256,
+                    ),
+                    // Icebox / cooler out front (cylinder).
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (1.2, 1.6, 1.2),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Explicit((200, 205, 210)),
+                        placement: Single(offset_m: (-4.0, 5.0)),
+                        rng_stream: 512,
+                    ),
+                ]),
             ),
             // Bait shop — smaller cousin to tackle_shop, often a stand-
             // alone hut with live-bait tank. Distinct orange "live bait"
@@ -879,6 +2535,41 @@
                     )),
                     self_spacing: Some((min_km: 10.0)),
                 )),
+                // 5c.2.c.4: small roadside bait hut + live-bait tank +
+                // orange-trim signage quad.
+                composition: Some([
+                    // Bait hut.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (4.5, 3.5, 5.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Live-bait tank.
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (1.8, 1.3, 1.8),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: Single(offset_m: (3.5, 2.5)),
+                        rng_stream: 256,
+                    ),
+                    // Orange "LIVE BAIT" sign (accent color is the
+                    // brand-orange per the palette).
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (3.0, 0.1, 1.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (0.0, 4.0)),
+                        rng_stream: 512,
+                    ),
+                ]),
             ),
             // Dwelling cluster — small village: 5-8 houses + yards + trees,
             // moderate density. CoastalBoreal home (valley settlements);
@@ -926,6 +2617,29 @@
                     self_spacing: Some((min_km: 5.0)),
                     road_adjacency: Some((required: false)),
                 )),
+                // 5c.2.b primitive composition: 5-8 house boxes
+                // (primary palette — weathered-wood walls) + 3-6 tree
+                // cones (secondary palette — foliage, biome-adapted).
+                composition: Some([
+                    (
+                        kind: Box,
+                        count: (5, 8),
+                        base_size_m: (8.0, 5.0, 10.0),
+                        scale_jitter: (0.8, 1.2),
+                        color_source: Primary,
+                        placement: RadialCluster(radius_m: 200.0),
+                        rng_stream: 0,
+                    ),
+                    (
+                        kind: Cone,
+                        count: (3, 6),
+                        base_size_m: (4.0, 11.0, 4.0),
+                        scale_jitter: (0.75, 1.25),
+                        color_source: Secondary,
+                        placement: RadialCluster(radius_m: 200.0),
+                        rng_stream: 256,
+                    ),
+                ]),
             ),
             // Gas station — small-format fuel stop + convenience store.
             // Phase 4.5 refuel economy anchor: when player lands within
@@ -978,6 +2692,78 @@
                     self_spacing: Some((min_km: 20.0)),
                     road_adjacency: Some((required: true)),
                 )),
+                // 5c.2.c.4: flat canopy + support columns + pump island +
+                // shop box + brand-accent signage.
+                composition: Some([
+                    // Canopy roof (flat quad, lifted 4.5 m so it's above
+                    // the pump columns).
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (10.0, 4.5, 8.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Four canopy support columns.
+                    (
+                        kind: Cylinder,
+                        count: (4, 4),
+                        base_size_m: (0.4, 4.5, 0.4),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: LinearChain(
+                            start_m: (-4.0, -3.5),
+                            direction_rad: 0.0,
+                            spacing_m: 8.0,
+                        ),
+                        rng_stream: 128,
+                    ),
+                    (
+                        kind: Cylinder,
+                        count: (4, 4),
+                        base_size_m: (0.4, 4.5, 0.4),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: LinearChain(
+                            start_m: (-4.0, 3.5),
+                            direction_rad: 0.0,
+                            spacing_m: 8.0,
+                        ),
+                        rng_stream: 192,
+                    ),
+                    // Pump island (small flat box under the canopy).
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (7.0, 1.2, 1.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 256,
+                    ),
+                    // Shop / convenience store (box, back of the pad).
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (12.0, 4.0, 6.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 10.0)),
+                        rng_stream: 512,
+                    ),
+                    // Branded signage (tall vertical signage box).
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (0.3, 6.0, 3.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (-8.0, 0.0)),
+                        rng_stream: 768,
+                    ),
+                ]),
             ),
             // General store — small-town mercantile: groceries + basic
             // cargo + hardware. Resupply + light-cargo mission anchor
@@ -1026,6 +2812,757 @@
                     self_spacing: Some((min_km: 15.0)),
                     road_adjacency: Some((required: false)),
                 )),
+                // 5c.2.c.4: main store + awning canopy + signage +
+                // icebox out front.
+                composition: Some([
+                    // Store building.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (10.0, 5.0, 12.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Awning (flat quad extending from the front).
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (10.0, 3.2, 3.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (0.0, -7.5)),
+                        rng_stream: 256,
+                    ),
+                    // Signage (vertical sign panel box).
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (4.0, 1.2, 0.2),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (0.0, -6.0)),
+                        rng_stream: 512,
+                    ),
+                    // Icebox / cooler out front.
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (1.2, 1.6, 1.2),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: Single(offset_m: (3.5, -7.0)),
+                        rng_stream: 768,
+                    ),
+                ]),
+            ),
+
+            // ─── Airports (5c.2.c.2 + 5c.2.c.3) ─────────────────────
+            //
+            // All airports homed in CoastalBoreal + bleed-over: true
+            // so palette adaptation naturally drifts them to the host
+            // biome (weathered wood → desert tan → alpine stone).
+            // Placement is gated by `hub_proximity` — each tier-gated
+            // feature only emits at cells close to a hub of matching
+            // tier, so Major-hub airports never spawn next to a Local
+            // bush strip and vice-versa.
+            //
+            // Runway orientation: all compositions use `direction_rad:
+            // 0.0` which places the runway along the world +X axis.
+            // A future milestone can randomize per-cell from a small
+            // set (0, π/6, π/3, π/2) for more variety; for now the
+            // aligned orientation is predictable + debuggable.
+
+            // Bush strip — grass / dirt strip for remote backcountry
+            // access. Matches Remote / Isolated hub tiers + appears
+            // far from major population. Tiny: one runway + one shed.
+            (
+                id: "bush_strip",
+                slope_tolerance_max_deg: 3.0,
+                roughness_tolerance_m: 15.0,
+                water_adjacency: None,
+                altitude_range_m: (-10.0, 2500.0),
+                selection_weight: 0.9,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (115, 90, 65),
+                    secondary: (130, 110, 80),
+                    accent: (165, 130, 90),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(BuildingWooden),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Remote": 30.0, "Isolated": 50.0 },
+                    )),
+                    self_spacing: Some((min_km: 20.0)),
+                )),
+                composition: Some([
+                    // Grass/dirt runway — thin FlatQuad.
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (100.0, 0.1, 8.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Explicit((110, 95, 70)),
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // One rustic shed.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (5.0, 3.0, 7.0),
+                        scale_jitter: (0.9, 1.1),
+                        color_source: Primary,
+                        placement: Single(offset_m: (-40.0, 15.0)),
+                        rng_stream: 256,
+                    ),
+                ]),
+            ),
+
+            // Small local airport — paved GA field, T-hangars, small
+            // FBO terminal. Local-tier hubs. Primary everyday-aviation
+            // setpiece for bush/ferry flights.
+            (
+                id: "airport_local",
+                slope_tolerance_max_deg: 2.0,
+                roughness_tolerance_m: 10.0,
+                water_adjacency: None,
+                altitude_range_m: (-10.0, 2000.0),
+                selection_weight: 1.0,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (140, 120, 95),
+                    secondary: (100, 90, 80),
+                    accent: (190, 170, 130),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(BuildingMasonry),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Local": 3.0 },
+                    )),
+                    self_spacing: Some((min_km: 15.0)),
+                )),
+                composition: Some([
+                    // Paved runway (300 m × 18 m).
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (300.0, 0.1, 18.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Explicit((72, 72, 72)),
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Apron slab.
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (50.0, 0.1, 35.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Explicit((88, 85, 78)),
+                        placement: Single(offset_m: (-80.0, -35.0)),
+                        rng_stream: 64,
+                    ),
+                    // 3 T-hangar bases in a LinearChain along the apron.
+                    (
+                        kind: Box,
+                        count: (3, 3),
+                        base_size_m: (12.0, 4.0, 14.0),
+                        scale_jitter: (0.95, 1.05),
+                        color_source: Primary,
+                        placement: LinearChain(
+                            start_m: (-100.0, -55.0),
+                            direction_rad: 0.0,
+                            spacing_m: 16.0,
+                        ),
+                        rng_stream: 256,
+                    ),
+                    // Matching half-cylinder roofs on top of each hangar.
+                    (
+                        kind: HalfCylinder,
+                        count: (3, 3),
+                        base_size_m: (12.0, 4.5, 14.0),
+                        scale_jitter: (0.95, 1.05),
+                        color_source: Accent,
+                        placement: LinearChain(
+                            start_m: (-100.0, -55.0),
+                            direction_rad: 0.0,
+                            spacing_m: 16.0,
+                        ),
+                        rng_stream: 512,
+                    ),
+                    // FBO / small terminal building.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (10.0, 5.0, 14.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (-60.0, -20.0)),
+                        rng_stream: 768,
+                    ),
+                ]),
+            ),
+
+            // Regional airport — paved 800 m runway, proper apron,
+            // terminal building, control tower, 5 hangars. Regional
+            // tier hubs. Supports 20-50-seat regional aircraft.
+            (
+                id: "airport_regional",
+                slope_tolerance_max_deg: 1.5,
+                roughness_tolerance_m: 8.0,
+                water_adjacency: None,
+                altitude_range_m: (-10.0, 1800.0),
+                selection_weight: 1.2,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (155, 140, 120),
+                    secondary: (90, 95, 100),
+                    accent: (210, 195, 160),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(BuildingMasonry),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Regional": 2.5 },
+                    )),
+                    self_spacing: Some((min_km: 40.0)),
+                )),
+                composition: Some([
+                    // Main runway (800 m × 30 m).
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (800.0, 0.1, 30.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Explicit((66, 66, 66)),
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Taxiway connecting runway to apron.
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (200.0, 0.1, 12.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Explicit((75, 75, 75)),
+                        placement: Single(offset_m: (-100.0, -60.0)),
+                        rng_stream: 32,
+                    ),
+                    // Apron.
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (120.0, 0.1, 60.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Explicit((88, 85, 78)),
+                        placement: Single(offset_m: (-100.0, -110.0)),
+                        rng_stream: 64,
+                    ),
+                    // 5 hangars.
+                    (
+                        kind: Box,
+                        count: (5, 5),
+                        base_size_m: (18.0, 7.0, 22.0),
+                        scale_jitter: (0.95, 1.05),
+                        color_source: Primary,
+                        placement: LinearChain(
+                            start_m: (-150.0, -140.0),
+                            direction_rad: 0.0,
+                            spacing_m: 24.0,
+                        ),
+                        rng_stream: 256,
+                    ),
+                    // Matching half-cylinder roofs.
+                    (
+                        kind: HalfCylinder,
+                        count: (5, 5),
+                        base_size_m: (18.0, 6.0, 22.0),
+                        scale_jitter: (0.95, 1.05),
+                        color_source: Accent,
+                        placement: LinearChain(
+                            start_m: (-150.0, -140.0),
+                            direction_rad: 0.0,
+                            spacing_m: 24.0,
+                        ),
+                        rng_stream: 512,
+                    ),
+                    // Terminal building (long low box).
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (40.0, 7.0, 15.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, -80.0)),
+                        rng_stream: 768,
+                    ),
+                    // Control tower shaft.
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (3.0, 14.0, 3.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Explicit((180, 180, 180)),
+                        placement: Single(offset_m: (30.0, -75.0)),
+                        rng_stream: 1024,
+                    ),
+                    // Control tower cab on top.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (6.0, 3.0, 6.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Explicit((60, 80, 100)),
+                        placement: Single(offset_m: (30.0, -75.0)),
+                        rng_stream: 1280,
+                    ),
+                ]),
+            ),
+
+            // Major airport — two parallel runways (1500 m × 45 m),
+            // huge apron, cargo + passenger terminals, multiple hangars,
+            // control tower. Major-tier hubs only. Rare world feature.
+            (
+                id: "airport_major",
+                slope_tolerance_max_deg: 1.0,
+                roughness_tolerance_m: 6.0,
+                water_adjacency: None,
+                altitude_range_m: (-10.0, 1500.0),
+                selection_weight: 1.5,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (165, 155, 140),
+                    secondary: (85, 90, 95),
+                    accent: (215, 200, 170),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(BuildingMasonry),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Major": 3.0 },
+                    )),
+                    self_spacing: Some((min_km: 80.0)),
+                )),
+                composition: Some([
+                    // Runway 1 (north).
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (1500.0, 0.1, 45.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Explicit((60, 60, 60)),
+                        placement: Single(offset_m: (0.0, 80.0)),
+                        rng_stream: 0,
+                    ),
+                    // Runway 2 (south).
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (1500.0, 0.1, 45.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Explicit((60, 60, 60)),
+                        placement: Single(offset_m: (0.0, -80.0)),
+                        rng_stream: 32,
+                    ),
+                    // Huge central apron between runways.
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (400.0, 0.1, 120.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Explicit((90, 88, 82)),
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 64,
+                    ),
+                    // Passenger terminal (long, prominent).
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (120.0, 10.0, 25.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, -40.0)),
+                        rng_stream: 128,
+                    ),
+                    // Cargo / secondary terminals (flanking).
+                    (
+                        kind: Box,
+                        count: (2, 2),
+                        base_size_m: (40.0, 8.0, 20.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: LinearChain(
+                            start_m: (-170.0, -40.0),
+                            direction_rad: 0.0,
+                            spacing_m: 260.0,
+                        ),
+                        rng_stream: 192,
+                    ),
+                    // 8 hangars along the apron back edge.
+                    (
+                        kind: Box,
+                        count: (8, 8),
+                        base_size_m: (22.0, 9.0, 28.0),
+                        scale_jitter: (0.95, 1.05),
+                        color_source: Primary,
+                        placement: LinearChain(
+                            start_m: (-220.0, 45.0),
+                            direction_rad: 0.0,
+                            spacing_m: 32.0,
+                        ),
+                        rng_stream: 256,
+                    ),
+                    // Matching half-cylinder hangar roofs.
+                    (
+                        kind: HalfCylinder,
+                        count: (8, 8),
+                        base_size_m: (22.0, 8.0, 28.0),
+                        scale_jitter: (0.95, 1.05),
+                        color_source: Accent,
+                        placement: LinearChain(
+                            start_m: (-220.0, 45.0),
+                            direction_rad: 0.0,
+                            spacing_m: 32.0,
+                        ),
+                        rng_stream: 512,
+                    ),
+                    // Control tower shaft (tall).
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (4.0, 25.0, 4.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Explicit((190, 190, 190)),
+                        placement: Single(offset_m: (80.0, -15.0)),
+                        rng_stream: 1024,
+                    ),
+                    // Control tower cab.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (9.0, 4.0, 9.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Explicit((60, 80, 100)),
+                        placement: Single(offset_m: (80.0, -15.0)),
+                        rng_stream: 1280,
+                    ),
+                ]),
+            ),
+
+            // Seaplane base — dock on water, shoreside hangars + office.
+            // Requires water adjacency. Regional / Local hubs in coastal
+            // areas. Floats + amphib aircraft base here.
+            (
+                id: "seaplane_base",
+                slope_tolerance_max_deg: 8.0,
+                roughness_tolerance_m: 30.0,
+                water_adjacency: Required,
+                altitude_range_m: (-5.0, 200.0),
+                selection_weight: 0.8,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (125, 95, 70),
+                    secondary: (100, 115, 90),
+                    accent: (160, 140, 105),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(BuildingWooden),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Regional": 5.0, "Local": 3.0 },
+                    )),
+                    self_spacing: Some((min_km: 30.0)),
+                )),
+                composition: Some([
+                    // Dock / floating platform. Lifted 20 cm above the
+                    // water plane to avoid z-fighting; authored colors
+                    // read as wet wood.
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (35.0, 0.2, 6.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Explicit((90, 70, 55)),
+                        placement: Single(offset_m: (0.0, -5.0)),
+                        rng_stream: 0,
+                    ),
+                    // 2 shoreside hangars (smaller than airport hangars).
+                    (
+                        kind: Box,
+                        count: (2, 2),
+                        base_size_m: (14.0, 5.0, 18.0),
+                        scale_jitter: (0.95, 1.05),
+                        color_source: Primary,
+                        placement: LinearChain(
+                            start_m: (-25.0, 30.0),
+                            direction_rad: 0.0,
+                            spacing_m: 22.0,
+                        ),
+                        rng_stream: 256,
+                    ),
+                    (
+                        kind: HalfCylinder,
+                        count: (2, 2),
+                        base_size_m: (14.0, 5.0, 18.0),
+                        scale_jitter: (0.95, 1.05),
+                        color_source: Accent,
+                        placement: LinearChain(
+                            start_m: (-25.0, 30.0),
+                            direction_rad: 0.0,
+                            spacing_m: 22.0,
+                        ),
+                        rng_stream: 512,
+                    ),
+                    // Small office / operations shack.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (6.0, 4.0, 8.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (20.0, 25.0)),
+                        rng_stream: 768,
+                    ),
+                ]),
+            ),
+
+            // ─── More CoastalBoreal features (5c.2.c.6) ─────────────
+
+            // Logging camp — timber-industry operation: main mill box
+            // + log-stack cylinders + sawdust cone pile + smokestack.
+            // PNW / Alaska logging signature. Regional / Local hubs.
+            (
+                id: "logging_camp",
+                slope_tolerance_max_deg: 8.0,
+                roughness_tolerance_m: 50.0,
+                water_adjacency: None,
+                altitude_range_m: (0.0, 1200.0),
+                selection_weight: 0.2,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (110, 85, 65),
+                    secondary: (130, 110, 85),
+                    accent: (85, 75, 70),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(BuildingWooden),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Regional": 25.0, "Local": 12.0 },
+                    )),
+                    self_spacing: Some((min_km: 25.0)),
+                )),
+                composition: Some([
+                    // Mill building.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (15.0, 7.0, 22.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Log piles (horizontal cylinders arranged in row).
+                    (
+                        kind: Cylinder,
+                        count: (4, 4),
+                        base_size_m: (2.5, 10.0, 2.5),
+                        scale_jitter: (0.9, 1.1),
+                        color_source: Secondary,
+                        placement: LinearChain(
+                            start_m: (-20.0, 15.0),
+                            direction_rad: 0.0,
+                            spacing_m: 6.0,
+                        ),
+                        rng_stream: 128,
+                    ),
+                    // Sawdust / wood chip cone pile.
+                    (
+                        kind: Cone,
+                        count: (1, 1),
+                        base_size_m: (6.0, 4.0, 6.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (22.0, 10.0)),
+                        rng_stream: 256,
+                    ),
+                    // Smokestack (tall cylinder).
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (1.5, 14.0, 1.5),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: Single(offset_m: (-8.0, -8.0)),
+                        rng_stream: 384,
+                    ),
+                    // Office trailer.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (8.0, 3.0, 4.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (12.0, -10.0)),
+                        rng_stream: 512,
+                    ),
+                ]),
+            ),
+
+            // Boathouse — small shore-side wood structure with
+            // half-cylinder roof + pier + 1-2 pilings. Water-adjacent.
+            // Bleeds to Mediterranean (smaller fishing-boat housing).
+            (
+                id: "boathouse",
+                slope_tolerance_max_deg: 4.0,
+                roughness_tolerance_m: 25.0,
+                water_adjacency: Required,
+                altitude_range_m: (-5.0, 200.0),
+                selection_weight: 0.4,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (100, 80, 65),
+                    secondary: (120, 100, 85),
+                    accent: (155, 95, 70),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(BuildingWooden),
+                placement_rules: Some((
+                    hub: Some((
+                        exclusion_min_km: 15.0,
+                        exclusion_min_tier: Some("Regional"),
+                    )),
+                    self_spacing: Some((min_km: 8.0)),
+                )),
+                composition: Some([
+                    // Boathouse walls (small box).
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (5.0, 3.0, 8.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 4.0)),
+                        rng_stream: 0,
+                    ),
+                    // Arched roof (half-cylinder on top).
+                    (
+                        kind: HalfCylinder,
+                        count: (1, 1),
+                        base_size_m: (5.0, 2.0, 8.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (0.0, 4.0)),
+                        rng_stream: 128,
+                    ),
+                    // Small deck quad extending toward water.
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (5.0, 0.15, 3.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: Single(offset_m: (0.0, -1.0)),
+                        rng_stream: 256,
+                    ),
+                    // Dock pilings.
+                    (
+                        kind: Cylinder,
+                        count: (2, 2),
+                        base_size_m: (0.4, 2.5, 0.4),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: LinearChain(
+                            start_m: (-2.0, -3.0),
+                            direction_rad: 0.0,
+                            spacing_m: 4.0,
+                        ),
+                        rng_stream: 512,
+                    ),
+                ]),
+            ),
+
+            // Helipad — simple H-marked pad (flat quad) + small
+            // shelter. Medical / EMS / backcountry rescue. Can appear
+            // near any hub tier; very small footprint. Bleeds
+            // everywhere.
+            (
+                id: "helipad",
+                slope_tolerance_max_deg: 3.0,
+                roughness_tolerance_m: 15.0,
+                water_adjacency: None,
+                altitude_range_m: (-5.0, 3000.0),
+                selection_weight: 0.3,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (80, 80, 85),
+                    secondary: (235, 230, 215),
+                    accent: (190, 55, 55),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(Signage),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Local": 5.0, "Remote": 20.0 },
+                    )),
+                    self_spacing: Some((min_km: 15.0)),
+                )),
+                composition: Some([
+                    // Pad surface.
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (15.0, 0.1, 15.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // White "H" marking (two overlapping quads).
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (2.0, 0.15, 6.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: Single(offset_m: (-1.5, 0.0)),
+                        rng_stream: 128,
+                    ),
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (2.0, 0.15, 6.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: Single(offset_m: (1.5, 0.0)),
+                        rng_stream: 192,
+                    ),
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (4.0, 0.15, 1.5),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 256,
+                    ),
+                    // Small shelter / equipment box.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (3.0, 2.5, 3.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (11.0, 0.0)),
+                        rng_stream: 512,
+                    ),
+                ]),
             ),
         ],
 
@@ -1218,6 +3755,629 @@
                     )),
                     self_spacing: Some((min_km: 30.0)),
                 )),
+                // 5c.2.c.4: main dock quad + gangway + ticket kiosk +
+                // piling cluster + red safety-paint accent piling.
+                composition: Some([
+                    // Main dock.
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (25.0, 0.2, 8.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Gangway connecting dock to shore.
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (10.0, 0.2, 3.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (15.0, 0.0)),
+                        rng_stream: 128,
+                    ),
+                    // Ticket kiosk.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (3.0, 3.0, 3.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: Single(offset_m: (22.0, 0.0)),
+                        rng_stream: 256,
+                    ),
+                    // Pilings along the dock edge.
+                    (
+                        kind: Cylinder,
+                        count: (6, 6),
+                        base_size_m: (0.4, 3.5, 0.4),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: LinearChain(
+                            start_m: (-10.0, -4.0),
+                            direction_rad: 0.0,
+                            spacing_m: 4.0,
+                        ),
+                        rng_stream: 512,
+                    ),
+                    // Safety bollard (accent-red cylinder marker at dock tip).
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (0.5, 1.2, 0.5),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (-12.0, 0.0)),
+                        rng_stream: 768,
+                    ),
+                ]),
+            ),
+
+            // ─── New Mediterranean features (5c.2.c.4) ──────────────
+
+            // Lighthouse — iconic coastal navigational aid, tall cylinder
+            // tower + conical lantern room cap + keeper's cottage. Rare
+            // (1-2 per regional coastline). Bleeds to CoastalBoreal where
+            // lighthouses are equally iconic.
+            (
+                id: "lighthouse",
+                slope_tolerance_max_deg: 12.0,
+                roughness_tolerance_m: 80.0,
+                water_adjacency: Required,
+                altitude_range_m: (-5.0, 200.0),
+                selection_weight: 0.3,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (230, 225, 215),
+                    secondary: (170, 55, 50),
+                    accent: (50, 65, 85),
+                )),
+                adaptation_per_host: {
+                    "CoastalBoreal": (
+                        primary: (220, 215, 205),
+                        secondary: (130, 65, 60),
+                        accent: (55, 75, 95),
+                    ),
+                    "HighDesert": (
+                        primary: (225, 200, 170),
+                        secondary: (175, 75, 55),
+                        accent: (80, 75, 70),
+                    ),
+                    "RockyAlpine": (
+                        primary: (210, 210, 215),
+                        secondary: (140, 60, 55),
+                        accent: (55, 60, 70),
+                    ),
+                },
+                palette_category: Some(BuildingMasonry),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Regional": 50.0, "Local": 30.0 },
+                    )),
+                    self_spacing: Some((min_km: 60.0)),
+                )),
+                composition: Some([
+                    // Tower shaft — tall white cylinder.
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (4.5, 18.0, 4.5),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Lantern room cap (cone).
+                    (
+                        kind: Cone,
+                        count: (1, 1),
+                        base_size_m: (4.5, 3.0, 4.5),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 128,
+                    ),
+                    // Red-striped accent band (short cylinder around the tower).
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (4.8, 2.5, 4.8),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 256,
+                    ),
+                    // Keeper's cottage.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (8.0, 4.0, 10.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (12.0, 0.0)),
+                        rng_stream: 512,
+                    ),
+                ]),
+            ),
+
+            // ─── More Mediterranean developed features (5c.2.c.5) ───
+
+            // Coastal village — tight cluster of white-stucco buildings
+            // with terracotta (half-cylinder) roofs + a few cypress /
+            // olive cones. Classic Aegean / Cycladic idiom. Local /
+            // Regional hubs in coastal zones.
+            (
+                id: "coastal_village",
+                slope_tolerance_max_deg: 12.0,
+                roughness_tolerance_m: 60.0,
+                water_adjacency: Required,
+                altitude_range_m: (-5.0, 250.0),
+                selection_weight: 0.4,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (225, 220, 205),
+                    secondary: (170, 80, 60),
+                    accent: (65, 105, 135),
+                )),
+                adaptation_per_host: {
+                    "CoastalBoreal": (
+                        primary: (205, 200, 195),
+                        secondary: (140, 75, 60),
+                        accent: (75, 100, 125),
+                    ),
+                    "HighDesert": (
+                        primary: (225, 205, 170),
+                        secondary: (180, 90, 60),
+                        accent: (110, 95, 80),
+                    ),
+                    "RockyAlpine": (
+                        primary: (215, 215, 220),
+                        secondary: (140, 75, 60),
+                        accent: (80, 90, 100),
+                    ),
+                },
+                palette_category: Some(BuildingMasonry),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Regional": 20.0, "Local": 8.0 },
+                    )),
+                    self_spacing: Some((min_km: 15.0)),
+                )),
+                composition: Some([
+                    // 6-10 white-stucco buildings (box + half-cyl roof).
+                    (
+                        kind: Box,
+                        count: (6, 10),
+                        base_size_m: (6.0, 4.0, 7.0),
+                        scale_jitter: (0.85, 1.15),
+                        color_source: Primary,
+                        placement: RadialCluster(radius_m: 30.0),
+                        rng_stream: 0,
+                    ),
+                    // Olive / cypress trees scattered between.
+                    (
+                        kind: Cone,
+                        count: (3, 5),
+                        base_size_m: (2.5, 7.0, 2.5),
+                        scale_jitter: (0.8, 1.2),
+                        color_source: Accent,
+                        placement: RadialCluster(radius_m: 35.0),
+                        rng_stream: 256,
+                    ),
+                ]),
+            ),
+
+            // Olive grove — regular grid of olive trees, small farmstead
+            // + dirt-path quad. Mediterranean agricultural signature.
+            // Local-tier hubs.
+            (
+                id: "olive_grove",
+                slope_tolerance_max_deg: 8.0,
+                roughness_tolerance_m: 40.0,
+                water_adjacency: None,
+                altitude_range_m: (0.0, 600.0),
+                selection_weight: 0.5,
+                is_bleed_over_candidate: false,
+                home_palette: Some((
+                    primary: (185, 175, 125),
+                    secondary: (110, 130, 85),
+                    accent: (145, 110, 80),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(Vegetation),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Local": 20.0, "Regional": 30.0 },
+                    )),
+                    self_spacing: Some((min_km: 12.0)),
+                )),
+                composition: Some([
+                    // Dirt path running through grove.
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (80.0, 0.1, 4.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Dense olive-tree scatter (many cones, grove-like).
+                    (
+                        kind: Cone,
+                        count: (20, 28),
+                        base_size_m: (2.0, 4.0, 2.0),
+                        scale_jitter: (0.8, 1.2),
+                        color_source: Secondary,
+                        placement: RadialCluster(radius_m: 50.0),
+                        rng_stream: 256,
+                    ),
+                    // Small farmstead.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (6.0, 4.0, 8.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (45.0, 15.0)),
+                        rng_stream: 512,
+                    ),
+                ]),
+            ),
+
+            // Watchtower — stone cylindrical tower with conical roof.
+            // Medieval coastal-defense idiom. Prominence-required
+            // placement so it tops headlands / ridges. Rare, evocative.
+            (
+                id: "watchtower",
+                slope_tolerance_max_deg: 20.0,
+                roughness_tolerance_m: 150.0,
+                water_adjacency: None,
+                altitude_range_m: (20.0, 500.0),
+                selection_weight: 0.15,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (160, 145, 115),
+                    secondary: (105, 90, 75),
+                    accent: (85, 70, 55),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(Stone),
+                placement_rules: Some((
+                    self_spacing: Some((min_km: 40.0)),
+                    prominence: Some((min_m: 40.0, min_slope_deg: 15.0)),
+                )),
+                composition: Some([
+                    // Thick stone tower.
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (6.0, 10.0, 6.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Conical roof cap.
+                    (
+                        kind: Cone,
+                        count: (1, 1),
+                        base_size_m: (6.0, 3.0, 6.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 128,
+                    ),
+                ]),
+            ),
+
+            // Marina — recreational harbor with piers, moored boats
+            // (sphere approximations), small harbor office. Regional
+            // tier hubs with water adjacency.
+            (
+                id: "marina",
+                slope_tolerance_max_deg: 4.0,
+                roughness_tolerance_m: 25.0,
+                water_adjacency: Required,
+                altitude_range_m: (-5.0, 20.0),
+                selection_weight: 0.3,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (210, 200, 185),
+                    secondary: (90, 75, 65),
+                    accent: (180, 65, 55),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(BuildingWooden),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Regional": 5.0, "Local": 3.0 },
+                    )),
+                    self_spacing: Some((min_km: 25.0)),
+                )),
+                composition: Some([
+                    // Main pier (flat quad).
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (40.0, 0.2, 5.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Finger piers (3 shorter quads running perpendicular).
+                    (
+                        kind: FlatQuad,
+                        count: (3, 3),
+                        base_size_m: (15.0, 0.2, 2.5),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: LinearChain(
+                            start_m: (-12.0, 8.0),
+                            direction_rad: 0.0,
+                            spacing_m: 12.0,
+                        ),
+                        rng_stream: 128,
+                    ),
+                    // Moored boats (spheres along finger piers).
+                    (
+                        kind: Sphere,
+                        count: (6, 9),
+                        base_size_m: (3.0, 1.5, 5.0),
+                        scale_jitter: (0.8, 1.2),
+                        color_source: Primary,
+                        placement: RadialCluster(radius_m: 18.0),
+                        rng_stream: 256,
+                    ),
+                    // Harbor office.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (8.0, 4.0, 6.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (22.0, -8.0)),
+                        rng_stream: 512,
+                    ),
+                    // Red "no wake" marker buoy (cylinder).
+                    (
+                        kind: Cylinder,
+                        count: (1, 1),
+                        base_size_m: (0.6, 1.5, 0.6),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (-22.0, 0.0)),
+                        rng_stream: 768,
+                    ),
+                ]),
+            ),
+
+            // ─── More Mediterranean features (5c.2.c.6) ─────────────
+
+            // Vineyard — ordered rows of grapevines (short cylinders
+            // on wire trellises) + winery building + dirt access road.
+            // Agricultural sibling to olive_grove; distinct pattern.
+            (
+                id: "vineyard",
+                slope_tolerance_max_deg: 8.0,
+                roughness_tolerance_m: 40.0,
+                water_adjacency: None,
+                altitude_range_m: (20.0, 800.0),
+                selection_weight: 0.3,
+                is_bleed_over_candidate: false,
+                home_palette: Some((
+                    primary: (175, 155, 115),
+                    secondary: (95, 115, 80),
+                    accent: (140, 95, 75),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(Vegetation),
+                placement_rules: Some((
+                    hub: Some((
+                        proximity_km_per_tier: { "Regional": 15.0, "Local": 8.0 },
+                    )),
+                    self_spacing: Some((min_km: 10.0)),
+                )),
+                composition: Some([
+                    // 3 rows of vine cylinders (LinearChain each).
+                    (
+                        kind: Cylinder,
+                        count: (12, 12),
+                        base_size_m: (0.3, 1.8, 0.3),
+                        scale_jitter: (0.9, 1.1),
+                        color_source: Secondary,
+                        placement: LinearChain(
+                            start_m: (-35.0, -8.0),
+                            direction_rad: 0.0,
+                            spacing_m: 6.0,
+                        ),
+                        rng_stream: 0,
+                    ),
+                    (
+                        kind: Cylinder,
+                        count: (12, 12),
+                        base_size_m: (0.3, 1.8, 0.3),
+                        scale_jitter: (0.9, 1.1),
+                        color_source: Secondary,
+                        placement: LinearChain(
+                            start_m: (-35.0, 0.0),
+                            direction_rad: 0.0,
+                            spacing_m: 6.0,
+                        ),
+                        rng_stream: 64,
+                    ),
+                    (
+                        kind: Cylinder,
+                        count: (12, 12),
+                        base_size_m: (0.3, 1.8, 0.3),
+                        scale_jitter: (0.9, 1.1),
+                        color_source: Secondary,
+                        placement: LinearChain(
+                            start_m: (-35.0, 8.0),
+                            direction_rad: 0.0,
+                            spacing_m: 6.0,
+                        ),
+                        rng_stream: 128,
+                    ),
+                    // Winery building.
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (12.0, 5.0, 16.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (55.0, 0.0)),
+                        rng_stream: 256,
+                    ),
+                    // Access road (flat quad).
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (80.0, 0.1, 3.5),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Accent,
+                        placement: Single(offset_m: (10.0, -18.0)),
+                        rng_stream: 512,
+                    ),
+                ]),
+            ),
+
+            // Ancient ruins — stone ruins: scattered column cylinders +
+            // low wall boxes + central platform quad. Mission anchor
+            // (archaeology, lore). Rare, evocative.
+            (
+                id: "ancient_ruins",
+                slope_tolerance_max_deg: 10.0,
+                roughness_tolerance_m: 50.0,
+                water_adjacency: None,
+                altitude_range_m: (0.0, 600.0),
+                selection_weight: 0.15,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (180, 165, 140),
+                    secondary: (145, 130, 110),
+                    accent: (110, 95, 80),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(Stone),
+                placement_rules: Some((
+                    self_spacing: Some((min_km: 60.0)),
+                )),
+                composition: Some([
+                    // Central platform quad (stone pavement).
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (20.0, 0.3, 15.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Column cylinders (broken, varied heights).
+                    (
+                        kind: Cylinder,
+                        count: (6, 8),
+                        base_size_m: (1.2, 5.0, 1.2),
+                        scale_jitter: (0.5, 1.2),
+                        color_source: Secondary,
+                        placement: RadialCluster(radius_m: 12.0),
+                        rng_stream: 128,
+                    ),
+                    // Fallen wall segments (low boxes).
+                    (
+                        kind: Box,
+                        count: (3, 5),
+                        base_size_m: (3.0, 1.5, 1.5),
+                        scale_jitter: (0.7, 1.3),
+                        color_source: Accent,
+                        placement: RadialCluster(radius_m: 18.0),
+                        rng_stream: 256,
+                    ),
+                ]),
+            ),
+
+            // Monastery — walled religious complex: central chapel box
+            // with cone bell tower + cloister half-cylinder arcade +
+            // walled courtyard quad + cypress cones. Rare, iconic.
+            (
+                id: "monastery",
+                slope_tolerance_max_deg: 12.0,
+                roughness_tolerance_m: 80.0,
+                water_adjacency: None,
+                altitude_range_m: (50.0, 1200.0),
+                selection_weight: 0.1,
+                is_bleed_over_candidate: true,
+                home_palette: Some((
+                    primary: (210, 195, 170),
+                    secondary: (155, 85, 70),
+                    accent: (85, 75, 60),
+                )),
+                adaptation_per_host: {},
+                palette_category: Some(BuildingMasonry),
+                placement_rules: Some((
+                    self_spacing: Some((min_km: 70.0)),
+                    prominence: Some((min_m: 25.0, min_slope_deg: 8.0)),
+                )),
+                composition: Some([
+                    // Walled courtyard (stone paving quad).
+                    (
+                        kind: FlatQuad,
+                        count: (1, 1),
+                        base_size_m: (25.0, 0.2, 25.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 0.0)),
+                        rng_stream: 0,
+                    ),
+                    // Chapel (main box).
+                    (
+                        kind: Box,
+                        count: (1, 1),
+                        base_size_m: (10.0, 7.0, 15.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, -5.0)),
+                        rng_stream: 128,
+                    ),
+                    // Bell tower (cone on top of chapel, or next to it).
+                    (
+                        kind: Cone,
+                        count: (1, 1),
+                        base_size_m: (4.0, 6.0, 4.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Secondary,
+                        placement: Single(offset_m: (-7.0, -5.0)),
+                        rng_stream: 256,
+                    ),
+                    // Cloister arcade (half-cylinder running along edge).
+                    (
+                        kind: HalfCylinder,
+                        count: (1, 1),
+                        base_size_m: (24.0, 3.0, 4.0),
+                        scale_jitter: (1.0, 1.0),
+                        color_source: Primary,
+                        placement: Single(offset_m: (0.0, 12.0)),
+                        rng_stream: 384,
+                    ),
+                    // Cypress trees flanking entrance.
+                    (
+                        kind: Cone,
+                        count: (4, 4),
+                        base_size_m: (1.8, 6.0, 1.8),
+                        scale_jitter: (0.9, 1.1),
+                        color_source: Accent,
+                        placement: LinearChain(
+                            start_m: (-12.0, -15.0),
+                            direction_rad: 0.0,
+                            spacing_m: 8.0,
+                        ),
+                        rng_stream: 512,
+                    ),
+                ]),
             ),
         ],
     },

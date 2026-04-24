@@ -553,17 +553,19 @@ impl Renderer {
             },
         };
 
-        // 3.6.3c.5c.1: feature-instance renderer. Uses the existing
-        // camera + scene bind group layouts so the draw can share
-        // uniforms with the main scene pass. Instance buffer starts
-        // empty; game_app uploads when the active cell set resolves.
-        let primitive_box = CpuMesh::primitive_box();
+        // 3.6.3c.5c.1 + 5c.2.a: feature-instance renderer. One mesh
+        // per primitive kind (box / cone / cylinder / sphere). Shares
+        // the camera + scene bind groups with the main scene pipeline.
+        // Instance buffers start empty; `game_app` uploads per-kind
+        // when the active cell set resolves.
+        let instance_meshes = InstanceRenderer::build_primitive_meshes();
+        let instance_mesh_refs: Vec<&CpuMesh> = instance_meshes.iter().collect();
         let instances = InstanceRenderer::new(
             device,
             &camera_bgl,
             &scene_bgl,
             surface_format,
-            &primitive_box,
+            &instance_mesh_refs,
         );
 
         // Two slots: slot 0 = bottom-right orientation gizmo, slot 1 = bottom-left
@@ -731,21 +733,24 @@ impl Renderer {
         self.water_follows_camera = follows;
     }
 
-    /// Phase 3.6.3c.5c.1: replace the feature-instance active-set
-    /// buffer. Called by `game_app` whenever the streaming cell active
-    /// set changes. Empty slice clears the draw (zero instances).
-    pub fn upload_instances(
+    /// Phase 3.6.3c.5c.1 + 5c.2.a: replace the active-set instance
+    /// list for a single primitive kind. Caller groups instances by
+    /// kind + calls this once per kind per rebuild. Empty slice clears
+    /// the kind's draw (no-op on record).
+    pub fn upload_instances_for(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        kind: flowplan_world::feature_instances::PrimitiveKind,
         data: &[InstanceGpuData],
     ) {
-        self.instances.upload(device, queue, data);
+        self.instances.upload_kind(device, queue, kind, data);
     }
 
-    /// Live instance count. Useful for debug HUD + telemetry.
+    /// Live instance count across all primitive kinds. Debug HUD +
+    /// telemetry consumer.
     #[must_use]
-    pub const fn instance_count(&self) -> u32 {
+    pub fn instance_count(&self) -> u32 {
         self.instances.instance_count()
     }
 

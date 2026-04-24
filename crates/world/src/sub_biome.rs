@@ -210,6 +210,14 @@ pub struct SubBiomeFeature {
     /// `None` = no extended rules (baseline placement only).
     #[serde(default)]
     pub placement_rules: Option<PlacementRules>,
+    /// Primitive composition (Phase 3.6.3c.5c.2.b). When `Some`, the
+    /// bake emits [`crate::feature_instances::FeatureInstance`] entries
+    /// for each listed `PrimitiveComponent`. `None` = no render-side
+    /// primitives (pure heightfield delta + future mesh-anchor
+    /// features). Authored per-feature in
+    /// `data/world/sub_biome_features.ron`.
+    #[serde(default)]
+    pub composition: Option<Vec<crate::feature_instances::PrimitiveComponent>>,
 }
 
 /// Nested placement-rule schema (3.6.3c.1).
@@ -1754,6 +1762,7 @@ mod tests {
             adaptation_per_host: HashMap::new(),
             palette_category: None,
             placement_rules: None,
+            composition: None,
         };
         // All pass.
         let ok = PlacementContext {
@@ -1804,6 +1813,7 @@ mod tests {
             adaptation_per_host: HashMap::new(),
             palette_category: None,
             placement_rules: None,
+            composition: None,
         };
         let forb = SubBiomeFeature {
             water_adjacency: WaterAdjacency::Forbidden,
@@ -1953,6 +1963,7 @@ mod tests {
             adaptation_per_host: over,
             palette_category: Some(PaletteCategory::BuildingWooden),
             placement_rules: None,
+            composition: None,
         };
         let libs = SubBiomeLibraries::shared();
         let adapted = adapt_palette(&feature, BiomeClass::RockyAlpine, libs);
@@ -1984,6 +1995,7 @@ mod tests {
             adaptation_per_host: HashMap::new(),
             palette_category: Some(PaletteCategory::BuildingWooden),
             placement_rules: None,
+            composition: None,
         };
         let libs = SubBiomeLibraries::shared();
         let adapted = adapt_palette(&feature, BiomeClass::RockyAlpine, libs);
@@ -2017,6 +2029,7 @@ mod tests {
             adaptation_per_host: HashMap::new(),
             palette_category: None,
             placement_rules: None,
+            composition: None,
         };
         let libs = SubBiomeLibraries::shared();
         let adapted = adapt_palette(&feature, BiomeClass::HighDesert, libs);
@@ -2039,6 +2052,7 @@ mod tests {
             adaptation_per_host: HashMap::new(),
             palette_category: None,
             placement_rules: None,
+            composition: None,
         };
         let libs = SubBiomeLibraries::shared();
         let adapted = adapt_palette(&feature, BiomeClass::HighDesert, libs);
@@ -2061,6 +2075,7 @@ mod tests {
             adaptation_per_host: HashMap::new(),
             palette_category: None,
             placement_rules: None,
+            composition: None,
         };
         // We can't easily construct a real HubCatalog + HydrologyGraph in
         // a unit test. Assert only the short-circuit path (rules=None):
