@@ -999,9 +999,25 @@ Split (pinned 2026-04-23 per user direction, detail in [MAPGEN.md § Layer 3 pha
 
 - [ ] `composed::WorldRefs` computes `source_weight` + `blend_factor = smoothstep(0.1, 0.9, source_weight)`; shader-side palette lerp. Visual-bench `palette_bleed_over_{crop}.png`. Makes the winter-ranch / desert-fjord effects actually visible.
 
-**3.6.3c.5 — Debug camera (Task #223): pending.**
+**3.6.3c.5b — Render streaming (Task #226): pending.** Ships first because the debug camera depends on it (a free-fly camera against a fixed 4 km mesh sees nothing useful past x = ±2 km).
+
+- [ ] **Layer 1 — uniform terrain mesh, recenter on camera**: `StreamingTerrain` with `maybe_rebuild` checking distance threshold. 10 km half-extent / 20 m cells / ~1 M verts default. Performance slider exposed in Phase 4.8 settings UI.
+- [ ] **Layer 2 — active cell set**: `Vec<CellId>` of Voronoi cells within `STREAM_RADIUS_M` (10 km default) of active camera. Refreshed per frame via `SubBiomeCellCatalog::cells_within_radius`.
+- [ ] **`app::ActiveCamera`** abstraction: single source of truth for camera pose, returns sim camera in normal play, debug camera in debug mode. Both streaming layers read from this.
+- [ ] **Async mesh build via `rayon::par_iter`** on the terrain_patch construction loop. Targets ~5× speedup on the rebuild (50-100 ms → 15-25 ms).
+- [ ] **Same pattern for water mesh** at smaller half-extent (4 km).
+- [ ] **Toroidal wrap handling**: both layers use `wrap_coord` for camera position; verify mesh + cell set wrap seamlessly past world edges.
+- [ ] **Tests**: 7 specific tests in `crates/world/tests/streaming_test.rs` (active-cell-set correctness at position, set updates on movement, mesh recenter triggers at threshold, mesh determinism at rest, traversal-path independence, vertex-count budget, toroidal wrap handling).
+- [ ] Full design spec: [MAPGEN.md § Render streaming](MAPGEN.md#render-streaming--uniform-terrain-mesh--voronoi-cell-active-set-pinned-2026-04-23) + memory `streaming_render_architecture`.
+
+**3.6.3c.5a — Debug camera (Task #223): pending — ships AFTER 5b.**
 
 - [ ] Slew-mode free 6-DoF camera, no aircraft model — in-engine verification of placement rules + palette adaptation + deltas. Evolves into photo-mode (5.5) + multiplayer spectator (Phase 6). Memory `visual_bench_pattern` flags this pre-spec.
+- [ ] Bindings: WASD horizontal, Left Shift / Left Ctrl vertical, mouse Δ for yaw + pitch, Tab cycles speed (50 / 100 / 500 m/s), backtick (`) toggles in/out, ESC releases mouse capture.
+- [ ] `app::ActiveCamera` integration — debug camera writes its pose when active; streaming + render read from the same source-of-truth.
+- [ ] Aircraft instrument-panel HUDs hide while debug camera is active; minimal debug overlay (position, heading, speed-tier, frame time) shows instead.
+- [ ] Sim continues running in background — exiting debug mode resumes normal play with the aircraft wherever physics took it.
+- [ ] Screenshot (F12 → PNG to `target/screenshots/`) — **deferred** to 3.6.3c.5a-followup; user can capture with external tools meanwhile.
 
 ### Milestone 3.6.4: Flora, decoration, seasonal overlay
 

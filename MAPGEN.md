@@ -783,6 +783,102 @@ Measured at canonical seed: **275 s serial → 33 s parallel = 8.3× speedup** o
 
 **Scan-order — master-seed-keyed permutation (3.6.3c.1c PINNED)**: cell processing order is a deterministic permutation `splitmix64(master_seed, cell_id)` rather than naive `0..n_cells` ascending. Bridson's depth-first spatial walk produces cell IDs that are spatially correlated (cells near initial seed get low IDs, far cells get high IDs); naive ascending order would give the low-ID region "first pick" on contested high-spacing features (e.g. `hot_springs` with 50 km min_km). The permutation removes geographic bias while preserving full bit-identical determinism per master_seed. Same seed → same permutation → same bake output across all platforms.
 
+### Render streaming — uniform terrain mesh + Voronoi-cell active set (PINNED 2026-04-23)
+
+The 5000 km × 5000 km world cannot fit a single rendered mesh; rendering must stream content relative to the active camera position. The architecture is a **hybrid two-layer split**: continuous data (heightfield) gets a uniform mesh; cell-aligned content (features, hubs, overlays) gets a Voronoi-cell active set. Honors the PINNED `voronoi_subbiome_architecture` cell-as-unit-of-streaming direction at the render layer.
+
+#### Layer 1 — Uniform terrain mesh (recenter on camera)
+
+Single GPU mesh, fixed size (10 km half-extent = 20 km × 20 km), uniform tessellation (~1 M vertices at 20 m per cell). When the **active camera** moves more than `REBUILD_THRESHOLD_M` (default 2 km) from the mesh center, the mesh rebuilds at the new camera position.
+
+```rust
+pub struct StreamingTerrain {
+    cpu_mesh: CpuMesh,
+    gpu: GpuMesh,
+    center: Vec2,
+    half_extent: f32,
+    resolution: u32,
+}
+
+impl StreamingTerrain {
+    pub fn maybe_rebuild(&mut self, camera_pos: Vec2, terrain: &Terrain, device: &Device) {
+        if (camera_pos - self.center).length() > REBUILD_THRESHOLD_M {
+            self.cpu_mesh = CpuMesh::terrain_patch_at(
+                self.resolution, self.half_extent, camera_pos, terrain,
+            );  // built via rayon::par_iter
+            self.gpu = GpuMesh::upload(device, &self.cpu_mesh);
+            self.center = camera_pos;
+        }
+    }
+}
+```
+
+**Why uniform grid for terrain**: the heightfield is a continuous function `terrain.height(x, z)` regardless of cell boundaries. A uniform grid is the cheapest correct way to render it — one mesh, one draw call, predictable cost. Per-cell triangulation would be 5-10× more complex (irregular polygon clipping, per-cell vertex sharing for seam-free boundaries, more draw calls) for zero visual benefit since terrain is continuous.
+
+**Why recenter rather than chunk**: chunks are a clean future evolution but add cache-management complexity. Single-mesh-recenter is the MVP; chunks land when LOD or cache benefits justify them.
+
+**Performance slider**: mesh sizing exposed in Phase 4.8 settings UI. Strong hardware → 16 km / 30 m cells / 4 M verts. Weak → 5 km / 40 m cells / 250 K verts. Default 10 km / 20 m / 1 M verts.
+
+#### Layer 2 — Active cell set (content streaming)
+
+`Vec<CellId>` of all sub-biome Voronoi cells whose **seed position** is within `STREAM_RADIUS_M` (default 10 km) of the active camera. Refreshed each frame via `SubBiomeCellCatalog::cells_within_radius(camera_pos, STREAM_RADIUS_M)` — O(K) where K is the cell count in radius (~80 at 2 km avg spacing × 10 km radius).
+
+The active set is the **unit-of-content-streaming**. Anything that lives per-cell hooks into this set:
+
+- **Feature instances** (3.6.3c.5c+ when sub-biome feature primitives ship): each cell in the active set contributes its instance list (boxes, cones per [`simple_primitives_render_direction`](#simple-primitives-render-direction-pinned)). Cells leaving the set discard their instances.
+- **Future LOD decisions**: cells within ~3 km = full detail; 3-7 km = mid; 7-10 km = silhouette only.
+- **Hub markers / chart overlays** (Phase 4.7): cells determine which hubs are within visible chart radius.
+- **Weather visualization**: per-cell weather state (3.2 weather Voronoi) renders only for active cells.
+- **Audio sources** (Phase 5+): bird calls, water sounds, wind soundscape — emit from cells in the set.
+
+#### Active camera arbitration
+
+One source of truth per frame: `app::ActiveCamera` returns the pose used by both streaming layers + the renderer's `CameraUniform`. In normal play it's the sim camera (chase / cockpit / orbit). In debug mode (3.6.3c.5a backtick toggle) it's the debug-fly camera. Both streaming layers read from this single source — no duplicated logic.
+
+#### Determinism
+
+- **At-rest deterministic**: at any camera position, the rendered terrain mesh + active cell set are identical. Same seed → same output.
+- **In-flight non-deterministic**: rebuild trigger order depends on camera trajectory. Acceptable — gameplay-relevant world state (hydrology, BakedAssignments, hub catalog) is fully deterministic at the bake level. Only the rendering view-window varies with player path.
+
+#### Toroidal world wrap
+
+Active camera position uses `flowplan_core::wrap_coord` for both layer queries. Camera flying past world edge sees terrain wrap seamlessly. Terrain mesh sampling already wraps via `terrain.height`; cell-active-set query uses toroidal-wrap-aware spatial-hash mode.
+
+#### Memory budget
+
+| State | Approx | Notes |
+|---|--:|---|
+| Terrain GPU mesh (1 M verts × 32 bytes) | ~32 MB | Layer 1 active mesh |
+| Water GPU mesh (160 K verts × 32 bytes) | ~5 MB | Same pattern, smaller patch |
+| CPU mesh shadow during rebuild (transient) | +~32 MB | Dropped after upload |
+| Active cell set (Vec<CellId>) | <1 KB | Layer 2 active list |
+| Per-cell instance lists (3.6.3c.5c+) | TBD | Future feature instances |
+| **Total render-side world state** | **~37 MB steady, ~70 MB transient during rebuild** | Within budget |
+
+World-bake state (hydrology + hub_catalog + BakedAssignments + terrain) totals ~200 MB. Render layer adds ~37 MB. **Total ~237 MB** for full world. Lean per the user-pinned posture (vs. Minecraft-style multi-GB world states).
+
+#### Performance
+
+- **Mesh rebuild**: ~50-100 ms CPU (1 M `terrain.height` calls) → reduced to ~15-25 ms with `rayon::par_iter` on the patch construction (rayon already in workspace per 3.6.3c.1c). GPU upload ~10-20 ms.
+- **Rebuild frequency**: every 2 km of camera motion. At 100 m/s = every 20 sec. At 500 m/s = every 4 sec.
+- **Cell active-set refresh**: <1 ms per frame.
+- **Hot-path impact**: NONE per-frame except the single rebuild stutter every N km.
+
+#### Future-improvement candidates
+
+1. **Async mesh build** — already shipped from day one via `rayon::par_iter`.
+2. **LOD tiers** — coarse background mesh (50 km × 50 km, 100 cells, ~10 K verts) + fine detail mesh.
+3. **Multi-chunk grid** — 4 km × 4 km chunks, NxN grid active around camera, with cache for recently-evicted.
+4. **Per-cell mesh subdivision (true cell-aligned terrain)** — only if visual evidence shows uniform-grid artifacts at cell boundaries. Probably never needed.
+5. **Origin-shift coordinate system** — keep render-space relative to camera; shift every 1 km to keep f32 precision tight. Phase 6+ if precision artifacts surface near world edge (~30 cm jitter at 2500 km from origin).
+6. **Predictive prefetch** — extrapolate camera direction, pre-rebuild mesh ahead of motion before threshold trips.
+7. **Sub-biome feature instance streaming** (3.6.3c.5c+) — per-cell instances per the simple-primitives memory.
+8. **Hub-marker streaming overlays** (Phase 4.7) — same Layer-2 pattern, different content.
+9. **Weather visualization streaming** — per-cell weather state from 3.2 weather Voronoi.
+10. **Audio source streaming** (Phase 5+) — environmental SFX positioned per-cell.
+
+Memory reference: `streaming_render_architecture` — pinned design direction, full detail.
+
 ### Composition properties (why this separation matters)
 
 - **Independent development.** Each layer lands on a separate milestone. Layer 1 = Phase 3.6.1; Layer 2 = Phase 3.6.2; Layer 3 = Phase 3.6.3 + 3.6.4.
