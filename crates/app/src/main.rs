@@ -15,6 +15,7 @@ mod debug_hud;
 mod game_app;
 mod input_map;
 mod snapshot_buf;
+mod streaming;
 
 use anyhow::{Context, Result};
 use tracing_subscriber::EnvFilter;

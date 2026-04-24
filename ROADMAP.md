@@ -1015,7 +1015,7 @@ Split (pinned 2026-04-23 per user direction, detail in [MAPGEN.md § Layer 3 pha
 - [ ] Slew-mode free 6-DoF camera, no aircraft model — in-engine verification of placement rules + palette adaptation + deltas. Evolves into photo-mode (5.5) + multiplayer spectator (Phase 6). Memory `visual_bench_pattern` flags this pre-spec.
 - [ ] Bindings: WASD horizontal, Left Shift / Left Ctrl vertical, mouse Δ for yaw + pitch, Tab cycles speed (50 / 100 / 500 m/s), backtick (`) toggles in/out, ESC releases mouse capture.
 - [ ] `app::ActiveCamera` integration — debug camera writes its pose when active; streaming + render read from the same source-of-truth.
-- [ ] Aircraft instrument-panel HUDs hide while debug camera is active; minimal debug overlay (position, heading, speed-tier, frame time) shows instead.
+- [ ] Aircraft instrument-panel HUDs hide while debug camera is active; minimal debug overlay shows: position (X/Y/Z world coords), heading, speed-tier (50/100/500), **FPS + frametime** (per user spec 2026-04-23 — useful for performance measurement while flying the streaming mesh), active-cell-count (from `StreamingCellSet.active_count()`).
 - [ ] Sim continues running in background — exiting debug mode resumes normal play with the aircraft wherever physics took it.
 - [ ] Screenshot (F12 → PNG to `target/screenshots/`) — **deferred** to 3.6.3c.5a-followup; user can capture with external tools meanwhile.
 

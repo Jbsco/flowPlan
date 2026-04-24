@@ -653,6 +653,23 @@ impl Renderer {
     /// Toggle whether the water mesh is rendered. Default `true`. Set to
     /// `false` for wheels-variant scenarios on flat-land terrain, where the
     /// y=0 water surface would z-fight the y=0 terrain.
+    /// Replace the terrain `GpuMesh` from a freshly-built `CpuMesh`.
+    ///
+    /// Used by the streaming-render layer (Phase 3.6.3c.5b) when the
+    /// active camera moves enough to trigger a mesh rebuild. Old VBO /
+    /// IBO are dropped (wgpu handles GPU lifetime — buffers are kept
+    /// alive until current GPU work finishes).
+    pub fn update_terrain_mesh(&mut self, device: &wgpu::Device, mesh: &flowplan_assets::CpuMesh) {
+        self.terrain.mesh = GpuMesh::upload(device, mesh);
+    }
+
+    /// Replace the water `GpuMesh` from a freshly-built `CpuMesh`.
+    ///
+    /// Same pattern as [`Self::update_terrain_mesh`] for water streaming.
+    pub fn update_water_mesh(&mut self, device: &wgpu::Device, mesh: &flowplan_assets::CpuMesh) {
+        self.water.mesh = GpuMesh::upload(device, mesh);
+    }
+
     pub fn set_water_visible(&mut self, visible: bool) {
         self.draw_water = visible;
     }

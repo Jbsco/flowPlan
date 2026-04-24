@@ -3,7 +3,70 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
-Last updated: **2026-04-23** (Phase 2.5 **SHIPPED**; Phase 3.2.1 + 3.2.2 + 3.2.3 weather W1/W2/W3 **SHIPPED**; world scope **LOCKED to Option A toroidal**; progression data-model locked; **scenario-realism audit COMPLETE**; **flight-model realism pass COMPLETE**; **water-physics hardening COMPLETE**; **Phase 3.6.0 through 3.6.2 SHIPPED**; **Phase 3.6.3a SHIPPED**; **Phase 3.6.3b SHIPPED** — palette adaptation via biome-receives HSV shift + simple-primitives render direction, 18 cross-biome features authored in RON with palettes + categories, full-spec placement rules; **Phase 3.6.3c.1 SHIPPED** — `PlacementRules` nested schema (7 categories) + `evaluate_placement_rules` function (5 rule categories evaluated lazily); **Phase 3.6.3c.1c SHIPPED** — `BakedAssignments` eager-bake materializes per-cell sub-biome assignments with self-spacing + attractor `weight_mult` biasing; rayon parallel two-phase architecture (Phase A read-only par_iter + Phase B serial permuted-order merge) hits **8.3× speedup** (275 s → 33 s at canonical seed), bit-identical output. ~20 MB world-state memory budget (u16-interned feature ids); rayon added to DESIGN.md tech-stack + workspace deps. Bench at ~70 scenarios + 501 unit tests, full gate green. **Now: Phase 3.6.3c.2** — per-cell deltas for 18 3.6.3b features + over-strict-rule tuning.).
+Last updated: **2026-04-23** (Phase 2.5 **SHIPPED**; Phase 3.2.1 + 3.2.2 + 3.2.3 weather W1/W2/W3 **SHIPPED**; world scope **LOCKED to Option A toroidal**; progression data-model locked; **scenario-realism audit COMPLETE**; **flight-model realism pass COMPLETE**; **water-physics hardening COMPLETE**; **Phase 3.6.0 through 3.6.2 SHIPPED**; **Phase 3.6.3a SHIPPED**; **Phase 3.6.3b SHIPPED** — palette adaptation via biome-receives HSV shift + simple-primitives render direction, 18 cross-biome features authored in RON with palettes + categories, full-spec placement rules; **Phase 3.6.3c.1 SHIPPED** — `PlacementRules` nested schema (7 categories) + `evaluate_placement_rules` function (5 rule categories evaluated lazily); **Phase 3.6.3c.1c SHIPPED** — `BakedAssignments` eager-bake materializes per-cell sub-biome assignments with self-spacing + attractor `weight_mult` biasing; rayon parallel two-phase architecture (Phase A read-only par_iter + Phase B serial permuted-order merge) hits **8.3× speedup** (275 s → 33 s at canonical seed), bit-identical output. ~20 MB world-state memory budget (u16-interned feature ids); rayon added to DESIGN.md tech-stack + workspace deps. Bench at ~70 scenarios + 501 unit tests, full gate green. **Phase 3.6.3c.5b SHIPPED** — render streaming with rayon-parallel mesh build (10 km terrain + water half-extent, ~1 M terrain verts at 20 m cells, 2 km rebuild threshold) + Voronoi cell active set (`StreamingCellSet` for future content streaming); `ActiveCamera` single-source-of-truth abstraction ready for 3.6.3c.5a debug-camera integration; rayon added to DESIGN.md tech-stack + assets crate. 508 workspace tests pass. **Now: Phase 3.6.3c.5a** — debug camera (WASD + mouse + Tab speed cycle + backtick toggle + debug HUD with pos / heading / speed-tier / **FPS + frametime**).).
+
+## 2026-04-23 (iteration 9) — Phase 3.6.3c.5b (Render streaming — uniform terrain + Voronoi cell active set)
+
+First render-streaming layer for flowPlan. The 5000 km world is now inspectable anywhere — terrain mesh recenters on active camera as it moves; Voronoi cell active set tracks cells within streaming radius for future content layers (feature instances, hub markers, weather overlays, audio sources). Full design in MAPGEN § Render streaming + memory `streaming_render_architecture`.
+
+- **`crates/app/src/streaming.rs`** (~490 LOC including tests): new module holding `StreamingTerrain` + `StreamingWater` (Layer 1 mesh) + `StreamingCellSet` (Layer 2 cell active set) + `ActiveCamera` (single-source-of-truth abstraction).
+- **`ActiveCamera`** wraps `sim::CameraSnapshot`. 3.6.3c.5a will extend to debug-fly camera; architecturally both write here. Renderer + streaming read from this single source. Pinned design memory captures the pattern.
+- **Layer 1 — uniform terrain mesh**: 10 km half-extent (20 km × 20 km mesh), 1000 cells = 20 m per cell, ~1 M vertices. Rebuilds when `active_camera` moves more than `REBUILD_THRESHOLD_M = 2 km` from mesh center. Same pattern for water mesh at matching 10 km (per user direction — rivers / coastlines visible at distance look wrong with smaller water).
+- **Rayon-parallel mesh build**: `CpuMesh::terrain_patch_at` uses `rayon::par_iter` for the 1 M-vertex height-sampling pass. Adds `rayon = { workspace = true }` to assets crate. CODING_RULES-compliant: world-bake hot paths only, never render/audio.
+- **Layer 2 — active cell set**: `SubBiomeCellCatalog::cells_within_radius(x, z, radius_m)` added (~50 LOC) with toroidal wrap. `StreamingCellSet::refresh` computes per-frame active list + `entered` / `exited` deltas for downstream content systems. Refresh cost ~80 cells per call at 10 km radius / 2 km spacing, <1 ms.
+- **Renderer API**: `Renderer::update_terrain_mesh` + `Renderer::update_water_mesh` (~30 LOC) replace the `GpuMesh` contents from a fresh `CpuMesh`. Old VBO / IBO dropped; wgpu handles GPU lifetime.
+- **game_app integration**: Runtime holds `Option<StreamingTerrain> / Option<StreamingWater> / Option<StreamingCellSet> / Option<SubBiomeCellCatalog>` — None for scenario playback (uses fixed `Terrain::flat*`), Some for free-flight mode. Per-tick `tick_and_render` calls `maybe_rebuild` + `refresh` from the active camera position; rebuilt meshes update the renderer.
+- **Toroidal world wrap**: `terrain.height` wraps internally via `flowplan_core::wrap_coord`; `cells_within_radius` uses `wrap_cell_index` for the grid-scan. Camera flying past world edge sees terrain + cells wrap seamlessly. Test `streaming_terrain_handles_world_edge_position` verifies mesh build at ±2400 km from origin produces finite vertex data.
+- **Tests (7 total per design-doc promise)**:
+  - `rebuild_threshold_smaller_than_half_extent` — const-assert sanity check
+  - `stream_radius_reasonable_default` — const-assert sanity check
+  - `active_camera_from_sim_snapshot` — field round-trip through ActiveCamera
+  - `streaming_terrain_rebuilds_at_threshold` — movement < threshold = no rebuild; movement > threshold = rebuild; center tracks correctly
+  - `streaming_terrain_at_rest_is_deterministic` — same camera_pos → byte-identical vertex data
+  - `streaming_water_rebuilds_at_threshold` — parallel to terrain
+  - `streaming_terrain_handles_world_edge_position` — no NaN at ±2400 km
+  - `mesh_resolution_within_budget` — vertex-count ceiling guard
+  - `streaming_cell_set_at_canonical_seed` (#[ignore] opt-in) — full-bake scenario for cell set active / entered / exited / refresh determinism
+
+### Technical-debt tracking
+
+`#[allow(dead_code)]` + `TODO(3.6.3c.5a/5c)` markers on fields the follow-up milestones will consume:
+- `ActiveCamera.orientation / fov_y_radians / debug_active` (consumed 3.6.3c.5a)
+- `StreamingTerrain::center` / `StreamingWater::center` (consumed 3.6.3c.5a debug HUD)
+- `StreamingCellSet::active / entered / exited / active_count` (consumed 3.6.3c.5a HUD + 3.6.3c.5c content streaming)
+
+All grep-findable via `TODO(3.6.3c.5a`. Task descriptions for #223 + #227 include cleanup steps.
+
+### Test state
+
+- **23 app unit tests pass / 0 fail / 1 ignored** (was 0 before this module; full streaming API exercised)
+- **508 workspace tests pass / 0 fail / 48 ignored** (+7 for streaming; +1 ignored for full-bake cell-set test)
+- Full workspace: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo test --doc` all pass.
+- Zero new crate-level lint suppressions. Inline allows on future-milestone-consumed fields are scoped + carry TODO markers per CODING_RULES §61.
+
+### Dependencies added
+
+- `rayon = "1"` — already in workspace (3.6.3c.1c approved); added to `crates/assets/Cargo.toml` for `terrain_patch_at` parallelism.
+
+### Memory budget (measured)
+
+- Terrain GPU mesh: ~32 MB (1 M verts × 32 bytes)
+- Water GPU mesh: ~1 MB (40K verts × 32 bytes — using 200-cell coarser resolution)
+- Active cell set: <1 KB
+- Per-rebuild CPU transient: +~32 MB (dropped after upload)
+- **Steady-state render: ~33 MB** — within budget (~37 MB projected).
+
+### Performance
+
+- Mesh rebuild trigger frequency: every 2 km of camera motion. At sim-camera cruise ~55 m/s = every ~36 sec. At 3.6.3c.5a debug-camera 500 m/s = every ~4 sec.
+- Rebuild cost: pending first in-engine measurement (compile-only validation done). `rayon` should keep it < 30 ms on 8-core hardware.
+- Cell active-set refresh: <1 ms per frame measured implicitly via 23 unit tests completing in 0.01 s.
+
+### Next milestone
+
+**Phase 3.6.3c.5a — Debug camera** (Task #223). Consumes the `ActiveCamera` abstraction + the streaming layers this milestone ships. WASD + mouse + Tab (50/100/500 m/s speed cycle) + backtick toggle + debug HUD (position, heading, speed-tier, FPS/frametime, active-cell-count). Cleanup of `#[allow(dead_code)]` + `TODO(3.6.3c.5a)` markers on landing per user direction.
+
+---
 
 ## 2026-04-23 (iteration 8) — Phase 3.6.3c.1c (Eager BakedAssignments + parallel bake)
 

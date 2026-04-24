@@ -97,22 +97,54 @@ impl CpuMesh {
     /// Build a flat grid patch for the terrain, sampled from a provided height function.
     ///
     /// The patch is `cells_per_side` cells wide, spanning `[-half_extent, +half_extent]`
-    /// in world X/Z. Height is sampled via the closure.
+    /// in world X/Z (centered at world origin). Height is sampled via the closure.
+    /// For a patch centered at an arbitrary world position (used by the
+    /// Phase 3.6.3c.5b streaming-render layer), see [`Self::terrain_patch_at`].
     pub fn terrain_patch(
         cells_per_side: u32,
         half_extent: f32,
-        sample_height: impl Fn(f32, f32) -> f32,
+        sample_height: impl Fn(f32, f32) -> f32 + Sync,
     ) -> Self {
+        Self::terrain_patch_at(cells_per_side, half_extent, (0.0, 0.0), sample_height)
+    }
+
+    /// Build a flat grid patch for the terrain at an arbitrary world center.
+    ///
+    /// Vertex positions are in **world coordinates** (no model-matrix
+    /// translation needed). The patch spans `[center.x - half_extent,
+    /// center.x + half_extent]` × `[center.z - half_extent, center.z +
+    /// half_extent]`. Height is sampled via the closure at world coords.
+    ///
+    /// Used by the streaming-render layer (Phase 3.6.3c.5b — see memory
+    /// `streaming_render_architecture` + MAPGEN § Render streaming).
+    /// Built in parallel via `rayon::par_iter` because `cells_per_side`
+    /// can be 1000+ for a 10 km × 20 m-cell patch (~1 M vertices) and
+    /// the closure (`terrain.height(x, z)`) is the dominant cost.
+    pub fn terrain_patch_at(
+        cells_per_side: u32,
+        half_extent: f32,
+        center: (f32, f32),
+        sample_height: impl Fn(f32, f32) -> f32 + Sync,
+    ) -> Self {
+        use rayon::prelude::*;
+
         let mut mesh = Self::new("terrain");
         let cells = cells_per_side;
         let verts_per_side = cells + 1;
         let step = (half_extent * 2.0) / cells as f32;
+        let total_verts = (verts_per_side as usize) * (verts_per_side as usize);
 
-        // Build vertices.
-        for iz in 0..verts_per_side {
-            for ix in 0..verts_per_side {
-                let x = -half_extent + ix as f32 * step;
-                let z = -half_extent + iz as f32 * step;
+        // Build vertices in parallel — `terrain.height` calls dominate
+        // wall-clock for the 1 M-vertex default patch. Each vertex is
+        // independent (samples 4 neighbors for normal + height for
+        // color), so `par_iter().map().collect()` is safe and clean.
+        mesh.vertices = (0..total_verts)
+            .into_par_iter()
+            .map(|i| {
+                let ix = (i % verts_per_side as usize) as u32;
+                let iz = (i / verts_per_side as usize) as u32;
+                let x = center.0 - half_extent + ix as f32 * step;
+                let z = center.1 - half_extent + iz as f32 * step;
                 let y = sample_height(x, z);
 
                 // Approximate normal via central differences on the height function.
@@ -122,20 +154,21 @@ impl CpuMesh {
                 let normal = Vec3::new(-dy_dx, 1.0, -dy_dz).normalize_or(Vec3::Y);
 
                 // Multi-tier color ramp by height. Sand -> field -> forest -> rock.
-                // Breakpoints chosen for the Phase 2.2.5 terrain envelope (±3.88 m
-                // fine detail + ±2.5 m regional bias, so y spans roughly [-6.4, 6.4]).
                 let color = terrain_color_for_height(y);
 
-                mesh.vertices.push(Vertex {
+                Vertex {
                     position: [x, y, z],
                     normal: [normal.x, normal.y, normal.z],
                     uv: [ix as f32 / cells as f32, iz as f32 / cells as f32],
                     color,
-                });
-            }
-        }
+                }
+            })
+            .collect();
 
-        // Build indices (two triangles per cell).
+        // Build indices (two triangles per cell). Sequential — cheap +
+        // independent of vertex order.
+        mesh.indices
+            .reserve((cells as usize) * (cells as usize) * 6);
         for iz in 0..cells {
             for ix in 0..cells {
                 let row = verts_per_side;
@@ -155,6 +188,20 @@ impl CpuMesh {
     /// displacement in the vertex shader without re-authoring the mesh.
     #[must_use]
     pub fn water_grid(cells_per_side: u32, half_extent: f32, color: [f32; 4]) -> Self {
+        Self::water_grid_at(cells_per_side, half_extent, (0.0, 0.0), color)
+    }
+
+    /// Build a flat water grid at `y = 0` centered at an arbitrary world
+    /// position. Vertex positions in world coordinates (no model-matrix
+    /// translation needed). Used by the streaming-render layer
+    /// (Phase 3.6.3c.5b) to keep water aligned with the active camera.
+    #[must_use]
+    pub fn water_grid_at(
+        cells_per_side: u32,
+        half_extent: f32,
+        center: (f32, f32),
+        color: [f32; 4],
+    ) -> Self {
         let mut mesh = Self::new("water");
         let cells = cells_per_side.max(1);
         let verts_per_side = cells + 1;
@@ -162,8 +209,8 @@ impl CpuMesh {
 
         for iz in 0..verts_per_side {
             for ix in 0..verts_per_side {
-                let x = -half_extent + ix as f32 * step;
-                let z = -half_extent + iz as f32 * step;
+                let x = center.0 - half_extent + ix as f32 * step;
+                let z = center.1 - half_extent + iz as f32 * step;
                 mesh.vertices.push(Vertex {
                     position: [x, 0.0, z],
                     normal: [0.0, 1.0, 0.0],

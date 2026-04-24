@@ -37,6 +37,6 @@ pub use difficulty::DifficultyDials;
 pub use flight::{FlightOutputs, MomentBreakdown, StallState};
 pub use hash::state_hash;
 pub use input::{AppCommand, InputEvent, InputEvents};
-pub use snapshot::{ControlsSnapshot, SimSnapshot, VehicleSnapshot};
+pub use snapshot::{CameraSnapshot, ControlsSnapshot, SimSnapshot, VehicleSnapshot};
 pub use state::{SimState, WeatherInputs};
 pub use vehicle::VehicleState;

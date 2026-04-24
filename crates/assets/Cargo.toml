@@ -16,4 +16,8 @@ glam = { workspace = true }
 bytemuck = { workspace = true }
 gltf = "1.4"
 thiserror = { workspace = true }
+# Data parallelism for streaming terrain mesh build (Phase 3.6.3c.5b).
+# World-bake hot path only — never on render or audio per CODING_RULES
+# § real-time discipline.
+rayon = { workspace = true }
 # flowplan-core + tracing added when asset handles and loader logging arrive in Phase 2.

@@ -210,6 +210,21 @@ struct Runtime {
 
     // World (kept on the app side; sim doesn't depend on terrain in Phase 1).
     terrain: Terrain,
+    /// Streaming terrain mesh (Phase 3.6.3c.5b) — recenters on the active
+    /// camera as it moves, replacing the fixed-origin mesh used in earlier
+    /// phases. None for scenario playback (uses fixed `Terrain::flat*`).
+    streaming_terrain: Option<crate::streaming::StreamingTerrain>,
+    /// Streaming water mesh — same pattern, follows active camera.
+    streaming_water: Option<crate::streaming::StreamingWater>,
+    /// Streaming Voronoi-cell active set (Phase 3.6.3c.5b Layer 2).
+    /// Refreshed per frame from the active camera position. Consumers
+    /// (feature instances, future LOD, hub markers, weather overlays,
+    /// audio sources) read `active()` / `entered()` / `exited()` slices.
+    /// None for scenario playback.
+    streaming_cells: Option<crate::streaming::StreamingCellSet>,
+    /// Sub-biome cell catalog — baked once, queried per frame by
+    /// `streaming_cells.refresh`. None for scenario playback.
+    sub_biome_catalog: Option<flowplan_world::SubBiomeCellCatalog>,
     /// Depth (meters) from the vehicle mesh's CG/origin down to its lowest point
     /// (floats / wheels). Used to lift the spawn altitude and each-tick `min_altitude`
     /// so those contact points clear terrain / water.
@@ -548,15 +563,53 @@ impl Runtime {
         } else {
             Terrain::from_seed(WORLD_SEED)
         };
-        let terrain_mesh = CpuMesh::terrain_patch(TERRAIN_CELLS, TERRAIN_HALF_EXTENT, |x, z| {
-            terrain.height(x, z)
-        });
+        // Streaming terrain + water (Phase 3.6.3c.5b). For free-flight mode (no
+        // scenario), we use the streaming meshes so the camera can fly anywhere
+        // in the 5000 km world. For scenario mode, we keep the small fixed mesh
+        // because scenarios are bounded test cases that don't need streaming.
+        let initial_center = glam::Vec2::ZERO;
+        let (terrain_mesh, streaming_terrain) = if scenario.is_none() {
+            let st = crate::streaming::StreamingTerrain::new(
+                crate::streaming::TERRAIN_HALF_EXTENT_M,
+                crate::streaming::TERRAIN_CELLS,
+                initial_center,
+                &terrain,
+            );
+            (st.cpu_mesh().clone(), Some(st))
+        } else {
+            let m = CpuMesh::terrain_patch(TERRAIN_CELLS, TERRAIN_HALF_EXTENT, |x, z| {
+                terrain.height(x, z)
+            });
+            (m, None)
+        };
 
         // Depth of the lowest mesh point below the origin (CG). Used below to lift the
         // spawn altitude so the floats clear terrain. Zero when the mesh sits at or
         // above y=0.
         let vehicle_float_offset = (-vehicle_mesh.bbox_min_y()).max(0.0);
-        let water_mesh = CpuMesh::water_grid(WATER_CELLS, WATER_HALF_EXTENT, WATER_COLOR);
+        let (water_mesh, streaming_water) = if scenario.is_none() {
+            let sw = crate::streaming::StreamingWater::new(
+                crate::streaming::WATER_HALF_EXTENT_M,
+                crate::streaming::WATER_CELLS,
+                initial_center,
+                WATER_COLOR,
+            );
+            (sw.cpu_mesh().clone(), Some(sw))
+        } else {
+            let m = CpuMesh::water_grid(WATER_CELLS, WATER_HALF_EXTENT, WATER_COLOR);
+            (m, None)
+        };
+
+        // Layer 2 streaming: Voronoi cell active set. Only in free-flight
+        // mode (scenarios use flat terrain, no cell-based content). The
+        // catalog is baked once at app init; active set refreshes per frame.
+        let (streaming_cells, sub_biome_catalog) = if scenario.is_none() {
+            let catalog = flowplan_world::SubBiomeCellCatalog::bake(WORLD_SEED);
+            let cells = crate::streaming::StreamingCellSet::new(crate::streaming::STREAM_RADIUS_M);
+            (Some(cells), Some(catalog))
+        } else {
+            (None, None)
+        };
 
         let mut renderer = Renderer::new(
             &device,
@@ -624,6 +677,10 @@ impl Runtime {
             config,
             renderer,
             terrain,
+            streaming_terrain,
+            streaming_water,
+            streaming_cells,
+            sub_biome_catalog,
             vehicle_float_offset,
             hud_format,
             sim,
@@ -867,6 +924,36 @@ impl Runtime {
         // and the debug HUD read from this; later phases add the hand-rolled HUD and
         // 3D cockpit instruments as additional consumers of the same struct.
         let telemetry = Telemetry::derive(&curr);
+
+        // 3.6.3c.5b: Render streaming. Recenter terrain + water meshes on
+        // the active camera if it has moved beyond REBUILD_THRESHOLD_M.
+        // `ActiveCamera` is the single-source-of-truth abstraction;
+        // 3.6.3c.5a's debug-fly camera will write here when toggled on.
+        // Until then `from_sim` wraps the interpolated-per-tick sim camera.
+        let active_camera = crate::streaming::ActiveCamera::from_sim(curr.camera);
+        let active_cam_pos_xz = active_camera.position_xz();
+        if let Some(st) = self.streaming_terrain.as_mut() {
+            st.maybe_rebuild(active_cam_pos_xz, &self.terrain);
+            if st.just_rebuilt() {
+                self.renderer
+                    .update_terrain_mesh(&self.device, st.cpu_mesh());
+            }
+        }
+        if let Some(sw) = self.streaming_water.as_mut() {
+            sw.maybe_rebuild(active_cam_pos_xz);
+            if sw.just_rebuilt() {
+                self.renderer.update_water_mesh(&self.device, sw.cpu_mesh());
+            }
+        }
+        // Layer 2 cell active-set refresh (cheap; ~80 cells in radius).
+        // Consumers (feature instance streaming 3.6.3c.5c+, hub markers,
+        // weather overlays, audio sources) read from `.active()` slice.
+        if let (Some(cells), Some(catalog)) = (
+            self.streaming_cells.as_mut(),
+            self.sub_biome_catalog.as_ref(),
+        ) {
+            cells.refresh(active_cam_pos_xz, catalog);
+        }
 
         // Rebuild both debug widgets every frame (always on; debug-first instruments
         // that inform the real HUD later).

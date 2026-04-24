@@ -305,6 +305,58 @@ impl SubBiomeCellCatalog {
         best_id
     }
 
+    /// All cells whose seed position lies within `radius_m` of `(x, z)`.
+    ///
+    /// Used by the **render-streaming Layer 2 active set** (3.6.3c.5b) —
+    /// returns the Voronoi cells that should currently contribute
+    /// content (feature instances, future LOD decisions, hub markers,
+    /// weather overlays, audio sources). See memory
+    /// `streaming_render_architecture` + MAPGEN § Render streaming.
+    ///
+    /// O(K) where K = grid cells within radius (~25 grid-cells at the
+    /// default 10 km streaming radius / 2 km cell spacing). Toroidal-
+    /// wrap aware via `wrap_cell_index` + closest-toroidal-distance
+    /// computation. Same access pattern as `nearest_cell` extended to
+    /// the full radius.
+    ///
+    /// Result order is **deterministic** (cell-id ascending) — sort
+    /// after collection so callers don't have to.
+    #[must_use]
+    pub fn cells_within_radius(&self, x: f32, z: f32, radius_m: f32) -> Vec<CellId> {
+        let xw = wrap_coord(x);
+        let zw = wrap_coord(z);
+        let radius_sq = radius_m * radius_m;
+        let r_grid = (radius_m / self.grid_cell_m).ceil() as i64;
+        let ix = ((xw / self.grid_cell_m) as usize).min(self.grid_n - 1);
+        let iz = ((zw / self.grid_cell_m) as usize).min(self.grid_n - 1);
+        let half_w = WORLD_EXTENT_M * 0.5;
+        let mut out: Vec<CellId> = Vec::new();
+        for dz in -r_grid..=r_grid {
+            for dx in -r_grid..=r_grid {
+                let nx = wrap_cell_index(ix as i64 + dx, self.grid_n as i64) as usize;
+                let nz = wrap_cell_index(iz as i64 + dz, self.grid_n as i64) as usize;
+                let cell_id = self.grid[nz * self.grid_n + nx];
+                if cell_id == EMPTY_GRID {
+                    continue;
+                }
+                let (sx, sz) = self.seeds[cell_id as usize].position;
+                let mut dx_m = (xw - sx).abs();
+                let mut dz_m = (zw - sz).abs();
+                if dx_m > half_w {
+                    dx_m = WORLD_EXTENT_M - dx_m;
+                }
+                if dz_m > half_w {
+                    dz_m = WORLD_EXTENT_M - dz_m;
+                }
+                if dx_m * dx_m + dz_m * dz_m <= radius_sq {
+                    out.push(cell_id);
+                }
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
     /// Compute the feature assignment for a given cell. Pure function
     /// of `(master_seed, cell_id, terrain, hydrology)`. Caller-side
     /// caching is up to the consumer.
