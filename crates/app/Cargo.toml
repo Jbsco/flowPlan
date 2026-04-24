@@ -22,10 +22,10 @@ workspace = true
 
 [dependencies]
 flowplan-assets = { workspace = true }
+flowplan-core = { workspace = true }
 flowplan-sim = { workspace = true }
 flowplan-world = { workspace = true }
 flowplan-render = { workspace = true }
-# flowplan-core added when app uses core types directly.
 
 wgpu = { workspace = true }
 winit = { workspace = true }

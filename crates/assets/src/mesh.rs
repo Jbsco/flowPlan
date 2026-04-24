@@ -94,6 +94,22 @@ impl CpuMesh {
         mesh
     }
 
+    /// Unit-size primitive box for instance rendering (Phase 3.6.3c.5c.1).
+    ///
+    /// Dimensions: 1 m × 1 m × 1 m, centered at origin, vertex color
+    /// white. The instance shader reads (position, scale, `rotation_y`,
+    /// color) from a storage buffer and applies them per draw; the
+    /// mesh itself is uploaded once and reused for every box instance.
+    ///
+    /// 5c.1 MVP: this is the only instance primitive. 5c.2+ will add
+    /// cone / cylinder / sphere / etc.
+    #[must_use]
+    pub fn primitive_box() -> Self {
+        let mut mesh = Self::cube(1.0, [1.0, 1.0, 1.0, 1.0]);
+        mesh.label = "primitive_box".to_string();
+        mesh
+    }
+
     /// Build a flat grid patch for the terrain, sampled from a provided height function.
     ///
     /// The patch is `cells_per_side` cells wide, spanning `[-half_extent, +half_extent]`
@@ -129,7 +145,13 @@ impl CpuMesh {
         // Square mesh = disc with radius so large it clips nothing.
         // Using f32::INFINITY triggers NaN via multiplication, so use a
         // large finite value (1e9 m ≫ any realistic world extent).
-        Self::terrain_patch_disc_at(cells_per_side, half_extent, f32::MAX * 0.5, center, sample_height)
+        Self::terrain_patch_disc_at(
+            cells_per_side,
+            half_extent,
+            f32::MAX * 0.5,
+            center,
+            sample_height,
+        )
     }
 
     /// Build a terrain mesh where vertices outside `disc_radius` of the

@@ -473,32 +473,25 @@ impl StreamingCellSet {
         self.last_camera_pos = camera_pos_xz;
     }
 
-    /// Currently-active cells (sorted ascending). Consumed by 3.6.3c.5c
-    /// feature-instance streaming + 3.6.3c.5a debug HUD (shows active
-    /// count). Allow per `CODING_RULES` §61 — consumers queued on Tasks
-    /// #223 + future 3.6.3c.5c.
-    // TODO(3.6.3c.5c — Task #227): remove this allow when feature-instance streaming consumes active().
-    #[allow(dead_code)]
+    /// Currently-active cells (sorted ascending). Consumed by
+    /// feature-instance upload (3.6.3c.5c.1) + debug HUD (shows count).
     #[must_use]
     pub fn active(&self) -> &[CellId] {
         &self.active
     }
 
     /// Cells that entered on the most recent refresh. Consumed by
-    /// 3.6.3c.5c for per-cell resource allocation (spawn feature
-    /// instances, allocate per-cell buffers).
-    // TODO(3.6.3c.5c — Task #227): remove this allow when feature-instance streaming consumes entered().
-    #[allow(dead_code)]
+    /// 3.6.3c.5c.1 to detect active-set changes (triggers instance
+    /// buffer rebuild). Per-cell resource allocation hooks (spawn
+    /// audio sources, allocate per-cell GPU buffers) land in 5c.2+.
     #[must_use]
     pub fn entered(&self) -> &[CellId] {
         &self.entered
     }
 
     /// Cells that exited on the most recent refresh. Consumed by
-    /// 3.6.3c.5c for per-cell resource release (free feature instances,
-    /// deallocate per-cell buffers).
-    // TODO(3.6.3c.5c — Task #227): remove this allow when feature-instance streaming consumes exited().
-    #[allow(dead_code)]
+    /// 3.6.3c.5c.1 to detect active-set changes. Per-cell release
+    /// hooks (free audio sources, deallocate buffers) land in 5c.2+.
     #[must_use]
     pub fn exited(&self) -> &[CellId] {
         &self.exited

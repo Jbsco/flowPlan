@@ -14,6 +14,7 @@ use glam::{Mat4, Quat, Vec3, Vec4};
 use wgpu::util::DeviceExt;
 
 use crate::debug_lines::{DebugLineBatch, DebugLinesRenderer};
+use crate::instances::{InstanceGpuData, InstanceRenderer};
 
 /// Depth format for the Phase 1 forward pass.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -268,6 +269,12 @@ pub struct Renderer {
     /// debug camera (aircraft pinned to camera position; don't render
     /// it from inside). Default `true`.
     draw_vehicle: bool,
+    /// Phase 3.6.3c.5c.1: feature-instance renderer. Draws unit-box
+    /// primitives at per-instance (position, rotation, scale, color)
+    /// from a storage buffer. Populated by `game_app` from
+    /// `BakedAssignments::instances_at_cell` when the active cell set
+    /// changes.
+    instances: InstanceRenderer,
     /// 2.4.2c: line-list pipeline used by the corner widgets and (later) HUD ladders
     /// and wireframe debug views.
     debug_lines: DebugLinesRenderer,
@@ -550,6 +557,19 @@ impl Renderer {
             },
         };
 
+        // 3.6.3c.5c.1: feature-instance renderer. Uses the existing
+        // camera + scene bind group layouts so the draw can share
+        // uniforms with the main scene pass. Instance buffer starts
+        // empty; game_app uploads when the active cell set resolves.
+        let primitive_box = CpuMesh::primitive_box();
+        let instances = InstanceRenderer::new(
+            device,
+            &camera_bgl,
+            &scene_bgl,
+            surface_format,
+            &primitive_box,
+        );
+
         // Two slots: slot 0 = bottom-right orientation gizmo, slot 1 = bottom-left
         // attitude indicator. Each has its own VBO pair so queue writes between
         // render passes in the same command buffer don't clobber each other.
@@ -607,6 +627,7 @@ impl Renderer {
             water_follows_camera: true,
             draw_vehicle: true,
             vehicle,
+            instances,
             debug_lines,
             widget_camera_buf_br,
             widget_camera_bg_br,
@@ -712,6 +733,24 @@ impl Renderer {
     /// water behavior for scenario playback).
     pub fn set_water_follows_camera(&mut self, follows: bool) {
         self.water_follows_camera = follows;
+    }
+
+    /// Phase 3.6.3c.5c.1: replace the feature-instance active-set
+    /// buffer. Called by `game_app` whenever the streaming cell active
+    /// set changes. Empty slice clears the draw (zero instances).
+    pub fn upload_instances(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        data: &[InstanceGpuData],
+    ) {
+        self.instances.upload(device, queue, data);
+    }
+
+    /// Live instance count. Useful for debug HUD + telemetry.
+    #[must_use]
+    pub const fn instance_count(&self) -> u32 {
+        self.instances.instance_count()
     }
 
     pub fn set_scene(&self, queue: &wgpu::Queue, params: &SceneParams) {
@@ -935,6 +974,11 @@ impl Renderer {
                 pass.set_index_buffer(self.vehicle.mesh.ibo.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..self.vehicle.mesh.index_count, 0, 0..1);
             }
+
+            // 3.6.3c.5c.1: feature instances. Own pipeline (storage-
+            // buffer instanced draw). No-op when count is 0.
+            self.instances
+                .record(&mut pass, &self.camera_bg, &self.scene_bg);
         }
 
         // Outline pass: full-screen triangle, sobel on the just-written depth buffer,

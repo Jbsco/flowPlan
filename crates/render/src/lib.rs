@@ -17,6 +17,7 @@
 #![allow(clippy::too_many_lines, clippy::too_many_arguments)]
 
 pub mod debug_lines;
+pub mod instances;
 pub mod renderer;
 pub mod telemetry;
 
@@ -24,6 +25,7 @@ pub mod telemetry;
 pub mod hot_reload;
 
 pub use debug_lines::{DebugLineBatch, DebugLineVertex, DebugLinesRenderer};
+pub use instances::{InstanceGpuData, InstanceRenderer};
 pub use renderer::{Renderer, SceneParams, ShadingParams, WATER_WGSL_SOURCE};
 pub use telemetry::Telemetry;
 

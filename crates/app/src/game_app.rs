@@ -71,8 +71,7 @@ const AIRCRAFT_DIR: &str = "data/aircraft";
 /// levels → `data/aircraft`. Used as fallback when the CWD-relative path
 /// doesn't resolve (e.g. when the release binary is invoked from outside
 /// the project root).
-const AIRCRAFT_DIR_FALLBACK: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/aircraft");
+const AIRCRAFT_DIR_FALLBACK: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/aircraft");
 
 /// Resolve the aircraft catalog directory, trying CWD-relative first
 /// (matches cargo-run-from-root + workspace dev workflow), then falling
@@ -247,6 +246,12 @@ struct Runtime {
     /// Sub-biome cell catalog — baked once, queried per frame by
     /// `streaming_cells.refresh`. None for scenario playback.
     sub_biome_catalog: Option<flowplan_world::SubBiomeCellCatalog>,
+    /// Eager-baked per-cell feature assignments + instance lists
+    /// (Phase 3.6.3c.5c.1). Built once at app init; the active-cell-set
+    /// upload loop reads `instances_at_cell(cell_id)` for each entered
+    /// cell. None for scenario playback + during the 33 s bake window
+    /// when the optional is taken by a background builder (5c.2+).
+    baked_assignments: Option<flowplan_world::baked_assignments::BakedAssignments>,
     /// Most-recent terrain mesh-rebuild CPU time (milliseconds). Includes
     /// `CpuMesh::terrain_patch_at` — the parallel height-sampling pass.
     /// Persists between rebuilds so the debug HUD can display stale-but-
@@ -645,11 +650,176 @@ impl Runtime {
         } else {
             Terrain::from_seed(WORLD_SEED)
         };
+        // Depth of the lowest mesh point below the origin (CG). Used below to lift the
+        // spawn altitude so the floats clear terrain. Zero when the mesh sits at or
+        // above y=0.
+        let vehicle_float_offset = (-vehicle_mesh.bbox_min_y()).max(0.0);
+
+        // Sub-biome cell catalog (Phase 3.6.3c.5b Layer 2). Baked once
+        // per session. Consumed both by the streaming cell active-set
+        // refresh and by the feature-instance bake below. Initialized
+        // BEFORE streaming-terrain/water so spawn-near-instance can
+        // reposition the initial mesh center (avoiding a ~1 s async
+        // rebuild at frame 0 when teleporting far from origin).
+        let sub_biome_catalog = if scenario.is_none() {
+            Some(flowplan_world::SubBiomeCellCatalog::bake(WORLD_SEED))
+        } else {
+            None
+        };
+
+        // 3.6.3c.5c.1: eager bake of feature assignments + per-cell
+        // instance lists. Gated behind `FLOWPLAN_FEATURE_INSTANCES=1`
+        // because the full 3.9 M-cell bake is ~40 s (hydrology + hub
+        // + assignments). Dev iteration stays fast by default; instance
+        // rendering opts in when needed. Serialized preload is a 3.7
+        // save-format target.
+        let instances_enabled = std::env::var("FLOWPLAN_FEATURE_INSTANCES")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        let baked_assignments = match (
+            scenario.is_none(),
+            instances_enabled,
+            sub_biome_catalog.as_ref(),
+        ) {
+            (true, true, Some(catalog)) => {
+                eprintln!(
+                    "flowplan: FLOWPLAN_FEATURE_INSTANCES=1 — baking feature assignments (~30-60 s)..."
+                );
+                let t0 = std::time::Instant::now();
+                let hydrology = flowplan_world::HydrologyGraph::bake(WORLD_SEED, &terrain);
+                eprintln!(
+                    "flowplan: hydrology baked in {:.1} s",
+                    t0.elapsed().as_secs_f32()
+                );
+                let t1 = std::time::Instant::now();
+                let hub_catalog =
+                    flowplan_world::HubCatalog::bake(WORLD_SEED, &terrain, &hydrology);
+                eprintln!(
+                    "flowplan: hub catalog baked in {:.1} s",
+                    t1.elapsed().as_secs_f32()
+                );
+                let t2 = std::time::Instant::now();
+                let baked = flowplan_world::baked_assignments::BakedAssignments::bake(
+                    catalog,
+                    &terrain,
+                    &hydrology,
+                    &hub_catalog,
+                );
+                eprintln!(
+                    "flowplan: baked assignments in {:.1} s — {} total instances across {} cells ({} populated of {} world)",
+                    t2.elapsed().as_secs_f32(),
+                    baked.total_instance_count(),
+                    baked.populated_cell_count(),
+                    baked.populated_cell_count(),
+                    baked.stats().cell_count,
+                );
+                // Print ~8 sample populated-cell coordinates nearest the
+                // spawn (0, 0) so the player has a target to fly to.
+                // Uses the first instance's position (x, y, z); y is
+                // terrain-anchored at bake time so it tells you what
+                // altitude to fly at. Distance uses toroidal metric
+                // because the world wraps at WORLD_EXTENT_M.
+                let toroidal_dist_from_origin = |x: f32, z: f32| -> f32 {
+                    let dx = x.min(flowplan_core::WORLD_EXTENT_M - x);
+                    let dz = z.min(flowplan_core::WORLD_EXTENT_M - z);
+                    dx.hypot(dz)
+                };
+                let mut samples: Vec<(f32, f32, f32, f32)> = baked
+                    .populated_cells()
+                    .filter_map(|(_, insts)| {
+                        insts
+                            .first()
+                            .map(|i| (i.position.x, i.position.y, i.position.z))
+                    })
+                    .map(|(x, y, z)| (x, y, z, toroidal_dist_from_origin(x, z)))
+                    .collect();
+                samples.sort_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal));
+                eprintln!(
+                    "flowplan: nearest {} populated cells to spawn:",
+                    samples.len().min(8)
+                );
+                for (x, y, z, d) in samples.iter().take(8) {
+                    eprintln!(
+                        "  ({:>+9.0}, y={:>+6.0}, {:>+9.0})  ~{:>6.1} km from spawn",
+                        x,
+                        y,
+                        z,
+                        d / 1000.0
+                    );
+                }
+                Some(baked)
+            },
+            _ => None,
+        };
+
+        // 3.6.3c.5c.1 diagnostic: `FLOWPLAN_SPAWN_NEAR_INSTANCE=1` puts
+        // the debug camera 200 m south + 100 m above the populated cell
+        // CLOSEST TO ORIGIN (by toroidal distance), pitched slightly
+        // down, with debug-fly mode pre-activated. Nearest-to-origin
+        // keeps the world-coord magnitudes small so f32 precision in
+        // the view-matrix matmul doesn't produce z-fighting / flicker
+        // at extreme coords. Only honored when `FLOWPLAN_FEATURE_INSTANCES=1`
+        // also yielded a bake.
+        let spawn_near_instance = std::env::var("FLOWPLAN_SPAWN_NEAR_INSTANCE")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        let initial_debug_camera_pose: Option<(glam::Vec3, f32, f32)> = match (
+            spawn_near_instance,
+            baked_assignments.as_ref(),
+        ) {
+            (true, Some(baked)) => {
+                // Toroidal distance from origin (0, 0) to (x, z) in a
+                // 5000 km world with coords in [0, WORLD_EXTENT_M).
+                // Minimum of the direct wrap (x) and the "other way"
+                // (WORLD_EXTENT - x).
+                let toroidal_dist = |x: f32, z: f32| -> f32 {
+                    let dx = x.min(flowplan_core::WORLD_EXTENT_M - x);
+                    let dz = z.min(flowplan_core::WORLD_EXTENT_M - z);
+                    dx.hypot(dz)
+                };
+                let best = baked
+                    .populated_cells()
+                    .filter_map(|(cell_id, insts)| insts.first().map(|inst| (cell_id, inst)))
+                    .min_by(|a, b| {
+                        let da = toroidal_dist(a.1.position.x, a.1.position.z);
+                        let db = toroidal_dist(b.1.position.x, b.1.position.z);
+                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                best.map(|(cell_id, inst)| {
+                    let eye = glam::Vec3::new(
+                        inst.position.x,
+                        inst.position.y + 100.0,
+                        inst.position.z + 200.0,
+                    );
+                    // yaw=0 looks -Z (toward cluster since eye.z > inst.z).
+                    // pitch=-0.4 rad ≈ -23° (cluster is ~100 m below + ~200 m
+                    // away, angular offset ~26°).
+                    let yaw = 0.0;
+                    let pitch = -0.4;
+                    let d_km = toroidal_dist(inst.position.x, inst.position.z) / 1000.0;
+                    eprintln!(
+                        "flowplan: SPAWN_NEAR_INSTANCE — cell {cell_id} is closest ({:.1} km from origin); teleporting debug camera to ({:+.0}, {:+.0}, {:+.0}) toward instance at ({:+.0}, {:+.0}, {:+.0})",
+                        d_km,
+                        eye.x, eye.y, eye.z,
+                        inst.position.x, inst.position.y, inst.position.z,
+                    );
+                    (eye, yaw, pitch)
+                })
+            },
+            _ => None,
+        };
+
         // Streaming terrain + water (Phase 3.6.3c.5b). For free-flight mode (no
         // scenario), we use the streaming meshes so the camera can fly anywhere
         // in the 5000 km world. For scenario mode, we keep the small fixed mesh
         // because scenarios are bounded test cases that don't need streaming.
-        let initial_center = glam::Vec2::ZERO;
+        //
+        // Initial center = debug-camera spawn-near pose if set (avoids
+        // a ~1 s async rebuild at frame 0 when teleporting far from
+        // origin); otherwise world origin.
+        let initial_center = initial_debug_camera_pose.map_or(glam::Vec2::ZERO, |(pos, _, _)| {
+            glam::Vec2::new(pos.x, pos.z)
+        });
         let (terrain_mesh, streaming_terrain) = if scenario.is_none() {
             let st = crate::streaming::StreamingTerrain::new(
                 crate::streaming::TERRAIN_HALF_EXTENT_M,
@@ -664,11 +834,6 @@ impl Runtime {
             });
             (m, None)
         };
-
-        // Depth of the lowest mesh point below the origin (CG). Used below to lift the
-        // spawn altitude so the floats clear terrain. Zero when the mesh sits at or
-        // above y=0.
-        let vehicle_float_offset = (-vehicle_mesh.bbox_min_y()).max(0.0);
         let (water_mesh, streaming_water) = if scenario.is_none() {
             let sw = crate::streaming::StreamingWater::new(
                 crate::streaming::WATER_HALF_EXTENT_M,
@@ -681,16 +846,12 @@ impl Runtime {
             let m = CpuMesh::water_grid(WATER_CELLS, WATER_HALF_EXTENT, WATER_COLOR);
             (m, None)
         };
-
-        // Layer 2 streaming: Voronoi cell active set. Only in free-flight
-        // mode (scenarios use flat terrain, no cell-based content). The
-        // catalog is baked once at app init; active set refreshes per frame.
-        let (streaming_cells, sub_biome_catalog) = if scenario.is_none() {
-            let catalog = flowplan_world::SubBiomeCellCatalog::bake(WORLD_SEED);
-            let cells = crate::streaming::StreamingCellSet::new(crate::streaming::STREAM_RADIUS_M);
-            (Some(cells), Some(catalog))
+        let streaming_cells = if scenario.is_none() {
+            Some(crate::streaming::StreamingCellSet::new(
+                crate::streaming::STREAM_RADIUS_M,
+            ))
         } else {
-            (None, None)
+            None
         };
 
         let mut renderer = Renderer::new(
@@ -717,6 +878,12 @@ impl Runtime {
         // Scenarios keep the old behavior (fixed-origin mesh + follow).
         if scenario.is_none() {
             renderer.set_water_follows_camera(false);
+        }
+        // Spawn-near mode: debug camera is pre-activated with the
+        // vehicle hidden (same contract as the interactive backtick
+        // toggle inside `tick_and_render`).
+        if initial_debug_camera_pose.is_some() {
+            renderer.set_vehicle_visible(false);
         }
 
         // Sim. Scenario-mode init uses the scenario's ScenarioInitial so playback is
@@ -771,11 +938,20 @@ impl Runtime {
             streaming_water,
             streaming_cells,
             sub_biome_catalog,
+            baked_assignments,
             last_terrain_rebuild_cpu_ms: 0.0,
             last_terrain_rebuild_gpu_ms: 0.0,
             last_water_rebuild_cpu_ms: 0.0,
             last_water_rebuild_gpu_ms: 0.0,
-            debug_camera: crate::debug_camera::DebugCamera::default(),
+            debug_camera: match initial_debug_camera_pose {
+                Some((pos, yaw, pitch)) => {
+                    let mut cam = crate::debug_camera::DebugCamera::spawn_at(pos);
+                    cam.yaw = yaw;
+                    cam.pitch = pitch;
+                    cam
+                },
+                None => crate::debug_camera::DebugCamera::default(),
+            },
             debug_mouse_delta: (0.0, 0.0),
             mouse_captured: false,
             frametime_ema_s: 1.0 / 60.0,
@@ -790,7 +966,16 @@ impl Runtime {
             input_queue,
             debug_hud,
             ticks_last_frame: 0,
-            key_state: KeyState::default(),
+            key_state: {
+                let mut ks = KeyState::default();
+                // Activate debug mode from frame 0 when spawn-near
+                // is engaged so the pre-posed debug camera drives
+                // rendering immediately.
+                if initial_debug_camera_pose.is_some() {
+                    ks.debug_active = true;
+                }
+                ks
+            },
             gizmo_batch: DebugLineBatch::new(),
             attitude_batch: DebugLineBatch::new(),
             scenario_playback: scenario.map(|s| ScenarioPlayback {
@@ -1236,6 +1421,45 @@ impl Runtime {
             self.sub_biome_catalog.as_ref(),
         ) {
             cells.refresh(active_cam_pos_xz, catalog);
+
+            // 3.6.3c.5c.1: feature-instance upload. Rebuild the active
+            // instance list + upload only when the cell set changed
+            // (entered or exited non-empty). Full rebuild is O(active
+            // cells × per-cell instance lookup) = cheap; per-frame
+            // incremental ranges are a 5c.2+ optimization.
+            if let Some(baked) = self.baked_assignments.as_ref() {
+                if !cells.entered().is_empty() || !cells.exited().is_empty() {
+                    let mut buf: Vec<flowplan_render::InstanceGpuData> = Vec::new();
+                    let mut populated_in_active = 0_usize;
+                    for &cell_id in cells.active() {
+                        let insts = baked.instances_at_cell(cell_id);
+                        if !insts.is_empty() {
+                            populated_in_active += 1;
+                        }
+                        for inst in insts {
+                            buf.push(flowplan_render::InstanceGpuData::from_fields(
+                                inst.position.to_array(),
+                                inst.rotation_y_rad,
+                                inst.scale.to_array(),
+                                inst.color,
+                            ));
+                        }
+                    }
+                    tracing::info!(
+                        target: "streaming",
+                        active = cells.active().len(),
+                        entered = cells.entered().len(),
+                        exited = cells.exited().len(),
+                        populated_in_active = populated_in_active,
+                        instances_uploaded = buf.len(),
+                        cam_x = active_cam_pos_xz.x,
+                        cam_z = active_cam_pos_xz.y,
+                        "instance-buffer rebuild"
+                    );
+                    self.renderer
+                        .upload_instances(&self.device, &self.queue, &buf);
+                }
+            }
         }
 
         // Rebuild both debug widgets every frame (always on; debug-first instruments
@@ -1274,6 +1498,7 @@ impl Runtime {
                     .streaming_cells
                     .as_ref()
                     .map_or(0, crate::streaming::StreamingCellSet::active_count),
+                instance_count: self.renderer.instance_count(),
                 last_terrain_cpu_ms: self.last_terrain_rebuild_cpu_ms,
                 last_terrain_gpu_ms: self.last_terrain_rebuild_gpu_ms,
                 rebuild_in_flight: self
@@ -1400,7 +1625,10 @@ pub fn print_catalog_and_exit() -> ! {
         eprintln!("catalog scan warning: {err}");
     }
     if catalog.is_empty() {
-        println!("(catalog empty — no parseable RON files in {})", dir.display());
+        println!(
+            "(catalog empty — no parseable RON files in {})",
+            dir.display()
+        );
     } else {
         println!("Aircraft catalog ({} entries):", catalog.entries().len());
         for entry in catalog.entries() {
@@ -1430,8 +1658,7 @@ fn load_vehicle_mesh(path: &str) -> CpuMesh {
         if cwd.is_file() {
             cwd.to_path_buf()
         } else {
-            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../"))
-                .join(path)
+            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../")).join(path)
         }
     };
     match std::fs::read(&resolved) {

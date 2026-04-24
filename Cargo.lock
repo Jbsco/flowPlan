@@ -1052,6 +1052,7 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "flowplan-assets",
+ "flowplan-core",
  "flowplan-render",
  "flowplan-sim",
  "flowplan-world",

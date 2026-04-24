@@ -427,6 +427,10 @@ pub struct DebugCameraOverlay<'a> {
     pub speed_mps: f32,
     /// Active sub-biome cell count from `StreamingCellSet.active_count()`.
     pub active_cell_count: usize,
+    /// Live feature-instance count in the renderer (3.6.3c.5c.1). Reads
+    /// `Renderer::instance_count()`. Zero when `FLOWPLAN_FEATURE_INSTANCES=1`
+    /// is unset + during the pre-upload frames while bake is in flight.
+    pub instance_count: u32,
     /// Most recent terrain mesh-rebuild CPU cost (worker thread).
     pub last_terrain_cpu_ms: f32,
     /// Most recent terrain mesh-rebuild GPU upload cost.
@@ -488,6 +492,7 @@ fn build_debug_camera_ui(ctx: &Context, frame_ms: f32, o: &DebugCameraOverlay<'_
             ui.label(format!("distance from mesh center  {from_center:>6.0} m"));
             ui.separator();
             ui.label(format!("active cells  {}", o.active_cell_count));
+            ui.label(format!("instances     {}", o.instance_count));
             ui.separator();
             let (status_color, status_text) = if o.rebuild_in_flight {
                 (

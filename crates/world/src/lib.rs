@@ -13,6 +13,7 @@ pub mod biome;
 pub mod composed;
 pub mod feature_delta;
 pub mod feature_delta_impls;
+pub mod feature_instances;
 pub mod hub_catalog;
 pub mod hub_names;
 pub mod hydrology;

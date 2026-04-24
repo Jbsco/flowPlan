@@ -30,7 +30,7 @@
 )]
 
 use flowplan_assets::CpuMesh;
-use flowplan_render::{Renderer, SceneParams, ShadingParams};
+use flowplan_render::{InstanceGpuData, Renderer, SceneParams, ShadingParams};
 use flowplan_sim::SimSnapshot;
 use glam::{Quat, Vec3};
 
@@ -511,4 +511,94 @@ fn water_topdown_wide() {
         std::fs::write(&path, &png).expect("write water_topdown_wide PNG");
         println!("wrote {}", path.display());
     }
+}
+
+/// Phase 3.6.3c.5c.1 verification shot. Renders a hand-built cluster of
+/// box primitives via the instance pipeline — decoupled from the full
+/// world bake + streaming stack so the render path can be verified in
+/// isolation.
+///
+/// Scene: flat-ish terrain at world origin + 6 "house" boxes arranged
+/// in a ring around (0, ground, 0), various sizes / rotations / colors.
+/// Camera 15 m above the ground, 25 m back, pitched slightly down.
+///
+/// Output: `target/instance_preview/instance_preview.png`. First run
+/// produces a raw PNG to inspect manually. No insta snapshot — this is
+/// an iterative debug tool.
+#[cfg(feature = "hardware-tests")]
+#[test]
+fn instance_preview() {
+    let (device, queue) = init_wgpu();
+
+    // Gentle terrain centered at origin, ground ≈ 0 m.
+    let terrain = CpuMesh::terrain_patch(64, 200.0, |x, z| {
+        ((x * 0.02).sin() + (z * 0.02).cos()) * 1.0
+    });
+    // Water far below so it doesn't occlude the houses (but still present
+    // as scene fills).
+    let water = CpuMesh::water_grid(16, 200.0, WATER_COLOR);
+    // Placeholder vehicle — hidden via `set_vehicle_visible(false)` below.
+    let placeholder = CpuMesh::cube(0.1, [0.0, 0.0, 0.0, 0.0]);
+
+    #[allow(clippy::items_after_statements)]
+    const INSTANCE_SIZE: (u32, u32) = (800, 600);
+
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        FORMAT,
+        INSTANCE_SIZE,
+        &terrain,
+        TERRAIN_SHADING,
+        &water,
+        WATER_SHADING,
+        &placeholder,
+        VEHICLE_SHADING,
+    );
+    renderer.set_vehicle_visible(false);
+
+    // 6 house boxes arranged in a ring at radius 12 m from origin.
+    // Ground y ≈ 0, houses sit on it (center y = half-height). Varied
+    // sizes and rotations + distinct colors to verify per-instance data
+    // is actually reaching the shader.
+    #[allow(clippy::many_single_char_names)]
+    let instances: Vec<InstanceGpuData> = (0..6_u32)
+        .map(|i| {
+            let angle = (i as f32) * core::f32::consts::TAU / 6.0;
+            let rx = 12.0 * angle.cos();
+            let rz = 12.0 * angle.sin();
+            let width = 6.0 + (i as f32 % 3.0);
+            let height = 4.0 + (i as f32 % 2.0);
+            let depth = 8.0 + ((i as f32) * 1.5) % 3.0;
+            // Weathered-wood palette varied per house.
+            let red = 130 + ((i * 20) % 60) as u8;
+            let green = 85 + ((i * 15) % 40) as u8;
+            let blue = 70 + ((i * 10) % 30) as u8;
+            InstanceGpuData::from_fields(
+                [rx, height * 0.5, rz],
+                angle * 0.7,
+                [width, height, depth],
+                [red, green, blue, 255],
+            )
+        })
+        .collect();
+    renderer.upload_instances(&device, &queue, &instances);
+
+    // Camera: 15 m above ground, 25 m south, pitched -20° at the cluster.
+    let snap = build_camera_snapshot(
+        Vec3::new(0.0, 15.0, 25.0),
+        Vec3::new(0.0, 3.0, 0.0),
+        60.0,
+        Vec3::new(0.0, -1000.0, 0.0), // vehicle hidden anyway
+    );
+
+    let png = capture_png(&device, &queue, &mut renderer, &snap, INSTANCE_SIZE);
+    let out_dir = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../target/instance_preview"
+    ));
+    std::fs::create_dir_all(&out_dir).expect("mkdir target/instance_preview");
+    let path = out_dir.join("instance_preview.png");
+    std::fs::write(&path, &png).expect("write instance_preview.png");
+    println!("wrote {} ({} instances)", path.display(), instances.len());
 }

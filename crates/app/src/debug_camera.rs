@@ -46,10 +46,12 @@ pub const PITCH_CLAMP_RAD: f32 = 89.0 * core::f32::consts::PI / 180.0;
 /// default for seamless visual continuity on toggle.
 pub const DEFAULT_FOV_Y_RAD: f32 = 1.221_730_5; // 70°
 
-/// Speed tiers (m/s) cycled by Tab. Top tier (500 m/s) enables rapid
-/// traversal of the 10 km streaming radius for verifying the 8-10 km
-/// load-in behavior in one direction.
-pub const SPEED_TIERS_MPS: [f32; 3] = [50.0, 100.0, 500.0];
+/// Speed tiers (m/s) cycled by Tab. Low tiers (50/100/500 m/s) cover
+/// the 10 km streaming radius for near-camera inspection. High tiers
+/// (1 km/s, 5 km/s) enable world-scale sweeps — the 5000 km toroidal
+/// world takes ~17 min at 5 km/s, so biome-scale reconnaissance is
+/// realistic in a dev session.
+pub const SPEED_TIERS_MPS: [f32; 5] = [50.0, 100.0, 500.0, 1000.0, 5000.0];
 
 /// 6-DoF free-fly camera state.
 #[derive(Clone, Copy, Debug)]
@@ -181,6 +183,10 @@ mod tests {
         assert!((c.current_speed_mps() - 100.0).abs() < EPS);
         c.cycle_speed();
         assert!((c.current_speed_mps() - 500.0).abs() < EPS);
+        c.cycle_speed();
+        assert!((c.current_speed_mps() - 1000.0).abs() < EPS);
+        c.cycle_speed();
+        assert!((c.current_speed_mps() - 5000.0).abs() < EPS);
         c.cycle_speed();
         assert!((c.current_speed_mps() - 50.0).abs() < EPS);
     }

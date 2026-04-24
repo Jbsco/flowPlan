@@ -73,6 +73,7 @@ use std::collections::HashMap;
 
 use rayon::prelude::*;
 
+use crate::feature_instances::{compose_instances_for_feature, FeatureInstance};
 use crate::hub_catalog::HubCatalog;
 use crate::hydrology::HydrologyGraph;
 use crate::sub_biome::{
@@ -137,6 +138,15 @@ pub struct BakedAssignments {
     /// post-bake spatial queries (e.g. "is there a fishing_camp within
     /// 5 km of this point?"). Empty for features without self_spacing.
     spatial_hashes: SelfSpacingState,
+    /// Per-cell feature-instance lists (3.6.3c.5c.1). Sparse — only
+    /// cells whose feature has an authored primitive composition have
+    /// an entry. Memory: ~100-400 bytes per populated cell × thousands
+    /// of populated cells = tens of MB total across all features.
+    ///
+    /// Instances are computed at bake time so render-side can stream
+    /// via the cell active set without re-running per-cell logic.
+    /// Palette adaptation + cell-seed RNG variation are baked in.
+    per_cell_instances: HashMap<CellId, Vec<FeatureInstance>>,
     /// Bake statistics.
     stats: BakeStats,
 }
@@ -258,6 +268,22 @@ impl BakedAssignments {
             }
         }
 
+        // ---- Phase C: per-cell instance generation (3.6.3c.5c.1) ----
+        // For each cell whose accepted feature has an authored primitive
+        // composition, generate its instance list (uses cell-seed RNG
+        // + palette adaptation + terrain-height anchoring). Sparse:
+        // only populated cells stored.
+        let per_cell_instances = run_phase_c(
+            master_seed,
+            n_cells,
+            &per_cell,
+            &per_cell_source,
+            &feature_ids,
+            catalog,
+            libraries,
+            terrain,
+        );
+
         let elapsed = start.elapsed();
         stats.bake_wallclock_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
 
@@ -267,8 +293,46 @@ impl BakedAssignments {
             feature_ids,
             feature_id_index,
             spatial_hashes,
+            per_cell_instances,
             stats,
         }
+    }
+
+    /// Look up a cell's baked feature instances. Returns empty slice
+    /// for cells whose feature has no primitive composition (5c.1 MVP
+    /// supports `dwelling_cluster` only; 5c.2+ extends).
+    ///
+    /// Consumed by the active-cell-set streaming loop in game_app per
+    /// 3.6.3c.5c.1 design.
+    #[must_use]
+    pub fn instances_at_cell(&self, cell_id: CellId) -> &[FeatureInstance] {
+        self.per_cell_instances
+            .get(&cell_id)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// Total placed instance count across all cells. Useful for
+    /// bake-stat diagnostics.
+    #[must_use]
+    pub fn total_instance_count(&self) -> usize {
+        self.per_cell_instances.values().map(Vec::len).sum()
+    }
+
+    /// Number of cells with at least one baked instance. Useful for
+    /// diagnosing "where are the populated cells?" after a bake.
+    #[must_use]
+    pub fn populated_cell_count(&self) -> usize {
+        self.per_cell_instances.len()
+    }
+
+    /// Iterator over populated cells sorted by `CellId` (deterministic).
+    /// Consumed at bake time to emit sample coordinates the player can
+    /// fly to when verifying the 3.6.3c.5c.1 render path.
+    pub fn populated_cells(&self) -> impl Iterator<Item = (CellId, &[FeatureInstance])> {
+        let mut ids: Vec<CellId> = self.per_cell_instances.keys().copied().collect();
+        ids.sort_unstable();
+        ids.into_iter()
+            .map(move |id| (id, self.per_cell_instances[&id].as_slice()))
     }
 
     /// Look up a cell's baked assignment.
@@ -379,6 +443,74 @@ fn run_phase_a(
                 source: outcome.source,
                 attempts,
                 is_open_water: outcome.is_open_water,
+            }
+        })
+        .collect()
+}
+
+/// Phase-C worker. Per-cell feature-instance generation. Read-only
+/// against the output of phases A + B + the terrain sampler (for
+/// Y-anchoring). Embarrassingly parallel via `rayon::par_iter`.
+///
+/// 5c.1 MVP: only cells whose accepted feature has an authored
+/// primitive composition contribute an entry. All others are skipped
+/// (sparse storage). `AUTHORED_FEATURE_IDS` is the early-out filter so
+/// the 3.9 M-cell scan doesn't pay the cost of a library lookup per
+/// skipped cell. The terrain sampler is invoked per placed instance
+/// (typically 5-8 per populated cell) at bake time so the render
+/// side never re-samples.
+#[allow(clippy::too_many_arguments)]
+fn run_phase_c(
+    master_seed: u64,
+    n_cells: usize,
+    per_cell: &[u16],
+    per_cell_source: &[BiomeSource],
+    feature_ids: &[String],
+    catalog: &SubBiomeCellCatalog,
+    libraries: &SubBiomeLibraries,
+    terrain: &Terrain,
+) -> HashMap<CellId, Vec<FeatureInstance>> {
+    // Feature IDs with authored primitive compositions. Extend in 5c.2.
+    // Match this list against `compose_instances_for_feature`.
+    const AUTHORED_FEATURE_IDS: &[&str] = &["dwelling_cluster"];
+
+    let height_at = |x: f32, z: f32| terrain.height(x, z);
+
+    (0..n_cells as CellId)
+        .into_par_iter()
+        .filter_map(|cell_id| {
+            let idx = per_cell[cell_id as usize];
+            if idx == FALLBACK_INDEX {
+                return None;
+            }
+            let feature_id = feature_ids[idx as usize].as_str();
+            if !AUTHORED_FEATURE_IDS.contains(&feature_id) {
+                return None;
+            }
+            let source = per_cell_source[cell_id as usize];
+            let pos = catalog.seeds()[cell_id as usize].position;
+
+            // Resolve the feature. Try the source biome first; fall
+            // back to oceanic (sea cells). At most one of the two
+            // succeeds because feature_id intern table only contains
+            // ids from libraries we actually sampled.
+            let feature = libraries
+                .find(source.feature_source_biome(), feature_id)
+                .or_else(|| libraries.oceanic().iter().find(|f| f.id == feature_id))?;
+
+            let instances = compose_instances_for_feature(
+                master_seed,
+                cell_id,
+                pos,
+                feature,
+                source,
+                libraries,
+                &height_at,
+            );
+            if instances.is_empty() {
+                None
+            } else {
+                Some((cell_id, instances))
             }
         })
         .collect()
