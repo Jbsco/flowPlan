@@ -66,6 +66,28 @@ const CUBE_SIZE: f32 = 2.0;
 /// startup.
 const AIRCRAFT_DIR: &str = "data/aircraft";
 
+/// Compile-time absolute path to the aircraft catalog directory. Resolved
+/// from the app crate's `CARGO_MANIFEST_DIR` (at `crates/app`) → up two
+/// levels → `data/aircraft`. Used as fallback when the CWD-relative path
+/// doesn't resolve (e.g. when the release binary is invoked from outside
+/// the project root).
+const AIRCRAFT_DIR_FALLBACK: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/aircraft");
+
+/// Resolve the aircraft catalog directory, trying CWD-relative first
+/// (matches cargo-run-from-root + workspace dev workflow), then falling
+/// back to the compile-time absolute path (release binary run from any
+/// CWD). Either path may still fail to exist; caller handles that as
+/// "empty catalog → cube fallback".
+fn aircraft_dir_path() -> std::path::PathBuf {
+    let cwd = std::path::Path::new(AIRCRAFT_DIR);
+    if cwd.is_dir() {
+        cwd.to_path_buf()
+    } else {
+        std::path::PathBuf::from(AIRCRAFT_DIR_FALLBACK)
+    }
+}
+
 /// Cel-shading presets for the Phase 1 placeholder scene. The terrain is a large, mostly
 /// diffuse surface: many bands (4), high ambient floor (0.5), low rim (0.08). The vehicle
 /// is a small object where silhouette reads matter: fewer bands (3), lower ambient (0.35),
@@ -688,6 +710,14 @@ impl Runtime {
         if scenario.is_some() && vehicle_config == flowplan_sim::VehicleConfig::Wheels {
             renderer.set_water_visible(false);
         }
+        // 3.6.3c.5b: free-flight uses streaming water whose vertices are
+        // already in world coordinates. Suppress the per-frame camera-
+        // follow model-matrix translation (which would double-translate
+        // and make the water plane drift visibly with the camera).
+        // Scenarios keep the old behavior (fixed-origin mesh + follow).
+        if scenario.is_none() {
+            renderer.set_water_follows_camera(false);
+        }
 
         // Sim. Scenario-mode init uses the scenario's ScenarioInitial so playback is
         // deterministic and reproducible. Normal-mode init is the existing cruise-
@@ -844,6 +874,7 @@ impl Runtime {
                 self.key_state.clear_debug_inputs();
                 self.mouse_captured = false;
                 self.window_set_cursor_captured(false);
+                self.renderer.set_vehicle_visible(true);
                 tracing::info!(target: "debug_camera", "exit debug mode");
             } else {
                 // Entering debug mode. Snap to sim-camera pose.
@@ -855,6 +886,7 @@ impl Runtime {
                 self.debug_mouse_delta = (0.0, 0.0);
                 self.mouse_captured = true;
                 self.window_set_cursor_captured(true);
+                self.renderer.set_vehicle_visible(false);
                 tracing::info!(
                     target: "debug_camera",
                     pos_x = curr.camera.position.x,
@@ -895,9 +927,36 @@ impl Runtime {
             }
         }
 
+        // 3.6.3c.5a: when debug camera is active, the aircraft is
+        // "carried" with the camera — physics paused, position snapped
+        // to camera each frame. Avoids the "crashed while I was away"
+        // problem AND keeps the sim's implicit center-of-focus (which
+        // gameplay systems will eventually query — NPCs, weather, audio)
+        // co-located with where the player is actually LOOKING. On exit
+        // the aircraft resumes from the camera position with zero
+        // velocity (will fall per gravity unless pilot throttles up).
+        if self.key_state.debug_active {
+            self.sim.vehicle.position = self.debug_camera.position;
+            self.sim.vehicle.velocity = glam::Vec3::ZERO;
+            self.sim.vehicle.angular_velocity = glam::Vec3::ZERO;
+            // Zero out time budget so we don't catch up on a storm of
+            // paused ticks when returning to normal mode.
+            self.tick_budget = 0.0;
+            // Publish a fresh snapshot so the renderer + HUD see the
+            // updated aircraft pose.
+            let snap = SimSnapshot::from_state(&self.sim);
+            self.snapshots.publish(snap);
+            self.ticks_last_frame = 0;
+        }
+
         // Advance the sim by fixed-timestep ticks while we have budget.
+        // Skipped entirely while debug camera is active (block above
+        // handled that case).
         let mut tick_count = 0u32;
-        while self.tick_budget >= FIXED_DT && tick_count < MAX_TICKS_PER_FRAME {
+        while !self.key_state.debug_active
+            && self.tick_budget >= FIXED_DT
+            && tick_count < MAX_TICKS_PER_FRAME
+        {
             // Gather input for this tick. In scenario mode the scripted source
             // takes over -- keyboard is ignored for flight controls (still works
             // for Esc / reset / view). In normal mode, keyboard feeds the queue
@@ -1285,8 +1344,8 @@ pub struct SelectedAircraft {
 /// Returns `None` when the catalog is empty — caller falls back to the
 /// placeholder cube with a warning.
 fn resolve_aircraft_selection(opts: &crate::CliOptions) -> Option<SelectedAircraft> {
-    let dir = std::path::Path::new(AIRCRAFT_DIR);
-    let (catalog, errors) = flowplan_sim::AircraftCatalog::scan(dir);
+    let dir = aircraft_dir_path();
+    let (catalog, errors) = flowplan_sim::AircraftCatalog::scan(&dir);
     for err in &errors {
         tracing::warn!("catalog scan: {err}");
     }
@@ -1335,13 +1394,13 @@ fn resolve_aircraft_selection(opts: &crate::CliOptions) -> Option<SelectedAircra
 
 /// Print the catalog contents to stdout and exit. Used by `--list-aircraft`.
 pub fn print_catalog_and_exit() -> ! {
-    let dir = std::path::Path::new(AIRCRAFT_DIR);
-    let (catalog, errors) = flowplan_sim::AircraftCatalog::scan(dir);
+    let dir = aircraft_dir_path();
+    let (catalog, errors) = flowplan_sim::AircraftCatalog::scan(&dir);
     for err in &errors {
         eprintln!("catalog scan warning: {err}");
     }
     if catalog.is_empty() {
-        println!("(catalog empty — no parseable RON files in {AIRCRAFT_DIR})");
+        println!("(catalog empty — no parseable RON files in {})", dir.display());
     } else {
         println!("Aircraft catalog ({} entries):", catalog.entries().len());
         for entry in catalog.entries() {
@@ -1362,7 +1421,20 @@ pub fn print_catalog_and_exit() -> ! {
 /// Load the aircraft mesh at `path`; fall back to the placeholder cube on missing
 /// file or parse failure. Log the chosen path so startup is self-documenting.
 fn load_vehicle_mesh(path: &str) -> CpuMesh {
-    match std::fs::read(path) {
+    // Try CWD-relative first, then fall back to compile-time workspace-
+    // root path. Catalog RON files store `mesh_path` as workspace-root-
+    // relative (`data/aircraft/foo.glb`) so this matches the
+    // `aircraft_dir_path` resolution pattern.
+    let resolved: std::path::PathBuf = {
+        let cwd = std::path::Path::new(path);
+        if cwd.is_file() {
+            cwd.to_path_buf()
+        } else {
+            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../"))
+                .join(path)
+        }
+    };
+    match std::fs::read(&resolved) {
         Ok(bytes) => match flowplan_assets::load_mesh(&bytes) {
             Ok(mesh) => {
                 // The mesh is rendered at `vehicle.position` and rotated around it.

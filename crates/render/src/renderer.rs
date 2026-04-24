@@ -21,7 +21,12 @@ pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// Perspective near-plane distance (meters).
 const NEAR: f32 = 0.1;
 /// Perspective far-plane distance (meters).
-const FAR: f32 = 10_000.0;
+///
+/// Tuned for the Phase 3.6.3c.5b streaming mesh half-extent (10 km).
+/// Corner diagonal is ~14 km; 20 km clip provides margin so mesh never
+/// visibly clips at the horizon. Performance-slider candidate for
+/// Phase 4.8 settings UI.
+const FAR: f32 = 20_000.0;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -156,10 +161,14 @@ impl Default for SceneParams {
             sun_color: Vec3::splat(1.0),
             ambient: Vec3::splat(0.35),
             fog_color: Vec3::new(0.55, 0.73, 0.90),
-            // 0.0005 /m: ~5% fog at 100 m, ~39% at 1 km, ~63% at 2 km. Tuned for the
-            // mountain-scale terrain (±375 m peaks) so distant ridges read through
-            // atmospheric haze without disappearing. Per-biome tuning lands later.
-            fog_density: 0.0005,
+            // 0.00008 /m: ~4% fog at 500 m, ~8% at 1 km, ~55% at 10 km,
+            // ~80% at 20 km. Open-visibility tuning for the Phase 3.6.3c.5b
+            // streaming mesh (10 km half-extent ≈ 14 km diagonal). The
+            // previous 0.0005/m was tuned for a 4 km test world and made
+            // water read as sky past ~5 km — see `streaming_render_architecture`
+            // memory + PROGRESS for the Option-2 tuning decision. Per-biome
+            // tuning + performance-slider user control land in Phase 4.8.
+            fog_density: 0.000_08,
             time_seconds: 0.0,
             // Default matches the prior Phase 2 baseline where SimState's
             // chop_intensity sat at 1.0 unconditionally.
@@ -247,7 +256,18 @@ pub struct Renderer {
     /// mesh. Default `true` so free-flight and water-scenario playback retain
     /// the existing Gerstner surface.
     draw_water: bool,
+    /// When `true`, the water mesh's model matrix translates to follow
+    /// the camera each frame (old behavior for fixed-origin water mesh
+    /// in scenarios). When `false`, the model matrix is identity — the
+    /// water mesh is assumed to already have world-coordinate vertices
+    /// (3.6.3c.5b streaming water). Default `true` to keep scenario
+    /// playback unchanged; streaming setup in `game_app` flips it.
+    water_follows_camera: bool,
     vehicle: DrawModel,
+    /// When `false`, the vehicle draw call is skipped. Used by 3.6.3c.5a
+    /// debug camera (aircraft pinned to camera position; don't render
+    /// it from inside). Default `true`.
+    draw_vehicle: bool,
     /// 2.4.2c: line-list pipeline used by the corner widgets and (later) HUD ladders
     /// and wireframe debug views.
     debug_lines: DebugLinesRenderer,
@@ -584,6 +604,8 @@ impl Renderer {
             terrain,
             water,
             draw_water: true,
+            water_follows_camera: true,
+            draw_vehicle: true,
             vehicle,
             debug_lines,
             widget_camera_buf_br,
@@ -672,6 +694,24 @@ impl Renderer {
 
     pub fn set_water_visible(&mut self, visible: bool) {
         self.draw_water = visible;
+    }
+
+    /// Toggle rendering of the vehicle mesh.
+    ///
+    /// Used by 3.6.3c.5a — when debug camera is active, the aircraft is
+    /// pinned to the camera position (so the user isn't looking at the
+    /// inside of their own aircraft mesh). Defaults to true.
+    pub fn set_vehicle_visible(&mut self, visible: bool) {
+        self.draw_vehicle = visible;
+    }
+
+    /// When `false`, the water mesh's model matrix stays identity —
+    /// appropriate when the mesh vertices are in world coordinates
+    /// (3.6.3c.5b streaming water). When `true` (default), the mesh
+    /// translates to follow the camera each frame (old fixed-origin
+    /// water behavior for scenario playback).
+    pub fn set_water_follows_camera(&mut self, follows: bool) {
+        self.water_follows_camera = follows;
     }
 
     pub fn set_scene(&self, queue: &wgpu::Queue, params: &SceneParams) {
@@ -764,16 +804,25 @@ impl Renderer {
             bytemuck::bytes_of(&vehicle_uniform),
         );
 
-        // Water mesh follows the camera in XZ so the limited-extent high-tessellation
-        // mesh stays around the aircraft (otherwise the aircraft would fly out of the
-        // visible water area in seconds at cruise speed). Y stays at 0 (mean water
-        // level). The wave shader samples the post-translation world position to
-        // compute Gerstner displacement, so waves remain spatially anchored — they
-        // don't visually slide with the camera. Snap to a few-meter pitch so vertices
-        // align across consecutive frames and waves don't shimmer.
-        let snap_x = (cam_pos.x / WATER_FOLLOW_SNAP_M).round() * WATER_FOLLOW_SNAP_M;
-        let snap_z = (cam_pos.z / WATER_FOLLOW_SNAP_M).round() * WATER_FOLLOW_SNAP_M;
-        let water_model = Mat4::from_translation(Vec3::new(snap_x, 0.0, snap_z));
+        // Water mesh model matrix.
+        //
+        // Scenario / fixed-mesh mode (`water_follows_camera = true`): the
+        // mesh has local-origin vertices; translate to follow camera so
+        // the aircraft stays inside the tessellated water area. Snap to a
+        // few-meter pitch for shimmer-free frame-to-frame alignment.
+        //
+        // Streaming-water mode (3.6.3c.5b, `water_follows_camera = false`):
+        // the mesh's vertices are already in world coordinates (rebuilt
+        // when the camera crosses the recenter threshold). Identity
+        // matrix — any translation here would double-apply and make the
+        // water plane visibly drift with the camera.
+        let water_model = if self.water_follows_camera {
+            let snap_x = (cam_pos.x / WATER_FOLLOW_SNAP_M).round() * WATER_FOLLOW_SNAP_M;
+            let snap_z = (cam_pos.z / WATER_FOLLOW_SNAP_M).round() * WATER_FOLLOW_SNAP_M;
+            Mat4::from_translation(Vec3::new(snap_x, 0.0, snap_z))
+        } else {
+            Mat4::IDENTITY
+        };
         let water_uniform = ModelUniform {
             model: water_model.to_cols_array_2d(),
             normal_mat: Mat4::IDENTITY.to_cols_array_2d(),
@@ -873,14 +922,19 @@ impl Renderer {
                 pass.draw_indexed(0..self.water.mesh.index_count, 0, 0..1);
             }
 
-            // Back to the scene pipeline for the vehicle.
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.camera_bg, &[]);
-            pass.set_bind_group(2, &self.scene_bg, &[]);
-            pass.set_bind_group(1, &self.vehicle.bind_group, &[]);
-            pass.set_vertex_buffer(0, self.vehicle.mesh.vbo.slice(..));
-            pass.set_index_buffer(self.vehicle.mesh.ibo.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..self.vehicle.mesh.index_count, 0, 0..1);
+            // Back to the scene pipeline for the vehicle. Skipped when
+            // 3.6.3c.5a debug camera is active (aircraft pinned to
+            // camera position; rendering would put the user inside the
+            // vehicle mesh).
+            if self.draw_vehicle {
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.camera_bg, &[]);
+                pass.set_bind_group(2, &self.scene_bg, &[]);
+                pass.set_bind_group(1, &self.vehicle.bind_group, &[]);
+                pass.set_vertex_buffer(0, self.vehicle.mesh.vbo.slice(..));
+                pass.set_index_buffer(self.vehicle.mesh.ibo.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..self.vehicle.mesh.index_count, 0, 0..1);
+            }
         }
 
         // Outline pass: full-screen triangle, sobel on the just-written depth buffer,
