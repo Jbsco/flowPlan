@@ -1121,9 +1121,25 @@ impl Runtime {
         // the aircraft resumes from the camera position with zero
         // velocity (will fall per gravity unless pilot throttles up).
         if self.key_state.debug_active {
-            self.sim.vehicle.position = self.debug_camera.position;
+            // Debug camera stores position in f64 for precision at
+            // large world coords; vehicle.position is f32. Narrow at
+            // the boundary — static ~0.25 m quantization error at 5 Mm
+            // is absorbed into the render (no per-frame flicker).
+            self.sim.vehicle.position = self.debug_camera.position.as_vec3();
             self.sim.vehicle.velocity = glam::Vec3::ZERO;
             self.sim.vehicle.angular_velocity = glam::Vec3::ZERO;
+            // Also snap sim camera to track the moved vehicle. Without
+            // this, sim.camera is stale at its pre-debug location
+            // (normally updated by sim ticks which are paused while
+            // debug is active) — on debug exit, the snapshot would
+            // read back a camera position hundreds of km from the
+            // aircraft, triggering a streaming rebuild cascade. Large
+            // dt forces exponential smoothing to converge instantly.
+            self.sim.camera.follow(
+                self.sim.vehicle.position,
+                self.sim.vehicle.orientation,
+                10.0,
+            );
             // Zero out time budget so we don't catch up on a storm of
             // paused ticks when returning to normal mode.
             self.tick_budget = 0.0;
@@ -1309,7 +1325,7 @@ impl Runtime {
         // sim camera; in debug mode it wraps the debug-fly camera.
         let active_camera = if self.key_state.debug_active {
             crate::streaming::ActiveCamera {
-                position: self.debug_camera.position,
+                position: self.debug_camera.position.as_vec3(),
                 orientation: self.debug_camera.orientation(),
                 fov_y_radians: self.debug_camera.fov_y_radians,
                 debug_active: true,
@@ -1490,7 +1506,7 @@ impl Runtime {
         // the debug-camera overlay per 3.6.3c.5a.
         let debug_overlay = if self.key_state.debug_active {
             Some(crate::debug_hud::DebugCameraOverlay {
-                position: self.debug_camera.position,
+                position: self.debug_camera.position.as_vec3(),
                 heading_deg: self.debug_camera.heading_deg(),
                 pitch_deg: self.debug_camera.pitch * 180.0 / core::f32::consts::PI,
                 speed_mps: self.debug_camera.current_speed_mps(),

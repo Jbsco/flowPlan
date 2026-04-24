@@ -29,7 +29,7 @@
 
 #![allow(clippy::cast_precision_loss)]
 
-use glam::{Quat, Vec3};
+use glam::{DVec3, Quat, Vec3};
 
 /// Mouse sensitivity (radians per pixel of mouse motion).
 ///
@@ -54,10 +54,20 @@ pub const DEFAULT_FOV_Y_RAD: f32 = 1.221_730_5; // 70°
 pub const SPEED_TIERS_MPS: [f32; 5] = [50.0, 100.0, 500.0, 1000.0, 5000.0];
 
 /// 6-DoF free-fly camera state.
+///
+/// Position is stored as `DVec3` (f64) so per-frame integration at
+/// world coords far from origin still resolves sub-meter movement. At
+/// f32 precision, a position near the toroidal world boundary (~5 Mm)
+/// has ~0.5 m ULP — so at the 50 m/s speed tier (0.83 m/frame at 60
+/// FPS) the integration step rounds to zero intermittently and the
+/// camera appears stuck. f64 at 5 Mm has ~1 nm ULP — effectively
+/// infinite headroom. Position is cast to `Vec3` only at the
+/// render/HUD boundary.
 #[derive(Clone, Copy, Debug)]
 pub struct DebugCamera {
-    /// World-space camera position.
-    pub position: Vec3,
+    /// World-space camera position (f64 for precision at large coords;
+    /// see struct-level docs).
+    pub position: DVec3,
     /// Yaw in radians (rotation around world Y). Zero = looking -Z.
     pub yaw: f32,
     /// Pitch in radians (rotation around camera-local X). Clamped to
@@ -73,7 +83,7 @@ pub struct DebugCamera {
 impl Default for DebugCamera {
     fn default() -> Self {
         Self {
-            position: Vec3::ZERO,
+            position: DVec3::ZERO,
             yaw: 0.0,
             pitch: 0.0,
             fov_y_radians: DEFAULT_FOV_Y_RAD,
@@ -85,10 +95,13 @@ impl Default for DebugCamera {
 impl DebugCamera {
     /// Spawn at the given position, aiming along -Z, level pitch.
     /// Used on first backtick toggle (entry from sim-camera pose).
+    /// Takes `Vec3` (world coord from the sim) and widens to `DVec3`
+    /// internally — precision in the integration step matters; the
+    /// one-time widening has no observable effect.
     #[must_use]
     pub fn spawn_at(position: Vec3) -> Self {
         Self {
-            position,
+            position: position.as_dvec3(),
             ..Self::default()
         }
     }
@@ -135,14 +148,20 @@ impl DebugCamera {
     /// `forward_back`: +1 = W (forward along camera -Z); -1 = S (backward)
     /// `right_left`: +1 = D (strafe right along camera +X); -1 = A
     /// `up_down`: +1 = Shift (world +Y); -1 = Ctrl (world -Y)
+    ///
+    /// Delta is computed in f32 (orientation + speed are f32) then
+    /// widened to f64 before accumulation. Keeps the rotation math
+    /// cheap while preserving integration precision at large world
+    /// coords — see struct-level docs.
     pub fn integrate(&mut self, forward_back: f32, right_left: f32, up_down: f32, dt: f32) {
         let speed = self.current_speed_mps();
         let orient = self.orientation();
         let forward = orient * Vec3::NEG_Z;
         let right = orient * Vec3::X;
         let horizontal = forward * forward_back + right * right_left;
-        self.position += horizontal * speed * dt;
-        self.position.y += up_down * speed * dt;
+        let delta_xyz = horizontal * speed * dt;
+        self.position += delta_xyz.as_dvec3();
+        self.position.y += f64::from(up_down * speed * dt);
     }
 
     /// Heading in degrees (0-360) for HUD display. 0° = north (-Z),
@@ -164,11 +183,12 @@ mod tests {
     use super::*;
 
     const EPS: f32 = 1e-5;
+    const EPS64: f64 = 1e-5;
 
     #[test]
     fn default_camera_state() {
         let c = DebugCamera::default();
-        assert_eq!(c.position, Vec3::ZERO);
+        assert_eq!(c.position, DVec3::ZERO);
         assert!(c.yaw.abs() < EPS);
         assert!(c.pitch.abs() < EPS);
         assert_eq!(c.speed_tier, 0);
@@ -216,18 +236,18 @@ mod tests {
     fn forward_motion_moves_along_negative_z_at_default_orientation() {
         let mut c = DebugCamera::default();
         c.integrate(1.0, 0.0, 0.0, 1.0); // 1 sec forward at default tier (50 m/s)
-        assert!(c.position.x.abs() < EPS);
-        assert!(c.position.y.abs() < EPS);
-        assert!((c.position.z - -50.0).abs() < EPS);
+        assert!(c.position.x.abs() < EPS64);
+        assert!(c.position.y.abs() < EPS64);
+        assert!((c.position.z - -50.0).abs() < EPS64);
     }
 
     #[test]
     fn strafe_moves_along_positive_x_at_default_orientation() {
         let mut c = DebugCamera::default();
         c.integrate(0.0, 1.0, 0.0, 1.0);
-        assert!((c.position.x - 50.0).abs() < EPS);
-        assert!(c.position.y.abs() < EPS);
-        assert!(c.position.z.abs() < EPS);
+        assert!((c.position.x - 50.0).abs() < EPS64);
+        assert!(c.position.y.abs() < EPS64);
+        assert!(c.position.z.abs() < EPS64);
     }
 
     #[test]
@@ -237,9 +257,31 @@ mod tests {
         c.apply_mouse_delta(0.0, 200.0);
         let pos_before = c.position;
         c.integrate(0.0, 0.0, 1.0, 1.0);
-        assert!((c.position.x - pos_before.x).abs() < EPS);
-        assert!((c.position.z - pos_before.z).abs() < EPS);
-        assert!((c.position.y - (pos_before.y + 50.0)).abs() < EPS);
+        assert!((c.position.x - pos_before.x).abs() < EPS64);
+        assert!((c.position.z - pos_before.z).abs() < EPS64);
+        assert!((c.position.y - (pos_before.y + 50.0)).abs() < EPS64);
+    }
+
+    #[test]
+    fn integration_resolves_sub_meter_motion_at_world_edge() {
+        // Regression guard: at world-coord ~5 Mm, f32 ULP is ~0.5 m, so
+        // per-frame integration at 50 m/s × 1/60 s = 0.83 m/frame was
+        // rounding to zero intermittently — camera appeared stuck at
+        // low-speed tiers. Storing position as DVec3 (f64) resolves
+        // this; 60 frames at default 50 m/s should integrate cleanly to
+        // 50 m regardless of absolute world coord.
+        let mut c = DebugCamera::spawn_at(Vec3::new(4_998_180.0, 112.0, 4_990_568.0));
+        let pos_before = c.position;
+        let frames = 60;
+        let dt = 1.0_f32 / 60.0;
+        for _ in 0..frames {
+            c.integrate(1.0, 0.0, 0.0, dt);
+        }
+        let moved = (c.position.z - pos_before.z).abs();
+        assert!(
+            (moved - 50.0).abs() < 0.5,
+            "expected ~50 m forward motion after 1 s at 50 m/s, got {moved}"
+        );
     }
 
     #[test]

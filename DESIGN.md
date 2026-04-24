@@ -303,6 +303,17 @@ See [PLAN.md#rendering-approach](PLAN.md) for the creative direction. The techni
 
 Each pass is a function that takes the command encoder, the frame's resources, and the sim-derived state. No pass pulls directly from `SimState`; all reads go through the frame's interpolated render state.
 
+### Camera-relative rendering (Phase 3.6.3c.5d invariant)
+
+The 5000 km toroidal world puts camera positions routinely past 10⁶ m from origin. At that magnitude, f32 has ~0.5 m ULP, which destroys view-matrix matmul precision. Invariants to preserve:
+
+- **`perspective_view_proj` returns `proj * rotation_only_view`** — no translation column. `Mat4::look_to_rh` is called with `Vec3::ZERO` as the eye, not the world camera position.
+- **`CameraUniform.view_pos` carries the world-space camera position**; vertex shaders compute `rel_to_cam = world_pos - camera.view_pos.xyz` before applying `view_proj`. This moves the "large minus large = small" subtraction into a f32 op whose precision depends on the small result magnitude, not the huge operands.
+- **All scene-shader descendants** (`shader.wgsl`, `water.wgsl`, `instances.wgsl`) must follow this pattern. Sky and outline pipelines are exempt (full-screen / screen-space).
+- **Regression guard**: `view_proj_has_no_translation_column` unit test in `renderer.rs`. Hardware-gated `instance_preview_far` test renders at 2.5 Mm world-coord offset and must be visually identical to the origin render.
+
+**Deferred CPU-side precision work**: sim-side `sim.camera.position` and `sim.vehicle.position` remain `Vec3` (f32). Past ~1 Mm world coords, chase-camera smoothing + aircraft integration both quantize to their f32 ULP (~0.25 m at 2.5 Mm), producing frame-to-frame jitter on dynamic objects. Static geometry (terrain, water, baked instances) is unaffected — their vertex positions are fixed f32 at bake time. Jitter only manifests on debug-cam teleport scenarios (aircraft reaches 1 Mm+ from origin only after hours of normal-play flight). See memory `render_precision_at_world_scale` for the three fix options (A: document + defer — current; B: debug-mode render-origin rebasing; C: full end-to-end camera-relative CPU refactor including potential `DVec3` upgrade for sim-side positions).
+
 ---
 
 ## Audio Architecture

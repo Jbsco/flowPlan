@@ -3,6 +3,44 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
+## 2026-04-23 (iteration 11) — Phase 3.6.3c.5c.1 + 5d + 5d-followup
+
+Three stacked milestones landed together:
+
+### 3.6.3c.5c.1 — Feature-instance streaming MVP (SHIPPED)
+
+- `crates/world/src/feature_instances.rs` — `PrimitiveKind::Box`, `FeatureInstance` (position/scale/rotation_y/color), `compose_instances_for_feature` with hardcoded `dwelling_cluster` composition (5-8 box houses per cell). Y-anchored to `terrain.height(x, z) + half_height` at bake time.
+- `BakedAssignments` Phase C — sparse `HashMap<CellId, Vec<FeatureInstance>>` built in parallel via rayon `filter_map`, gated by `AUTHORED_FEATURE_IDS` early-out.
+- `crates/render/src/instances.{rs,wgsl}` — storage-buffer instanced draw pipeline, group-0 camera / group-1 instance buffer / group-2 scene, non-uniform-scale-aware normal transform, cel-shaded + fog (matches scene shader). `InstanceRenderer::upload` resizes/uploads the buffer; `record` adds the draw call in the scene pass.
+- `game_app` wires the active-cell-set refresh → instance upload loop. Upload triggers only when `entered`/`exited` is non-empty. Tracing log records `active`, `entered`, `exited`, `populated_in_active`, `instances_uploaded` per upload.
+- Debug HUD extended with `instances: N` line.
+- **Gated behind `FLOWPLAN_FEATURE_INSTANCES=1`** — the full 3.9 M-cell bake (hydrology + hubs + assignments) is ~30-60 s cold-start. Dev iteration stays fast by default; serialized preload is a 3.7 save-format target.
+- **`FLOWPLAN_SPAWN_NEAR_INSTANCE=1`** teleports the debug camera 200 m south + 100 m above the populated cell nearest origin (toroidal distance) at init. Streaming terrain/water initializes at that position too (no async-rebuild gap on frame 0). Prints nearest-8 populated cells with `(x, y, z) ~N km from spawn` for navigation.
+
+Hardware-gated reference renders: `target/instance_preview/instance_preview.png` (origin) + `instance_preview_far.png` (2.5 Mm offset) — visually identical after 5d camera-relative fix.
+
+### 3.6.3c.5d — Camera-relative rendering (SHIPPED)
+
+- `perspective_view_proj` drops its `pos` parameter; returns `proj * rot_only_view`. Translation applied CPU-side via `CameraUniform.view_pos`.
+- `shader.wgsl` / `water.wgsl` / `instances.wgsl` — vertex shaders compute `rel_to_cam = world_pos - camera.view_pos` before the rotation-only view-proj matmul. Math is equivalent to the old `proj * view_with_translation * world`; GPU-side matmul operates on small values regardless of absolute world coord magnitude.
+- `sky.wgsl` + `outline.wgsl` unchanged.
+- Regression guard `view_proj_has_no_translation_column` in renderer unit tests.
+- `instance_preview_far` hardware test renders the 6-box scene at 2.5 Mm offset and produces a clean artifact-free image.
+
+**Known limitation** captured in memory `render_precision_at_world_scale`: sim-side f32 integration of `sim.camera.position` + `sim.vehicle.position` still suffers at extreme world coords (~0.5m ULP at 5 Mm), producing dynamic-object jitter during debug-cam-teleport scenarios. Normal play stays below ~250 km where ULP is ~0.03m and invisible. Three fix options documented (A: ship-it, B: debug-mode rebasing ~1 h, C: full end-to-end refactor ~1 day). Option A chosen; revisit when teleport / save / fast-travel lands.
+
+### 3.6.3c.5d-followup — Sync rebuild on large camera jumps (SHIPPED)
+
+- `LARGE_JUMP_THRESHOLD_M = TERRAIN_HALF_EXTENT_M` (20 km). `StreamingTerrain::maybe_rebuild` sync-rebakes when the camera jumps more than this in one frame (mesh is outside frustum; async serves no purpose). Drops any in-flight worker.
+- Normal play (<100 m/s aircraft, <5 km/s debug cam) never crosses the threshold — always async.
+- New test `streaming_terrain_large_jump_is_sync` — starts async at 7.5 km, then jumps to 40 km, asserts single-call sync completion with no pending worker.
+- **Debug-cam ↔ sim-cam toggle fix**: `sim.camera.follow(vehicle_pos, vehicle_orient, dt=10.0)` now runs alongside the `vehicle.position = debug_cam.position` sync, forcing chase-cam to converge to aircraft-at-debug-location. Without this, sim.camera stayed frozen at pre-debug location (ticks paused), causing a cascade of streaming rebuilds on debug exit.
+- **Debug camera position precision**: `DebugCamera.position` widened to `DVec3` (f64). Per-frame integration at low speed tiers (50/100/500 m/s) at world coords near 5 Mm was rounding to zero in f32 (0.83 m/frame vs 0.5 m ULP); f64 resolves sub-meter motion everywhere. Cast to `Vec3` only at render/HUD boundary. Regression test `integration_resolves_sub_meter_motion_at_world_edge`.
+
+**Next: Phase 3.6.3c.5c.2** — extend primitive vocabulary (cone/cylinder/sphere/stick-tree) + RON-authored composition (remove the hardcoded `dwelling_cluster`-only branch in `compose_instances_for_feature`).
+
+---
+
 Last updated: **2026-04-23** (Phase 2.5 **SHIPPED**; Phase 3.2.1 + 3.2.2 + 3.2.3 weather W1/W2/W3 **SHIPPED**; world scope **LOCKED to Option A toroidal**; progression data-model locked; **scenario-realism audit COMPLETE**; **flight-model realism pass COMPLETE**; **water-physics hardening COMPLETE**; **Phase 3.6.0 through 3.6.2 SHIPPED**; **Phase 3.6.3a SHIPPED**; **Phase 3.6.3b SHIPPED** — palette adaptation via biome-receives HSV shift + simple-primitives render direction, 18 cross-biome features authored in RON with palettes + categories, full-spec placement rules; **Phase 3.6.3c.1 SHIPPED** — `PlacementRules` nested schema (7 categories) + `evaluate_placement_rules` function (5 rule categories evaluated lazily); **Phase 3.6.3c.1c SHIPPED** — `BakedAssignments` eager-bake materializes per-cell sub-biome assignments with self-spacing + attractor `weight_mult` biasing; rayon parallel two-phase architecture (Phase A read-only par_iter + Phase B serial permuted-order merge) hits **8.3× speedup** (275 s → 33 s at canonical seed), bit-identical output. ~20 MB world-state memory budget (u16-interned feature ids); rayon added to DESIGN.md tech-stack + workspace deps. Bench at ~70 scenarios + 501 unit tests, full gate green. **Phase 3.6.3c.5b SHIPPED** — render streaming with rayon-parallel mesh build (10 km terrain + water half-extent, ~1 M terrain verts at 20 m cells, 2 km rebuild threshold) + Voronoi cell active set (`StreamingCellSet` for future content streaming); `ActiveCamera` single-source-of-truth abstraction ready for 3.6.3c.5a debug-camera integration; rayon added to DESIGN.md tech-stack + assets crate. 508 workspace tests pass. **Now: Phase 3.6.3c.5a** — debug camera (WASD + mouse + Tab speed cycle + backtick toggle + debug HUD with pos / heading / speed-tier / **FPS + frametime**).).
 
 ## 2026-04-23 (iteration 9) — Phase 3.6.3c.5b (Render streaming — uniform terrain + Voronoi cell active set)

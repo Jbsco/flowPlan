@@ -999,25 +999,58 @@ Split (pinned 2026-04-23 per user direction, detail in [MAPGEN.md § Layer 3 pha
 
 - [ ] `composed::WorldRefs` computes `source_weight` + `blend_factor = smoothstep(0.1, 0.9, source_weight)`; shader-side palette lerp. Visual-bench `palette_bleed_over_{crop}.png`. Makes the winter-ranch / desert-fjord effects actually visible.
 
-**3.6.3c.5b — Render streaming (Task #226): pending.** Ships first because the debug camera depends on it (a free-fly camera against a fixed 4 km mesh sees nothing useful past x = ±2 km).
+**3.6.3c.5b — Render streaming (Task #226): SHIPPED 2026-04-23.**
 
-- [ ] **Layer 1 — uniform terrain mesh, recenter on camera**: `StreamingTerrain` with `maybe_rebuild` checking distance threshold. 10 km half-extent / 20 m cells / ~1 M verts default. Performance slider exposed in Phase 4.8 settings UI.
-- [ ] **Layer 2 — active cell set**: `Vec<CellId>` of Voronoi cells within `STREAM_RADIUS_M` (10 km default) of active camera. Refreshed per frame via `SubBiomeCellCatalog::cells_within_radius`.
-- [ ] **`app::ActiveCamera`** abstraction: single source of truth for camera pose, returns sim camera in normal play, debug camera in debug mode. Both streaming layers read from this.
-- [ ] **Async mesh build via `rayon::par_iter`** on the terrain_patch construction loop. Targets ~5× speedup on the rebuild (50-100 ms → 15-25 ms).
-- [ ] **Same pattern for water mesh** at smaller half-extent (4 km).
-- [ ] **Toroidal wrap handling**: both layers use `wrap_coord` for camera position; verify mesh + cell set wrap seamlessly past world edges.
-- [ ] **Tests**: 7 specific tests in `crates/world/tests/streaming_test.rs` (active-cell-set correctness at position, set updates on movement, mesh recenter triggers at threshold, mesh determinism at rest, traversal-path independence, vertex-count budget, toroidal wrap handling).
-- [ ] Full design spec: [MAPGEN.md § Render streaming](MAPGEN.md#render-streaming--uniform-terrain-mesh--voronoi-cell-active-set-pinned-2026-04-23) + memory `streaming_render_architecture`.
+- [x] **Layer 1 — uniform terrain mesh, recenter on camera**: `StreamingTerrain` with `maybe_rebuild` checking 5 km distance threshold. 20 km half-extent / 30 m cells / ~1 M verts default. Performance slider exposed in Phase 4.8 settings UI.
+- [x] **Layer 2 — active cell set**: `Vec<CellId>` of Voronoi cells within `STREAM_RADIUS_M` (20 km) of active camera, refreshed per frame via `SubBiomeCellCatalog::cells_within_radius`. `entered`/`exited` deltas drive 5c content streaming.
+- [x] **`app::ActiveCamera`** abstraction — single source of truth; returns sim camera in normal play, debug camera in debug mode.
+- [x] **Async mesh build** — rayon-parallel vertex sampling inside the worker thread pattern (`std::thread` + `std::sync::mpsc`). Main thread sees only ~6 ms GPU upload at finalize.
+- [x] **Disc-clipped mesh** (not rectangular) — consistent horizon distance in all directions (square gave 14 km axial vs 20 km diagonal).
+- [x] **Toroidal wrap handling** via `wrap_coord`.
+- [x] Full design spec: [MAPGEN.md § Render streaming](MAPGEN.md#render-streaming--uniform-terrain-mesh--voronoi-cell-active-set-pinned-2026-04-23) + memory `streaming_render_architecture`.
 
-**3.6.3c.5a — Debug camera (Task #223): pending — ships AFTER 5b.**
+**3.6.3c.5a — Debug camera (Task #223): SHIPPED 2026-04-23.**
 
-- [ ] Slew-mode free 6-DoF camera, no aircraft model — in-engine verification of placement rules + palette adaptation + deltas. Evolves into photo-mode (5.5) + multiplayer spectator (Phase 6). Memory `visual_bench_pattern` flags this pre-spec.
-- [ ] Bindings: WASD horizontal, Left Shift / Left Ctrl vertical, mouse Δ for yaw + pitch, Tab cycles speed (50 / 100 / 500 m/s), backtick (`) toggles in/out, ESC releases mouse capture.
-- [ ] `app::ActiveCamera` integration — debug camera writes its pose when active; streaming + render read from the same source-of-truth.
-- [ ] Aircraft instrument-panel HUDs hide while debug camera is active; minimal debug overlay shows: position (X/Y/Z world coords), heading, speed-tier (50/100/500), **FPS + frametime** (per user spec 2026-04-23 — useful for performance measurement while flying the streaming mesh), active-cell-count (from `StreamingCellSet.active_count()`).
-- [ ] Sim continues running in background — exiting debug mode resumes normal play with the aircraft wherever physics took it.
-- [ ] Screenshot (F12 → PNG to `target/screenshots/`) — **deferred** to 3.6.3c.5a-followup; user can capture with external tools meanwhile.
+- [x] Slew-mode free 6-DoF camera — WASD horizontal, Left Shift / Left Ctrl vertical, mouse Δ for yaw + pitch, Tab cycles speed (**50 / 100 / 500 / 1000 / 5000 m/s** — 1 km/s + 5 km/s tiers added 2026-04-23 for world-scale sweeps), backtick (`) toggles in/out, ESC releases mouse capture.
+- [x] `app::ActiveCamera` integration.
+- [x] Minimal debug overlay: position (X/Y/Z world coords), heading, speed-tier, FPS + frametime, active-cell-count, **instance count** (added 5c.1), streaming mesh center + rebuild status.
+- [x] Sim-carried-with-camera: `vehicle.position = debug_camera.position` + `sim.camera.follow(dt=10.0)` every frame in debug mode. Prevents "crashed while away" physics problem AND keeps chase-cam converged so debug-exit doesn't cascade streaming rebuilds.
+- [x] Position stored as `DVec3` (f64) to preserve sub-meter integration at large world coords — f32 at 5 Mm ULP ~0.5 m rounded the 0.83 m/frame at 50 m/s to zero.
+- [ ] Screenshot (F12 → PNG to `target/screenshots/`) — deferred; user can capture with external tools meanwhile.
+
+**3.6.3c.5c.1 — Feature-instance streaming MVP (Task #227): SHIPPED 2026-04-23.**
+
+- [x] `crates/world/src/feature_instances.rs` — `PrimitiveKind::Box`, `FeatureInstance` struct, `compose_instances_for_feature` with hardcoded `dwelling_cluster` composition (5-8 box houses per cell, terrain-Y-anchored).
+- [x] `BakedAssignments` Phase C — sparse `HashMap<CellId, Vec<FeatureInstance>>` built via rayon `filter_map` gated by `AUTHORED_FEATURE_IDS`.
+- [x] `crates/render/src/instances.{rs,wgsl}` — storage-buffer instanced draw pipeline. `cull_mode: None` because `CpuMesh::cube` has mixed winding (5c.2+ revisits once authored meshes land).
+- [x] `game_app` wires active-cell-set refresh → instance upload. Tracing log emits active/entered/exited/populated_in_active/instances_uploaded per upload.
+- [x] **`FLOWPLAN_FEATURE_INSTANCES=1`** dev toggle gates the ~30-60 s cold bake. Off by default to keep dev-iteration fast. Serialized preload is a 3.7 save-format target.
+- [x] **`FLOWPLAN_SPAWN_NEAR_INSTANCE=1`** dev toggle — teleports debug camera to populated cell nearest origin (toroidal distance), auto-activates debug mode, pre-centers streaming mesh at that position. Prints nearest-8 populated cells with `(x, y, z) ~N km from spawn` for navigation. Eliminates "fly 200 km to find something" dev cost.
+- [x] Hardware-gated `instance_preview` test writes reference PNG to `target/instance_preview/` (no insta gate, iterative debug tool). Pair with `instance_preview_far` at 2.5 Mm offset — both visually identical post-5d.
+
+**3.6.3c.5d — Camera-relative rendering (Task #234): SHIPPED 2026-04-23.**
+
+- [x] `perspective_view_proj` returns `proj * rotation_only_view` (no translation column). Documented in [DESIGN § Rendering Architecture → Camera-relative rendering](DESIGN.md#camera-relative-rendering-phase-363c5d-invariant).
+- [x] Vertex shaders (`shader.wgsl` / `water.wgsl` / `instances.wgsl`) subtract `camera.view_pos` from world positions before the matmul. GPU-side precision preserved at 5 Mm world coords.
+- [x] Regression tests: `view_proj_has_no_translation_column` (unit) + hardware-gated `instance_preview_far` (visual).
+- [x] **Sync-rebuild gate** (followup): `StreamingTerrain::maybe_rebuild` tests jump distance > `TERRAIN_HALF_EXTENT_M`; if so, drops any in-flight worker and sync-rebakes on the main thread. Normal play (<5 km/frame) never triggers this — only debug-cam teleport scenarios. Prevents "empty scene for ~1 s" artifact on debug ↔ sim toggle.
+
+**Known limitation**: sim-side f32 precision at extreme world coords still jitters dynamic objects (chase-cam smoothing + aircraft physics integration). Invisible during normal play (aircraft takes hours to reach >1 Mm via flight). Surface-only via debug-cam teleport. Three fix options documented in memory `render_precision_at_world_scale`: (A) ship-it + document — **current**; (B) debug-mode-only render-origin rebasing (~1 h); (C) full end-to-end CPU f64 camera-relative refactor (~1 day, may include sim-side `DVec3` position upgrade).
+
+**3.6.3c.5c.2 — Primitive vocabulary expansion + RON-authored composition: pending.**
+
+- [ ] Extend `PrimitiveKind` enum: `Cone`, `Cylinder`, `Sphere`, `HalfCylinder`, `FlatQuad`, `StickTree` (composite).
+- [ ] `CpuMesh::primitive_*` builders for each (unit-sized, consistent winding → can re-enable `cull_mode: Back` on the instance pipeline).
+- [ ] RON schema extension: each `SubBiomeFeature` declares its primitive composition (list of `(PrimitiveKind, count, size_range_m, color_hint)` tuples). Replaces the hardcoded `dwelling_cluster`-only branch in `compose_instances_for_feature`.
+- [ ] Covers all 18 3.6.3b features (currently 17 return empty instance lists).
+
+### Developer toggles
+
+Env-var dev tools documented in PROGRESS.md iteration-11 + memory `render_precision_at_world_scale`:
+
+- `FLOWPLAN_AIRCRAFT=<id>[:<variant>]` — catalog-slot selector (Phase 2.5).
+- `FLOWPLAN_FEATURE_INSTANCES=1` — enable 3.9 M-cell bake for instance rendering at startup (Phase 3.6.3c.5c.1; ~30-60 s cold cost).
+- `FLOWPLAN_SPAWN_NEAR_INSTANCE=1` — teleport debug camera to nearest populated cell, auto-activate debug mode, pre-center streaming mesh (Phase 3.6.3c.5c.1). Requires `FLOWPLAN_FEATURE_INSTANCES=1` to also be set.
 
 ### Milestone 3.6.4: Flora, decoration, seasonal overlay
 

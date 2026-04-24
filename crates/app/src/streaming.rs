@@ -62,6 +62,25 @@ pub const WATER_CELLS: u32 = 400;
 /// frequency is a budget decision not a responsiveness one.
 pub const REBUILD_THRESHOLD_M: f32 = 5_000.0;
 
+/// Large-jump threshold (Phase 3.6.3c.5d follow-up). When the camera
+/// moves more than this distance from the current mesh center in a
+/// single frame, `maybe_rebuild` synchronously re-bakes the mesh
+/// instead of kicking off an async worker. Reasoning: beyond
+/// [`TERRAIN_HALF_EXTENT_M`] the old mesh is entirely outside the
+/// view frustum, so the async worker's "continue rendering the old
+/// mesh while the new one bakes" story yields ~1 s of empty scene.
+/// Sync rebuild blocks the render loop once (~1 s) but skips the
+/// empty-scene artifact.
+///
+/// Normal play never crosses this threshold in one frame:
+/// - Cruise (~100 m/s): 1.7 m/frame
+/// - Debug top-tier (5 km/s): 83 m/frame
+///
+/// Only discrete camera jumps (spawn-near at init, debug ↔ sim
+/// toggle across >20 km, future teleport features) trigger the sync
+/// path.
+pub const LARGE_JUMP_THRESHOLD_M: f32 = TERRAIN_HALF_EXTENT_M;
+
 /// Voronoi-cell streaming radius. Cells whose seed position is within
 /// this distance of the active camera are in the active set; others
 /// are not. Used by Layer 2 content streaming (feature instances,
@@ -207,6 +226,18 @@ impl StreamingTerrain {
     pub fn maybe_rebuild(&mut self, camera_pos_xz: Vec2, terrain: &Terrain) {
         self.just_rebuilt = false;
 
+        // Large-jump path — if the camera has moved more than the mesh
+        // radius, the current mesh is outside the view frustum and the
+        // async "render old mesh while new one bakes" story yields ~1 s
+        // of empty scene. Block any in-flight worker, then sync-rebuild
+        // here. One-time ~1 s hitch is acceptable because large jumps
+        // only happen on discrete user actions (debug ↔ sim toggle,
+        // spawn-near at init, future teleport).
+        if camera_pos_xz.distance(self.center) > LARGE_JUMP_THRESHOLD_M {
+            self.sync_rebuild(camera_pos_xz, terrain);
+            return;
+        }
+
         // Phase 1 — finalize any in-flight worker.
         if let Some(rx) = &self.pending {
             match rx.try_recv() {
@@ -284,6 +315,39 @@ impl StreamingTerrain {
                 },
             }
         }
+    }
+
+    /// Synchronous rebuild at a new center. Blocks the caller for the
+    /// full bake duration (~1 s). Any in-flight worker is dropped (its
+    /// result is no longer needed — we're committing to a fresh bake
+    /// at a different position).
+    ///
+    /// Invoked by [`Self::maybe_rebuild`] when the camera jumps further
+    /// than [`LARGE_JUMP_THRESHOLD_M`] in one frame.
+    fn sync_rebuild(&mut self, camera_pos_xz: Vec2, terrain: &Terrain) {
+        // Drop in-flight worker; its result targets the now-obsolete
+        // center and would only be written back as a stale mesh.
+        self.pending = None;
+        self.pending_center = None;
+
+        let t0 = std::time::Instant::now();
+        self.cpu_mesh = CpuMesh::terrain_patch_disc_at(
+            self.resolution,
+            self.half_extent,
+            self.half_extent,
+            (camera_pos_xz.x, camera_pos_xz.y),
+            |x, z| terrain.height(x, z),
+        );
+        self.center = camera_pos_xz;
+        self.last_rebuild_cpu_ms = t0.elapsed().as_secs_f32() * 1000.0;
+        self.just_rebuilt = true;
+        tracing::info!(
+            target: "streaming",
+            cpu_ms = self.last_rebuild_cpu_ms,
+            center_x = camera_pos_xz.x,
+            center_z = camera_pos_xz.y,
+            "terrain sync rebuild (large camera jump)"
+        );
     }
 
     /// True iff the most recent `maybe_rebuild` call swapped in a
@@ -599,6 +663,37 @@ mod tests {
         }
         assert_eq!(st.center(), new_pos, "center tracked after finalize");
         assert!(st.last_rebuild_cpu_ms() > 0.0, "worker reported cpu time");
+    }
+
+    #[test]
+    fn streaming_terrain_large_jump_is_sync() {
+        // Camera jumping more than LARGE_JUMP_THRESHOLD_M forces a
+        // synchronous rebuild — `just_rebuilt` is true on return, no
+        // worker is left in flight. Prevents empty-scene artifact
+        // after debug ↔ sim toggle across hundreds of km.
+        let terrain = Terrain::from_seed(TEST_SEED);
+        let mut st = StreamingTerrain::new(SMALL_EXTENT, SMALL_CELLS, glam::Vec2::ZERO, &terrain);
+        assert!(st.just_rebuilt(), "initial bake");
+
+        // First, start an async rebuild at a short distance (so there's
+        // something to drop when the big jump arrives).
+        st.maybe_rebuild(glam::Vec2::new(REBUILD_THRESHOLD_M * 1.5, 0.0), &terrain);
+        assert!(
+            st.rebuild_in_flight() || st.just_rebuilt(),
+            "async worker spawned (or immediate finalize)"
+        );
+
+        // Now jump more than LARGE_JUMP_THRESHOLD_M. Rebuild must be
+        // synchronous: just_rebuilt true, no pending worker, center
+        // matches the new position, all on a single call.
+        let jump_pos = glam::Vec2::new(LARGE_JUMP_THRESHOLD_M * 2.0, 0.0);
+        st.maybe_rebuild(jump_pos, &terrain);
+        assert!(st.just_rebuilt(), "sync rebuild completed");
+        assert!(
+            !st.rebuild_in_flight(),
+            "no pending worker left over from earlier async rebuild"
+        );
+        assert_eq!(st.center(), jump_pos, "center matches jump target");
     }
 
     #[test]
