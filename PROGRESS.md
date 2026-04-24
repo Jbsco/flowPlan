@@ -56,11 +56,19 @@ All grep-findable via `TODO(3.6.3c.5a`. Task descriptions for #223 + #227 includ
 - Per-rebuild CPU transient: +~32 MB (dropped after upload)
 - **Steady-state render: ~33 MB** — within budget (~37 MB projected).
 
-### Performance
+### Performance (measured at canonical seed, 2026-04-23 fly-test)
 
-- Mesh rebuild trigger frequency: every 2 km of camera motion. At sim-camera cruise ~55 m/s = every ~36 sec. At 3.6.3c.5a debug-camera 500 m/s = every ~4 sec.
-- Rebuild cost: pending first in-engine measurement (compile-only validation done). `rayon` should keep it < 30 ms on 8-core hardware.
+- Mesh rebuild trigger frequency: every 2 km of camera motion. Measured at DHC-2 cruise (~60-65 m/s) = every ~30-35 sec.
+- **Initial serial rebuild cost**: ~1140 ms CPU (5 M `terrain.height` calls dominated by multi-octave Perlin-fBm). GPU upload ~6 ms. **User-perceptible hitch every 15-20 sec at cruise speed.**
+- **Async rebuild SHIPPED same day (3.6.3c.5b-followup)**: worker thread pattern (`std::thread` + `std::sync::mpsc`) with `FinishedRebuild` message. Main thread sees only ~6 ms GPU upload when the worker completes; the 1200+ ms CPU work runs entirely off the render thread. **Zero perceptible hitch** — FPS holds steady through rebuild events. Production fly-test validated by user 2026-04-23.
 - Cell active-set refresh: <1 ms per frame measured implicitly via 23 unit tests completing in 0.01 s.
+
+Post-async production measurements:
+
+| Rebuild | Main-thread cost | Worker CPU |
+|---|--:|--:|
+| Water (synchronous — tiny mesh) | 0.1-1.4 ms CPU + 0.2-0.6 ms GPU | — |
+| Terrain (async worker) | ~6 ms GPU upload only | 1190-1320 ms |
 
 ### Next milestone
 
