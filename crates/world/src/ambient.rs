@@ -400,6 +400,52 @@ pub fn generate_ambient_for_cell(
                 rotation_y_rad: rot_y,
                 color: [rgb[0], rgb[1], rgb[2], 255],
             });
+
+            // Composite stack layers (5c.2.c.12b). Each layer spawns
+            // one derived instance offset + scaled relative to the
+            // base. Enables trunks, skirts, crowns, boulder piles.
+            for (layer_idx, layer) in entry.stacks.iter().enumerate() {
+                let layer_rng = mix_seed(cand_rng, 0x4c41_5945_5200_0000 ^ layer_idx as u64);
+                let xz = layer.xz_scale.0
+                    + rand_unit(layer_rng, 1) * (layer.xz_scale.1 - layer.xz_scale.0);
+                let ys = layer.y_scale.0
+                    + rand_unit(layer_rng, 2) * (layer.y_scale.1 - layer.y_scale.0);
+                let yoff_ratio = layer.y_offset_ratio.0
+                    + rand_unit(layer_rng, 3)
+                        * (layer.y_offset_ratio.1 - layer.y_offset_ratio.0);
+                let layer_rot_jitter = (rand_unit(layer_rng, 4) * 2.0 - 1.0)
+                    * layer.rotation_y_jitter_rad;
+
+                // Layer scale in world meters. FlatQuad keeps its
+                // thin-plate y, other kinds get independent xz vs y.
+                let (layer_scale, layer_center_y_offset) = match layer.kind {
+                    PrimitiveKind::FlatQuad => (
+                        glam::Vec3::new(size * xz, 0.1, size * xz),
+                        0.05, // same y-lift as base FlatQuad
+                    ),
+                    _ => (
+                        glam::Vec3::new(size * xz, size * ys, size * xz),
+                        size * ys * 0.5, // center at base + half height
+                    ),
+                };
+                let layer_center_y = alt + size * yoff_ratio + layer_center_y_offset;
+
+                // Layer color resolution — independent palette pick.
+                let layer_rgb = match layer.color_source {
+                    ColorSource::Primary => palette[0],
+                    ColorSource::Secondary => palette[1],
+                    ColorSource::Accent => palette[2],
+                    ColorSource::Explicit(rgb) => rgb,
+                };
+
+                out.push(FeatureInstance {
+                    primitive: layer.kind,
+                    position: glam::Vec3::new(px, layer_center_y, pz),
+                    scale: layer_scale,
+                    rotation_y_rad: rot_y + layer_rot_jitter,
+                    color: [layer_rgb[0], layer_rgb[1], layer_rgb[2], 255],
+                });
+            }
         }
     }
     out
@@ -434,6 +480,7 @@ mod tests {
             altitude_range_m: (-100.0, 3000.0),
             slope_max_deg: 60.0,
             rng_stream: 0,
+            stacks: Vec::new(),
         }
     }
 
@@ -673,6 +720,75 @@ mod tests {
         for inst in &insts {
             let on_runway = inst.position.z.abs() < 750.0 && inst.position.x.abs() < 22.5;
             assert!(!on_runway, "rotated runway overlap missed");
+        }
+    }
+
+    #[test]
+    fn stacks_emit_derived_instances_per_base_candidate() {
+        // Base cone with two stacks (skirt + crown) → each candidate
+        // emits 3 instances (1 base + 2 stacks). Verify we get 3x the
+        // output of an equivalent no-stacks entry.
+        use crate::feature_instances::AmbientStackLayer;
+        let base = boreal_forest_entry();
+        let mut with_stacks = base.clone();
+        with_stacks.stacks = vec![
+            AmbientStackLayer {
+                kind: PrimitiveKind::Cone,
+                color_source: ColorSource::Secondary,
+                xz_scale: (1.3, 1.3),
+                y_scale: (0.4, 0.4),
+                y_offset_ratio: (0.0, 0.0),
+                rotation_y_jitter_rad: 0.0,
+            },
+            AmbientStackLayer {
+                kind: PrimitiveKind::Cylinder,
+                color_source: ColorSource::Primary,
+                xz_scale: (0.15, 0.15),
+                y_scale: (0.5, 0.5),
+                y_offset_ratio: (-0.3, -0.3),
+                rotation_y_jitter_rad: 0.0,
+            },
+        ];
+
+        let base_insts = generate_ambient_for_cell(
+            42,
+            7,
+            (0.0, 0.0),
+            BiomeClass::CoastalBoreal,
+            &[base],
+            &[],
+            None,
+            &const_height(100.0),
+            &no_water,
+        );
+        let stacked_insts = generate_ambient_for_cell(
+            42,
+            7,
+            (0.0, 0.0),
+            BiomeClass::CoastalBoreal,
+            &[with_stacks],
+            &[],
+            None,
+            &const_height(100.0),
+            &no_water,
+        );
+
+        assert_eq!(
+            stacked_insts.len(),
+            base_insts.len() * 3,
+            "each candidate should emit base + 2 stacks"
+        );
+
+        // Each base instance is followed by its two stacks, in order.
+        for triple in stacked_insts.chunks_exact(3) {
+            let (base_inst, skirt, trunk) = (&triple[0], &triple[1], &triple[2]);
+            // Skirt: wider (xz=1.3) than base (xz=1.0). Cone.
+            assert_eq!(skirt.primitive, PrimitiveKind::Cone);
+            assert!(skirt.scale.x > base_inst.scale.x);
+            // Trunk: narrower than base, shorter, Cylinder.
+            assert_eq!(trunk.primitive, PrimitiveKind::Cylinder);
+            assert!(trunk.scale.x < base_inst.scale.x);
+            assert!(trunk.scale.y < base_inst.scale.y);
         }
     }
 

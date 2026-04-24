@@ -385,6 +385,13 @@ Acceptance: no ambient trees growing through runways / apron slabs / large featu
 
 All 4 steppings (.c.8 types/RON → .c.9 generator → .c.10 fBm fields → .c.11 rotated-rect polish) shipped. The ambient environment subsystem is live, deterministic, and ready for visual-iteration tuning. Follow-ups (.c.12 `InverseTaperedClearing` authoring, .c.13 cross-cell seam lookup, .c.14 seasonal variation) remain as deferred items.
 
+**5c.2.c.12b composite stacks + variety pass — 2026-04-24 (Task #252).** After the first visual check, user requested more shape variation. Delivered:
+- `AmbientStackLayer` struct + `AmbientEntry.stacks: Vec<_>` field (serde-default empty). Each base candidate emits derived instances per stack layer: independent xz / y scale, y-offset as a fraction of base size, per-layer rotation jitter, per-layer color-source slot.
+- Generator emits the base instance then iterates stacks, using a per-layer RNG stream so stacks don't correlate across candidates.
+- RON authoring pass across all 4 biomes: layered-skirt pines (boreal), trunk-and-cone pines (boreal + alpine + mediterranean), wind-sculpted mature olives (mediterranean), pinyon with trunk (desert), hoodoo rock columns with cap (desert), boulder piles with satellite rocks (boreal / alpine / mediterranean / desert), rare dense-pocket boulder fields (boreal + alpine "gear challenge" zones).
+- Size ranges widened + density bumped on primary canopy entries. Altitude floors raised to +3 m on boreal cones + +2 m on boreal shrubs + +3 m on med olives for beach exclusion.
+- New test `stacks_emit_derived_instances_per_base_candidate` (12 ambient-module tests total).
+
 **5c.2.c.12a regression fixes — 2026-04-24 (Task #251).** Two issues surfaced in the first in-game run:
 1. *Streaming hitch on camera motion*: `generate_ambient_for_cell` was being called for all ~300 active cells on every cell-boundary crossing (~300 cells × ~300 candidates × 4-octave fBm ≈ 75 ms hitch). Fix: per-cell `ambient_cache: HashMap<CellId, Vec<FeatureInstance>>` in `GameApp`. Generate only for `cells.entered()`, evict on `cells.exited()`, look up during the active-set bucket rebuild. Delta-event work now scales with the handful of entered/exited cells, not the full active set.
 2. *Trees in water occasionally*: ambient altitude filter couldn't catch elevated lakes (terrain > 0 but water > terrain). Fix: threaded `is_water: &dyn Fn(f32, f32) -> bool` through `generate_ambient_for_cell`. The app closes over a retained `HydrologyGraph` (now a `GameApp` field). Test `water_filter_rejects_candidates_under_water_surface` locks the invariant in.

@@ -4506,54 +4506,151 @@
         // ── CoastalBoreal ambient: conifer forest + shrub + boulders ──
         "CoastalBoreal": [
             (
+                // Primary conifer canopy — tall pines / spruce.
+                // Widened size range for more visible variation;
+                // altitude floor raised to 3 m so trees don't spawn
+                // on beaches / shoreline flats.
                 kind: Cone,
                 color_source: Secondary,
-                density_per_km2: 120.0,
-                size_range_m: (3.0, 12.0),
-                scale_jitter: (0.8, 1.2),
+                density_per_km2: 180.0,
+                size_range_m: (4.0, 18.0),
+                scale_jitter: (0.7, 1.4),
                 noise_scale_m: 400.0,
-                noise_threshold: 0.25,
-                altitude_range_m: (-10.0, 1500.0),
+                noise_threshold: 0.2,
+                altitude_range_m: (3.0, 1500.0),
                 slope_max_deg: 35.0,
                 rng_stream: 0,
             ),
             (
-                // Understory shrubs (spheres).
-                kind: Sphere,
+                // Layered-skirt pines — wider base skirt + narrower
+                // upper crown. Rare high-threshold pockets so authored
+                // mature-forest clusters read distinct from the
+                // primary canopy carpet.
+                kind: Cone,
                 color_source: Secondary,
                 density_per_km2: 50.0,
-                size_range_m: (0.5, 1.2),
-                scale_jitter: (0.7, 1.3),
+                size_range_m: (6.0, 14.0),
+                scale_jitter: (0.9, 1.15),
+                noise_scale_m: 280.0,
+                noise_threshold: 0.55,
+                altitude_range_m: (3.0, 1400.0),
+                slope_max_deg: 30.0,
+                rng_stream: 3,
+                stacks: [
+                    (
+                        // Wider skirt at base, slightly rotated.
+                        kind: Cone,
+                        color_source: Secondary,
+                        xz_scale: (1.25, 1.45),
+                        y_scale: (0.35, 0.5),
+                        y_offset_ratio: (-0.05, 0.05),
+                        rotation_y_jitter_rad: 1.0,
+                    ),
+                    (
+                        // Crown — narrower, stacked halfway up.
+                        kind: Cone,
+                        color_source: Secondary,
+                        xz_scale: (0.55, 0.75),
+                        y_scale: (0.45, 0.6),
+                        y_offset_ratio: (0.4, 0.55),
+                        rotation_y_jitter_rad: 1.5,
+                    ),
+                ],
+            ),
+            (
+                // Trunk-and-cone pine — narrow cylinder trunk below
+                // a cone canopy. Height varies independently from
+                // canopy. Bark-colored trunk adds visual rhythm.
+                kind: Cone,
+                color_source: Secondary,
+                density_per_km2: 30.0,
+                size_range_m: (3.0, 7.0),
+                scale_jitter: (0.85, 1.2),
+                noise_scale_m: 200.0,
+                noise_threshold: 0.4,
+                altitude_range_m: (3.0, 1600.0),
+                slope_max_deg: 40.0,
+                rng_stream: 4,
+                stacks: [
+                    (
+                        // Trunk — narrow, short, bark color.
+                        kind: Cylinder,
+                        color_source: Primary,
+                        xz_scale: (0.1, 0.18),
+                        y_scale: (0.3, 0.55),
+                        y_offset_ratio: (-0.4, -0.25),
+                        rotation_y_jitter_rad: 0.5,
+                    ),
+                ],
+            ),
+            (
+                // Understory shrubs (spheres) — density-boosted,
+                // wider jitter for visible clumping. Altitude floor
+                // +2 m avoids beach placement.
+                kind: Sphere,
+                color_source: Secondary,
+                density_per_km2: 90.0,
+                size_range_m: (0.4, 1.5),
+                scale_jitter: (0.6, 1.5),
                 noise_scale_m: 150.0,
-                noise_threshold: 0.3,
-                altitude_range_m: (-10.0, 1800.0),
+                noise_threshold: 0.25,
+                altitude_range_m: (2.0, 1800.0),
                 slope_max_deg: 50.0,
                 rng_stream: 1,
             ),
             (
-                // Scattered glacial boulders.
+                // Glacial boulder fields — clustered piles with
+                // scattered satellite rocks. A stacked sphere gives
+                // the "pile" look without a new primitive.
                 kind: Sphere,
                 color_source: Primary,
-                density_per_km2: 12.0,
-                size_range_m: (0.8, 2.5),
-                scale_jitter: (0.7, 1.8),
-                noise_scale_m: 800.0,
-                noise_threshold: 0.5,
+                density_per_km2: 18.0,
+                size_range_m: (0.8, 3.0),
+                scale_jitter: (0.6, 1.9),
+                noise_scale_m: 700.0,
+                noise_threshold: 0.45,
                 altitude_range_m: (100.0, 2500.0),
                 slope_max_deg: 60.0,
                 rng_stream: 2,
+                stacks: [
+                    (
+                        // Smaller satellite rock, offset on top.
+                        kind: Sphere,
+                        color_source: Primary,
+                        xz_scale: (0.55, 0.75),
+                        y_scale: (0.55, 0.75),
+                        y_offset_ratio: (0.45, 0.6),
+                        rotation_y_jitter_rad: 3.14,
+                    ),
+                ],
+            ),
+            (
+                // Boulder-field pocket — very low density outside,
+                // high density inside noise-cluster. Creates the
+                // "challenging gear area" concentrated pockets.
+                kind: Sphere,
+                color_source: Primary,
+                density_per_km2: 60.0,
+                size_range_m: (0.6, 2.2),
+                scale_jitter: (0.7, 1.6),
+                noise_scale_m: 500.0,
+                noise_threshold: 0.7,
+                altitude_range_m: (50.0, 2200.0),
+                slope_max_deg: 70.0,
+                rng_stream: 5,
             ),
         ],
 
         // ── HighDesert ambient: sparse juniper / sage / rocks ─────────
         "HighDesert": [
             (
-                // Juniper / pinyon cones — sparser than boreal forest.
+                // Juniper / pinyon cones — sparse, short, stubby.
+                // Widened size range for twisted-tree variety.
                 kind: Cone,
                 color_source: Secondary,
-                density_per_km2: 30.0,
-                size_range_m: (1.8, 5.0),
-                scale_jitter: (0.7, 1.3),
+                density_per_km2: 40.0,
+                size_range_m: (1.8, 6.0),
+                scale_jitter: (0.7, 1.4),
                 noise_scale_m: 500.0,
                 noise_threshold: 0.4,
                 altitude_range_m: (400.0, 2400.0),
@@ -4561,12 +4658,37 @@
                 rng_stream: 0,
             ),
             (
-                // Sage / rabbitbrush clumps.
+                // Clumped pinyon — short trunk + crown. Gives the
+                // twisted mature-juniper silhouette.
+                kind: Cone,
+                color_source: Secondary,
+                density_per_km2: 15.0,
+                size_range_m: (2.5, 4.5),
+                scale_jitter: (0.9, 1.2),
+                noise_scale_m: 350.0,
+                noise_threshold: 0.55,
+                altitude_range_m: (500.0, 2200.0),
+                slope_max_deg: 35.0,
+                rng_stream: 3,
+                stacks: [
+                    (
+                        // Short thick trunk.
+                        kind: Cylinder,
+                        color_source: Primary,
+                        xz_scale: (0.15, 0.25),
+                        y_scale: (0.25, 0.4),
+                        y_offset_ratio: (-0.35, -0.2),
+                        rotation_y_jitter_rad: 0.8,
+                    ),
+                ],
+            ),
+            (
+                // Sage / rabbitbrush clumps — density boosted.
                 kind: Sphere,
                 color_source: Secondary,
-                density_per_km2: 80.0,
-                size_range_m: (0.3, 0.8),
-                scale_jitter: (0.7, 1.3),
+                density_per_km2: 120.0,
+                size_range_m: (0.3, 1.0),
+                scale_jitter: (0.6, 1.4),
                 noise_scale_m: 120.0,
                 noise_threshold: 0.2,
                 altitude_range_m: (200.0, 2800.0),
@@ -4574,104 +4696,233 @@
                 rng_stream: 1,
             ),
             (
-                // Slickrock boulders / weathered rubble.
+                // Slickrock boulders with satellite rocks on top.
                 kind: Sphere,
                 color_source: Primary,
-                density_per_km2: 18.0,
-                size_range_m: (0.6, 2.2),
-                scale_jitter: (0.6, 1.6),
+                density_per_km2: 24.0,
+                size_range_m: (0.6, 2.8),
+                scale_jitter: (0.6, 1.8),
                 noise_scale_m: 600.0,
                 noise_threshold: 0.35,
                 altitude_range_m: (200.0, 3000.0),
                 slope_max_deg: 65.0,
                 rng_stream: 2,
+                stacks: [
+                    (
+                        kind: Sphere,
+                        color_source: Primary,
+                        xz_scale: (0.5, 0.7),
+                        y_scale: (0.5, 0.7),
+                        y_offset_ratio: (0.4, 0.55),
+                        rotation_y_jitter_rad: 3.14,
+                    ),
+                ],
+            ),
+            (
+                // Hoodoo / sandstone cap — layered rock column.
+                // Rare authored "chimney" silhouette for flight interest.
+                kind: Cylinder,
+                color_source: Primary,
+                density_per_km2: 4.0,
+                size_range_m: (1.0, 2.5),
+                scale_jitter: (0.9, 1.2),
+                noise_scale_m: 900.0,
+                noise_threshold: 0.75,
+                altitude_range_m: (600.0, 2600.0),
+                slope_max_deg: 40.0,
+                rng_stream: 4,
+                stacks: [
+                    (
+                        // Cap stone — wider flat-ish top.
+                        kind: Cylinder,
+                        color_source: Primary,
+                        xz_scale: (1.3, 1.6),
+                        y_scale: (0.2, 0.3),
+                        y_offset_ratio: (0.95, 1.05),
+                        rotation_y_jitter_rad: 0.3,
+                    ),
+                ],
             ),
         ],
 
         // ── RockyAlpine ambient: conifer + talus + moraine ─────────────
         "RockyAlpine": [
             (
-                // Alpine conifers (spruce, fir). Denser at mid-altitude,
+                // Alpine conifers (spruce, fir). Denser at mid-altitude;
                 // fades above treeline via `altitude_range_m` cap.
+                // Widened size range for treeline-scale variation.
                 kind: Cone,
                 color_source: Secondary,
-                density_per_km2: 100.0,
-                size_range_m: (3.0, 10.0),
-                scale_jitter: (0.75, 1.25),
+                density_per_km2: 140.0,
+                size_range_m: (3.0, 14.0),
+                scale_jitter: (0.7, 1.3),
                 noise_scale_m: 350.0,
-                noise_threshold: 0.28,
+                noise_threshold: 0.25,
                 altitude_range_m: (1200.0, 2800.0),
                 slope_max_deg: 40.0,
                 rng_stream: 0,
             ),
             (
-                // Talus / scree boulders — abundant high-altitude.
+                // Mature spruce — tall narrow cone + short trunk.
+                kind: Cone,
+                color_source: Secondary,
+                density_per_km2: 35.0,
+                size_range_m: (5.0, 12.0),
+                scale_jitter: (0.85, 1.15),
+                noise_scale_m: 250.0,
+                noise_threshold: 0.5,
+                altitude_range_m: (1200.0, 2700.0),
+                slope_max_deg: 35.0,
+                rng_stream: 3,
+                stacks: [
+                    (
+                        // Narrow trunk.
+                        kind: Cylinder,
+                        color_source: Primary,
+                        xz_scale: (0.08, 0.14),
+                        y_scale: (0.25, 0.4),
+                        y_offset_ratio: (-0.4, -0.25),
+                        rotation_y_jitter_rad: 0.3,
+                    ),
+                ],
+            ),
+            (
+                // Talus / scree boulders — abundant high-altitude,
+                // now with stacked satellite rocks for the jumble look.
                 kind: Sphere,
                 color_source: Primary,
-                density_per_km2: 45.0,
-                size_range_m: (0.7, 2.5),
-                scale_jitter: (0.6, 1.8),
+                density_per_km2: 70.0,
+                size_range_m: (0.7, 2.8),
+                scale_jitter: (0.5, 1.9),
                 noise_scale_m: 400.0,
-                noise_threshold: 0.3,
+                noise_threshold: 0.25,
                 altitude_range_m: (1800.0, 3800.0),
                 slope_max_deg: 70.0,
                 rng_stream: 1,
+                stacks: [
+                    (
+                        kind: Sphere,
+                        color_source: Primary,
+                        xz_scale: (0.5, 0.75),
+                        y_scale: (0.5, 0.75),
+                        y_offset_ratio: (0.4, 0.55),
+                        rotation_y_jitter_rad: 3.14,
+                    ),
+                ],
             ),
             (
                 // Alpine shrub / krummholz at treeline transition.
                 kind: Sphere,
                 color_source: Secondary,
-                density_per_km2: 30.0,
-                size_range_m: (0.3, 0.9),
-                scale_jitter: (0.7, 1.3),
+                density_per_km2: 60.0,
+                size_range_m: (0.3, 1.1),
+                scale_jitter: (0.6, 1.4),
                 noise_scale_m: 180.0,
-                noise_threshold: 0.35,
+                noise_threshold: 0.3,
                 altitude_range_m: (2400.0, 3400.0),
                 slope_max_deg: 55.0,
                 rng_stream: 2,
+            ),
+            (
+                // Boulder-field pocket — concentrated "gear challenge"
+                // zones. High threshold → rare but dense when present.
+                kind: Sphere,
+                color_source: Primary,
+                density_per_km2: 90.0,
+                size_range_m: (0.6, 2.5),
+                scale_jitter: (0.6, 1.7),
+                noise_scale_m: 550.0,
+                noise_threshold: 0.7,
+                altitude_range_m: (1600.0, 3500.0),
+                slope_max_deg: 75.0,
+                rng_stream: 4,
             ),
         ],
 
         // ── MediterraneanArchipelago ambient: olive / maquis / rocks ──
         "MediterraneanArchipelago": [
             (
-                // Olive trees + pines.
+                // Olive trees + pines — low, wind-sculpted, widely varied.
                 kind: Cone,
                 color_source: Secondary,
-                density_per_km2: 50.0,
-                size_range_m: (2.0, 6.0),
-                scale_jitter: (0.8, 1.3),
+                density_per_km2: 70.0,
+                size_range_m: (2.0, 7.0),
+                scale_jitter: (0.75, 1.35),
                 noise_scale_m: 400.0,
                 noise_threshold: 0.3,
-                altitude_range_m: (0.0, 800.0),
+                altitude_range_m: (3.0, 800.0),
                 slope_max_deg: 45.0,
                 rng_stream: 0,
             ),
             (
-                // Maquis shrubland (dense low scrub).
+                // Mature olive — wide crown + knotted trunk.
+                kind: Cone,
+                color_source: Secondary,
+                density_per_km2: 15.0,
+                size_range_m: (3.5, 6.0),
+                scale_jitter: (0.85, 1.15),
+                noise_scale_m: 250.0,
+                noise_threshold: 0.55,
+                altitude_range_m: (5.0, 700.0),
+                slope_max_deg: 35.0,
+                rng_stream: 3,
+                stacks: [
+                    (
+                        // Wide low skirt — classic wind-sculpted olive.
+                        kind: Sphere,
+                        color_source: Secondary,
+                        xz_scale: (1.15, 1.4),
+                        y_scale: (0.4, 0.55),
+                        y_offset_ratio: (-0.05, 0.1),
+                        rotation_y_jitter_rad: 3.14,
+                    ),
+                    (
+                        // Short thick trunk.
+                        kind: Cylinder,
+                        color_source: Primary,
+                        xz_scale: (0.15, 0.25),
+                        y_scale: (0.2, 0.3),
+                        y_offset_ratio: (-0.3, -0.2),
+                        rotation_y_jitter_rad: 0.5,
+                    ),
+                ],
+            ),
+            (
+                // Maquis shrubland (dense low scrub) — density up,
+                // wider size for clumping.
                 kind: Sphere,
                 color_source: Secondary,
-                density_per_km2: 100.0,
-                size_range_m: (0.4, 1.1),
-                scale_jitter: (0.7, 1.3),
+                density_per_km2: 160.0,
+                size_range_m: (0.3, 1.3),
+                scale_jitter: (0.6, 1.5),
                 noise_scale_m: 140.0,
-                noise_threshold: 0.25,
-                altitude_range_m: (0.0, 1200.0),
+                noise_threshold: 0.2,
+                altitude_range_m: (2.0, 1200.0),
                 slope_max_deg: 55.0,
                 rng_stream: 1,
             ),
             (
-                // Limestone boulders / rocky outcrops.
+                // Limestone outcrops — stacked boulders with caps.
                 kind: Sphere,
                 color_source: Primary,
-                density_per_km2: 20.0,
-                size_range_m: (0.6, 2.0),
-                scale_jitter: (0.6, 1.7),
+                density_per_km2: 28.0,
+                size_range_m: (0.6, 2.4),
+                scale_jitter: (0.6, 1.8),
                 noise_scale_m: 500.0,
                 noise_threshold: 0.4,
-                altitude_range_m: (-5.0, 1800.0),
+                altitude_range_m: (3.0, 1800.0),
                 slope_max_deg: 70.0,
                 rng_stream: 2,
+                stacks: [
+                    (
+                        kind: Sphere,
+                        color_source: Primary,
+                        xz_scale: (0.55, 0.7),
+                        y_scale: (0.55, 0.7),
+                        y_offset_ratio: (0.4, 0.55),
+                        rotation_y_jitter_rad: 3.14,
+                    ),
+                ],
             ),
         ],
     },

@@ -246,6 +246,47 @@ pub struct AmbientEntry {
     /// (forest cones + shrub spheres at the same cell) don't
     /// correlate their placements.
     pub rng_stream: u64,
+    /// Optional composite-primitive stack. When non-empty, each
+    /// successful candidate emits the base instance PLUS one
+    /// derived instance per stack layer. Enables trunks, layered-
+    /// skirt pines, boulder piles, shrub clusters, etc. Default
+    /// empty = single-primitive (current behavior).
+    ///
+    /// See [`AmbientStackLayer`] for the per-layer parameters.
+    #[serde(default)]
+    pub stacks: Vec<AmbientStackLayer>,
+}
+
+/// One layer in an [`AmbientEntry`]'s composite-primitive stack.
+///
+/// Each layer is a primitive offset + scaled relative to the base
+/// instance's authored size. Added in Phase 3.6.3c.5c.2.c.12b to
+/// enable shape variation (trunk + canopy trees, layered-skirt pines,
+/// boulder piles).
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct AmbientStackLayer {
+    /// Primitive kind for this layer (can differ from the entry's
+    /// base kind — e.g., Cylinder trunk under a Cone canopy).
+    pub kind: PrimitiveKind,
+    /// Palette-slot source for this layer's baked color.
+    pub color_source: ColorSource,
+    /// Horizontal (X/Z) scale as a fraction of the candidate's base
+    /// size. Random uniform sample in (min, max). Independent of Y
+    /// so authors can build squat skirts or tall narrow crowns.
+    pub xz_scale: (f32, f32),
+    /// Vertical (Y) scale as a fraction of the candidate's base size.
+    /// Random uniform sample in (min, max). Cone/Cylinder height;
+    /// Sphere behaves as uniform when equal to `xz_scale`.
+    pub y_scale: (f32, f32),
+    /// Y offset from the candidate's base ground position, expressed
+    /// as a fraction of the candidate's base size. `(0, 0)` = stacked
+    /// at ground; `(0.4, 0.5)` = stacked halfway up the base; negative
+    /// values sink below ground (useful for trunks rooted through the
+    /// base center).
+    pub y_offset_ratio: (f32, f32),
+    /// Per-layer random yaw rotation in radians. Range `[-jitter, +jitter]`.
+    /// Set to 0 for aligned stacks; `PI` for fully random orientation.
+    pub rotation_y_jitter_rad: f32,
 }
 
 /// One entry in a feature's primitive composition (5c.2.b RON schema).
