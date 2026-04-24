@@ -225,6 +225,17 @@ struct Runtime {
     /// Sub-biome cell catalog — baked once, queried per frame by
     /// `streaming_cells.refresh`. None for scenario playback.
     sub_biome_catalog: Option<flowplan_world::SubBiomeCellCatalog>,
+    /// Most-recent terrain mesh-rebuild CPU time (milliseconds). Includes
+    /// `CpuMesh::terrain_patch_at` — the parallel height-sampling pass.
+    /// Persists between rebuilds so the debug HUD can display stale-but-
+    /// useful values. 3.6.3c.5b instrumentation; read by 3.6.3c.5a HUD.
+    last_terrain_rebuild_cpu_ms: f32,
+    /// Most-recent terrain mesh-rebuild GPU upload time (milliseconds).
+    /// Includes VBO + IBO buffer creation + data transfer.
+    last_terrain_rebuild_gpu_ms: f32,
+    /// Water rebuild timings — same pattern.
+    last_water_rebuild_cpu_ms: f32,
+    last_water_rebuild_gpu_ms: f32,
     /// Depth (meters) from the vehicle mesh's CG/origin down to its lowest point
     /// (floats / wheels). Used to lift the spawn altitude and each-tick `min_altitude`
     /// so those contact points clear terrain / water.
@@ -681,6 +692,10 @@ impl Runtime {
             streaming_water,
             streaming_cells,
             sub_biome_catalog,
+            last_terrain_rebuild_cpu_ms: 0.0,
+            last_terrain_rebuild_gpu_ms: 0.0,
+            last_water_rebuild_cpu_ms: 0.0,
+            last_water_rebuild_gpu_ms: 0.0,
             vehicle_float_offset,
             hud_format,
             sim,
@@ -933,16 +948,44 @@ impl Runtime {
         let active_camera = crate::streaming::ActiveCamera::from_sim(curr.camera);
         let active_cam_pos_xz = active_camera.position_xz();
         if let Some(st) = self.streaming_terrain.as_mut() {
+            let t_cpu = Instant::now();
             st.maybe_rebuild(active_cam_pos_xz, &self.terrain);
+            let cpu_ms = t_cpu.elapsed().as_secs_f32() * 1000.0;
             if st.just_rebuilt() {
+                let t_gpu = Instant::now();
                 self.renderer
                     .update_terrain_mesh(&self.device, st.cpu_mesh());
+                let gpu_ms = t_gpu.elapsed().as_secs_f32() * 1000.0;
+                self.last_terrain_rebuild_cpu_ms = cpu_ms;
+                self.last_terrain_rebuild_gpu_ms = gpu_ms;
+                tracing::info!(
+                    target: "streaming",
+                    cpu_ms = cpu_ms,
+                    gpu_ms = gpu_ms,
+                    center_x = st.center().x,
+                    center_z = st.center().y,
+                    "terrain mesh rebuild"
+                );
             }
         }
         if let Some(sw) = self.streaming_water.as_mut() {
+            let t_cpu = Instant::now();
             sw.maybe_rebuild(active_cam_pos_xz);
+            let cpu_ms = t_cpu.elapsed().as_secs_f32() * 1000.0;
             if sw.just_rebuilt() {
+                let t_gpu = Instant::now();
                 self.renderer.update_water_mesh(&self.device, sw.cpu_mesh());
+                let gpu_ms = t_gpu.elapsed().as_secs_f32() * 1000.0;
+                self.last_water_rebuild_cpu_ms = cpu_ms;
+                self.last_water_rebuild_gpu_ms = gpu_ms;
+                tracing::info!(
+                    target: "streaming",
+                    cpu_ms = cpu_ms,
+                    gpu_ms = gpu_ms,
+                    center_x = sw.center().x,
+                    center_z = sw.center().y,
+                    "water mesh rebuild"
+                );
             }
         }
         // Layer 2 cell active-set refresh (cheap; ~80 cells in radius).
