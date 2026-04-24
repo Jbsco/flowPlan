@@ -1,0 +1,686 @@
+//! Ambient environment object generator (Phase 3.6.3c.5c.9).
+//!
+//! Fills the visual void between placed features with biome-wide
+//! cover (forest / shrub / boulders / grass). Generates per-cell
+//! ambient instances lazily at streaming cell-enter from a
+//! deterministic seed `(master_seed, cell_id, ambient_entry_idx)` —
+//! zero persistent storage.
+//!
+//! See [MAPGEN § Ambient environment objects](../../../MAPGEN.md#ambient-environment-objects-phase-363c5c8)
+//! for full design.
+//!
+//! # Pipeline
+//!
+//! Called from the app's streaming cell-enter loop for each new cell:
+//!
+//! 1. Enumerate the biome's [`AmbientEntry`] list.
+//! 2. Per entry, compute expected candidate count as
+//!    `density_per_km2 × cell_area_km2`.
+//! 3. For each candidate, seed a per-instance RNG and sample uniform
+//!    disc coords within the cell.
+//! 4. Filter: altitude range, slope, noise density threshold.
+//! 5. Apply the cell-feature's [`FeatureAmbientControl`] — compute
+//!    nearest feature-instance distance, reject or scale by clearing
+//!    rule.
+//! 6. Per-primitive instance-overlap check (all modes): reject if
+//!    candidate is within any feature-instance footprint radius.
+//! 7. Emit a [`FeatureInstance`] with biome-default ambient palette
+//!    color.
+//!
+//! # Determinism
+//!
+//! All RNG is derived from `(master_seed, cell_id, entry_idx,
+//! candidate_idx)`. Same seed → bit-identical ambient set. The
+//! generator is pure w.r.t. its inputs; callers drive the flow from
+//! stable streaming events.
+//!
+//! # MVP vs follow-up
+//!
+//! - 5c.2.c.9: generator + clearing modes + basic hash-based
+//!   pseudo-noise filter.
+//! - 5c.2.c.10: replace pseudo-noise with proper 4-octave fBm
+//!   density fields seeded per-entry.
+//! - 5c.2.c.11 (this revision): rect-to-point SDF for `Box` /
+//!   `FlatQuad` so elongated primitives (airport runways) clear
+//!   their actual footprint instead of their bounding circle.
+//! - Deferred (5c.2.c.13): 1-ring neighbor-cell lookup for cross-
+//!   cell clearing seams — open until visual-check flags them.
+
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_sign_loss)]
+
+use crate::biome::BiomeClass;
+use crate::feature_instances::{
+    AmbientEntry, ColorSource, FeatureAmbientControl, FeatureInstance, PrimitiveKind,
+};
+use crate::voronoi_cells::CellId;
+
+/// Per-biome ambient palette (primary = rock / structural,
+/// secondary = foliage, accent = highlights). Hardcoded constants
+/// for 5c.2.c.9 MVP; 5c.2.c.11 may migrate to RON if authors want
+/// to tune. Biome-appropriate natural tones independent of feature
+/// palette adaptations.
+const AMBIENT_PALETTE: [(BiomeClass, [[u8; 3]; 3]); 4] = [
+    (
+        BiomeClass::CoastalBoreal,
+        [[125, 105, 85], [70, 110, 75], [160, 155, 140]], // brown bark / conifer / rock
+    ),
+    (
+        BiomeClass::HighDesert,
+        [[175, 135, 95], [130, 135, 95], [165, 140, 105]], // sandstone / sage / dusty
+    ),
+    (
+        BiomeClass::RockyAlpine,
+        [[125, 120, 115], [60, 95, 65], [170, 165, 155]], // granite / fir / talus
+    ),
+    (
+        BiomeClass::MediterraneanArchipelago,
+        [[180, 165, 140], [100, 130, 85], [165, 150, 120]], // limestone / olive / beige
+    ),
+];
+
+fn ambient_palette_for(biome: BiomeClass) -> [[u8; 3]; 3] {
+    AMBIENT_PALETTE.iter().find(|(b, _)| *b == biome).map_or(
+        [[150, 140, 125], [90, 120, 90], [170, 160, 140]],
+        |(_, p)| *p,
+    )
+}
+
+const TAU: f32 = core::f32::consts::TAU;
+
+/// Splitmix64-inspired hash — matches the `mix_seed` pattern used
+/// across the world crate for deterministic PRNG chains.
+const fn mix_seed(a: u64, b: u64) -> u64 {
+    let mut x = a.wrapping_add(b).wrapping_add(0x9e37_79b9_7f4a_7c15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+fn rand_unit(seed: u64, step: u64) -> f32 {
+    let h = mix_seed(seed, step);
+    ((h & 0xFFFF_FFFF) as f32) / (u32::MAX as f32 + 1.0)
+}
+
+/// Per-biome per-entry fBm density field (5c.2.c.10). 4 octaves of
+/// Perlin seeded by the entry's tag (derived from `master_seed` +
+/// biome + `entry_idx`). Raw output is normalized to `[0, 1]` so the
+/// authored `noise_threshold` in RON maps intuitively (0 = always
+/// spawn, 0.5 = half the field clusters, 0.9 = very sparse).
+///
+/// Same signature as the 5c.2.c.9 pseudo-noise it replaces; no caller
+/// changes required.
+fn density_noise(x: f32, z: f32, scale_m: f32, entry_tag: u64) -> f32 {
+    // 4 octaves at the entry's base wavelength. Raw fBm range is
+    // roughly [-1.4, 1.4]; map to [0, 1].
+    let raw = crate::noise::fbm_2d(entry_tag, 0, x, z, scale_m, 4);
+    ((raw / 2.8) + 0.5).clamp(0.0, 1.0)
+}
+
+/// Smoothstep — cubic ease from 0 to 1 over `t ∈ [0, 1]`.
+fn smoothstep(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Circular-approximation footprint radius for curved primitives
+/// (`Cylinder`, `Sphere`, `Cone`, `HalfCylinder`). `Box` / `FlatQuad`
+/// go through rotated-rect math in [`signed_distance_to_footprint`]
+/// and never call this.
+fn circular_footprint_radius(_kind: PrimitiveKind, scale: glam::Vec3) -> f32 {
+    scale.x.max(scale.z) * 0.5
+}
+
+/// Signed distance from `(x, z)` to a feature instance's XZ-plane
+/// footprint. Negative inside, zero at boundary, positive outside.
+///
+/// Elongated rect primitives (`Box`, `FlatQuad`) use a rotated-rect
+/// test oriented by `rotation_y_rad` — critical for long runways
+/// (`airport_major` 1500 m × 45 m) where a circular approximation
+/// would either mis-clear 1500 m of cross-runway space or fail to
+/// clear 200 m either end.
+///
+/// Curved primitives (`Cylinder`, `Sphere`, `Cone`, `HalfCylinder`)
+/// keep the cheap circle-based distance.
+#[allow(clippy::many_single_char_names)] // x, z, dx, dz are standard math names
+fn signed_distance_to_footprint(x: f32, z: f32, feature: &FeatureInstance) -> f32 {
+    let dx = x - feature.position.x;
+    let dz = z - feature.position.z;
+    match feature.primitive {
+        PrimitiveKind::Box | PrimitiveKind::FlatQuad => {
+            // Rotate (dx, dz) into the primitive's local frame. The
+            // inverse of a CCW rotation by θ on a point is:
+            //   (dx·cos(θ) + dz·sin(θ), -dx·sin(θ) + dz·cos(θ)).
+            let (sin, cos) = feature.rotation_y_rad.sin_cos();
+            let lx = dx * cos + dz * sin;
+            let lz = -dx * sin + dz * cos;
+            let hx = feature.scale.x * 0.5;
+            let hz = feature.scale.z * 0.5;
+            let qx = lx.abs() - hx;
+            let qz = lz.abs() - hz;
+            // Axis-aligned rectangle SDF (Inigo Quilez).
+            let outside = qx.max(0.0).hypot(qz.max(0.0));
+            let inside = qx.max(qz).min(0.0);
+            outside + inside
+        },
+        PrimitiveKind::Cylinder
+        | PrimitiveKind::Sphere
+        | PrimitiveKind::Cone
+        | PrimitiveKind::HalfCylinder => {
+            let r = circular_footprint_radius(feature.primitive, feature.scale);
+            dx.hypot(dz) - r
+        },
+    }
+}
+
+/// Distance from `(x, z)` to the nearest feature instance's footprint
+/// edge. Returns `f32::INFINITY` when there are no feature instances.
+/// Used by the clearing-mode logic.
+fn nearest_feature_distance(x: f32, z: f32, features: &[FeatureInstance]) -> f32 {
+    let mut min_d = f32::INFINITY;
+    for f in features {
+        let d = signed_distance_to_footprint(x, z, f);
+        if d < min_d {
+            min_d = d;
+        }
+    }
+    min_d
+}
+
+/// True if `(x, z)` falls strictly within any feature-instance
+/// footprint. Always rejected regardless of clearing mode.
+fn is_within_any_footprint(x: f32, z: f32, features: &[FeatureInstance]) -> bool {
+    features
+        .iter()
+        .any(|f| signed_distance_to_footprint(x, z, f) < 0.0)
+}
+
+/// Bounding-circle footprint radius — retained for the airport-runway
+/// regression test that demonstrates what the rotated-rect improvement
+/// avoids. Prefer [`signed_distance_to_footprint`] in hot paths.
+#[cfg(test)]
+fn bounding_footprint_radius(_kind: PrimitiveKind, scale: glam::Vec3) -> f32 {
+    scale.x.max(scale.z) * 0.5
+}
+
+/// Effective cell radius used for ambient candidate disc sampling.
+/// Approximates the Voronoi cell radius (cells have variable size
+/// from the power-diagram weighting). Good enough for MVP.
+const AMBIENT_CELL_RADIUS_M: f32 = 1000.0;
+
+/// Ground-Y anchoring: for each primitive kind return the
+/// (center, scale) adjustment so bases sit on terrain.
+fn ground_anchor_y(kind: PrimitiveKind, size_m: f32, ground_y: f32) -> (f32, glam::Vec3) {
+    if kind == PrimitiveKind::FlatQuad {
+        // Zero-thickness quad at y=0 local; lift 5 cm above ground to
+        // avoid z-fighting with terrain.
+        let scale = glam::Vec3::new(size_m, 0.1, size_m);
+        (ground_y + 0.05, scale)
+    } else {
+        // Uniform scale; base rests on ground, center at ground + h/2.
+        let scale = glam::Vec3::splat(size_m);
+        (ground_y + size_m * 0.5, scale)
+    }
+}
+
+/// Generate the ambient-cover instance list for a single Voronoi
+/// cell. Called from the app's streaming cell-enter path for each
+/// newly-active cell.
+///
+/// Arguments:
+/// - `master_seed`: world seed.
+/// - `cell_id`: the cell entering the active set.
+/// - `cell_pos`: `(x, z)` world-space cell center.
+/// - `biome`: host biome of the cell (drives ambient-entry lookup +
+///   biome-default palette).
+/// - `entries`: the biome's `AmbientEntry` list (typically from
+///   `SubBiomeLibraries::ambient_for_biome(biome)`).
+/// - `feature_instances`: the cell's baked feature instances
+///   (consulted for overlap + clearing).
+/// - `ambient_control`: the cell-assigned feature's control mode.
+///   `None` (the default Option) = fully wild.
+/// - `height_at`: terrain sampler for altitude + ground anchor.
+///
+/// Returns `Vec<FeatureInstance>` tagged with primitive kind + color;
+/// the renderer pipeline consumes them via the same upload path as
+/// feature instances.
+#[must_use]
+#[allow(clippy::too_many_lines)] // linear per-candidate pipeline; splitting hurts readability
+pub fn generate_ambient_for_cell(
+    master_seed: u64,
+    cell_id: CellId,
+    cell_pos: (f32, f32),
+    biome: BiomeClass,
+    entries: &[AmbientEntry],
+    feature_instances: &[FeatureInstance],
+    ambient_control: Option<FeatureAmbientControl>,
+    height_at: &dyn Fn(f32, f32) -> f32,
+) -> Vec<FeatureInstance> {
+    if entries.is_empty() {
+        return Vec::new();
+    }
+
+    let cell_area_km2 =
+        core::f32::consts::PI * AMBIENT_CELL_RADIUS_M * AMBIENT_CELL_RADIUS_M / 1_000_000.0;
+    let palette = ambient_palette_for(biome);
+    let control = ambient_control.unwrap_or(FeatureAmbientControl::None);
+    let mut out = Vec::new();
+
+    for (entry_idx, entry) in entries.iter().enumerate() {
+        let target = (entry.density_per_km2 * cell_area_km2).ceil() as u32;
+        let entry_tag = mix_seed(0x4a47_45be_4143_4f56, entry_idx as u64); // "AMBIENT\0"-ish
+        let entry_rng = mix_seed(mix_seed(master_seed, u64::from(cell_id)), entry_idx as u64);
+
+        for i in 0..target {
+            let cand_rng = mix_seed(entry_rng, u64::from(i));
+
+            // Uniform disc sample (area-preserving).
+            let angle = rand_unit(cand_rng, 1) * TAU;
+            let radius = rand_unit(cand_rng, 2).sqrt() * AMBIENT_CELL_RADIUS_M;
+            let px = cell_pos.0 + radius * angle.cos();
+            let pz = cell_pos.1 + radius * angle.sin();
+
+            // Altitude filter.
+            let alt = height_at(px, pz);
+            if alt < entry.altitude_range_m.0 || alt > entry.altitude_range_m.1 {
+                continue;
+            }
+
+            // Slope filter (computed via 4-sample finite-difference
+            // gradient magnitude; cheap, adequate for MVP).
+            let offset = 5.0;
+            let h_e = height_at(px + offset, pz);
+            let h_w = height_at(px - offset, pz);
+            let h_n = height_at(px, pz + offset);
+            let h_s = height_at(px, pz - offset);
+            let dh_dx = (h_e - h_w) / (2.0 * offset);
+            let dh_dz = (h_n - h_s) / (2.0 * offset);
+            let slope_deg = dh_dx.hypot(dh_dz).atan().to_degrees();
+            if slope_deg > entry.slope_max_deg {
+                continue;
+            }
+
+            // Density-field filter. 4-octave fBm seeded per-entry;
+            // raw range normalized to `[0, 1]` so `noise_threshold` in
+            // RON maps intuitively (0 = always spawn, 0.5 = half the
+            // field, 0.9 = very sparse clusters).
+            let noise = density_noise(px, pz, entry.noise_scale_m, entry_tag);
+            if noise < entry.noise_threshold {
+                continue;
+            }
+
+            // Instance-overlap (all modes): candidate rejected if
+            // strictly inside any feature-instance footprint.
+            if is_within_any_footprint(px, pz, feature_instances) {
+                continue;
+            }
+
+            // Clearing-mode size factor. Rejects are handled inline.
+            let size_factor = match control {
+                FeatureAmbientControl::None => 1.0,
+                FeatureAmbientControl::HardClearing { clear_radius_m } => {
+                    let d = nearest_feature_distance(px, pz, feature_instances);
+                    if d < clear_radius_m {
+                        continue;
+                    }
+                    1.0
+                },
+                FeatureAmbientControl::TaperedClearing {
+                    clear_radius_m,
+                    taper_radius_m,
+                } => {
+                    let d = nearest_feature_distance(px, pz, feature_instances);
+                    if d < clear_radius_m {
+                        continue;
+                    }
+                    if d < taper_radius_m {
+                        let t = (d - clear_radius_m) / (taper_radius_m - clear_radius_m).max(1e-3);
+                        smoothstep(t)
+                    } else {
+                        1.0
+                    }
+                },
+                FeatureAmbientControl::InverseTaperedClearing {
+                    clear_radius_m,
+                    taper_radius_m,
+                } => {
+                    let d = nearest_feature_distance(px, pz, feature_instances);
+                    if d < clear_radius_m {
+                        0.3 // pioneer sprout
+                    } else if d < taper_radius_m {
+                        let t = (d - clear_radius_m) / (taper_radius_m - clear_radius_m).max(1e-3);
+                        0.3 + 0.7 * smoothstep(t)
+                    } else {
+                        1.0
+                    }
+                },
+            };
+
+            // Size pick.
+            let base_size = entry.size_range_m.0
+                + rand_unit(cand_rng, 3) * (entry.size_range_m.1 - entry.size_range_m.0);
+            let jitter = entry.scale_jitter.0
+                + rand_unit(cand_rng, 4) * (entry.scale_jitter.1 - entry.scale_jitter.0);
+            let size = base_size * jitter * size_factor;
+            if size < 0.1 {
+                continue; // below visible-threshold — skip the upload
+            }
+
+            // Color resolution. Ambient uses per-biome default palette,
+            // not the cell-feature's adapted palette.
+            let rgb = match entry.color_source {
+                ColorSource::Primary => palette[0],
+                ColorSource::Secondary => palette[1],
+                ColorSource::Accent => palette[2],
+                ColorSource::Explicit(rgb) => rgb,
+            };
+
+            let rot_y = rand_unit(cand_rng, 5) * TAU;
+            let (py, scale_vec) = ground_anchor_y(entry.kind, size, alt);
+
+            out.push(FeatureInstance {
+                primitive: entry.kind,
+                position: glam::Vec3::new(px, py, pz),
+                scale: scale_vec,
+                rotation_y_rad: rot_y,
+                color: [rgb[0], rgb[1], rgb[2], 255],
+            });
+        }
+    }
+    out
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn const_height(h: f32) -> impl Fn(f32, f32) -> f32 {
+        move |_x, _z| h
+    }
+
+    fn boreal_forest_entry() -> AmbientEntry {
+        AmbientEntry {
+            kind: PrimitiveKind::Cone,
+            color_source: ColorSource::Secondary,
+            density_per_km2: 100.0,
+            size_range_m: (3.0, 8.0),
+            scale_jitter: (0.9, 1.1),
+            noise_scale_m: 400.0,
+            noise_threshold: 0.0, // everything passes (max of pseudo-noise is 0.7)
+            altitude_range_m: (-100.0, 3000.0),
+            slope_max_deg: 60.0,
+            rng_stream: 0,
+        }
+    }
+
+    #[test]
+    fn generator_produces_instances_on_flat_ground() {
+        let entries = vec![boreal_forest_entry()];
+        let insts = generate_ambient_for_cell(
+            42,
+            0,
+            (0.0, 0.0),
+            BiomeClass::CoastalBoreal,
+            &entries,
+            &[],
+            None,
+            &const_height(100.0),
+        );
+        assert!(
+            !insts.is_empty(),
+            "should emit ambient on unblocked flat ground"
+        );
+        for inst in &insts {
+            assert_eq!(inst.primitive, PrimitiveKind::Cone);
+            assert_eq!(inst.color[3], 255);
+            // Ground-anchored: y = ground + scale.y / 2 = 100 + size/2.
+            let expected_y = 100.0 + inst.scale.y * 0.5;
+            assert!((inst.position.y - expected_y).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn altitude_filter_rejects_out_of_range() {
+        let mut entry = boreal_forest_entry();
+        entry.altitude_range_m = (0.0, 50.0); // ground is 100, everything rejected
+        let insts = generate_ambient_for_cell(
+            42,
+            0,
+            (0.0, 0.0),
+            BiomeClass::CoastalBoreal,
+            &[entry],
+            &[],
+            None,
+            &const_height(100.0),
+        );
+        assert!(insts.is_empty());
+    }
+
+    #[test]
+    fn generator_deterministic() {
+        let entries = vec![boreal_forest_entry()];
+        let a = generate_ambient_for_cell(
+            42,
+            123,
+            (200.0, -400.0),
+            BiomeClass::CoastalBoreal,
+            &entries,
+            &[],
+            None,
+            &const_height(50.0),
+        );
+        let b = generate_ambient_for_cell(
+            42,
+            123,
+            (200.0, -400.0),
+            BiomeClass::CoastalBoreal,
+            &entries,
+            &[],
+            None,
+            &const_height(50.0),
+        );
+        assert_eq!(a.len(), b.len());
+        for (l, r) in a.iter().zip(b.iter()) {
+            assert_eq!(l.position, r.position);
+            assert_eq!(l.scale, r.scale);
+        }
+    }
+
+    #[test]
+    fn hard_clearing_rejects_ambient_in_radius() {
+        // Place a large feature at cell center → hard clearing 100 m.
+        // All ambient within 100 m gets dropped. Lots outside should
+        // remain.
+        let entries = vec![boreal_forest_entry()];
+        let feature = FeatureInstance {
+            primitive: PrimitiveKind::Box,
+            position: glam::Vec3::new(0.0, 2.5, 0.0),
+            scale: glam::Vec3::new(10.0, 5.0, 10.0),
+            rotation_y_rad: 0.0,
+            color: [150, 100, 80, 255],
+        };
+        let insts = generate_ambient_for_cell(
+            42,
+            0,
+            (0.0, 0.0),
+            BiomeClass::CoastalBoreal,
+            &entries,
+            &[feature],
+            Some(FeatureAmbientControl::HardClearing {
+                clear_radius_m: 100.0,
+            }),
+            &const_height(100.0),
+        );
+        for inst in &insts {
+            let d = inst.position.x.hypot(inst.position.z);
+            // Clearing is distance-to-edge; 10×10 box → ~5 m half-extent
+            // → min distance-to-center ≈ 100 + 5 along axis. Keep the
+            // assertion loose since corner-direction candidates are ~107.
+            assert!(
+                d >= 100.0,
+                "ambient instance found too close to cleared feature: d={d}"
+            );
+        }
+    }
+
+    #[test]
+    fn tapered_clearing_scales_down_near_feature() {
+        let entries = vec![boreal_forest_entry()];
+        let feature = FeatureInstance {
+            primitive: PrimitiveKind::Box,
+            position: glam::Vec3::new(0.0, 2.5, 0.0),
+            scale: glam::Vec3::new(10.0, 5.0, 10.0),
+            rotation_y_rad: 0.0,
+            color: [150, 100, 80, 255],
+        };
+        // Taper from 30 to 100 m: inside 30 rejected, at 100+ full size.
+        let insts = generate_ambient_for_cell(
+            42,
+            0,
+            (0.0, 0.0),
+            BiomeClass::CoastalBoreal,
+            &entries,
+            &[feature],
+            Some(FeatureAmbientControl::TaperedClearing {
+                clear_radius_m: 30.0,
+                taper_radius_m: 100.0,
+            }),
+            &const_height(100.0),
+        );
+
+        // Partition: close = distance < 60, far = distance > 100.
+        let (close, far): (Vec<&FeatureInstance>, Vec<&FeatureInstance>) =
+            insts.iter().partition(|i| {
+                let d = i.position.x.hypot(i.position.z);
+                d < 60.0
+            });
+        // Require at least one of each bucket for the test to be meaningful.
+        if !close.is_empty() && !far.is_empty() {
+            let avg_close: f32 = close.iter().map(|i| i.scale.y).sum::<f32>() / close.len() as f32;
+            let avg_far: f32 = far.iter().map(|i| i.scale.y).sum::<f32>() / far.len() as f32;
+            assert!(
+                avg_close <= avg_far + 0.5,
+                "close ambient avg {avg_close} should be <= far avg {avg_far}"
+            );
+        }
+    }
+
+    #[test]
+    fn elongated_quad_uses_rotated_rect_not_bounding_circle() {
+        // Airport runway: 1500 m × 45 m FlatQuad, unrotated.
+        // A circular bounding-radius approach would clear 750 m
+        // cross-runway (wrong). Rect SDF clears only the 45 m width.
+        let entries = vec![boreal_forest_entry()];
+        let runway = FeatureInstance {
+            primitive: PrimitiveKind::FlatQuad,
+            position: glam::Vec3::new(0.0, 0.05, 0.0),
+            scale: glam::Vec3::new(1500.0, 0.1, 45.0),
+            rotation_y_rad: 0.0,
+            color: [70, 70, 70, 255],
+        };
+        let insts = generate_ambient_for_cell(
+            42,
+            0,
+            (0.0, 0.0),
+            BiomeClass::CoastalBoreal,
+            &entries,
+            core::slice::from_ref(&runway),
+            None,
+            &const_height(100.0),
+        );
+
+        // No ambient should land ON the runway rect (|x| < 750, |z| < 22.5).
+        for inst in &insts {
+            let on_runway = inst.position.x.abs() < 750.0 && inst.position.z.abs() < 22.5;
+            assert!(
+                !on_runway,
+                "ambient placed on runway at ({}, {})",
+                inst.position.x, inst.position.z
+            );
+        }
+
+        // A bounding-circle approach would have cleared the entire
+        // 750 m radius; verify we DO allow ambient at moderate cross-
+        // runway distance (say 60 m from centerline, well outside 22.5).
+        // This is the business end of the rotated-rect improvement.
+        let has_near_cross = insts.iter().any(|i| {
+            i.position.x.abs() < 700.0 && i.position.z.abs() > 60.0 && i.position.z.abs() < 150.0
+        });
+        assert!(
+            has_near_cross,
+            "rotated-rect should allow ambient 60 m cross-runway (bounding-circle would block)"
+        );
+
+        // Sanity-check bounding-footprint radius for the runway is
+        // 750 m — confirms a circle-only approach would have over-cleared.
+        assert!((bounding_footprint_radius(runway.primitive, runway.scale) - 750.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn rotated_rect_clears_along_orientation() {
+        // Same runway, rotated 90° — now wide axis is along Z.
+        // Ambient should be blocked for |z| < 750 (not |x|).
+        let entries = vec![boreal_forest_entry()];
+        let runway = FeatureInstance {
+            primitive: PrimitiveKind::FlatQuad,
+            position: glam::Vec3::new(0.0, 0.05, 0.0),
+            scale: glam::Vec3::new(1500.0, 0.1, 45.0),
+            rotation_y_rad: core::f32::consts::FRAC_PI_2,
+            color: [70, 70, 70, 255],
+        };
+        let insts = generate_ambient_for_cell(
+            42,
+            0,
+            (0.0, 0.0),
+            BiomeClass::CoastalBoreal,
+            &entries,
+            &[runway],
+            None,
+            &const_height(100.0),
+        );
+        for inst in &insts {
+            let on_runway = inst.position.z.abs() < 750.0 && inst.position.x.abs() < 22.5;
+            assert!(!on_runway, "rotated runway overlap missed");
+        }
+    }
+
+    #[test]
+    fn instance_overlap_rejects_exact_position() {
+        let entries = vec![boreal_forest_entry()];
+        // Tiny feature — only exact overlap should be rejected.
+        let feature = FeatureInstance {
+            primitive: PrimitiveKind::Cylinder,
+            position: glam::Vec3::new(100.0, 5.0, 100.0),
+            scale: glam::Vec3::new(2.0, 10.0, 2.0),
+            rotation_y_rad: 0.0,
+            color: [150, 100, 80, 255],
+        };
+        let insts = generate_ambient_for_cell(
+            42,
+            0,
+            (0.0, 0.0),
+            BiomeClass::CoastalBoreal,
+            &entries,
+            &[feature],
+            None, // wild — no clearing
+            &const_height(100.0),
+        );
+        // Verify no ambient is INSIDE the 1m cylinder footprint
+        // (scale.x / 2 = 1 m).
+        for inst in &insts {
+            let dx = inst.position.x - 100.0;
+            let dz = inst.position.z - 100.0;
+            let d = dx.hypot(dz);
+            assert!(
+                d >= 1.0 - 1e-3,
+                "ambient should not overlap feature footprint"
+            );
+        }
+    }
+}

@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod ambient;
 pub mod baked_assignments;
 pub mod biome;
 pub mod composed;

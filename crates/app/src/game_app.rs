@@ -1455,12 +1455,71 @@ impl Runtime {
                     let mut half_cylinders: Vec<flowplan_render::InstanceGpuData> = Vec::new();
                     let mut flat_quads: Vec<flowplan_render::InstanceGpuData> = Vec::new();
                     let mut populated_in_active = 0_usize;
+                    let mut ambient_uploaded = 0_usize;
+                    // Libraries + terrain sampler for 5c.2.c.9
+                    // ambient generation.
+                    let libs = flowplan_world::sub_biome::SubBiomeLibraries::shared();
+                    let terrain_ref = &self.terrain;
+                    let height_at = |x: f32, z: f32| {
+                        flowplan_world::terrain::HeightSampler::height(terrain_ref, x, z)
+                    };
                     for &cell_id in cells.active() {
                         let insts = baked.instances_at_cell(cell_id);
                         if !insts.is_empty() {
                             populated_in_active += 1;
                         }
+                        // Bucket feature instances.
                         for inst in insts {
+                            let gpu = flowplan_render::InstanceGpuData::from_fields(
+                                inst.position.to_array(),
+                                inst.rotation_y_rad,
+                                inst.scale.to_array(),
+                                inst.color,
+                            );
+                            match inst.primitive {
+                                PrimitiveKind::Box => boxes.push(gpu),
+                                PrimitiveKind::Cone => cones.push(gpu),
+                                PrimitiveKind::Cylinder => cylinders.push(gpu),
+                                PrimitiveKind::Sphere => spheres.push(gpu),
+                                PrimitiveKind::HalfCylinder => half_cylinders.push(gpu),
+                                PrimitiveKind::FlatQuad => flat_quads.push(gpu),
+                            }
+                        }
+                        // 5c.2.c.9: lazy ambient generation per cell.
+                        // Biome from sub-biome-catalog lookup; feature
+                        // from baked assignment; ambient entries from
+                        // the shared library.
+                        let seed_pos = catalog.seeds()[cell_id as usize].position;
+                        let host_biome =
+                            flowplan_world::biome::biome_at(WORLD_SEED, seed_pos.0, seed_pos.1);
+                        let ambient_entries = libs.ambient_for_biome(host_biome);
+                        if ambient_entries.is_empty() {
+                            continue;
+                        }
+                        let assignment = baked.feature_at_cell(cell_id);
+                        let feature = libs
+                            .find(
+                                assignment.source.feature_source_biome(),
+                                &assignment.feature_id,
+                            )
+                            .or_else(|| {
+                                libs.oceanic()
+                                    .iter()
+                                    .find(|f| f.id == assignment.feature_id)
+                            });
+                        let ambient_control = feature.and_then(|f| f.ambient_control);
+                        let ambient_insts = flowplan_world::ambient::generate_ambient_for_cell(
+                            WORLD_SEED,
+                            cell_id,
+                            seed_pos,
+                            host_biome,
+                            ambient_entries,
+                            insts,
+                            ambient_control,
+                            &height_at,
+                        );
+                        ambient_uploaded += ambient_insts.len();
+                        for inst in &ambient_insts {
                             let gpu = flowplan_render::InstanceGpuData::from_fields(
                                 inst.position.to_array(),
                                 inst.rotation_y_rad,
@@ -1490,6 +1549,7 @@ impl Runtime {
                         exited = cells.exited().len(),
                         populated_in_active = populated_in_active,
                         instances_uploaded = total_uploaded,
+                        ambient_uploaded = ambient_uploaded,
                         boxes = boxes.len(),
                         cones = cones.len(),
                         cylinders = cylinders.len(),

@@ -322,7 +322,7 @@ Acceptance: all 49 features have an `ambient_control` (most `None`), all 4 biome
 - 2 new tests: `ambient_entries_load_per_biome`, `feature_ambient_control_variants_present`
 - 259 workspace lib tests pass. Full gate green.
 
-**5c.2.c.9 — Ambient generator** (Task #248, PENDING, blocked on .c.8).
+**5c.2.c.9 — Ambient generator** (Task #248, SHIPPED 2026-04-24).
 
 *Goal:* lazy per-cell ambient instances visible in-game at world origin.
 
@@ -336,27 +336,54 @@ Acceptance: all 49 features have an `ambient_control` (most `None`), all 4 biome
 
 Acceptance: visual diff on spawn-near shows ambient cover filling cells around features. Performance: cell-enter generation ≤ 5 ms on 8-core.
 
-**5c.2.c.10 — Noise-density fields** (Task #249, PENDING, blocked on .c.9).
+**Shipped summary (5c.2.c.9)**:
+- `crates/world/src/ambient.rs` — pure generator with all 4 `FeatureAmbientControl` modes.
+- Per-biome `AMBIENT_PALETTE` constants (primary/secondary/accent RGB) — 4 biomes + fallback.
+- Helpers: `mix_seed`, `rand_unit`, `smoothstep`, per-primitive `circular_footprint_radius`, `nearest_feature_distance`, `is_within_any_footprint`, `ground_anchor_y`.
+- `generate_ambient_for_cell` signature: master_seed, cell_id, cell_pos, biome, entries, feature_instances, ambient_control, height_at closure → `Vec<FeatureInstance>`.
+- 6 unit tests: generator output, altitude filter, determinism, hard clearing, tapered clearing, instance overlap.
+- Wired into `crates/app/src/game_app.rs` streaming cell-enter loop. Ambient instances flow through the same renderer upload path as feature instances.
+
+**5c.2.c.10 — Noise-density fields** (Task #249, SHIPPED 2026-04-24).
 
 *Goal:* biome-scoped variation so ambient clusters and sparses naturally rather than uniform density.
 
-- [ ] Per-biome × per-ambient-entry fBm sampler, seeded from `(master_seed, biome_discriminant, entry_idx)`. Uses existing `crate::noise` primitives.
-- [ ] `noise_scale_m` → wavelength; `noise_threshold` → spawn gate.
-- [ ] Integrate into 5c.2.c.9 generator: each candidate queries its entry's density field, rejects if below threshold.
-- [ ] Visual-iteration pass: tune density_per_km2 + noise_scale_m + threshold per biome via spawn-near screenshots.
+- [x] Per-biome × per-ambient-entry fBm sampler, seeded from `(master_seed, biome_discriminant, entry_idx)`. Uses existing `crate::noise` primitives.
+- [x] `noise_scale_m` → wavelength; `noise_threshold` → spawn gate.
+- [x] Integrate into 5c.2.c.9 generator: each candidate queries its entry's density field, rejects if below threshold.
+- [ ] Visual-iteration pass: tune density_per_km2 + noise_scale_m + threshold per biome via spawn-near screenshots. *(Deferred — blocked on user visual check.)*
 
 Acceptance: forested zones look like forested zones, meadows look like meadows, boulder fields look like boulder fields. No uniform-carpet coverage.
 
-**5c.2.c.11 — Footprint + overlap polish** (Task #250, PENDING, blocked on .c.9).
+**Shipped summary (5c.2.c.10)**:
+- Replaced hash-based pseudo-noise with `density_noise(x, z, scale_m, entry_tag) → f32` using `crate::noise::fbm_2d` at 4 octaves.
+- Raw fBm output (range ~[-1.4, 1.4]) normalized to `[0, 1]` so authored thresholds in RON are intuitive.
+- No caller-signature changes — drop-in replacement.
+- All 8 ambient-module tests still pass.
+
+**5c.2.c.11 — Footprint + overlap polish** (Task #250, SHIPPED 2026-04-24).
 
 *Goal:* correctness + performance pass before calling 5c.2.c ambient COMPLETE.
 
-- [ ] Footprint-radius math: rect-to-point for elongated primitives (FlatQuad runway 1500 m × 45 m needs its actual rectangular footprint, not a 1500 m circle). Handle Box and FlatQuad rectangle cases explicitly.
-- [ ] Profile cell-enter cost; optimize hot loops (density-sample, overlap-check).
-- [ ] Optional: 1-ring neighbor-cell lookup for cross-cell clearing if visual-check flags seams. Default: contained cell only.
-- [ ] Test: large-feature (airport_major) overlap check correctly clears ambient over its 1500 m runway quad but allows ambient 50 m outside the runway edge.
+- [x] Footprint-radius math: rotated-rect SDF for `Box` / `FlatQuad` via Inigo Quilez axis-aligned rect formula in the primitive's local frame. `airport_major` 1500 m × 45 m runway now clears exactly its rectangle instead of a 1500 m bounding circle.
+- [x] Curved primitives (`Cylinder`, `Sphere`, `Cone`, `HalfCylinder`) keep the cheap circle-distance path.
+- [x] `signed_distance_to_footprint` unifies hard-clearing / tapered-clearing / instance-overlap distance queries on one function.
+- [x] Tests: `elongated_quad_uses_rotated_rect_not_bounding_circle` (cross-runway ambient allowed at 60 m), `rotated_rect_clears_along_orientation` (90°-rotated runway clears along Z, not X).
+- [ ] 1-ring neighbor-cell lookup (seam handling). *(Deferred to 5c.2.c.13 pending visual-check.)*
+- [ ] Profile cell-enter cost. *(Deferred — defer until in-game instrumentation reports frame time.)*
 
 Acceptance: no ambient trees growing through runways / apron slabs / large feature footprints. No performance regression vs pre-5c.2.c.9.
+
+**Shipped summary (5c.2.c.11)**:
+- `signed_distance_to_footprint` — negative inside, zero at boundary, positive outside. Replaces the old `distance_to_center - bounding_radius` approximation.
+- `circular_footprint_radius` — trimmed to a pure curved-primitive helper (Box/FlatQuad no longer flow through it).
+- `is_within_any_footprint` + `nearest_feature_distance` both delegate to the unified SDF. Hard/tapered clearing decisions now work correctly for elongated runways, rotated plazas, and any rect-shaped feature.
+- 10 total ambient-module tests (6 original + 2 rotated-rect + 2 feature-instance RON).
+- Full world-crate clippy clean (4 pre-existing unrelated warnings resolved along the way).
+
+### 5c.2.c ambient — COMPLETE 2026-04-24
+
+All 4 steppings (.c.8 types/RON → .c.9 generator → .c.10 fBm fields → .c.11 rotated-rect polish) shipped. The ambient environment subsystem is live, deterministic, and ready for visual-iteration tuning. Follow-ups (.c.12 `InverseTaperedClearing` authoring, .c.13 cross-cell seam lookup, .c.14 seasonal variation) remain as deferred items.
 
 ### Deferred / follow-up
 
