@@ -980,9 +980,13 @@ Split (pinned 2026-04-23 per user direction, detail in [MAPGEN.md § Layer 3 pha
 - [x] **Rayon parallel bake** (Phase A par_iter + Phase B serial merge): **275 s → 33 s = 8.3× speedup** at canonical seed, bit-identical output. `rayon` added to [DESIGN.md tech-stack](DESIGN.md#tech-stack) + workspace deps.
 - [x] **Diagnostic** (`emit_baked_assignments_calibration` visual-bench test): full-bake stats including per-feature placement counts, fallback rate, bleed-over rate, self-spacing rejection count, wall-clock.
 
-**3.6.3c.2 — Per-cell deltas for 18 3.6.3b features: pending.**
+**3.6.3c.2 — Per-cell deltas for 11 dev/resupply features + tuning: SHIPPED 2026-04-25 (Task #272).**
 
-- [ ] Development deltas (modest flatten + skirt smaller than hub_foundation). Scenery = render-tag-only. Registry extension in `feature_delta.rs`.
+- [x] **Development + resupply deltas** wired via `flatten_delta` in `feature_delta_impls.rs::natural_delta`. 11 features (5 development + 6 resupply) with strengths interleaved with natural flattens by surface character (plowed 0.85 > paved 0.8 > shop-pad 0.65 > yard 0.6 > clearing 0.5 > rough-camp 0.4). Magnitudes bounded < 5 m by the proxy ceiling, well under hub_foundation envelope.
+- [x] **Scenery cues** = render-tag-only at heightfield level (already shipped in 3.6.3a — `creek_valley` channel, `scenic_overlook` prominence, `hot_springs` bowl, etc.; the remaining four scenery cues use natural-feature deltas).
+- [x] **`scenic_overlook` placement-rule tuning** — `prominence: (min_m: 100→25, min_slope_deg: 20→0)`. Slope gate dropped (cell-seed slope is locally smooth even on alpine ridges); per-feature `PROMINENCE_SAMPLE_RADIUS_M` tuning queued for 3.6.3c.4+. Post-tune calibration: 37 → 12 placements at canonical seed.
+- [x] **`STREAM_RADIUS_M` cushion** (Task #261, .12k closure) — 20 → 22 km; covers cells whose Voronoi polygon extends inward into the visible terrain disc.
+- [ ] **Infrastructure deltas** (`road_segment`, `dirt_road_segment`, `highway_intersection`, `rail_corridor_segment`) — blocked on 3.6.3c.3 `FeatureGroup`; need group-aware continuous-polyline deltas, not per-cell.
 
 **3.6.3c.3 — `FeatureGroup` multi-cell engine: pending.**
 

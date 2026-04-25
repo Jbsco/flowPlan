@@ -2214,15 +2214,18 @@ mod tests {
         assert!(hub.proximity_km_per_tier.contains_key("Regional"));
         assert!(rules.self_spacing.is_some());
 
-        // scenic_overlook (RockyAlpine) — prominence + self_spacing
+        // scenic_overlook (RockyAlpine) — prominence + self_spacing.
+        // Tuned 3.6.3c.2: min_m 100→25, min_slope_deg 20→0 (cell-seed
+        // slope is locally smooth even on alpine ridges; per-feature
+        // sampling-radius tuning queued for 3.6.3c.4+).
         let overlook = libs
             .find(BiomeClass::RockyAlpine, "scenic_overlook")
             .unwrap();
         let rules = overlook.placement_rules.as_ref().unwrap();
         let prom = rules.prominence.as_ref().unwrap();
         let eps = 1e-6_f32;
-        assert!((prom.min_m - 100.0).abs() < eps);
-        assert!((prom.min_slope_deg - 20.0).abs() < eps);
+        assert!((prom.min_m - 25.0).abs() < eps);
+        assert!((prom.min_slope_deg - 0.0).abs() < eps);
 
         // creek_valley (CoastalBoreal) — hydrology coupling (Creek)
         let creek = libs

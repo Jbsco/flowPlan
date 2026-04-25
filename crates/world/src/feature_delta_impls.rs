@@ -110,15 +110,26 @@ pub fn natural_delta(feature_id: &str, ctx: &DeltaContext) -> f32 {
         "waterfall" => step_delta(ctx, 35.0),
 
         // ── Flattens (gentle smoothing) ─────────────────────────────
-        "bush_strip_clearing" => flatten_delta(ctx, 0.75),
-        "alpine_meadow" => flatten_delta(ctx, 0.45),
-        "natural_meadow" | "coastal_plain" => flatten_delta(ctx, 0.5),
-        "river_floodplain" => flatten_delta(ctx, 0.55),
+        // Strength scale (first-pass tuning, refine after L3 visual-bench).
+        // Developments + resupply (3.6.3c.2) interleave with natural
+        // flattens by surface character: plowed > paved > shop-pad >
+        // yard > clearing > rough-camp.
         "salt_flat" => flatten_delta(ctx, 0.95),
+        "farmland_parcel" => flatten_delta(ctx, 0.85),
+        "gas_station" => flatten_delta(ctx, 0.8),
+        "bush_strip_clearing" => flatten_delta(ctx, 0.75),
+        "ranch" | "general_store" => flatten_delta(ctx, 0.65),
+        "dwelling_cluster" | "ferry_dock" => flatten_delta(ctx, 0.6),
+        "river_floodplain" | "bait_shop" | "tackle_shop" => flatten_delta(ctx, 0.55),
+        "natural_meadow" | "coastal_plain" | "homestead_clearing" | "remote_compound" => {
+            flatten_delta(ctx, 0.5)
+        },
+        "alpine_meadow" => flatten_delta(ctx, 0.45),
+        "fishing_camp" => flatten_delta(ctx, 0.4),
 
         // All other feature ids (including `plain`, oceanic types,
-        // scenery tags, developments/infra/resupply from 3.6.3b)
-        // produce no heightfield delta at this phase.
+        // scenery tags, infrastructure from 3.6.3b which is blocked
+        // on `FeatureGroup` 3.6.3c.3) produce no heightfield delta.
         _ => 0.0,
     }
 }
@@ -548,6 +559,62 @@ mod tests {
         assert!(natural_delta("mesa_top", &ctx) > 0.0);
         assert!(natural_delta("book_cliffs", &ctx) > 0.0);
         assert!(natural_delta("cliff_coast", &ctx) > 0.0);
+    }
+
+    #[test]
+    fn dev_resupply_deltas_emit_modest_flatten() {
+        // 3.6.3c.2 features must produce a non-zero (negative) delta —
+        // confirms wiring through `natural_delta` dispatch. Magnitudes
+        // bounded by `flatten_delta`'s 5 m proxy × strength × falloff.
+        let ctx = ctx_at(0.3, 100.0);
+        for id in [
+            "farmland_parcel",
+            "ranch",
+            "dwelling_cluster",
+            "homestead_clearing",
+            "remote_compound",
+            "gas_station",
+            "general_store",
+            "ferry_dock",
+            "bait_shop",
+            "tackle_shop",
+            "fishing_camp",
+        ] {
+            let d = natural_delta(id, &ctx);
+            assert!(
+                d < 0.0,
+                "{id} should emit a negative flatten delta, got {d}"
+            );
+            assert!(
+                d > -5.0,
+                "{id} flatten magnitude should stay under the 5 m proxy ceiling, got {d}"
+            );
+        }
+    }
+
+    #[test]
+    fn dev_deltas_zero_at_edge() {
+        let ctx = ctx_at(1.0, 100.0);
+        for id in ["farmland_parcel", "gas_station", "ferry_dock"] {
+            let d = natural_delta(id, &ctx);
+            assert!(d.abs() < 1e-3, "{id} should taper to zero at cell edge");
+        }
+    }
+
+    #[test]
+    fn dev_deltas_strength_ordering() {
+        // farmland (cultivated, very flat) > gas_station (paved pad) >
+        // fishing_camp (rough clearing). At identical query position
+        // the magnitudes should reflect that ordering.
+        let ctx = ctx_at(0.3, 100.0);
+        let farmland = natural_delta("farmland_parcel", &ctx).abs();
+        let gas = natural_delta("gas_station", &ctx).abs();
+        let camp = natural_delta("fishing_camp", &ctx).abs();
+        assert!(
+            farmland > gas,
+            "farmland {farmland} should exceed gas {gas}"
+        );
+        assert!(gas > camp, "gas {gas} should exceed fishing-camp {camp}");
     }
 
     fn ctx_at_xz(x: f32, z: f32, cell_cx: f32, cell_cz: f32, cell_r: f32, t: f32) -> DeltaContext {

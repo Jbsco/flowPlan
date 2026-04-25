@@ -64,10 +64,7 @@ struct JobByPriority(AmbientJob);
 impl Eq for JobByPriority {}
 impl PartialEq for JobByPriority {
     fn eq(&self, other: &Self) -> bool {
-        self.0
-            .priority_dist_m
-            .partial_cmp(&other.0.priority_dist_m)
-            == Some(Ordering::Equal)
+        self.0.priority_dist_m.partial_cmp(&other.0.priority_dist_m) == Some(Ordering::Equal)
     }
 }
 impl PartialOrd for JobByPriority {
@@ -263,10 +260,7 @@ mod tests {
     }
 
     /// Poll the worker up to `timeout_ms` waiting for a single result.
-    fn wait_for_result(
-        worker: &AmbientWorker,
-        timeout_ms: u64,
-    ) -> Option<AmbientResult> {
+    fn wait_for_result(worker: &AmbientWorker, timeout_ms: u64) -> Option<AmbientResult> {
         let start = std::time::Instant::now();
         while start.elapsed() < std::time::Duration::from_millis(timeout_ms) {
             if let Some(r) = worker.try_recv() {

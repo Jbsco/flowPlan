@@ -409,11 +409,16 @@ mod tests {
         // values are the smoking-gun cases — they don't divide
         // WORLD_EXTENT_M evenly and surfaced the wrap-seam bug.
         let wavelengths = [
-            30.0_f32, 50.0, 60.0, 100.0, 120.0, 130.0, 140.0, 150.0, 180.0, 200.0,
-            250.0, 280.0, 350.0, 400.0, 420.0, 460.0, 500.0, 550.0, 600.0, 700.0,
-            800.0, 900.0, 1000.0, 2000.0, 5000.0,
+            30.0_f32, 50.0, 60.0, 100.0, 120.0, 130.0, 140.0, 150.0, 180.0, 200.0, 250.0, 280.0,
+            350.0, 400.0, 420.0, 460.0, 500.0, 550.0, 600.0, 700.0, 800.0, 900.0, 1000.0, 2000.0,
+            5000.0,
         ];
-        let probe_points = [(0.0_f32, 0.0_f32), (1234.5, -567.8), (-1.0, 1.0), (12_345.0, -54_321.0)];
+        let probe_points = [
+            (0.0_f32, 0.0_f32),
+            (1234.5, -567.8),
+            (-1.0, 1.0),
+            (12_345.0, -54_321.0),
+        ];
 
         let mut fail_count = 0_u32;
         let mut max_diff = 0.0_f32;
@@ -446,13 +451,7 @@ mod tests {
         assert_eq!(
             fail_count, 0,
             "wrap-seam discontinuity at {} probes; worst: spacing={} m at ({},{}): {} vs {} (Δ={})",
-            fail_count,
-            worst.0,
-            worst.1 .0,
-            worst.1 .1,
-            worst.2,
-            worst.3,
-            max_diff,
+            fail_count, worst.0, worst.1 .0, worst.1 .1, worst.2, worst.3, max_diff,
         );
     }
 

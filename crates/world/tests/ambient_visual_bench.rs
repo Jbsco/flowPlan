@@ -261,11 +261,7 @@ fn render_underlay(
 /// Render every ambient instance the generator emits for cells whose
 /// center falls in the crop, as white dots on the underlay. This is
 /// the diagnostic that tells us what the player actually sees.
-fn render_placements(
-    libs: &SubBiomeLibraries,
-    terrain: &Terrain,
-    hydrology: &HydrologyGraph,
-) {
+fn render_placements(libs: &SubBiomeLibraries, terrain: &Terrain, hydrology: &HydrologyGraph) {
     let mut img = render_underlay(terrain, hydrology);
 
     // Sample cells on a coarse grid; the catalog isn't easily
@@ -400,8 +396,7 @@ fn ambient_visual_bench_real_bake() {
     // that plus a cell-extent margin. This same geometry issue
     // applies to the game's circular streaming radius — cells in
     // corner-of-frustum positions won't be enqueued without this fix.
-    let probe_radius =
-        STREAMING_EXTENT_M * core::f32::consts::SQRT_2 / 2.0 + 4_000.0;
+    let probe_radius = STREAMING_EXTENT_M * core::f32::consts::SQRT_2 / 2.0 + 4_000.0;
     let cells_in_crop = catalog.cells_within_radius(0.0, 0.0, probe_radius);
     eprintln!(
         "{} cells whose seed is within {} m of origin",
@@ -430,10 +425,7 @@ fn ambient_visual_bench_real_bake() {
         }
         let avg = min_neighbor.iter().sum::<f32>() / min_neighbor.len() as f32;
         let max = min_neighbor.iter().copied().fold(0.0_f32, f32::max);
-        let min = min_neighbor
-            .iter()
-            .copied()
-            .fold(f32::INFINITY, f32::min);
+        let min = min_neighbor.iter().copied().fold(f32::INFINITY, f32::min);
         eprintln!(
             "  nearest-neighbor seed distance: avg={avg:.0} m, min={min:.0} m, max={max:.0} m"
         );
@@ -638,7 +630,11 @@ fn render_coverage_diff_hires(
                 assignment.source.feature_source_biome(),
                 &assignment.feature_id,
             )
-            .or_else(|| libs.oceanic().iter().find(|f| f.id == assignment.feature_id));
+            .or_else(|| {
+                libs.oceanic()
+                    .iter()
+                    .find(|f| f.id == assignment.feature_id)
+            });
         let ambient_control = feature.and_then(|f| f.ambient_control);
         let target = cell_id;
         let is_in_cell = |x: f32, z: f32| catalog.nearest_cell(x, z) == target;
@@ -673,7 +669,11 @@ fn render_coverage_diff_hires(
         pixel_size_m,
         dot_total,
         dot_on_blue,
-        if dot_total > 0 { dot_on_blue as f64 / dot_total as f64 * 100.0 } else { 0.0 },
+        if dot_total > 0 {
+            dot_on_blue as f64 / dot_total as f64 * 100.0
+        } else {
+            0.0
+        },
     );
     write_png(&format!("coverage-with-dots-{label}"), &img);
 }
@@ -782,7 +782,11 @@ fn render_coverage_diff(
                 assignment.source.feature_source_biome(),
                 &assignment.feature_id,
             )
-            .or_else(|| libs.oceanic().iter().find(|f| f.id == assignment.feature_id));
+            .or_else(|| {
+                libs.oceanic()
+                    .iter()
+                    .find(|f| f.id == assignment.feature_id)
+            });
         let ambient_control = feature.and_then(|f| f.ambient_control);
         let target = cell_id;
         let is_in_cell = |x: f32, z: f32| catalog.nearest_cell(x, z) == target;
@@ -811,12 +815,7 @@ fn render_coverage_diff(
                     dot_on_blue += 1;
                     if dot_on_blue_examples.len() < 20 {
                         let h = HeightSampler::height(terrain, inst.position.x, inst.position.z);
-                        dot_on_blue_examples.push((
-                            inst.position.x,
-                            inst.position.z,
-                            h,
-                            cell_id,
-                        ));
+                        dot_on_blue_examples.push((inst.position.x, inst.position.z, h, cell_id));
                     }
                 } else if bg == [255, 140, 0] {
                     dot_on_orange += 1;
@@ -857,8 +856,8 @@ fn render_coverage_diff(
                     let nx = x + dx_steps as f32 * pixel_size_m;
                     let nz = z + dz_steps as f32 * pixel_size_m;
                     if HeightSampler::height(terrain, nx, nz) < SEA_LEVEL_M {
-                        let d = (dx_steps as f32 * pixel_size_m)
-                            .hypot(dz_steps as f32 * pixel_size_m);
+                        let d =
+                            (dx_steps as f32 * pixel_size_m).hypot(dz_steps as f32 * pixel_size_m);
                         if d < nearest_water_m {
                             nearest_water_m = d;
                         }
@@ -952,8 +951,8 @@ fn render_wide_status(
                 .entry(cid)
                 .or_insert_with(|| evaluate_cell_status(cid, catalog, baked, libs));
             let rgb = match status {
-                CellStatus::Populated => [60, 180, 80], // green
-                CellStatus::Zero => [200, 60, 60],      // red
+                CellStatus::Populated => [60, 180, 80],        // green
+                CellStatus::Zero => [200, 60, 60],             // red
                 CellStatus::NoBiomeEntries => [120, 120, 120], // grey
             };
             pixel_count[match status {
@@ -1010,7 +1009,11 @@ fn evaluate_cell_status(
             assignment.source.feature_source_biome(),
             &assignment.feature_id,
         )
-        .or_else(|| libs.oceanic().iter().find(|f| f.id == assignment.feature_id));
+        .or_else(|| {
+            libs.oceanic()
+                .iter()
+                .find(|f| f.id == assignment.feature_id)
+        });
     // If the feature is oceanic-themed (open_ocean, kelp_forest, etc.)
     // we know the cell will likely produce zero from our earlier bench.
     // Use the actual zero list discovered: open_ocean / kelp_forest /
@@ -1054,8 +1057,7 @@ fn render_zoom_level(
 
     // Underlay: keep biome colors for orientation (user prefers them
     // to grey + colored dots).
-    let mut placements: ImageBuffer<Rgb<u8>, Vec<u8>> =
-        ImageBuffer::new(RESOLUTION, RESOLUTION);
+    let mut placements: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(RESOLUTION, RESOLUTION);
     for py in 0..RESOLUTION {
         for px in 0..RESOLUTION {
             let (x, z) = pixel_to_world_at(center, extent_m, px, py);
@@ -1067,11 +1069,7 @@ fn render_zoom_level(
                 BiomeClass::MediterraneanArchipelago => [180, 200, 140],
             };
             let underwater = HeightSampler::height(terrain, x, z) < SEA_LEVEL_M;
-            placements.put_pixel(
-                px,
-                py,
-                Rgb(if underwater { [30, 60, 120] } else { bg }),
-            );
+            placements.put_pixel(px, py, Rgb(if underwater { [30, 60, 120] } else { bg }));
         }
     }
 
@@ -1097,7 +1095,11 @@ fn render_zoom_level(
                 assignment.source.feature_source_biome(),
                 &assignment.feature_id,
             )
-            .or_else(|| libs.oceanic().iter().find(|f| f.id == assignment.feature_id));
+            .or_else(|| {
+                libs.oceanic()
+                    .iter()
+                    .find(|f| f.id == assignment.feature_id)
+            });
         let ambient_control = feature.and_then(|f| f.ambient_control);
         let target = cell_id;
         let is_in_cell = |x: f32, z: f32| catalog.nearest_cell(x, z) == target;
@@ -1184,8 +1186,7 @@ fn render_zoom_level(
     write_png(&format!("placements-{label}"), &placements);
 
     // Voronoi mosaic at the same crop.
-    let mut mosaic: ImageBuffer<Rgb<u8>, Vec<u8>> =
-        ImageBuffer::new(RESOLUTION, RESOLUTION);
+    let mut mosaic: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(RESOLUTION, RESOLUTION);
     for py in 0..RESOLUTION {
         for px in 0..RESOLUTION {
             let (x, z) = pixel_to_world_at(center, extent_m, px, py);
@@ -1215,12 +1216,7 @@ fn pixel_to_world_at(center: (f32, f32), extent_m: f32, px: u32, py: u32) -> (f3
     (x, z)
 }
 
-fn world_to_pixel_at(
-    center: (f32, f32),
-    extent_m: f32,
-    x: f32,
-    z: f32,
-) -> Option<(u32, u32)> {
+fn world_to_pixel_at(center: (f32, f32), extent_m: f32, x: f32, z: f32) -> Option<(u32, u32)> {
     // Toroidal-wrap delta: cells via cells_within_radius can have
     // literal seed coords near WORLD_EXTENT_M when their wrap-distance
     // to center is small. Normalize delta to [-EXTENT/2, +EXTENT/2].
@@ -1255,5 +1251,9 @@ fn cell_color(cid: u32) -> [u8; 3] {
     let g = ((h >> 8) & 0xFF) as u8;
     let b = (h & 0xFF) as u8;
     // Boost saturation a bit so all colors are readable.
-    [r.saturating_add(40), g.saturating_add(40), b.saturating_add(40)]
+    [
+        r.saturating_add(40),
+        g.saturating_add(40),
+        b.saturating_add(40),
+    ]
 }

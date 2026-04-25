@@ -3,6 +3,56 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
+## 2026-04-25 (iteration 18) — Phase 3.6.3c.2 (Per-cell deltas for 11 dev/resupply features) + tuning
+
+Tightens the L3 heightfield pipeline: the developments + resupply features authored in 3.6.3b now emit modest flatten deltas, so cultivated / built / waterfront cells visually settle into their host terrain instead of riding the full base-octave noise. Tunes the over-strict `scenic_overlook` placement rule that .12i diagnostic flagged at zero placements.
+
+### Per-cell deltas — 11 features
+
+`feature_delta_impls.rs::natural_delta` now dispatches the developments (5) and resupply (6) features through the existing `flatten_delta` helper. Strengths interleave with natural flattens by surface character — plowed > paved > shop-pad > yard > clearing > rough-camp:
+
+| Strength | Features |
+| ---: | --- |
+| 0.95 | salt_flat |
+| 0.85 | farmland_parcel |
+| 0.80 | gas_station |
+| 0.75 | bush_strip_clearing |
+| 0.65 | ranch, general_store |
+| 0.60 | dwelling_cluster, ferry_dock |
+| 0.55 | river_floodplain, bait_shop, tackle_shop |
+| 0.50 | natural_meadow, coastal_plain, homestead_clearing, remote_compound |
+| 0.45 | alpine_meadow |
+| 0.40 | fishing_camp |
+
+`flatten_delta`'s 5 m local-variation proxy bounds the per-feature delta below 5 m × strength × falloff — well under the hub-foundation envelope (the design spec called for "modest flatten + skirt smaller than hub_foundation"). Refining the proxy to a real cell-mean blend lands when `WorldRefs` threads center altitude through `DeltaContext` (3.6.3c.4 follow-up).
+
+The 7 scenery cues authored in 3.6.3b (natural_meadow, alpine_meadow, creek_valley, scenic_overlook, river_bend_viewpoint, hot_springs, abandoned_homestead) already carry their natural-feature deltas (flatten / channel / prominence / bowl) from 3.6.3a — no additional work needed in this phase. The 4 infrastructure features (road_segment, dirt_road_segment, highway_intersection, rail_corridor_segment) stay zero-delta until the `FeatureGroup` engine in 3.6.3c.3 lands; they need group-aware deltas (continuous depression along a polyline crossing multiple cells), not per-cell deltas.
+
+### scenic_overlook placement-rule tuning
+
+Calibration showed `scenic_overlook` 40 → 0 (.12i) — the prominence rule rejected every candidate. Diagnostic chase: the rule was `min_m: 100, min_slope_deg: 20`, both gates load-bearing. Investigation:
+
+- **min_m**: the median-of-9 prominence proxy samples at ±5 km in a 3×3 grid. RockyAlpine cells at 2-4 km scale rarely sit 100 m above their 5 km neighbors (alpine plateaus are coherently elevated). Lowered 100 → 25 m.
+- **min_slope_deg**: slope is sampled at the cell SEED point, where terrain is locally smooth even on alpine ridges. The 20° gate is essentially a cliff-cell gate, not a viewpoint gate. Dropped 20 → 0 (rule disabled). Per-feature `PROMINENCE_SAMPLE_RADIUS_M` (currently 5 km global) wants regional-scale ~10-15 km sampling — queued for 3.6.3c.4+.
+
+Post-tune calibration: `scenic_overlook` 37 → **12** placements (a viewpoint at every ~80 km on average — appropriate rarity).
+
+`hot_springs` left at `temp_range_c: (-50, 5)` — climate window is conceptually correct (rare = cold). Calibration shows it stays near zero on canonical seed; revisit if visual-bench at 3.6.3c.4 confirms zero appearances.
+
+### Streaming-radius cushion (Task #261, .12k)
+
+Re-framed: in-game terrain is a CIRCLE of `TERRAIN_DISC_RADIUS_M = 20km`, not a square, so the bench's `radius × √2` factor doesn't apply. The real gap is cells whose seed sits just outside `STREAM_RADIUS_M` but whose polygon extends inward into the visible terrain disc. **Bumped `STREAM_RADIUS_M` 20 km → 22 km** (2 km cushion = ~Bridson observed worst-case polygon radius 1750 m + margin). Cell count rises ~21% (~365 → ~440 active), per-frame `cells_within_radius` stays well under 1 ms.
+
+### Tests + gate
+
+- 3 new `feature_delta_impls` unit tests: `dev_resupply_deltas_emit_modest_flatten` (all 11 features non-zero, magnitude ≤ 5 m), `dev_deltas_zero_at_edge`, `dev_deltas_strength_ordering`. 25 / 25 feature_delta tests pass.
+- `authored_placement_rules_present_in_catalog` assertions updated to scenic_overlook tuned values (min_m 25, min_slope_deg 0).
+- 277 / 277 world-lib tests pass; full workspace `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` all green. Zero new lint suppressions.
+
+**Next: Phase 3.6.3c.3 — `FeatureGroup` multi-cell engine** — roads / rail-corridors via shared centerline polylines, group-aware depression deltas, residential-cluster k-nearest-cells groups, `requires_road_adjacency` rule activation, spillover placement queue. Unblocks the 4 infrastructure features authored in 3.6.3b.
+
+---
+
 ## 2026-04-23 (iteration 11) — Phase 3.6.3c.5c.1 + 5d + 5d-followup
 
 Three stacked milestones landed together:
@@ -389,7 +439,7 @@ All 4 steppings (.c.8 types/RON → .c.9 generator → .c.10 fBm fields → .c.1
 
 1. **Hardcoded `AMBIENT_CELL_RADIUS_M = 1000` disc sampling.** Real Voronoi cells are ~2-3 km in diameter (avg seed-spacing 2398 m, max 3492 m observed in spawn area). The 1 km disc was sampling only the inner ~30% of each cell; the outer 70% of every cell was empty regardless of generation success. **Shipped fix**: `generate_ambient_for_cell` now samples in a `cell_pos ± AMBIENT_BBOX_HALF_M (4 km)` bounding box and keeps only candidates whose nearest seed is the target cell (`is_in_cell` closure typically wrapping `catalog.nearest_cell(x, z) == cell_id`). Zero overlap with neighbor cells, zero gaps. `AmbientWorker::spawn` extended to take `Arc<SubBiomeCellCatalog>` for the per-job closure binding.
 
-2. **Streaming-radius square-vs-circle gap.** The game's `cells_within_radius(camera, 20km)` returns cells in a *circle*, but the renderer draws a *square* frustum. Cells in frustum corners (up to 28 km from camera at frustum corners with the streaming circle's 20 km radius) aren't enqueued. **Identified, not yet fixed in-game**; bench compensates with `radius × √2 + cell-extent`.
+2. **Streaming-radius square-vs-circle gap.** The game's `cells_within_radius(camera, 20km)` returns cells in a *circle*, but the renderer draws a *square* frustum. Cells in frustum corners (up to 28 km from camera at frustum corners with the streaming circle's 20 km radius) aren't enqueued. **Identified, not yet fixed in-game**; bench compensates with `radius × √2 + cell-extent`. **Closed 2026-04-25 (.12k, Task #261)** — re-framed: in-game terrain is a CIRCLE of `TERRAIN_DISC_RADIUS_M = 20km`, not a square, so the √2 factor doesn't apply. The real gap is cells whose seed is just outside `STREAM_RADIUS_M` but whose polygon extends inward into the visible terrain disc (Bridson observed max neighbor-spacing 3500 m → max polygon radius ~1750 m toward camera). **Shipped fix**: `STREAM_RADIUS_M = 22_000.0` (was 20_000.0) — 2 km cushion covers worst-case polygon extension with margin. Cell count rises ~21% (~365 → ~440 active), per-frame `cells_within_radius` stays well under 1 ms.
 
 3. **Visual-bench artifact** shipped (`crates/world/tests/ambient_visual_bench.rs`, `--ignored`):
    - `density-noise-<biome>.png` (4 biomes): raw fBm field over the spawn 10 km crop. Confirmed noise field is healthy [0.3, 0.7] mottled distribution, NOT tending to 0.

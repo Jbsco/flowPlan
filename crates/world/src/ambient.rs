@@ -444,13 +444,12 @@ pub fn generate_ambient_for_cell(
                 let layer_rng = mix_seed(cand_rng, 0x4c41_5945_5200_0000 ^ layer_idx as u64);
                 let xz = layer.xz_scale.0
                     + rand_unit(layer_rng, 1) * (layer.xz_scale.1 - layer.xz_scale.0);
-                let ys = layer.y_scale.0
-                    + rand_unit(layer_rng, 2) * (layer.y_scale.1 - layer.y_scale.0);
+                let ys =
+                    layer.y_scale.0 + rand_unit(layer_rng, 2) * (layer.y_scale.1 - layer.y_scale.0);
                 let yoff_ratio = layer.y_offset_ratio.0
-                    + rand_unit(layer_rng, 3)
-                        * (layer.y_offset_ratio.1 - layer.y_offset_ratio.0);
-                let layer_rot_jitter = (rand_unit(layer_rng, 4) * 2.0 - 1.0)
-                    * layer.rotation_y_jitter_rad;
+                    + rand_unit(layer_rng, 3) * (layer.y_offset_ratio.1 - layer.y_offset_ratio.0);
+                let layer_rot_jitter =
+                    (rand_unit(layer_rng, 4) * 2.0 - 1.0) * layer.rotation_y_jitter_rad;
 
                 // Layer scale in world meters. FlatQuad keeps its
                 // thin-plate y, other kinds get independent xz vs y.
@@ -872,10 +871,7 @@ mod tests {
 
         // Soft-taper output should include at least one instance
         // scaled below 0.9× its maximum — edge-fade evidence.
-        let max_y = soft_out
-            .iter()
-            .map(|i| i.scale.y)
-            .fold(0.0_f32, f32::max);
+        let max_y = soft_out.iter().map(|i| i.scale.y).fold(0.0_f32, f32::max);
         let has_small = soft_out.iter().any(|i| i.scale.y < max_y * 0.85);
         assert!(
             has_small,

@@ -1514,8 +1514,7 @@ impl Runtime {
             if let Some(worker) = self.ambient_worker.as_ref() {
                 while let Some(result) = worker.try_recv() {
                     if cells.active().binary_search(&result.cell_id).is_ok() {
-                        self.ambient_cache
-                            .insert(result.cell_id, result.instances);
+                        self.ambient_cache.insert(result.cell_id, result.instances);
                         any_ambient_drained = true;
                     }
                 }
@@ -1527,9 +1526,7 @@ impl Runtime {
             // per-cell instance lookup) = cheap; per-frame incremental
             // ranges are a 5c.2+ optimization.
             if let Some(baked) = self.baked_assignments.as_ref() {
-                if !cells.entered().is_empty()
-                    || !cells.exited().is_empty()
-                    || any_ambient_drained
+                if !cells.entered().is_empty() || !cells.exited().is_empty() || any_ambient_drained
                 {
                     use flowplan_world::feature_instances::PrimitiveKind;
 
@@ -1579,9 +1576,7 @@ impl Runtime {
                                 }
                                 let seed_pos = (sx, sz);
                                 let host_biome = flowplan_world::biome::biome_at(
-                                    WORLD_SEED,
-                                    seed_pos.0,
-                                    seed_pos.1,
+                                    WORLD_SEED, seed_pos.0, seed_pos.1,
                                 );
                                 let ambient_entries = libs.ambient_for_biome(host_biome);
                                 if ambient_entries.is_empty() {
@@ -1599,8 +1594,7 @@ impl Runtime {
                                             .iter()
                                             .find(|f| f.id == assignment.feature_id)
                                     });
-                                let ambient_control =
-                                    feature.and_then(|f| f.ambient_control);
+                                let ambient_control = feature.and_then(|f| f.ambient_control);
                                 let dx = seed_pos.0 - active_cam_pos_xz.x;
                                 let dz = seed_pos.1 - active_cam_pos_xz.y;
                                 worker.enqueue(crate::ambient_worker::AmbientJob {

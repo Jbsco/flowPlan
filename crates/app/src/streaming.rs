@@ -84,9 +84,19 @@ pub const LARGE_JUMP_THRESHOLD_M: f32 = TERRAIN_HALF_EXTENT_M;
 /// Voronoi-cell streaming radius. Cells whose seed position is within
 /// this distance of the active camera are in the active set; others
 /// are not. Used by Layer 2 content streaming (feature instances,
-/// future LOD, hub markers, weather overlays, audio sources). Matches
-/// terrain disc so loaded content never exceeds visible terrain.
-pub const STREAM_RADIUS_M: f32 = 20_000.0;
+/// future LOD, hub markers, weather overlays, audio sources).
+///
+/// Sized as `TERRAIN_DISC_RADIUS_M + cell-extent cushion`. A cell's
+/// polygon can extend inward from its seed by up to ~half the maximum
+/// neighbor-spacing (Bridson observed max ~3500 m → polygon radius ~1750 m).
+/// Cells whose seed sits just outside the terrain disc but whose polygon
+/// overlaps the visible disc would otherwise leave un-streamed gaps —
+/// "Streaming-radius square-vs-circle gap" (Task #261, .12k). The 2 km
+/// cushion covers the observed worst-case polygon extension with margin.
+///
+/// Cost: cell count scales as r². At 22 km vs 20 km that's +21% cells in
+/// the active set; per-frame `cells_within_radius` stays well under 1 ms.
+pub const STREAM_RADIUS_M: f32 = 22_000.0;
 
 /// Source-of-truth for the camera pose used by both streaming layers
 /// and the renderer.
@@ -499,8 +509,8 @@ impl StreamingCellSet {
     /// Refresh the active set from the current camera position. Computes
     /// `entered` + `exited` deltas vs. the previous active set.
     ///
-    /// O(K) where K is the cell count in radius (~80 at default 10 km
-    /// radius / 2 km cell spacing).
+    /// O(K) where K is the cell count in radius (~440 at the production
+    /// 22 km radius / 2 km cell spacing).
     pub fn refresh(&mut self, camera_pos_xz: Vec2, catalog: &SubBiomeCellCatalog) {
         let new_active =
             catalog.cells_within_radius(camera_pos_xz.x, camera_pos_xz.y, self.radius_m);

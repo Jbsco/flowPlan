@@ -1140,7 +1140,16 @@
                 palette_category: Some(Stone),
                 placement_rules: Some((
                     self_spacing: Some((min_km: 8.0)),
-                    prominence: Some((min_m: 100.0, min_slope_deg: 20.0)),
+                    // Tuned 3.6.3c.2: median-of-9 sampling at 5 km / 2 km
+                    // cell scale under-reports prominence — 100 m gate
+                    // rejected all 40 sampled candidates. Dropped slope
+                    // gate (cells are sampled at SEED point where slope
+                    // is locally smooth even on alpine ridges); kept min_m
+                    // 25 m as the prominence proxy. Per-feature
+                    // `PROMINENCE_SAMPLE_RADIUS_M` tuning queued for
+                    // 3.6.3c.4+ (currently 5 km global; viewpoints want
+                    // regional ~10-15 km sampling).
+                    prominence: Some((min_m: 25.0, min_slope_deg: 0.0)),
                 )),
             ),
             // Hot springs — geothermal pool with mineral-stained
