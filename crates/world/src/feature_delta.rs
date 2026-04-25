@@ -49,7 +49,7 @@ use std::collections::HashMap;
 use flowplan_core::{wrap_coord, WORLD_EXTENT_M};
 
 use crate::feature_delta_impls;
-use crate::feature_groups::{perpendicular_distance_to_polyline, FeatureGroupBundle};
+use crate::feature_groups::FeatureGroupBundle;
 use crate::hub_catalog::{HubCatalog, HubTier};
 use crate::hydrology::{HydrologyGraph, WaterClass};
 use crate::voronoi_cells::{CellId, SubBiomeCellCatalog};
@@ -283,25 +283,64 @@ fn compute_group_delta_at(
     feature_groups: &FeatureGroupBundle,
     hydrology: &HydrologyGraph,
 ) -> f32 {
-    let group_ids = feature_groups.groups_for_cell(cell_id);
-    if group_ids.is_empty() {
+    let mems = feature_groups.groups_for_cell(cell_id);
+    if mems.is_empty() {
         return 0.0;
     }
     let mut total = 0.0_f32;
-    for &gid in group_ids {
-        let Some(group) = feature_groups.group(gid) else {
+    for m in mems {
+        let Some(group) = feature_groups.group(m.group_id) else {
             continue;
         };
-        let dist = perpendicular_distance_to_polyline(&group.polyline, x, z);
-        if dist >= group.half_width_m {
+        // Per-cell membership records the segment index nearest the
+        // cell's seed. Check at most segments [i-1, i, i+1] — bounds
+        // the per-cell cost regardless of polyline length. Without
+        // this, long highways would force every membership query to
+        // iterate the full polyline (~125 segments × 1.4 M vertices
+        // = 175 M seg-distance computes per streaming-mesh rebuild).
+        let seg_idx = m.seg_idx as usize;
+        let n_segments = group.polyline.len().saturating_sub(1);
+        if n_segments == 0 {
             continue;
         }
-        let t = dist / group.half_width_m;
+        let lo = seg_idx.saturating_sub(1);
+        let hi = (seg_idx + 1).min(n_segments.saturating_sub(1));
+
+        // Align query to polyline frame once via the first vertex.
+        let (ref_x, ref_z) = group.polyline[0];
+        let half = flowplan_core::WORLD_EXTENT_M * 0.5;
+        let mut aqx = x;
+        let mut aqz = z;
+        let dx = x - ref_x;
+        let dz = z - ref_z;
+        if dx > half {
+            aqx -= flowplan_core::WORLD_EXTENT_M;
+        } else if dx < -half {
+            aqx += flowplan_core::WORLD_EXTENT_M;
+        }
+        if dz > half {
+            aqz -= flowplan_core::WORLD_EXTENT_M;
+        } else if dz < -half {
+            aqz += flowplan_core::WORLD_EXTENT_M;
+        }
+
+        let mut best_dist = f32::INFINITY;
+        for seg in lo..=hi {
+            let p0 = group.polyline[seg];
+            let p1 = group.polyline[seg + 1];
+            let d = point_to_segment_distance(aqx, aqz, p0, p1);
+            if d < best_dist {
+                best_dist = d;
+            }
+        }
+        if best_dist >= group.half_width_m {
+            continue;
+        }
+        let t = best_dist / group.half_width_m;
         let falloff = 1.0 - smoothstep(t);
         total += group.kind.depth_m() * falloff;
     }
-    // Hydrology continuity: groups (depressions or berms) don't cut
-    // through / rise out of open water.
+    // Hydrology continuity: groups don't cut through / rise out of water.
     if total != 0.0 {
         if let Some(surface) = hydrology.water_surface_at(x, z) {
             if !matches!(surface.class, WaterClass::DryChannel) {
@@ -310,6 +349,21 @@ fn compute_group_delta_at(
         }
     }
     total
+}
+
+#[inline]
+fn point_to_segment_distance(qx: f32, qz: f32, p0: (f32, f32), p1: (f32, f32)) -> f32 {
+    let dx = p1.0 - p0.0;
+    let dz = p1.1 - p0.1;
+    let len_sq = dx * dx + dz * dz;
+    if len_sq <= 1e-6 {
+        return (qx - p0.0).hypot(qz - p0.1);
+    }
+    let t = ((qx - p0.0) * dx + (qz - p0.1) * dz) / len_sq;
+    let t_clamped = t.clamp(0.0, 1.0);
+    let cx = p0.0 + t_clamped * dx;
+    let cz = p0.1 + t_clamped * dz;
+    (qx - cx).hypot(qz - cz)
 }
 
 /// Toroidal-closest-path distance between two world coordinates.

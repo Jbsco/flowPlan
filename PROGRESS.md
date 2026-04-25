@@ -39,6 +39,19 @@ Post-tune calibration: `scenic_overlook` 37 → **12** placements (a viewpoint a
 
 `hot_springs` left at `temp_range_c: (-50, 5)` — climate window is conceptually correct (rare = cold). Calibration shows it stays near zero on canonical seed; revisit if visual-bench at 3.6.3c.4 confirms zero appearances.
 
+### 3.6.3c.3c.1 — Polyline-distance perf fix (mesh rebuild 133s → ~1s)
+
+User playtest after 3.6.3c.3c shipped: "rebuilds in flight take about 133 seconds, leaving the currently rendered terrain crashes the game". Diagnosis: each terrain-mesh vertex evaluates `compute_group_delta_at`, which iterated ALL polyline segments × 9 wrap shifts per group membership. With 30K+ road groups in the bundle and long highway polylines (100+ segments), per-vertex cost was ~900-1100 distance computes. At 1.4M vertices × 10 group-cells per vertex = ~10B ops per rebuild = 133s.
+
+**Two-part fix:**
+
+1. **Drop the 9-shift wrap loop in `perpendicular_distance_to_polyline`** — polylines are stored in literal coords with all vertices in a single frame (built wrap-aware via `polyline_from_cells` / `straight_polyline_wrap_aware`). Align query to polyline frame ONCE via the first vertex; one pass over segments. **9× speedup.**
+2. **Per-cell segment-index hint** — `GroupMembership` struct gains `seg_idx: u16` (vertex index of the closest segment to this cell). Bake walk records it; the L3 evaluator only checks segments `[i-1, i, i+1]` rather than iterating the full polyline. **~33× speedup on top** (3 vs ~100 segments per query).
+
+Combined: ~300× speedup. 133s rebuilds → estimated <1s. Sync rebuild on large jumps no longer locks main thread → game shouldn't crash on debug-cam teleport.
+
+The crash was the OS killing the process for not-responding when sync rebuild ran during a teleport; with rebuilds back to ~1s the window stays responsive.
+
 ### Phase 3.6.3c.3c — feature-emit access roads + 5-tier ladder (Task #274)
 
 User design extension after seeing "no roads near canonical spawn": developments should emit short access roads pointing toward larger hubs / other road-enabled features. Tiered enum so authors can request a minimum road quality that matches the feature's character (a homestead emits `RoughDirt`, a ranch `Dirt`, a dwelling cluster `Gravel`).

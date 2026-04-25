@@ -208,6 +208,19 @@ pub struct FeatureGroup {
     pub half_width_m: f32,
 }
 
+/// Per-cell membership entry.
+///
+/// `group_id` identifies the polyline; `seg_idx` is the representative
+/// vertex index — segment `[seg_idx, seg_idx+1]` is the one closest to
+/// the cell. The L3 delta evaluator only checks segments near
+/// `seg_idx` — at most 3 distance computes per cell-group pair
+/// instead of iterating the full polyline.
+#[derive(Copy, Clone, Debug)]
+pub struct GroupMembership {
+    pub group_id: FeatureGroupId,
+    pub seg_idx: u16,
+}
+
 /// Bundle of feature groups + per-cell membership index.
 ///
 /// Built once at world bake. Read-only at query time; cheap to share
@@ -215,9 +228,10 @@ pub struct FeatureGroup {
 #[derive(Clone, Debug, Default)]
 pub struct FeatureGroupBundle {
     groups: Vec<FeatureGroup>,
-    /// `cell_id` → group ids that polyline-pass through this cell. Most
-    /// cells: 0 entries. Cells on a road: 1 entry. Intersections: 2+.
-    membership: HashMap<CellId, Vec<FeatureGroupId>>,
+    /// `cell_id` → list of `(group_id, segment_index)` — each entry is
+    /// a polyline that passes through this cell at the given segment.
+    /// Most cells: 0 entries. Cells on a road: 1 entry. Intersections: 2+.
+    membership: HashMap<CellId, Vec<GroupMembership>>,
 }
 
 impl FeatureGroupBundle {
@@ -307,24 +321,28 @@ impl FeatureGroupBundle {
         //    every ~half_width meters and recording the cell at each
         //    sample. Coarse but adequate — group lookup happens once
         //    per L3-query cell, not per polyline-vertex.
-        let mut membership: HashMap<CellId, Vec<FeatureGroupId>> = HashMap::new();
+        let mut membership: HashMap<CellId, Vec<GroupMembership>> = HashMap::new();
         for group in &groups {
             let step_m = group.half_width_m * 1.5;
             let mut visited: std::collections::HashSet<CellId> = std::collections::HashSet::new();
-            for window in group.polyline.windows(2) {
+            for (seg_idx, window) in group.polyline.windows(2).enumerate() {
                 let (x0, z0) = window[0];
                 let (x1, z1) = window[1];
                 let dx = x1 - x0;
                 let dz = z1 - z0;
                 let length = dx.hypot(dz).max(1.0);
                 let n_steps = (length / step_m).ceil() as usize + 1;
+                let seg_idx_u16 = seg_idx.min(u16::MAX as usize) as u16;
                 for s in 0..=n_steps {
                     let t = s as f32 / n_steps as f32;
                     let x = wrap_coord(x0 + dx * t);
                     let z = wrap_coord(z0 + dz * t);
                     let cell = sub_biome.nearest_cell(x, z);
                     if visited.insert(cell) {
-                        membership.entry(cell).or_default().push(group.id);
+                        membership.entry(cell).or_default().push(GroupMembership {
+                            group_id: group.id,
+                            seg_idx: seg_idx_u16,
+                        });
                     }
                 }
             }
@@ -336,7 +354,7 @@ impl FeatureGroupBundle {
     /// Look up groups whose polyline passes through this cell. Most
     /// cells: empty slice.
     #[must_use]
-    pub fn groups_for_cell(&self, cell_id: CellId) -> &[FeatureGroupId] {
+    pub fn groups_for_cell(&self, cell_id: CellId) -> &[GroupMembership] {
         self.membership.get(&cell_id).map_or(&[], Vec::as_slice)
     }
 
@@ -431,6 +449,13 @@ impl FeatureGroupBundle {
                 continue;
             };
             let target_set = self.target_cells_for_tier(my_tier);
+            // Lower tiers inherit higher-tier emit cells via
+            // `target_cells_for_tier` after the higher tier ran in
+            // descending-tier order — chain-emergent connectivity
+            // forms automatically. Same-tier seeding would self-
+            // target (every emit source is in the target set, paths
+            // collapse to 1-cell stubs), so we deliberately don't
+            // add this kind's own emit cells.
             if target_set.is_empty() {
                 continue;
             }
@@ -463,8 +488,18 @@ impl FeatureGroupBundle {
                     polyline,
                     half_width_m: kind.half_width_m(),
                 });
-                for cell in &path_cells {
-                    self.membership.entry(*cell).or_default().push(group_id);
+                // Each path-cell sits at vertex i; the closest segment
+                // is `[i, i+1]` (or `[i-1, i]` for the last cell).
+                for (i, cell) in path_cells.iter().enumerate() {
+                    let seg_idx = i.min(path_cells.len().saturating_sub(2));
+                    let seg_idx_u16 = seg_idx.min(u16::MAX as usize) as u16;
+                    self.membership
+                        .entry(*cell)
+                        .or_default()
+                        .push(GroupMembership {
+                            group_id,
+                            seg_idx: seg_idx_u16,
+                        });
                 }
             }
         }
@@ -474,9 +509,9 @@ impl FeatureGroupBundle {
     /// Used as the target set for Pass-2 A* pathing.
     fn target_cells_for_tier(&self, min_tier: u8) -> HashSet<CellId> {
         let mut out: HashSet<CellId> = HashSet::new();
-        for (cell, group_ids) in &self.membership {
-            for gid in group_ids {
-                if let Some(group) = self.groups.get(*gid as usize) {
+        for (cell, mems) in &self.membership {
+            for m in mems {
+                if let Some(group) = self.groups.get(m.group_id as usize) {
                     if let Some(t) = group.kind.road_tier() {
                         if t >= min_tier {
                             out.insert(*cell);
@@ -555,27 +590,42 @@ fn straight_polyline_wrap_aware(a: (f32, f32), b: (f32, f32)) -> Vec<(f32, f32)>
 /// wrap-aware. Returns the minimum perpendicular distance to any
 /// segment.
 ///
-/// For each segment, computes both the literal distance and the
-/// distance with the query point shifted by `±WORLD_EXTENT_M` in each
-/// axis — handles wrap-edge polylines transparently.
+/// **Wrap-handling**: polylines are stored in literal coords with all
+/// vertices in a single frame (built via `straight_polyline_wrap_aware`
+/// for Pass 1 / `polyline_from_cells` for Pass 2). The query point may
+/// be in a different literal frame (e.g. the query is at literal
+/// `WORLD_EXTENT_M - 100` while the polyline runs from literal `-1000`
+/// to `+1000`). We align the query to the polyline's frame once via
+/// the first vertex, then do one pass over segments — much cheaper
+/// than the prior 9-shift × N-segment evaluator.
 #[must_use]
 pub fn perpendicular_distance_to_polyline(polyline: &[(f32, f32)], qx: f32, qz: f32) -> f32 {
     if polyline.len() < 2 {
         return f32::INFINITY;
     }
+    let (ref_x, ref_z) = polyline[0];
+    let half = WORLD_EXTENT_M * 0.5;
+    let mut aqx = qx;
+    let mut aqz = qz;
+    let dx = qx - ref_x;
+    let dz = qz - ref_z;
+    if dx > half {
+        aqx -= WORLD_EXTENT_M;
+    } else if dx < -half {
+        aqx += WORLD_EXTENT_M;
+    }
+    if dz > half {
+        aqz -= WORLD_EXTENT_M;
+    } else if dz < -half {
+        aqz += WORLD_EXTENT_M;
+    }
     let mut best = f32::INFINITY;
-    for shift_x in [-WORLD_EXTENT_M, 0.0, WORLD_EXTENT_M] {
-        for shift_z in [-WORLD_EXTENT_M, 0.0, WORLD_EXTENT_M] {
-            let qxs = qx + shift_x;
-            let qzs = qz + shift_z;
-            for window in polyline.windows(2) {
-                let (x0, z0) = window[0];
-                let (x1, z1) = window[1];
-                let d = point_to_segment_distance(qxs, qzs, x0, z0, x1, z1);
-                if d < best {
-                    best = d;
-                }
-            }
+    for window in polyline.windows(2) {
+        let (x0, z0) = window[0];
+        let (x1, z1) = window[1];
+        let d = point_to_segment_distance(aqx, aqz, x0, z0, x1, z1);
+        if d < best {
+            best = d;
         }
     }
     best
