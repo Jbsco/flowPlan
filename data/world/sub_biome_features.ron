@@ -237,6 +237,7 @@
                     ),
                 ]),
                 ambient_control: Some(TaperedClearing(clear_radius_m: 90.0, taper_radius_m: 120.0)),
+                road_emit: Some(Gravel),
             ),
             // Working ranch — barn + outbuildings + corral + dirt yard
             // + dry-grass paddock. Bleed-over enables the "winter ranch"
@@ -341,6 +342,7 @@
                     ),
                 ]),
                 ambient_control: Some(TaperedClearing(clear_radius_m: 35.0, taper_radius_m: 60.0)),
+                road_emit: Some(Dirt),
             ),
 
             // ─── New HighDesert developed features (5c.2.c.5) ───────
@@ -402,6 +404,7 @@
                     ),
                 ]),
                 ambient_control: Some(TaperedClearing(clear_radius_m: 30.0, taper_radius_m: 55.0)),
+                road_emit: Some(Paved),
             ),
 
             // Ghost town — abandoned frontier-era settlement. A row of
@@ -469,6 +472,7 @@
                         rng_stream: 512,
                     ),
                 ]),
+                road_emit: Some(Dirt),
             ),
 
             // Mining camp — small ore extraction operation: adit
@@ -542,6 +546,7 @@
                     ),
                 ]),
                 ambient_control: Some(HardClearing(clear_radius_m: 25.0)),
+                road_emit: Some(Gravel),
             ),
 
             // Solar farm — utility-scale photovoltaic array. Rows of
@@ -1279,6 +1284,7 @@
                     ),
                 ]),
                 ambient_control: Some(TaperedClearing(clear_radius_m: 30.0, taper_radius_m: 55.0)),
+                road_emit: Some(Gravel),
             ),
 
             // ─── More RockyAlpine developed features (5c.2.c.5) ─────
@@ -2216,6 +2222,7 @@
                         rng_stream: 512,
                     ),
                 ]),
+                road_emit: Some(RoughDirt),
             ),
             // Remote compound — small cluster of cabin + shed +
             // outhouse, off-grid lifestyle. Mission anchor (delivery,
@@ -2297,6 +2304,7 @@
                         rng_stream: 512,
                     ),
                 ]),
+                road_emit: Some(Dirt),
             ),
             // Homestead clearing — single occupied cabin in a clearing
             // ringed by conifers, often with a small garden plot and
@@ -2378,6 +2386,7 @@
                     ),
                 ]),
                 ambient_control: Some(TaperedClearing(clear_radius_m: 18.0, taper_radius_m: 30.0)),
+                road_emit: Some(RoughDirt),
             ),
             // Fishing camp — shoreline shack + dock + drying nets +
             // small skiff. Resupply candidate (fuel + bait + repair).
@@ -2664,6 +2673,7 @@
                     ),
                 ]),
                 ambient_control: Some(TaperedClearing(clear_radius_m: 40.0, taper_radius_m: 70.0)),
+                road_emit: Some(Gravel),
             ),
             // Gas station — small-format fuel stop + convenience store.
             // Phase 4.5 refuel economy anchor: when player lands within
@@ -4000,6 +4010,7 @@
                     ),
                 ]),
                 ambient_control: Some(TaperedClearing(clear_radius_m: 30.0, taper_radius_m: 50.0)),
+                road_emit: Some(Paved),
             ),
 
             // Olive grove — regular grid of olive trees, small farmstead
@@ -4059,6 +4070,7 @@
                     ),
                 ]),
                 ambient_control: Some(TaperedClearing(clear_radius_m: 5.0, taper_radius_m: 15.0)),
+                road_emit: Some(Dirt),
             ),
 
             // Watchtower — stone cylindrical tower with conical roof.

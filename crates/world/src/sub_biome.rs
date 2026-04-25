@@ -168,6 +168,39 @@ impl Default for PaletteHsvShift {
     }
 }
 
+/// Road tier a feature emits in Pass 2 of `FeatureGroupBundle`. RON
+/// authoring surface for `SubBiomeFeature.road_emit`. Maps 1:1 to
+/// [`crate::feature_groups::FeatureGroupKind`]'s road variants.
+///
+/// Authoring guidance (from MAPGEN.md § Road tiers):
+/// - `RoughDirt` — abandoned_homestead, homestead_clearing
+/// - `Dirt` — remote_compound, ranch (rural single-family)
+/// - `Gravel` — dwelling_cluster, farmland_parcel (small settlement)
+/// - `Paved` — adobe_village, ghost_town (larger settlement)
+/// - `Highway` — never feature-emitted; reserved for hub-trunk pass.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Hash)]
+pub enum RoadEmitKind {
+    RoughDirt,
+    Dirt,
+    Gravel,
+    Paved,
+    Highway,
+}
+
+impl RoadEmitKind {
+    /// Convert to the corresponding `FeatureGroupKind`.
+    #[must_use]
+    pub fn to_group_kind(self) -> crate::feature_groups::FeatureGroupKind {
+        match self {
+            Self::RoughDirt => crate::feature_groups::FeatureGroupKind::RoughDirt,
+            Self::Dirt => crate::feature_groups::FeatureGroupKind::Dirt,
+            Self::Gravel => crate::feature_groups::FeatureGroupKind::Gravel,
+            Self::Paved => crate::feature_groups::FeatureGroupKind::Paved,
+            Self::Highway => crate::feature_groups::FeatureGroupKind::Highway,
+        }
+    }
+}
+
 /// Single sub-biome feature catalog entry.
 #[derive(Clone, Debug, Deserialize)]
 pub struct SubBiomeFeature {
@@ -225,6 +258,15 @@ pub struct SubBiomeFeature {
     /// appropriate. See [MAPGEN § Ambient environment objects](../../../MAPGEN.md#ambient-environment-objects-phase-363c5c8).
     #[serde(default)]
     pub ambient_control: Option<crate::feature_instances::FeatureAmbientControl>,
+    /// Feature-emit road tier (Phase 3.6.3c.3c). When `Some(kind)`, the
+    /// bake's Pass-2 road builder paths an access road of this tier
+    /// from each placed instance toward the nearest higher-or-equal-
+    /// tier road segment OR hub. `None` = feature does not emit a road.
+    /// Author on developments (dwelling_cluster, ranch, etc.) — small
+    /// resupply features (bait_shop, gas_station) inherit road access
+    /// via `requires_road_adjacency` placement against existing trunks.
+    #[serde(default)]
+    pub road_emit: Option<RoadEmitKind>,
 }
 
 /// Nested placement-rule schema (3.6.3c.1).
@@ -1066,6 +1108,17 @@ pub struct PlacementRulesContext<'a> {
     /// Height sampler: `(x, z) -> altitude_m`. Used for prominence
     /// median-sampling.
     pub height_at: &'a dyn Fn(f32, f32) -> f32,
+    /// Set of cells reached by any feature group's polyline. Populated
+    /// post-3.6.3c.3a road-network bake; consulted by
+    /// `requires_road_adjacency` placement rule. `None` in callers
+    /// without a feature-group bundle (lazy/legacy paths) — rule
+    /// returns Pass in that case to preserve existing behavior.
+    pub road_adjacent_cells: Option<&'a std::collections::HashSet<crate::voronoi_cells::CellId>>,
+    /// Sub-biome cell catalog — needed to resolve `cell_pos` to a
+    /// `CellId` for `road_adjacent_cells` membership lookup. Passed
+    /// alongside `road_adjacent_cells`; both should be present or both
+    /// absent.
+    pub sub_biome: Option<&'a crate::voronoi_cells::SubBiomeCellCatalog>,
     /// Optional per-cell hub-cache (3.6.3c.1c bake optimization).
     ///
     /// Precomputed list of hubs within [`MAX_RULE_HUB_RADIUS_M`] of the
@@ -1227,7 +1280,26 @@ pub fn evaluate_placement_rules(
         }
     }
 
-    // self_spacing + road_adjacency + spillover not yet evaluated.
+    // Road adjacency — activated 3.6.3c.3b. Reject features that
+    // require a road if the cell isn't on (or directly adjacent to) a
+    // baked road polyline. When `road_adjacent_cells` / `sub_biome`
+    // aren't supplied (legacy lazy callers), the rule returns Pass to
+    // preserve existing behavior.
+    if let Some(road) = &rules.road_adjacency {
+        if road.required {
+            if let (Some(cells), Some(sb)) = (rules_ctx.road_adjacent_cells, rules_ctx.sub_biome) {
+                let cell_id = sb.nearest_cell(cell_pos.0, cell_pos.1);
+                if !cells.contains(&cell_id) {
+                    return PlacementRuleOutcome::Reject {
+                        reason: RejectReason::RoadAdjacency,
+                    };
+                }
+            }
+        }
+    }
+
+    // self_spacing + spillover not yet evaluated (3.6.3c.1c-eager
+    // pass + 3.6.3c.3c+ respectively).
 
     PlacementRuleOutcome::Pass { weight_mult }
 }
@@ -1800,6 +1872,7 @@ mod tests {
             placement_rules: None,
             composition: None,
             ambient_control: None,
+            road_emit: None,
         };
         // All pass.
         let ok = PlacementContext {
@@ -1852,6 +1925,7 @@ mod tests {
             placement_rules: None,
             composition: None,
             ambient_control: None,
+            road_emit: None,
         };
         let forb = SubBiomeFeature {
             water_adjacency: WaterAdjacency::Forbidden,
@@ -2003,6 +2077,7 @@ mod tests {
             placement_rules: None,
             composition: None,
             ambient_control: None,
+            road_emit: None,
         };
         let libs = SubBiomeLibraries::shared();
         let adapted = adapt_palette(&feature, BiomeClass::RockyAlpine, libs);
@@ -2036,6 +2111,7 @@ mod tests {
             placement_rules: None,
             composition: None,
             ambient_control: None,
+            road_emit: None,
         };
         let libs = SubBiomeLibraries::shared();
         let adapted = adapt_palette(&feature, BiomeClass::RockyAlpine, libs);
@@ -2071,6 +2147,7 @@ mod tests {
             placement_rules: None,
             composition: None,
             ambient_control: None,
+            road_emit: None,
         };
         let libs = SubBiomeLibraries::shared();
         let adapted = adapt_palette(&feature, BiomeClass::HighDesert, libs);
@@ -2095,6 +2172,7 @@ mod tests {
             placement_rules: None,
             composition: None,
             ambient_control: None,
+            road_emit: None,
         };
         let libs = SubBiomeLibraries::shared();
         let adapted = adapt_palette(&feature, BiomeClass::HighDesert, libs);
@@ -2119,6 +2197,7 @@ mod tests {
             placement_rules: None,
             composition: None,
             ambient_control: None,
+            road_emit: None,
         };
         // We can't easily construct a real HubCatalog + HydrologyGraph in
         // a unit test. Assert only the short-circuit path (rules=None):

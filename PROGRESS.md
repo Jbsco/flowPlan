@@ -39,6 +39,137 @@ Post-tune calibration: `scenic_overlook` 37 → **12** placements (a viewpoint a
 
 `hot_springs` left at `temp_range_c: (-50, 5)` — climate window is conceptually correct (rare = cold). Calibration shows it stays near zero on canonical seed; revisit if visual-bench at 3.6.3c.4 confirms zero appearances.
 
+### Phase 3.6.3c.3c — feature-emit access roads + 5-tier ladder (Task #274)
+
+User design extension after seeing "no roads near canonical spawn": developments should emit short access roads pointing toward larger hubs / other road-enabled features. Tiered enum so authors can request a minimum road quality that matches the feature's character (a homestead emits `RoughDirt`, a ranch `Dirt`, a dwelling cluster `Gravel`).
+
+**Tiered `FeatureGroupKind`** — was 4 kinds (`Highway` / `Road` / `DirtRoad` / `Rail`); now 6 (`RoughDirt` / `Dirt` / `Gravel` / `Paved` / `Highway` / `Rail`). The road tiers are `Ord`-comparable via `FeatureGroupKind::road_tier()`. Per-kind constants:
+
+| Kind | Half-width | Depth | Max length |
+| --- | ---: | ---: | ---: |
+| RoughDirt | 8 m | -0.4 m | 30 km |
+| Dirt | 15 m | -0.6 m | 60 km |
+| Gravel | 18 m | -1.0 m | 80 km |
+| Paved | 25 m | -1.5 m | 120 km |
+| Highway | 40 m | -3.0 m | 250 km |
+| Rail | 20 m | +1.5 m (berm) | 200 km |
+
+Rename `Road` → `Paved` + `DirtRoad` → `Dirt` propagated through Pass-1 hub-trunk config + visual-bench color map.
+
+**Pass-2 builder** — `FeatureGroupBundle::extend_with_feature_emit_roads(emit_cells, sub_biome, terrain, hydrology)`. Reads `(CellId, FeatureGroupKind)` tuples from `BakedAssignments::collect_road_emit_cells(libs)`. Per-tier processing in DESCENDING tier order (Paved before Gravel before Dirt etc.) so higher-tier paths exist as path targets when lower tiers evaluate.
+
+**Multi-source Dijkstra over Voronoi-cell graph** — replaces per-feature A*. The A* heuristic was O(target_count) per pop, ballooned the cost on real bakes (60K+ emit cells × 1500 visits × 656 targets = 60B ops). Multi-source Dijkstra runs ONCE per kind, building a (dist, successor) field over all reachable cells; per-feature path reconstruction walks the successor chain in O(path_length). Pass-2 cost: ~270 s for the canonical seed (61K emit cells × 5 kinds). Bake-time discipline applies — one-time at world load, never per-frame.
+
+**Edge cost** = toroidal-Euclidean step + slope penalty (5× for >25°, 2× for >15°) + water-block (mid-segment on water = unreachable). Roads cannot cross open water by construction. Slope penalty steers paths around steep terrain without forbidding it outright.
+
+**RON authoring** — `SubBiomeFeature.road_emit: Option<RoadEmitKind>` field. 12 development features authored:
+
+- `RoughDirt`: abandoned_homestead, homestead_clearing, fishing_camp
+- `Dirt`: ranch, mining_camp, ghost_town, watchtower
+- `Gravel`: farmland_parcel, mountain_lodge, dwelling_cluster, remote_compound
+- `Paved`: adobe_village, coastal_village, olive_grove
+
+**Game-app wiring** — Pass 2 runs after `BakedAssignments::bake` in the `FLOWPLAN_FEATURE_INSTANCES=1` path. Adds ~270 s to world-load wall-clock; mitigated by spawn-near + the player not noticing because they fly straight to a feature.
+
+**Canonical-seed network growth** (Pass 1 → Pass 1+2):
+
+| Metric | Pass 1 only | Pass 1+2 |
+| --- | ---: | ---: |
+| Total groups | 809 | **30 536** |
+| Total network length | 54 200 km | **813 265 km** |
+| Median segment length | 53 km | **15 km** |
+| Per-kind | 172 Highway / 481 Paved / 156 Dirt | 29 Highway / 5316 Paved / 11711 Gravel / 7048 Dirt / 6432 RoughDirt |
+
+The canonical-spawn area should now have roads — Pass-2 fills the dwelling-clusters / fishing-camps / coastal-villages near (0,0) with their own access roads back to the trunk network.
+
+**Tests + gate** — 282 world-lib tests pass; full workspace clippy + fmt clean. Determinism preserved (Dijkstra heap stable on f_score+cell_id, source-cell iteration sorted ascending, multi-source seeding deterministic per master_seed).
+
+**Pinned for 3.6.3c.3d (spillover) + future polish:**
+- Fade-out on dead-end paths (paths that exhaust their length budget without reaching the network — currently dropped, should emit a tapered-depth polyline)
+- Smooth tier transitions at Gravel↔Paved junctions (currently hard tier-shift; visual blend is a per-segment width/depth modulation)
+- Bridge primitives for narrow water crossings (currently water = hard reject, no bridges allowed)
+- Switchback geometry for steep terrain (currently 5× slope penalty effectively bans paths over 25°; switchback support would let roads climb)
+- Per-tier rendering color in the streaming terrain mesh (currently L3 delta only — visual differentiation between Dirt and Paved comes from their different depths only)
+- Rail = 0 segments at canonical seed — Major-Major distances exceed 200 km cap. Either widen `Rail.max_length_m` or accept rare-rail design (rail makes sense only at dense-Major regions).
+
+### Ambient height sampling — wire L1+L3 composed altitude
+
+User playtest after L3 wired into streaming terrain mesh: "noticing some 'hill' bumps rising up out of ambient objects that do not have any ambient objects themselves... these also seem to occasionally be 'cut' with a straight line, is this a cliff formation?"
+
+Diagnosis: ✅ L3 deltas were rendering correctly in the terrain mesh — **mesa_top plateaus, cliff_coast edges, hub_foundation flatten zones, prominence peaks** all visible. But the ambient generator (`crates/world/src/ambient.rs` via `app::ambient_worker`) was sampling L1 height only — instances either (a) buried inside L3-raised mesa tops, (b) floated above L3-cut depressions, or (c) failed altitude-band filters that compared L1 elevation against L3-modified visual elevation. Net effect: L3 features looked stripped of ambient cover.
+
+**Shipped fix**: `AmbientWorker::spawn` now takes `Option<WorldRefsArc>`; the worker-loop closure samples `world_refs.height_at(x, z)` (L1+L3) instead of `terrain.height(x, z)` when present. Same gate as the streaming-terrain L3 wiring (`FLOWPLAN_FEATURE_INSTANCES=1`); without the flag, ambient stays L1-only. Both `height_at` and `is_water` closures updated symmetrically — water-rejection uses composed height too, so cliff-coast tops correctly pass the not-water gate.
+
+**Per-call cost**: ~50-100 ns added per ambient candidate (the L3 `nearest_cell` lookup + delta dispatch). Per cell ~few hundred candidates → ~5-10 µs/cell extra. Worker is async + spiral-out priority, so the cost stays off the main thread.
+
+### "Have not seen any roads yet" — confirmed: no roads near canonical spawn
+
+Same playtest: "have not seen any roads yet." Diagnostic added (`feature_instance_visual_bench::report_roads_near_spawn`) that reports per-kind segment counts + nearest-centerline distance from spawn. Result for canonical (0,0):
+
+| Kind | Segments within 22 km | Nearest centerline |
+| --- | ---: | ---: |
+| Highway | 0 | **519 km** |
+| Road | 0 | **91 km** |
+| DirtRoad | 0 | **127 km** |
+| Rail | 0 | n/a (no Major-Major within reach) |
+
+Canonical (0,0) is in **Mediterranean ocean / coastal mix** — geographically isolated from the dense Major-hub clusters. The 656 of 55495 hubs (1.2 %) in the road network produce a sparse backbone aligned with population density, not uniformly. Per design (memory `feature_delta_expansion_3_6_3`), Remote / Isolated tiers stay off-grid by intent.
+
+**Workaround for playtest**: use the debug-camera 5 km/s speed tier to sweep northwest until you reach the road network, OR add `FLOWPLAN_BENCH_SPAWN_X` / `_Z` env vars (currently bench-only — would need to thread into game_app for in-game use). The continental visual-bench artifact (`target/world-gen-plots/feature-groups/.../road-network-continental-*.png`) shows where the network actually is.
+
+**Pinned for 3.6.3c.3c+ tuning**: revisit network density. Options if playtest reveals "too sparse to play with":
+- Add `Local↔Regional` connections (currently DirtRoad is Local-only and Road is Major-Regional only).
+- Lower `MAX_LENGTH_M` per kind to favor short connections over long ones.
+- Connect a fraction of Remote tier (e.g. 20 % into the network).
+None of these are firing without playtest signal — current sparseness might be authentic to the bush-pilot fantasy.
+
+### Phase 3.6.3c.3b — 4 road kinds + `requires_road_adjacency` activation (Task #275)
+
+Extends 3.6.3c.3a from one road type to four with per-kind tier eligibility, half-width, depth, and length caps. Activates the `requires_road_adjacency` placement rule that was a stub since 3.6.3c.1.
+
+**`FeatureGroupKind` extended** — `Highway` / `Road` / `DirtRoad` / `Rail` (was just `Road`). Per-kind table:
+
+| Kind | Tier eligibility | k-nearest | Half-width | Depth | Max length |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Highway | Major | 2 | 40 m | -3.0 m | 250 km |
+| Road | Major + Regional | 2 | 25 m | -1.5 m | 120 km |
+| DirtRoad | Local | 2 | 15 m | -0.6 m | 60 km |
+| Rail | Major | 1 | 20 m | +1.5 m | 200 km |
+
+`Rail` is the lone positive-delta variant — a raised berm rather than a cut. The depth + half-width values align with real-world rail/road geometries (40 m highway band ≈ a 4-lane divided + shoulder; 15 m dirt road ≈ a single-lane track + verge). Per-kind dispatch happens via `FeatureGroupKind::depth_m()` / `half_width_m()` accessors — the L3 group-delta evaluator (`compute_group_delta_at`) reads from `group.kind` rather than a hardcoded constant.
+
+**Canonical-seed bake**: 809 segments / 27156 cell-memberships / 54200 km total. 656 of 55495 hubs (1.2 %) participate (dropped from 1386 because each tier connects within itself rather than across — Major hubs only get Highway+Road+Rail, Regional only Road, Local only DirtRoad). Median segment 53 km / max 249 km (the highway upper bound).
+
+**`requires_road_adjacency` rule activation** — `RoadAdjacencyRules.required: true` now actually rejects placements. `PlacementRulesContext` gains `road_adjacent_cells: Option<&HashSet<CellId>>` + `sub_biome: Option<&SubBiomeCellCatalog>`. The bake-time path (`run_phase_a` in `baked_assignments.rs`) passes both, populated from `FeatureGroupBundle::road_adjacent_cells()`. Lazy / legacy callers leave them `None` and the rule returns Pass — preserves backward compatibility for the ad-hoc `feature_at_cell_with_rules` path that doesn't have a road bundle in scope.
+
+**Bake signature change**: `BakedAssignments::bake` gains a `feature_groups: &FeatureGroupBundle` parameter. All 4 callers updated: `game_app` passes the live bundle, the 3 visual-bench tests build their own. Determinism preserved (groups bake first, then assignments → same master_seed → same output).
+
+`FeatureGroupBundle::road_adjacent_cells` returns the post-bake set of cells whose polyline membership flags them as "on a road". Strict membership only — a cell qualifies iff a polyline literally passed through it. Future extension (3.6.3c.3c+) could expand outward via the sub-biome adjacency graph for "near a road within N km" semantics.
+
+282 world-lib tests pass (was 282; `feature_groups` module unchanged in test surface). Full workspace fmt + clippy + test suite green.
+
+**Next: 3.6.3c.3c** — spillover placement queue + first 1-2 anchor features. Captures the "factory pulls supporting features into emergent micro-hub" pattern (memory `hub_emergent_upgrade_via_spillover`).
+
+### Phase 3.6.3c.3a — `FeatureGroup` engine + hub-to-hub road network (Task #274)
+
+First sub-milestone of 3.6.3c.3 — multi-cell linear features. Ships the type system + bake algorithm + L3 dispatch + visual-bench artifact, with one group kind (`Road`) connecting Major/Regional/Local hubs.
+
+**`crates/world/src/feature_groups.rs` (new, ~370 LOC)** — `FeatureGroupId`, `FeatureGroupKind` enum (1 variant for now), `FeatureGroup` struct (id + kind + polyline + half_width), `FeatureGroupBundle` (groups + per-cell membership index). `FeatureGroupBundle::build_road_network(hubs, sub_biome)` constructs the road network in O(eligible_hubs²) — for canonical seed: ~2037 hub pairs, ~28 s wall-clock. Each Major/Regional/Local hub connects to its k=2 nearest eligible neighbors within 100 km. Polylines are wrap-aware (a hub at literal `(100, 0)` connects to literal `(WORLD_EXTENT_M - 100, 0)` via the 200 m seam path, not the 5 Mm literal path).
+
+**`compute_delta_at` extended** — group dispatch added after the natural-feature dispatch. For cells in any feature group, compute perpendicular distance to each polyline; if within `half_width_m`, apply a smoothstep-falloff depression (`-1.5 m` at centerline → 0 at band edge). Hydrology continuity invariant suppresses depression on water cells. Existing tests passed unchanged after the signature gained `feature_groups: &FeatureGroupBundle` (callers pass `FeatureGroupBundle::empty()` for L1+L3-only tests).
+
+**`WorldRefs` + `WorldRefsArc` carry `feature_groups`** — sixth field. Game-app builds the bundle alongside `HubFoundationMap` (gated by `FLOWPLAN_FEATURE_INSTANCES=1`), threads it into the WorldRefs Arc, which streams into the L3-aware `StreamingTerrain` height sampler. **Roads are now visible in-game without further wiring** — the existing render path already consumes L1+L3 composed height.
+
+**Visual-bench (`tests/feature_groups_visual_bench.rs`)** — `render_road_network_artifacts` (`#[ignore]` opt-in) bakes the canonical world and emits two PNGs:
+- `road-network-continental-<seed>.png` (5 Mm × 5 Mm at 1024² → ~5 km/px) — the full network shape; hubs color-coded by tier (yellow Major / tan Regional / blue Local / gray Remote / dark Isolated); roads as thin gray lines.
+- `road-network-spawn-50km-<seed>.png` (50 km × 50 km at 1024² → ~50 m/px) — density + alignment near canonical spawn.
+
+**Canonical-seed run**: 2037 road segments, 63613 cell-memberships, 126 885 km total network, median 64 km / p99 99 km / max 99.9 km. 1386 of 55495 hubs (2.5 %) participate — by design, since Remote / Isolated tiers are the off-grid bulk and stay un-connected.
+
+5 unit tests in `feature_groups.rs` (empty bundle, perpendicular-distance correctness, wrap-aware polyline, toroidal distance). 282 world-lib tests pass total (was 277, +5 from this module).
+
+**Next: 3.6.3c.3b** — extend `FeatureGroupKind` to `Road` / `DirtRoad` / `Highway` / `Rail`. Filter eligible hubs by tier per kind: Highway (Major only, 80 m band, deeper depression), Road (Major↔Regional, 60 m band), DirtRoad (Local-only, 30 m band, shallow), Rail (Major↔Major, 40 m band, raised berm = positive delta). Activate `requires_road_adjacency` placement-rule evaluation for cells whose nearest road is within N km.
+
 ### L3 deltas wired into streaming terrain mesh (Task #273)
 
 Until this turn, the streaming terrain mesh sampled `terrain.height(x, z)` only — L1 (continental + biome topography) without the L3 feature deltas. So even though `compute_delta_at` and `WorldRefs::height_at` had been shipped in 3.6.3a, **none of the natural-feature deltas were ever visible in-game** (lake_cluster bowls, mesa_top plateaus, cirque scoops, cliff_coast drops). The 3.6.3c.2 dev/resupply flatten deltas inherited the same gap.

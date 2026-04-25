@@ -383,7 +383,11 @@ fn ambient_visual_bench_real_bake() {
     let hub_catalog = HubCatalog::bake(GAME_SEED, &terrain, &hydrology);
     eprintln!("  hub catalog baked in {:.1}s", t1.elapsed().as_secs_f32());
     let t2 = std::time::Instant::now();
-    let baked = BakedAssignments::bake(&catalog, &terrain, &hydrology, &hub_catalog);
+    let groups = flowplan_world::feature_groups::FeatureGroupBundle::build_road_network(
+        &hub_catalog,
+        &catalog,
+    );
+    let baked = BakedAssignments::bake(&catalog, &terrain, &hydrology, &hub_catalog, &groups);
     eprintln!(
         "  baked assignments in {:.1}s — {} populated cells",
         t2.elapsed().as_secs_f32(),

@@ -49,6 +49,7 @@ use std::collections::HashMap;
 use flowplan_core::{wrap_coord, WORLD_EXTENT_M};
 
 use crate::feature_delta_impls;
+use crate::feature_groups::{perpendicular_distance_to_polyline, FeatureGroupBundle};
 use crate::hub_catalog::{HubCatalog, HubTier};
 use crate::hydrology::{HydrologyGraph, WaterClass};
 use crate::voronoi_cells::{CellId, SubBiomeCellCatalog};
@@ -195,6 +196,7 @@ pub fn compute_delta_at(
     foundations: &HubFoundationMap,
     hubs: &HubCatalog,
     hydrology: &HydrologyGraph,
+    feature_groups: &FeatureGroupBundle,
     terrain_seed: u64,
 ) -> f32 {
     let cell_id = sub_biome.nearest_cell(x, z);
@@ -257,7 +259,57 @@ pub fn compute_delta_at(
         }
     }
 
-    raw_delta
+    // Layer 3 group deltas — additive on top of the per-cell delta.
+    // For 3.6.3c.3a, only roads. Each road is a polyline; the depression
+    // band falls smoothly to zero outside `half_width_m`.
+    let group_delta = compute_group_delta_at(x, z, cell_id, feature_groups, hydrology);
+
+    raw_delta + group_delta
+}
+
+/// Sum of all feature-group deltas at `(x, z)`. For the cells the
+/// query-point's nearest-cell belongs to, evaluate each group's
+/// delta and sum. Per-kind centerline depth comes from
+/// [`crate::feature_groups::FeatureGroupKind::depth_m`].
+///
+/// Suppressed on water (same continuity invariant as natural deltas):
+/// depressions never carve into open water surfaces; berms (positive
+/// `depth_m`, e.g. `Rail`) follow the per-cell positive-suppression
+/// rule.
+fn compute_group_delta_at(
+    x: f32,
+    z: f32,
+    cell_id: CellId,
+    feature_groups: &FeatureGroupBundle,
+    hydrology: &HydrologyGraph,
+) -> f32 {
+    let group_ids = feature_groups.groups_for_cell(cell_id);
+    if group_ids.is_empty() {
+        return 0.0;
+    }
+    let mut total = 0.0_f32;
+    for &gid in group_ids {
+        let Some(group) = feature_groups.group(gid) else {
+            continue;
+        };
+        let dist = perpendicular_distance_to_polyline(&group.polyline, x, z);
+        if dist >= group.half_width_m {
+            continue;
+        }
+        let t = dist / group.half_width_m;
+        let falloff = 1.0 - smoothstep(t);
+        total += group.kind.depth_m() * falloff;
+    }
+    // Hydrology continuity: groups (depressions or berms) don't cut
+    // through / rise out of open water.
+    if total != 0.0 {
+        if let Some(surface) = hydrology.water_surface_at(x, z) {
+            if !matches!(surface.class, WaterClass::DryChannel) {
+                return 0.0;
+            }
+        }
+    }
+    total
 }
 
 /// Toroidal-closest-path distance between two world coordinates.

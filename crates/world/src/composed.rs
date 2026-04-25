@@ -26,6 +26,7 @@
 use std::sync::Arc;
 
 use crate::feature_delta::{compute_delta_at, HubFoundationMap};
+use crate::feature_groups::FeatureGroupBundle;
 use crate::hub_catalog::HubCatalog;
 use crate::hydrology::HydrologyGraph;
 use crate::surface_class::{surface_at, SurfaceClass};
@@ -42,6 +43,7 @@ pub struct WorldRefs<'a> {
     pub sub_biome: &'a SubBiomeCellCatalog,
     pub hubs: &'a HubCatalog,
     pub foundations: &'a HubFoundationMap,
+    pub feature_groups: &'a FeatureGroupBundle,
 }
 
 impl<'a> WorldRefs<'a> {
@@ -55,6 +57,7 @@ impl<'a> WorldRefs<'a> {
         sub_biome: &'a SubBiomeCellCatalog,
         hubs: &'a HubCatalog,
         foundations: &'a HubFoundationMap,
+        feature_groups: &'a FeatureGroupBundle,
     ) -> Self {
         Self {
             terrain,
@@ -62,6 +65,7 @@ impl<'a> WorldRefs<'a> {
             sub_biome,
             hubs,
             foundations,
+            feature_groups,
         }
     }
 
@@ -78,6 +82,7 @@ impl<'a> WorldRefs<'a> {
             self.foundations,
             self.hubs,
             self.hydrology,
+            self.feature_groups,
             self.terrain.seed(),
         );
         base + delta
@@ -99,6 +104,7 @@ impl<'a> WorldRefs<'a> {
             self.foundations,
             self.hubs,
             self.hydrology,
+            self.feature_groups,
             self.terrain.seed(),
         );
         base + delta
@@ -117,6 +123,7 @@ impl<'a> WorldRefs<'a> {
             self.foundations,
             self.hubs,
             self.hydrology,
+            self.feature_groups,
             self.terrain.seed(),
         )
     }
@@ -151,10 +158,11 @@ pub struct WorldRefsArc {
     pub sub_biome: Arc<SubBiomeCellCatalog>,
     pub hubs: Arc<HubCatalog>,
     pub foundations: Arc<HubFoundationMap>,
+    pub feature_groups: Arc<FeatureGroupBundle>,
 }
 
 impl WorldRefsArc {
-    /// Build the bundle from already-owned `Arc`s. All five must share
+    /// Build the bundle from already-owned `Arc`s. All six must share
     /// the same `master_seed`; we accept them without re-checking.
     #[must_use]
     pub const fn new(
@@ -163,6 +171,7 @@ impl WorldRefsArc {
         sub_biome: Arc<SubBiomeCellCatalog>,
         hubs: Arc<HubCatalog>,
         foundations: Arc<HubFoundationMap>,
+        feature_groups: Arc<FeatureGroupBundle>,
     ) -> Self {
         Self {
             terrain,
@@ -170,6 +179,7 @@ impl WorldRefsArc {
             sub_biome,
             hubs,
             foundations,
+            feature_groups,
         }
     }
 
@@ -182,6 +192,7 @@ impl WorldRefsArc {
             &self.sub_biome,
             &self.hubs,
             &self.foundations,
+            &self.feature_groups,
         )
     }
 
@@ -225,10 +236,19 @@ mod tests {
         (terrain, hydrology, sub_biome, hubs, foundations)
     }
 
+    /// Empty feature-group bundle for tests that don't exercise group
+    /// deltas. Constructing the real bundle requires a hub catalog +
+    /// sub-biome catalog and adds bake time we don't need for these
+    /// L1+L3 unit tests.
+    fn empty_groups() -> crate::feature_groups::FeatureGroupBundle {
+        crate::feature_groups::FeatureGroupBundle::empty()
+    }
+
     #[test]
     fn height_at_composes_l1_plus_l3() {
         let (t, h, s, hc, f) = bake_canonical();
-        let refs = WorldRefs::new(&t, &h, &s, &hc, &f);
+        let groups = empty_groups();
+        let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &groups);
         // Sample at origin: just verify it doesn't panic + returns
         // a finite value in the plausible world-envelope range.
         let composed = refs.height_at(1234.5, -6789.0);
@@ -242,7 +262,8 @@ mod tests {
     #[test]
     fn delta_at_equals_composed_minus_base() {
         let (t, h, s, hc, f) = bake_canonical();
-        let refs = WorldRefs::new(&t, &h, &s, &hc, &f);
+        let groups = empty_groups();
+        let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &groups);
         for &(x, z) in &[
             (1000.0_f32, -1000.0),
             (50_000.0, 25_000.0),
@@ -267,7 +288,8 @@ mod tests {
         // canonical mirror; using canonical-positive coords here
         // keeps the test stable and self-explanatory.
         let (t, h, s, hc, f) = bake_canonical();
-        let refs = WorldRefs::new(&t, &h, &s, &hc, &f);
+        let groups = empty_groups();
+        let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &groups);
         let mut found = false;
         'outer: for ix in 0..10 {
             for iz in 0..10 {
@@ -294,7 +316,8 @@ mod tests {
         // Scan cells on known water — delta should never be positive
         // on them (hydrology continuity invariant).
         let (t, h, s, hc, f) = bake_canonical();
-        let refs = WorldRefs::new(&t, &h, &s, &hc, &f);
+        let groups = empty_groups();
+        let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &groups);
         let mut samples_checked = 0_u32;
         for ix in 0..30 {
             for iz in 0..30 {

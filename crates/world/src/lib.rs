@@ -14,6 +14,7 @@ pub mod biome;
 pub mod composed;
 pub mod feature_delta;
 pub mod feature_delta_impls;
+pub mod feature_groups;
 pub mod feature_instances;
 pub mod hub_catalog;
 pub mod hub_names;
@@ -32,6 +33,10 @@ pub use biome::{biome_at, biome_weights_at, BiomeClass, BiomeWeights};
 pub use composed::WorldRefs;
 pub use feature_delta::{
     bump_falloff, compute_delta_at, smoothstep, DeltaContext, HubFoundationMap,
+};
+pub use feature_groups::{
+    perpendicular_distance_to_polyline, FeatureGroup, FeatureGroupBundle, FeatureGroupId,
+    FeatureGroupKind,
 };
 pub use hub_catalog::{
     HubCatalog, HubEntry, HubId, HubOperationalTags, HubTier, RegionId, RegionSeed,

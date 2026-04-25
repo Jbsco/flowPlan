@@ -10,7 +10,7 @@
 //!
 //! # Pipeline
 //!
-//! 1. Build `BakedAssignments::bake(catalog, terrain, hydrology, hub_catalog)`.
+//! 1. Build `BakedAssignments::bake(catalog, terrain, hydrology, hub_catalog, feature_groups)`.
 //! 2. Process cells in **master-seed-keyed permuted order** (see scan-
 //!    order rationale below).
 //! 3. For each cell, sample candidates with placement-rule + self-
@@ -178,6 +178,7 @@ impl BakedAssignments {
         terrain: &Terrain,
         hydrology: &HydrologyGraph,
         hub_catalog: &HubCatalog,
+        feature_groups: &crate::feature_groups::FeatureGroupBundle,
     ) -> Self {
         let start = std::time::Instant::now();
         let master_seed = catalog.master_seed();
@@ -194,6 +195,7 @@ impl BakedAssignments {
         order.sort_unstable_by_key(|&(k, _)| k);
 
         // ---- Phase A: parallel per-cell candidate generation -------
+        let road_adjacent = feature_groups.road_adjacent_cells();
         let precomputed = run_phase_a(
             master_seed,
             n_cells,
@@ -203,6 +205,7 @@ impl BakedAssignments {
             hub_catalog,
             libraries,
             &feature_id_index,
+            &road_adjacent,
         );
 
         // ---- Phase B: serial self-spacing merge in permuted order ---
@@ -335,6 +338,39 @@ impl BakedAssignments {
             .map(move |id| (id, self.per_cell_instances[&id].as_slice()))
     }
 
+    /// Collect `(cell_id, road_emit_kind)` tuples for every cell whose
+    /// assigned feature has a `road_emit` field set. Drives Pass-2 of
+    /// `FeatureGroupBundle::extend_with_feature_emit_roads`. Iteration
+    /// order is `CellId` ascending — deterministic.
+    #[must_use]
+    pub fn collect_road_emit_cells(
+        &self,
+        libs: &SubBiomeLibraries,
+    ) -> Vec<(CellId, crate::feature_groups::FeatureGroupKind)> {
+        let n_cells = self.per_cell.len();
+        let mut out: Vec<(CellId, crate::feature_groups::FeatureGroupKind)> = Vec::new();
+        for cell_id in 0..n_cells as CellId {
+            let idx = self.per_cell[cell_id as usize];
+            if idx == FALLBACK_INDEX {
+                continue;
+            }
+            let feature_id = self.feature_ids[idx as usize].as_str();
+            let source = self.per_cell_source[cell_id as usize];
+            // Resolve via host biome first, then oceanic fallback.
+            let feature = libs
+                .for_biome(source.feature_source_biome())
+                .iter()
+                .find(|f| f.id == feature_id)
+                .or_else(|| libs.oceanic().iter().find(|f| f.id == feature_id));
+            if let Some(feature) = feature {
+                if let Some(emit) = feature.road_emit {
+                    out.push((cell_id, emit.to_group_kind()));
+                }
+            }
+        }
+        out
+    }
+
     /// Look up a cell's baked assignment.
     #[must_use]
     pub fn feature_at_cell(&self, cell_id: CellId) -> FeatureAssignment {
@@ -404,6 +440,7 @@ fn run_phase_a(
     hub_catalog: &HubCatalog,
     libraries: &SubBiomeLibraries,
     feature_id_index: &HashMap<String, u16>,
+    road_adjacent_cells: &std::collections::HashSet<CellId>,
 ) -> Vec<PrecomputedCell> {
     let height_at_local = move |x: f32, z: f32| terrain.height(x, z);
     (0..n_cells as CellId)
@@ -418,6 +455,8 @@ fn run_phase_a(
                 hub_catalog,
                 hydrology,
                 height_at: &height_at_local,
+                road_adjacent_cells: Some(road_adjacent_cells),
+                sub_biome: Some(catalog),
                 cell_hubs_cache: Some(&cell_hubs),
             };
             let outcome = compute_bake_candidates_for_cell(
@@ -600,8 +639,9 @@ mod tests {
         let hub_catalog = HubCatalog::bake(TEST_SEED, &terrain, &hydrology);
         let catalog = SubBiomeCellCatalog::bake(TEST_SEED);
 
-        let baked_a = BakedAssignments::bake(&catalog, &terrain, &hydrology, &hub_catalog);
-        let baked_b = BakedAssignments::bake(&catalog, &terrain, &hydrology, &hub_catalog);
+        let groups = crate::feature_groups::FeatureGroupBundle::empty();
+        let baked_a = BakedAssignments::bake(&catalog, &terrain, &hydrology, &hub_catalog, &groups);
+        let baked_b = BakedAssignments::bake(&catalog, &terrain, &hydrology, &hub_catalog, &groups);
 
         // Same seed → bit-identical per-cell assignments.
         assert_eq!(baked_a.per_cell, baked_b.per_cell);

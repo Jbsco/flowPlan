@@ -733,12 +733,47 @@ impl Runtime {
                 );
                 let foundations =
                     flowplan_world::feature_delta::HubFoundationMap::build(&hub_catalog, catalog);
+                let t_groups = std::time::Instant::now();
+                let feature_groups =
+                    flowplan_world::feature_groups::FeatureGroupBundle::build_road_network(
+                        &hub_catalog,
+                        catalog,
+                    );
+                eprintln!(
+                    "flowplan: feature groups (road network) baked in {:.2} s — {} groups across {} cells",
+                    t_groups.elapsed().as_secs_f64(),
+                    feature_groups.len(),
+                    feature_groups.cell_count(),
+                );
                 let t2 = std::time::Instant::now();
                 let baked = flowplan_world::baked_assignments::BakedAssignments::bake(
                     catalog,
                     &terrain,
                     &hydrology,
                     &hub_catalog,
+                    &feature_groups,
+                );
+                // Pass-2 (3.6.3c.3c): feature-emit access roads. Reads
+                // BakedAssignments to find cells whose authored
+                // `road_emit` is set, then A*s them onto the existing
+                // hub-trunk network. Mutates the bundle in place.
+                let mut feature_groups = feature_groups;
+                let t_emit = std::time::Instant::now();
+                let libs = flowplan_world::sub_biome::SubBiomeLibraries::shared();
+                let emit_cells = baked.collect_road_emit_cells(libs);
+                let emit_count = emit_cells.len();
+                feature_groups.extend_with_feature_emit_roads(
+                    &emit_cells,
+                    catalog,
+                    &terrain,
+                    &hydrology,
+                );
+                eprintln!(
+                    "flowplan: pass-2 emit roads baked in {:.2} s — {} emitting cells, bundle now has {} groups across {} cells",
+                    t_emit.elapsed().as_secs_f64(),
+                    emit_count,
+                    feature_groups.len(),
+                    feature_groups.cell_count(),
                 );
                 eprintln!(
                     "flowplan: baked assignments in {:.1} s — {} total instances across {} cells ({} populated of {} world)",
@@ -789,6 +824,7 @@ impl Runtime {
                     std::sync::Arc::clone(catalog),
                     std::sync::Arc::new(hub_catalog),
                     std::sync::Arc::new(foundations),
+                    std::sync::Arc::new(feature_groups),
                 );
                 (Some(baked), Some(hydrology_arc), Some(world_refs_arc))
             },
@@ -805,6 +841,7 @@ impl Runtime {
                 terrain.clone(),
                 std::sync::Arc::clone(hydro),
                 std::sync::Arc::clone(catalog),
+                world_refs.clone(),
             )),
             _ => None,
         };

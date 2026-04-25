@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 
 use flowplan_world::baked_assignments::BakedAssignments;
 use flowplan_world::biome::BiomeClass;
+use flowplan_world::feature_groups::FeatureGroupBundle;
 use flowplan_world::feature_instances::{
     compose_instances_for_feature, FeatureInstance, PrimitiveKind,
 };
@@ -265,7 +266,11 @@ fn report_populated_cells_near_spawn() {
     let hydrology = HydrologyGraph::bake(GAME_SEED, &terrain);
     let hub_catalog = HubCatalog::bake(GAME_SEED, &terrain, &hydrology);
     let cells = SubBiomeCellCatalog::bake(GAME_SEED);
-    let baked = BakedAssignments::bake(&cells, &terrain, &hydrology, &hub_catalog);
+    let groups = flowplan_world::feature_groups::FeatureGroupBundle::build_road_network(
+        &hub_catalog,
+        &cells,
+    );
+    let baked = BakedAssignments::bake(&cells, &terrain, &hydrology, &hub_catalog, &groups);
     eprintln!(
         "bake done in {:.1} s; total cells = {}",
         bake_start.elapsed().as_secs_f64(),
@@ -274,6 +279,18 @@ fn report_populated_cells_near_spawn() {
 
     let active = cells.cells_within_radius(spawn_x, spawn_z, radius_m);
     eprintln!("active cells within {radius_m:.0} m: {}", active.len());
+
+    // Road-network presence near spawn — addresses "have not seen any
+    // roads yet" diagnostic from in-game playtest. Each kind reported
+    // separately so we can tell whether the spawn is on a Major-only
+    // backbone (Highway+Rail), a Local backwater (DirtRoad only), or
+    // truly off-grid.
+    let road_summary = report_roads_near_spawn(&groups, spawn_x, spawn_z, radius_m);
+    eprintln!();
+    eprintln!("=== roads near spawn ===");
+    for line in road_summary {
+        eprintln!("  {line}");
+    }
 
     // Mirror the in-game wrap fix (game_app.rs upload loop) — cells
     // returned via wrap-distance get their seed coords wrapped to be
@@ -435,6 +452,62 @@ fn world_to_pixel_centered(
 // ═══════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════
+
+/// Per-kind road-presence summary inside `radius_m` of `(cx, cz)`.
+/// Reports count of segments whose perpendicular distance from spawn
+/// is within radius (so a 50 km highway 21 km away counts), and the
+/// closest centerline approach for each kind.
+fn report_roads_near_spawn(
+    groups: &FeatureGroupBundle,
+    cx: f32,
+    cz: f32,
+    radius_m: f32,
+) -> Vec<String> {
+    use flowplan_world::feature_groups::{perpendicular_distance_to_polyline, FeatureGroupKind};
+
+    let mut by_kind: std::collections::HashMap<FeatureGroupKind, (u32, f32)> =
+        std::collections::HashMap::new();
+    for kind in [
+        FeatureGroupKind::Highway,
+        FeatureGroupKind::Paved,
+        FeatureGroupKind::Gravel,
+        FeatureGroupKind::Dirt,
+        FeatureGroupKind::RoughDirt,
+        FeatureGroupKind::Rail,
+    ] {
+        by_kind.insert(kind, (0, f32::INFINITY));
+    }
+    for group in groups.groups() {
+        let d = perpendicular_distance_to_polyline(&group.polyline, cx, cz);
+        let entry = by_kind.entry(group.kind).or_insert((0, f32::INFINITY));
+        if d < radius_m {
+            entry.0 += 1;
+        }
+        if d < entry.1 {
+            entry.1 = d;
+        }
+    }
+    let mut lines = Vec::new();
+    for kind in [
+        FeatureGroupKind::Highway,
+        FeatureGroupKind::Paved,
+        FeatureGroupKind::Gravel,
+        FeatureGroupKind::Dirt,
+        FeatureGroupKind::RoughDirt,
+        FeatureGroupKind::Rail,
+    ] {
+        let (count, nearest) = by_kind[&kind];
+        let nearest_str = if nearest.is_finite() {
+            format!("{:.1} km", nearest / 1000.0)
+        } else {
+            "n/a".to_string()
+        };
+        lines.push(format!(
+            "{kind:?}: {count} segment(s) within {radius_m:.0} m, nearest centerline {nearest_str}"
+        ));
+    }
+    lines
+}
 
 fn artifact_dir(stem: &str) -> PathBuf {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -27,6 +27,7 @@ use std::path::Path;
 
 use flowplan_world::composed::WorldRefs;
 use flowplan_world::feature_delta::HubFoundationMap;
+use flowplan_world::feature_groups::FeatureGroupBundle;
 use flowplan_world::hub_catalog::HubCatalog;
 use flowplan_world::hydrology::HydrologyGraph;
 use flowplan_world::surface_class::SurfaceClass;
@@ -100,13 +101,15 @@ fn shared_bake() -> (
     SubBiomeCellCatalog,
     HubCatalog,
     HubFoundationMap,
+    FeatureGroupBundle,
 ) {
     let terrain = Terrain::from_seed(CANONICAL_SEED);
     let hydrology = HydrologyGraph::bake(CANONICAL_SEED, &terrain);
     let sub_biome = SubBiomeCellCatalog::bake(CANONICAL_SEED);
     let hubs = HubCatalog::bake(CANONICAL_SEED, &terrain, &hydrology);
     let foundations = HubFoundationMap::build(&hubs, &sub_biome);
-    (terrain, hydrology, sub_biome, hubs, foundations)
+    let groups = FeatureGroupBundle::build_road_network(&hubs, &sub_biome);
+    (terrain, hydrology, sub_biome, hubs, foundations, groups)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -206,7 +209,7 @@ fn surface_rgb(c: SurfaceClass) -> [u8; 3] {
 
 #[test]
 fn l3_bake_smoke() {
-    let (_, _, _, _, f) = shared_bake();
+    let (_, _, _, _, f, _) = shared_bake();
     assert!(f.count() > 0, "hub foundation map should have overrides");
     let _ = output_dir();
 }
@@ -216,8 +219,8 @@ fn l3_bake_smoke() {
 fn emit_l3_topo_artifacts() {
     // L3-composed topo with hillshade — the "what does the world
     // look like now" artifact post feature-delta composition.
-    let (t, h, s, hc, f) = shared_bake();
-    let refs = WorldRefs::new(&t, &h, &s, &hc, &f);
+    let (t, h, s, hc, f, fg) = shared_bake();
+    let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &fg);
     let dir = output_dir();
 
     for &crop in CROPS {
@@ -258,8 +261,8 @@ fn emit_l3_topo_artifacts() {
 fn emit_l3_delta_diff_artifacts() {
     // Diverging red/blue diff map showing where L3 differs from L1.
     // Blue = carved (negative delta), red = raised (positive delta).
-    let (t, h, s, hc, f) = shared_bake();
-    let refs = WorldRefs::new(&t, &h, &s, &hc, &f);
+    let (t, h, s, hc, f, fg) = shared_bake();
+    let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &fg);
     let dir = output_dir();
     let max_abs_delta = 200.0_f32; // visualization scale — clamps wilder deltas
 
@@ -283,8 +286,8 @@ fn emit_l3_delta_diff_artifacts() {
 #[ignore = "visual-bench: opt-in via `cargo test -- --ignored`"]
 fn emit_surface_classification_artifacts() {
     // Surface class map — distinct color per SurfaceClass.
-    let (t, h, s, hc, f) = shared_bake();
-    let refs = WorldRefs::new(&t, &h, &s, &hc, &f);
+    let (t, h, s, hc, f, fg) = shared_bake();
+    let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &fg);
     let dir = output_dir();
 
     for &crop in CROPS {
@@ -308,8 +311,8 @@ fn emit_surface_classification_artifacts() {
 fn emit_hub_foundation_zoom_artifact() {
     // Zoom on a Major hub: side-by-side L1 vs L3 at ~3 km crop.
     // Shows the foundation flatten + skirt in action.
-    let (t, h, s, hc, f) = shared_bake();
-    let refs = WorldRefs::new(&t, &h, &s, &hc, &f);
+    let (t, h, s, hc, f, fg) = shared_bake();
+    let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &fg);
     let dir = output_dir();
 
     // Find a Major hub to center on.
@@ -392,8 +395,8 @@ fn emit_hub_foundation_zoom_artifact() {
 fn emit_delta_stats_diagnostic() {
     // Non-rendering diagnostic — counts cells with non-zero L3 delta
     // + reports surface-class distribution across a wide sample grid.
-    let (t, h, s, hc, f) = shared_bake();
-    let refs = WorldRefs::new(&t, &h, &s, &hc, &f);
+    let (t, h, s, hc, f, fg) = shared_bake();
+    let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &fg);
     let sample_n = 200_u32;
     let mut zero_delta = 0_u32;
     let mut pos_delta = 0_u32;

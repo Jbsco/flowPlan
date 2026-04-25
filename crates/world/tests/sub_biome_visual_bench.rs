@@ -491,7 +491,11 @@ fn emit_baked_assignments_calibration() {
     let cells = SubBiomeCellCatalog::bake(CANONICAL_SEED);
 
     eprintln!("baking BakedAssignments — eager pass with self-spacing + attractor biasing...");
-    let baked = BakedAssignments::bake(&cells, &terrain, &hydrology, &hub_catalog);
+    let groups = flowplan_world::feature_groups::FeatureGroupBundle::build_road_network(
+        &hub_catalog,
+        &cells,
+    );
+    let baked = BakedAssignments::bake(&cells, &terrain, &hydrology, &hub_catalog, &groups);
 
     let stats = baked.stats();
     eprintln!("=== BakedAssignments stats ===");

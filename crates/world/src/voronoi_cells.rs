@@ -411,6 +411,8 @@ impl SubBiomeCellCatalog {
             hub_catalog,
             hydrology,
             height_at: &height_at,
+            road_adjacent_cells: None,
+            sub_biome: None,
             cell_hubs_cache: None,
         };
         assign_feature(self.seed, cell_id, (x, z), &context, libs, Some(&rules_ctx))

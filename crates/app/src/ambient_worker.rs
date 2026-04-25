@@ -22,6 +22,7 @@ use std::thread::{self, JoinHandle};
 
 use flowplan_world::ambient::generate_ambient_for_cell;
 use flowplan_world::biome::BiomeClass;
+use flowplan_world::composed::WorldRefsArc;
 use flowplan_world::feature_instances::{FeatureAmbientControl, FeatureInstance};
 use flowplan_world::hydrology::{HydrologyGraph, SEA_LEVEL_M};
 use flowplan_world::sub_biome::SubBiomeLibraries;
@@ -104,6 +105,7 @@ impl AmbientWorker {
         terrain: Terrain,
         hydrology: Arc<HydrologyGraph>,
         catalog: Arc<SubBiomeCellCatalog>,
+        world_refs: Option<WorldRefsArc>,
     ) -> Self {
         let (job_tx, job_rx) = channel::<AmbientJob>();
         let (result_tx, result_rx) = channel::<AmbientResult>();
@@ -115,6 +117,7 @@ impl AmbientWorker {
                     &terrain,
                     &hydrology,
                     &catalog,
+                    world_refs.as_ref(),
                     &job_rx,
                     &result_tx,
                 );
@@ -144,11 +147,13 @@ impl AmbientWorker {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn worker_loop(
     master_seed: u64,
     terrain: &Terrain,
     hydrology: &Arc<HydrologyGraph>,
     catalog: &Arc<SubBiomeCellCatalog>,
+    world_refs: Option<&WorldRefsArc>,
     job_rx: &Receiver<AmbientJob>,
     result_tx: &Sender<AmbientResult>,
 ) {
@@ -190,26 +195,35 @@ fn worker_loop(
         // than at the canonical equivalent. Pre-wrapping ensures
         // consistent terrain answers for cells with seeds near the
         // wrap seam (5c.2.c.12r).
+        //
+        // 3.6.3c.3c: when `world_refs` is present (FLOWPLAN_FEATURE_INSTANCES=1
+        // path), sample L1+L3 composed height so ambient instances
+        // follow mesa plateaus / cliff-coast rims / road cuts / hub
+        // foundations. Without this, mesa tops render the L3 mesh
+        // raised by 100+ m but ambient still anchors to L1 → instances
+        // bury in the elevated terrain or float above cuts.
         let height_at = |x: f32, z: f32| {
-            HeightSampler::height(
-                terrain,
-                flowplan_core::wrap_coord(x),
-                flowplan_core::wrap_coord(z),
+            let xc = flowplan_core::wrap_coord(x);
+            let zc = flowplan_core::wrap_coord(z);
+            world_refs.map_or_else(
+                || HeightSampler::height(terrain, xc, zc),
+                |refs| refs.height_at(xc, zc),
             )
         };
-        // Water filter: simple global SEA_LEVEL_M cut. Continuous,
-        // smooth, no 2.5 km hydrology grid alignment. Lakes/rivers
-        // at positive elevation skip the rejection — trees may
-        // overlap lake surfaces visually, but the water mesh draws
-        // on top and the alternative (block-aligned dead zones from
-        // per-cell hydrology lookup) was visibly worse.
+        // Water filter: simple global SEA_LEVEL_M cut against the
+        // composed L1+L3 height — instances on cliff-coast tops
+        // (raised 90 m above sea by the delta) correctly pass the
+        // not-water gate; instances in carved lake bowls (depressed
+        // by `lake_cluster` delta) correctly fail it.
         let _ = hydrology; // reserved for future per-pixel water-surface field
         let is_water = |x: f32, z: f32| {
-            HeightSampler::height(
-                terrain,
-                flowplan_core::wrap_coord(x),
-                flowplan_core::wrap_coord(z),
-            ) < SEA_LEVEL_M
+            let xc = flowplan_core::wrap_coord(x);
+            let zc = flowplan_core::wrap_coord(z);
+            let h = world_refs.map_or_else(
+                || HeightSampler::height(terrain, xc, zc),
+                |refs| refs.height_at(xc, zc),
+            );
+            h < SEA_LEVEL_M
         };
         let catalog_ref = catalog.as_ref();
         let target_cell = job.cell_id;
@@ -256,7 +270,7 @@ mod tests {
         let terrain = Terrain::from_seed(42);
         let hydrology = Arc::new(HydrologyGraph::bake(42, &terrain));
         let catalog = Arc::new(SubBiomeCellCatalog::bake(42));
-        AmbientWorker::spawn(42, terrain, hydrology, catalog)
+        AmbientWorker::spawn(42, terrain, hydrology, catalog, None)
     }
 
     /// Poll the worker up to `timeout_ms` waiting for a single result.
