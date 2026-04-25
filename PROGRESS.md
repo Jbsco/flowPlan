@@ -39,6 +39,32 @@ Post-tune calibration: `scenic_overlook` 37 → **12** placements (a viewpoint a
 
 `hot_springs` left at `temp_range_c: (-50, 5)` — climate window is conceptually correct (rare = cold). Calibration shows it stays near zero on canonical seed; revisit if visual-bench at 3.6.3c.4 confirms zero appearances.
 
+### Feature-instance visibility — two-stage debug
+
+User playtest after the .12s wrap-fix landed: "I only see ambient objects, nothing flying around or with debug camera." Two compounding bugs surfaced. Both closed this turn.
+
+#### Bug 1 — `AUTHORED_FEATURE_IDS` whitelist (data layer)
+
+#### Bug 2 — Feature-instance toroidal-wrap (render layer, .12u)
+
+The .12m wrap-fix only patched the AMBIENT-WORKER seed enqueue (`game_app.rs::ambient_worker.queue`). The FEATURE-INSTANCE upload loop directly took `baked.instances_at_cell(cell_id)` — instances baked at LITERAL world coords — and pushed them straight to the GPU. Cells discovered via `cells_within_radius` use toroidal-wrap distance, so a "near" cell can have a literal seed at ~+5 Mm. The camera-relative shader projects those instances at `world - camera ≈ +5_000_000` → off-screen.
+
+Diagnosis ran via the new `report_populated_cells_near_spawn` bench (`feature_instance_visual_bench.rs`): pre-fix, the 13 populated cells in the canonical 22 km spawn radius spanned **literal coords from (97, ~5 Mm) up to (~5 Mm, ~5 Mm)** — i.e. 7 of 13 were on the wrap-side. Of the 6 within unwrapped range, the closest was `olive_grove` at 14.6 km — over the horizon at sea level. So the user genuinely had nothing nearby visible.
+
+**Shipped fix** (`game_app.rs` upload loop ~line 1620): wrap each feature-instance position to be within `±EXTENT/2` of the camera before building `InstanceGpuData`. Symmetric with the ambient-worker wrap (existing pattern, just applied to the second consumer that needs it).
+
+Post-fix diagnostic: closest populated cells to canonical spawn collapse from 14.6 km to **4 km SW** (`coastal_village`, 14 instances). Six populated cells now within 14 km — variety + proximity that match playtester expectations. Bench artifact `target/world-gen-plots/feature-instances/.../spawn-area/spawn-area-+000000000_+000000000.png` shows the populated-cell map at a glance.
+
+**Generalization (PIN candidate)**: any consumer of `cells_within_radius` that maps cell content into camera-relative space MUST wrap its world-position output. Two known consumers (ambient worker, feature-instance upload) both required the patch independently. Future consumers (hub markers, weather overlays, audio sources per `streaming_render_architecture` memory) should inherit the wrap pattern by default.
+
+#### Bug 1 — `AUTHORED_FEATURE_IDS` whitelist removal (visibility regression closed)
+
+User playtest after the deltas + tuning landed surfaced: "I only see the ambient objects currently." Investigation: `crates/world/src/baked_assignments.rs::run_phase_c` carried a `const AUTHORED_FEATURE_IDS: &[&str] = &["dwelling_cluster"]` early-out from the 5c.1 MVP. The list was supposed to be extended in 5c.2 alongside the RON-authored compositions for 49+ features, but the gate stayed at one entry — every other feature's composition was baked nowhere.
+
+**Shipped fix**: drop the whitelist entirely. `compose_instances_for_feature` already early-returns `Vec::new()` for features with `composition: None`, so per-cell library lookup + composition check is the natural filter. Cost ~100 ms across the 3.9 M-cell scan (negligible vs the bake's 30 s total). All 49 authored features (5 airports + 11 dev/resupply + 33 biome-variety + dwelling_cluster) now populate `BakedAssignments`.
+
+**Lesson encoded**: the 5c.2 PROGRESS entries (line 110, 128, 161, 210) all said "Next phase: extend AUTHORED_FEATURE_IDS" / "spawn-near targets the nearest populated dwelling_cluster" but the actual list extension never happened — it slipped between sub-milestones. The whitelist was a foot-gun: hardcoded data that shadowed RON-authoring intent. Replacing it with a derived check (`composition.is_some()`) is the right architectural move; the data drives behavior.
+
 ### Streaming-radius cushion (Task #261, .12k)
 
 Re-framed: in-game terrain is a CIRCLE of `TERRAIN_DISC_RADIUS_M = 20km`, not a square, so the bench's `radius × √2` factor doesn't apply. The real gap is cells whose seed sits just outside `STREAM_RADIUS_M` but whose polygon extends inward into the visible terrain disc. **Bumped `STREAM_RADIUS_M` 20 km → 22 km** (2 km cushion = ~Bridson observed worst-case polygon radius 1750 m + margin). Cell count rises ~21% (~365 → ~440 active), per-frame `cells_within_radius` stays well under 1 ms.

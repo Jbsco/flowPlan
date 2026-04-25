@@ -1619,14 +1619,36 @@ impl Runtime {
                     let mut flat_quads: Vec<flowplan_render::InstanceGpuData> = Vec::new();
                     let mut populated_in_active = 0_usize;
                     let mut ambient_uploaded = 0_usize;
+                    // Toroidal-wrap fix for FEATURE INSTANCES (5c.2.c.12u —
+                    // mirrors the ambient-worker wrap at line ~1560).
+                    // `cells_within_radius` returns wrap-distance neighbors,
+                    // so an active cell can have a literal seed at
+                    // ~WORLD_EXTENT_M while the player is at ~0. Feature
+                    // instances were baked at literal cell-seed coords;
+                    // without wrap they project to +5 Mm in the camera-
+                    // relative shader and render off-screen. Wrap each
+                    // instance's XZ to be within ±EXTENT/2 of the camera.
+                    let half_world = flowplan_core::WORLD_EXTENT_M * 0.5;
+                    let wrap_axis = |v: f32, cam: f32| -> f32 {
+                        let d = v - cam;
+                        if d > half_world {
+                            v - flowplan_core::WORLD_EXTENT_M
+                        } else if d < -half_world {
+                            v + flowplan_core::WORLD_EXTENT_M
+                        } else {
+                            v
+                        }
+                    };
                     for &cell_id in cells.active() {
                         let insts = baked.instances_at_cell(cell_id);
                         if !insts.is_empty() {
                             populated_in_active += 1;
                         }
                         for inst in insts {
+                            let wrapped_x = wrap_axis(inst.position.x, active_cam_pos_xz.x);
+                            let wrapped_z = wrap_axis(inst.position.z, active_cam_pos_xz.y);
                             let gpu = flowplan_render::InstanceGpuData::from_fields(
-                                inst.position.to_array(),
+                                [wrapped_x, inst.position.y, wrapped_z],
                                 inst.rotation_y_rad,
                                 inst.scale.to_array(),
                                 inst.color,

@@ -470,10 +470,14 @@ fn run_phase_c(
     libraries: &SubBiomeLibraries,
     terrain: &Terrain,
 ) -> HashMap<CellId, Vec<FeatureInstance>> {
-    // Feature IDs with authored primitive compositions. Extend in 5c.2.
-    // Match this list against `compose_instances_for_feature`.
-    const AUTHORED_FEATURE_IDS: &[&str] = &["dwelling_cluster"];
-
+    // Phase C generates instances for any feature with an authored RON
+    // `composition`. `compose_instances_for_feature` early-returns
+    // `Vec::new()` when `composition` is `None`, so the
+    // `instances.is_empty()` check below filters composition-less
+    // features (natural / scenery / unauthored) without an explicit
+    // whitelist. Library lookup per-cell is O(1) HashMap; the cost
+    // (~100 ms across the 3.9 M-cell scan) is negligible vs the bake's
+    // ~30 s total.
     let height_at = |x: f32, z: f32| terrain.height(x, z);
 
     (0..n_cells as CellId)
@@ -484,9 +488,6 @@ fn run_phase_c(
                 return None;
             }
             let feature_id = feature_ids[idx as usize].as_str();
-            if !AUTHORED_FEATURE_IDS.contains(&feature_id) {
-                return None;
-            }
             let source = per_cell_source[cell_id as usize];
             let pos = catalog.seeds()[cell_id as usize].position;
 
@@ -497,6 +498,11 @@ fn run_phase_c(
             let feature = libraries
                 .find(source.feature_source_biome(), feature_id)
                 .or_else(|| libraries.oceanic().iter().find(|f| f.id == feature_id))?;
+
+            // Skip features without authored compositions before calling
+            // the composer (saves the per-component RNG setup; equivalent
+            // to the empty-instances check below but cheaper).
+            feature.composition.as_ref()?;
 
             let instances = compose_instances_for_feature(
                 master_seed,
