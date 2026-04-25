@@ -1105,6 +1105,16 @@ Per biome × per ambient entry, one 2D fBm noise field. Specified by seed + wave
 
 Noise primitives from `crate::noise` (already in use for terrain L1). Deterministic per `(master_seed, biome_id, ambient_entry_idx)`.
 
+### Voronoi-polygon clip (PINNED 2026-04-24, replaces disc sampling)
+
+Original ambient generator sampled candidates in a `cell_pos ± 1000 m` **circular disc**. Real Voronoi cells are ~2-3 km in diameter (avg seed spacing 2398 m, max 3492 m observed). The disc covered only the inner ~30% of every cell; the outer 70% had no ambient from any generator (the cell's own generator didn't reach it; neighbor generators produced their own discs that didn't fill the gap either).
+
+**Fix**: each generator samples candidates in a generous **bounding box** (`cell_pos ± AMBIENT_BBOX_HALF_M = 4000 m`) and keeps only candidates whose nearest seed is THIS cell. The catalog's `nearest_cell(x, z)` is O(1) via the spatial-hash 5×5 grid neighborhood. Result: every Voronoi polygon is fully covered, no overlap with neighbors, no gaps.
+
+The density-noise field stays GLOBAL (sampled at each candidate's world position regardless of cell shape). Cell shape decides only WHICH candidates each generator emits; the noise decides spawn probability.
+
+**Streaming-radius geometry**: the game's `cells_within_radius(camera, 20 km)` returns cells in a CIRCLE, but the renderer draws a SQUARE frustum. Cells at frustum corners (up to `radius × √2 ≈ 28 km` from camera) aren't enqueued. Streaming radius needs to be widened by `√2` factor — pinned as next-fix.
+
 ### Density modulation vs gating (PINNED 2026-04-24)
 
 **Rule:** Noise fields controlling scatter density should MODULATE spawn probability + size continuously, not GATE candidates with a hard threshold. This is a project-wide principle — not just ambient.

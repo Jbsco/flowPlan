@@ -39,7 +39,7 @@ pub use hub_catalog::{
 };
 pub use hydrology::{
     BiomeHydrology, CoastlineSegment, HydrologyGraph, LakeBasin, RiverEdge, WaterClass,
-    WaterSurface,
+    WaterSurface, SEA_LEVEL_M,
 };
 pub use magnetic_variation::{magnetic_variation, MAG_VAR_AMPLITUDE_DEG};
 pub use sky::{local_time_of_day, sun_direction};

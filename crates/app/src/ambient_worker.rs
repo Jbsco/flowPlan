@@ -23,7 +23,7 @@ use std::thread::{self, JoinHandle};
 use flowplan_world::ambient::generate_ambient_for_cell;
 use flowplan_world::biome::BiomeClass;
 use flowplan_world::feature_instances::{FeatureAmbientControl, FeatureInstance};
-use flowplan_world::hydrology::{HydrologyGraph, WaterClass};
+use flowplan_world::hydrology::{HydrologyGraph, SEA_LEVEL_M};
 use flowplan_world::sub_biome::SubBiomeLibraries;
 use flowplan_world::terrain::{HeightSampler, Terrain};
 use flowplan_world::voronoi_cells::SubBiomeCellCatalog;
@@ -187,11 +187,15 @@ fn worker_loop(
         }
 
         let height_at = |x: f32, z: f32| HeightSampler::height(terrain, x, z);
-        let hydrology_ref = hydrology.as_ref();
+        // Water filter: simple global SEA_LEVEL_M cut. Continuous,
+        // smooth, no 2.5 km hydrology grid alignment. Lakes/rivers
+        // at positive elevation skip the rejection — trees may
+        // overlap lake surfaces visually, but the water mesh draws
+        // on top and the alternative (block-aligned dead zones from
+        // per-cell hydrology lookup) was visibly worse.
+        let _ = hydrology; // reserved for future per-pixel water-surface field
         let is_water = |x: f32, z: f32| {
-            hydrology_ref
-                .water_surface_at(x, z)
-                .is_some_and(|s| !matches!(s.class, WaterClass::DryChannel))
+            HeightSampler::height(terrain, x, z) < SEA_LEVEL_M
         };
         let catalog_ref = catalog.as_ref();
         let target_cell = job.cell_id;

@@ -43,7 +43,7 @@ use flowplan_world::baked_assignments::BakedAssignments;
 use flowplan_world::biome::{biome_at, BiomeClass};
 use flowplan_world::feature_instances::AmbientEntry;
 use flowplan_world::hub_catalog::HubCatalog;
-use flowplan_world::hydrology::{HydrologyGraph, WaterClass};
+use flowplan_world::hydrology::{HydrologyGraph, SEA_LEVEL_M};
 use flowplan_world::sub_biome::SubBiomeLibraries;
 use flowplan_world::terrain::{HeightSampler, Terrain};
 use flowplan_world::voronoi_cells::SubBiomeCellCatalog;
@@ -191,10 +191,16 @@ fn render_spawn_weight(libs: &SubBiomeLibraries, biome: BiomeClass) {
     write_png(&format!("spawn-weight-{biome:?}"), &img);
 }
 
-/// Background showing biome class (HSV-ish color per biome) +
-/// hydrology water (dark blue overlay) for the player crop. Used
-/// as the underlay for the placement-dot artifact.
-fn render_underlay(hydrology: &HydrologyGraph) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+/// Background showing biome class + actual-underwater hydrology
+/// overlay for the player crop. "Actually underwater" = terrain
+/// height below water-surface elevation, matching the generator's
+/// new water filter. Cells classified as water by hydrology but with
+/// terrain ABOVE sea level (visible green coastal flats) render as
+/// land and ARE valid ambient placement targets.
+fn render_underlay(
+    terrain: &Terrain,
+    _hydrology: &HydrologyGraph,
+) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     let mut img = ImageBuffer::new(RESOLUTION, RESOLUTION);
     for py in 0..RESOLUTION {
         for px in 0..RESOLUTION {
@@ -206,10 +212,8 @@ fn render_underlay(hydrology: &HydrologyGraph) -> ImageBuffer<Rgb<u8>, Vec<u8>> 
                 BiomeClass::RockyAlpine => [150, 150, 160],
                 BiomeClass::MediterraneanArchipelago => [180, 200, 140],
             };
-            let water = hydrology
-                .water_surface_at(x, z)
-                .is_some_and(|s| !matches!(s.class, WaterClass::DryChannel));
-            if water {
+            let truly_underwater = HeightSampler::height(terrain, x, z) < SEA_LEVEL_M;
+            if truly_underwater {
                 img.put_pixel(px, py, Rgb([30, 60, 120]));
             } else {
                 img.put_pixel(px, py, Rgb(bg));
@@ -227,7 +231,7 @@ fn render_placements(
     terrain: &Terrain,
     hydrology: &HydrologyGraph,
 ) {
-    let mut img = render_underlay(hydrology);
+    let mut img = render_underlay(terrain, hydrology);
 
     // Sample cells on a coarse grid; the catalog isn't easily
     // accessible from the test crate, so we synthesize cell-center
@@ -240,11 +244,7 @@ fn render_placements(
     let step_i = step_m as i32;
 
     let height_at = |x: f32, z: f32| HeightSampler::height(terrain, x, z);
-    let is_water = |x: f32, z: f32| {
-        hydrology
-            .water_surface_at(x, z)
-            .is_some_and(|s| !matches!(s.class, WaterClass::DryChannel))
-    };
+    let is_water = |x: f32, z: f32| HeightSampler::height(terrain, x, z) < SEA_LEVEL_M;
 
     let mut per_biome: std::collections::BTreeMap<String, (u64, u64)> =
         std::collections::BTreeMap::new();
@@ -405,14 +405,13 @@ fn ambient_visual_bench_real_bake() {
     }
 
     let height_at = |x: f32, z: f32| HeightSampler::height(&terrain, x, z);
-    let is_water = |x: f32, z: f32| {
-        hydrology
-            .water_surface_at(x, z)
-            .is_some_and(|s| !matches!(s.class, WaterClass::DryChannel))
-    };
+    let is_water = |x: f32, z: f32| HeightSampler::height(&terrain, x, z) < SEA_LEVEL_M;
 
     // Render at the wider STREAMING_EXTENT_M crop so the full set of
-    // cells visible from spawn is captured.
+    // cells visible from spawn is captured. Water = "truly underwater"
+    // (terrain h < water_surface elevation) per the generator's new
+    // water filter — coastal-flat cells above sea level render as
+    // land and ARE valid ambient targets.
     let mut img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(RESOLUTION, RESOLUTION);
     for py in 0..RESOLUTION {
         for px in 0..RESOLUTION {
@@ -424,10 +423,8 @@ fn ambient_visual_bench_real_bake() {
                 BiomeClass::RockyAlpine => [150, 150, 160],
                 BiomeClass::MediterraneanArchipelago => [180, 200, 140],
             };
-            let water = hydrology
-                .water_surface_at(x, z)
-                .is_some_and(|s| !matches!(s.class, WaterClass::DryChannel));
-            if water {
+            let truly_underwater = HeightSampler::height(&terrain, x, z) < SEA_LEVEL_M;
+            if truly_underwater {
                 img.put_pixel(px, py, Rgb([30, 60, 120]));
             } else {
                 img.put_pixel(px, py, Rgb(bg));
@@ -591,10 +588,8 @@ fn ambient_visual_bench_real_bake() {
     for py in 0..RESOLUTION {
         for px in 0..RESOLUTION {
             let (x, z) = world_coord_at(STREAMING_EXTENT_M, px, py);
-            let water = hydrology
-                .water_surface_at(x, z)
-                .is_some_and(|s| !matches!(s.class, WaterClass::DryChannel));
-            if water {
+            let truly_underwater = HeightSampler::height(&terrain, x, z) < SEA_LEVEL_M;
+            if truly_underwater {
                 let cur = mosaic.get_pixel(px, py).0;
                 let dark = [
                     (u32::from(cur[0]) * 30 / 100) as u8,
