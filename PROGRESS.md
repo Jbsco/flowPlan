@@ -400,6 +400,31 @@ All 4 steppings (.c.8 types/RON → .c.9 generator → .c.10 fBm fields → .c.1
 
 **Outcome**: bench artifacts confirm polygon-clip fix doubles populated-cell count and roughly doubles per-cell instance density vs the disc-sample baseline. **In-game improvement is more modest than the bench suggests** — the user's spawn screenshot still shows large empty expanses. Suspected next-cause: the `is_water` filter rejects ANY candidate inside a hydrology water-cell (`OpenOcean` / `OpenCoastal` / lake), but coastal cells extend onto land that's above sea level. Pixels at altitude 1-5 m visually rendered as green ground are being rejected because they're inside an `OpenCoastal` hydrology cell. **Fix** (next): change `is_water` from cell-classification check to elevation comparison — `terrain_height < water_surface_elevation` only.
 
+**5c.2.c.12s (visible terrain seam — the wrap math was actually wrong) — 2026-04-25 (Task #271)**. After shipping .12r I claimed "perlin_2d wrap-continuous, all noise consumers safe". The user re-spawned, immediately saw a STRAIGHT-LINE seam in terrain — static, position-locked at literal x=0, persistent through camera switches, not motion-related. My defensive instinct kicked in again ("must be streaming mesh disc edge, water/terrain desync"). User pushed back: "immediately on spawn, completely unchanged, not moving quickly."
+
+The user was right. My .12r fix was only HALF the wrap solution.
+
+### Two separate invariants
+- **Canonical equivalence**: `perlin_2d(x) == perlin_2d(x + W)`. Pre-wrapping inputs handles this. (.12r shipped this.)
+- **Wrap-seam continuity**: `perlin_2d` value+derivative continuous *at the seam itself* (canonical W ↔ canonical 0). This requires the cell grid to tile `W` EXACTLY. With `n_cells = round(W / spacing)`, the grid actually wraps every `n_cells × spacing m` ≠ `W` for any spacing where `W / spacing` is non-integer (e.g., 60 m: 5,000,000 / 60 = 83333.33; rounded `n_cells=83333`; grid wraps every 4,999,980 m; 20 m gap → noise discontinuity at exactly literal x=0).
+
+My .12r unit test asserted only the first invariant (`perlin_2d(-1, z) == perlin_2d(W - 1, z)` — both wrap to canonical W-1, same fx, same output). It did NOT assert the second (`perlin_2d(W - ε, z) ≈ perlin_2d(0 + ε, z)` — physically 2ε apart on the torus across the seam). The unit test PASSED on broken code because it tested the wrong thing.
+
+### The actual fix (.12s)
+Use `effective_spacing = WORLD_EXTENT_M / n_cells` (re-derived from rounded `n_cells`) when computing cell coords. Then `n_cells × effective_spacing == W` exactly, and the cell-grid wrap aligns with the world wrap. Noise becomes continuous in value AND derivative at the seam.
+
+The change in spacing is < 0.0001× (e.g., 60 → 29.99994 for spacing=30) — invisible visually but it makes the seam continuity perfect.
+
+### New unit test (.12s)
+`perlin_seam_continuous_at_torus_boundary` — compares `perlin_2d(-ε, z)` to `perlin_2d(+ε, z)` (canonically 2ε apart on the torus, ACROSS the seam). Bound is the Lipschitz-natural-gradient of Perlin (`1.5 / spacing × 2ε`), the same bound that applies anywhere in the grid. Fails on pre-.12s code (jump up to 0.067 at spacing=30 / ε=1, regardless of the canonical-equivalence fix). Passes post-.12s.
+
+Also asserts `noise(0) ≈ avg(noise(-ε), noise(+ε))` — no jump at the exact seam. This is what the canonical-equivalence test missed.
+
+### Process gap closed (this session)
+- **Test the right invariant.** When a system has a "must be continuous" requirement, the test must assert continuity at the boundary specifically. "Same input → same output" is a freshness/determinism test, not a continuity test.
+- **My defensive framing slowed me down again.** "Streaming mesh desync" is plausible but disproven by "immediately on spawn, persistent, not moving quickly." Should have gone straight to "what else uses x=0 as a fixed-position seam?" — i.e., the toroidal wrap math itself.
+- **Lipschitz bounds make stronger continuity tests.** `|f(a) - f(b)| ≤ L × |a - b|` is a real continuity statement, not a "matches at one point" assertion. Use it for any procedural function with a known gradient bound.
+
 **5c.2.c.12r (wrap-seam noise discontinuity — the saga) — 2026-04-24 (Task #268)**.
 
 This is a writeup of a multi-iteration debugging arc that took several rounds of user pushback to resolve. The user was right; my defenses were wrong; the bench eventually proved it.

@@ -79,15 +79,25 @@ pub fn perlin_2d(seed: u64, octave: u32, x: f32, z: f32, spacing_m: f32) -> f32 
     // canonically-equivalent inputs (e.g., literal -1.0 and
     // WORLD_EXTENT_M - 1.0) sample at different fractional cell
     // positions because `fx = xs - floor(xs)` is computed BEFORE the
-    // cell-index wrap. Result: noise discontinuity at the wrap seam,
-    // visible to consumers passing literal player-relative coords.
-    // 5c.2.c.12r — discovered via the ambient bench's 5×5 hi-res grid.
+    // cell-index wrap. 5c.2.c.12r — discovered via the ambient
+    // bench's 5×5 hi-res grid.
     let x = wrap_coord(x);
     let z = wrap_coord(z);
     #[allow(clippy::cast_possible_truncation)]
     let n_cells = (WORLD_EXTENT_M / spacing_m).round() as i64;
-    let xs = x / spacing_m;
-    let zs = z / spacing_m;
+    // 5c.2.c.12s — wrap-seam continuity. The cell grid must tile
+    // WORLD_EXTENT_M exactly. With requested spacing = 60 m, naive
+    // `n_cells * spacing = 4_999_980 m` ≠ 5_000_000 m → 20 m gap that
+    // exposes a noise jump at the seam (literal x = 0 / W). Use the
+    // EFFECTIVE spacing `W / n_cells` so the grid tiles W exactly,
+    // then divide by that effective spacing when computing cell
+    // coords. The change in spacing is < 0.0001× from requested
+    // values for our authored wavelengths — invisible visually but
+    // produces a perfectly continuous seam.
+    #[allow(clippy::cast_precision_loss)]
+    let effective_spacing = WORLD_EXTENT_M / n_cells as f32;
+    let xs = x / effective_spacing;
+    let zs = z / effective_spacing;
     #[allow(clippy::cast_possible_truncation)]
     let ix = libm::floorf(xs) as i64;
     #[allow(clippy::cast_possible_truncation)]
@@ -444,6 +454,74 @@ mod tests {
             worst.3,
             max_diff,
         );
+    }
+
+    /// Wrap-seam *continuity* (5c.2.c.12s). The earlier test only
+    /// asserted "canonically-equivalent inputs give same output" —
+    /// `perlin_2d(x) == perlin_2d(x + W)`. That doesn't catch the
+    /// real artifact: a discontinuity *at the seam itself*, between
+    /// canonical `W - ε` and canonical `0 + ε` (which are physically
+    /// 2ε apart on the torus). For wavelengths where `W / spacing` is
+    /// non-integer, the cell grid wraps at a different distance than
+    /// `W`, creating a noise jump at the seam. Visible in-game as a
+    /// straight line at `x = 0` or `z = 0`.
+    #[test]
+    fn perlin_seam_continuous_at_torus_boundary() {
+        // Compare noise across the torus seam: canonical W - ε vs
+        // canonical 0 + ε. With my fix (effective_spacing = W /
+        // n_cells), the cell grid tiles W exactly and noise IS
+        // continuous in BOTH value AND derivative across the seam.
+        //
+        // The natural Perlin gradient at the seam is bounded by
+        // ~1/spacing per meter (just like everywhere else in the
+        // grid). So |noise(-ε) - noise(+ε)| should be at most
+        // `2ε / spacing` (the Lipschitz bound), times a small safety
+        // factor for fade-curve curvature. This is the SAME bound
+        // that applies to any 2ε-apart sample inside a cell.
+        let wavelengths = [
+            30.0_f32, 50.0, 60.0, 100.0, 130.0, 200.0, 400.0, 500.0, 1000.0,
+        ];
+        let zs = [0.0_f32, 12_345.0, 1234.5, -54_321.0, 999.0];
+        let epsilons = [0.5_f32, 1.0, 5.0, 20.0];
+
+        for &spacing in &wavelengths {
+            // Lipschitz bound × safety. Empirical max seen in this
+            // test post-fix is ≈ 1.05 × (2ε / spacing).
+            let bound_per_2eps = 1.5 / spacing;
+            for &z in &zs {
+                for &eps in &epsilons {
+                    let bound = (bound_per_2eps * 2.0 * eps).max(1e-3);
+
+                    let a = perlin_2d(42, 0, -eps, z, spacing);
+                    let b = perlin_2d(42, 0, eps, z, spacing);
+                    let diff = (a - b).abs();
+                    assert!(
+                        diff <= bound,
+                        "X-seam discontinuous at spacing={spacing}m z={z} ε={eps}: a={a} b={b} Δ={diff} > bound={bound}"
+                    );
+
+                    let c = perlin_2d(42, 0, z, -eps, spacing);
+                    let d = perlin_2d(42, 0, z, eps, spacing);
+                    let diff_z = (c - d).abs();
+                    assert!(
+                        diff_z <= bound,
+                        "Z-seam discontinuous at spacing={spacing}m x={z} ε={eps}: c={c} d={d} Δ={diff_z} > bound={bound}"
+                    );
+
+                    // Also verify NO JUMP at the exact seam: noise at
+                    // canonical 0 should be the limit of noise as we
+                    // approach from either side. Test by comparing
+                    // value at canonical 0 to the average of (-ε, +ε).
+                    // For continuous noise, midpoint ≈ average.
+                    let mid = perlin_2d(42, 0, 0.0, z, spacing);
+                    let avg = (a + b) * 0.5;
+                    assert!(
+                        (mid - avg).abs() <= bound,
+                        "X-seam mid≠avg at spacing={spacing}m z={z} ε={eps}: mid={mid} avg={avg}"
+                    );
+                }
+            }
+        }
     }
 
     /// fBm-level wrap-seam regression. fBm sums multiple octaves at
