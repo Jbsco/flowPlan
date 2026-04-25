@@ -854,12 +854,25 @@ impl Runtime {
         // in the 5000 km world. For scenario mode, we keep the small fixed mesh
         // because scenarios are bounded test cases that don't need streaming.
         //
-        // Initial center = debug-camera spawn-near pose if set (avoids
-        // a ~1 s async rebuild at frame 0 when teleporting far from
-        // origin); otherwise world origin.
-        let initial_center = initial_debug_camera_pose.map_or(glam::Vec2::ZERO, |(pos, _, _)| {
-            glam::Vec2::new(pos.x, pos.z)
-        });
+        // Initial center order of preference:
+        //   1. debug-camera spawn-near pose if FLOWPLAN_SPAWN_NEAR_INSTANCE
+        //   2. FLOWPLAN_SPAWN_X / FLOWPLAN_SPAWN_Z env vars (free-flight)
+        //   3. world origin
+        // Set this BEFORE streaming-mesh creation so the initial mesh
+        // covers the spawn area (avoids ~1 s async rebuild at frame 0
+        // when teleporting far from origin).
+        let env_spawn_x: f32 = std::env::var("FLOWPLAN_SPAWN_X")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
+        let env_spawn_z: f32 = std::env::var("FLOWPLAN_SPAWN_Z")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
+        let initial_center = match initial_debug_camera_pose {
+            Some((pos, _, _)) => glam::Vec2::new(pos.x, pos.z),
+            None => glam::Vec2::new(env_spawn_x, env_spawn_z),
+        };
         let (terrain_mesh, streaming_terrain) = if scenario.is_none() {
             let st = crate::streaming::StreamingTerrain::new(
                 crate::streaming::TERRAIN_HALF_EXTENT_M,
@@ -949,8 +962,20 @@ impl Runtime {
             sim.vehicle.fuel_gal = s.initial.fuel_gal;
         } else {
             // Normal (free-flight) mode: cruise above terrain.
+            // FLOWPLAN_SPAWN_X / FLOWPLAN_SPAWN_Z env vars override
+            // the default origin spawn — use to drop in at a specific
+            // biome (see `cargo test biome_locator -- --ignored
+            // --nocapture` for representative coords per biome).
+            let spawn_x: f32 = std::env::var("FLOWPLAN_SPAWN_X")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0);
+            let spawn_z: f32 = std::env::var("FLOWPLAN_SPAWN_Z")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0);
             let start_y = terrain.max_height() + vehicle_float_offset + 25.0;
-            sim.vehicle.position = glam::Vec3::new(0.0, start_y, 0.0);
+            sim.vehicle.position = glam::Vec3::new(spawn_x, start_y, spawn_z);
             sim.vehicle.velocity = glam::Vec3::new(0.0, 0.0, -55.0);
             sim.vehicle.controls.throttle = 0.55;
         }
