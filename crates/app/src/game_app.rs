@@ -1522,8 +1522,37 @@ impl Runtime {
                     if !cells.entered().is_empty() {
                         if let Some(worker) = self.ambient_worker.as_ref() {
                             let libs = flowplan_world::sub_biome::SubBiomeLibraries::shared();
+                            // Toroidal-wrap fix (5c.2.c.12m):
+                            // `cells_within_radius` returns cells via
+                            // wrap-distance, so cells near the player
+                            // can have literal seed coords near
+                            // WORLD_EXTENT_M (e.g., 4.99M when player
+                            // is at -7000). The downstream renderer
+                            // works with camera-relative positions —
+                            // an instance at literal world (4.99M, 0)
+                            // with camera at (-7000, 0) projects far
+                            // off-screen. Normalize seed coords to be
+                            // within ±EXTENT/2 of camera before
+                            // generating, so all candidate world
+                            // coords land near the camera.
+                            let half_world = flowplan_core::WORLD_EXTENT_M * 0.5;
                             for &cell_id in cells.entered() {
-                                let seed_pos = catalog.seeds()[cell_id as usize].position;
+                                let raw = catalog.seeds()[cell_id as usize].position;
+                                let mut sx = raw.0;
+                                let mut sz = raw.1;
+                                let dx_raw = sx - active_cam_pos_xz.x;
+                                let dz_raw = sz - active_cam_pos_xz.y;
+                                if dx_raw > half_world {
+                                    sx -= flowplan_core::WORLD_EXTENT_M;
+                                } else if dx_raw < -half_world {
+                                    sx += flowplan_core::WORLD_EXTENT_M;
+                                }
+                                if dz_raw > half_world {
+                                    sz -= flowplan_core::WORLD_EXTENT_M;
+                                } else if dz_raw < -half_world {
+                                    sz += flowplan_core::WORLD_EXTENT_M;
+                                }
+                                let seed_pos = (sx, sz);
                                 let host_biome = flowplan_world::biome::biome_at(
                                     WORLD_SEED,
                                     seed_pos.0,
