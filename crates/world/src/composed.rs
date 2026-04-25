@@ -23,6 +23,8 @@
 //!   integration (2.5b.7 ground contact, render-side height sampling)
 //!   consumes this handle.
 
+use std::sync::Arc;
+
 use crate::feature_delta::{compute_delta_at, HubFoundationMap};
 use crate::hub_catalog::HubCatalog;
 use crate::hydrology::HydrologyGraph;
@@ -130,6 +132,64 @@ impl<'a> WorldRefs<'a> {
             self.hydrology,
             self.sub_biome,
         )
+    }
+}
+
+/// Owned-`Arc` bundle of world-bake state.
+///
+/// Mirrors [`WorldRefs`] but holds owning [`Arc`]s instead of borrows —
+/// suitable for moving into background worker threads (streaming-terrain
+/// rebake, async ambient generation) where lifetimes can't reach.
+///
+/// Cloning the bundle is cheap (Arc bumps only). Construct one per world
+/// load alongside the bake and share clones with anything that needs L3
+/// height composition off-main-thread.
+#[derive(Clone)]
+pub struct WorldRefsArc {
+    pub terrain: Arc<Terrain>,
+    pub hydrology: Arc<HydrologyGraph>,
+    pub sub_biome: Arc<SubBiomeCellCatalog>,
+    pub hubs: Arc<HubCatalog>,
+    pub foundations: Arc<HubFoundationMap>,
+}
+
+impl WorldRefsArc {
+    /// Build the bundle from already-owned `Arc`s. All five must share
+    /// the same `master_seed`; we accept them without re-checking.
+    #[must_use]
+    pub const fn new(
+        terrain: Arc<Terrain>,
+        hydrology: Arc<HydrologyGraph>,
+        sub_biome: Arc<SubBiomeCellCatalog>,
+        hubs: Arc<HubCatalog>,
+        foundations: Arc<HubFoundationMap>,
+    ) -> Self {
+        Self {
+            terrain,
+            hydrology,
+            sub_biome,
+            hubs,
+            foundations,
+        }
+    }
+
+    /// Borrow the bundle as a `WorldRefs<'_>` for query-side use.
+    #[must_use]
+    pub fn as_refs(&self) -> WorldRefs<'_> {
+        WorldRefs::new(
+            &self.terrain,
+            &self.hydrology,
+            &self.sub_biome,
+            &self.hubs,
+            &self.foundations,
+        )
+    }
+
+    /// Convenience: composed L1+L3 height. Equivalent to
+    /// `self.as_refs().height_at(x, z)` — shorter at call sites.
+    #[must_use]
+    pub fn height_at(&self, x: f32, z: f32) -> f32 {
+        self.as_refs().height_at(x, z)
     }
 }
 

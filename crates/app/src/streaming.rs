@@ -18,10 +18,43 @@
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_possible_truncation)]
 
+use std::sync::Arc;
+
 use flowplan_assets::CpuMesh;
+use flowplan_world::composed::WorldRefsArc;
 use flowplan_world::terrain::{HeightSampler, Terrain};
 use flowplan_world::voronoi_cells::{CellId, SubBiomeCellCatalog};
 use glam::Vec2;
+
+/// Source the streaming-terrain mesh samples for vertex height. Two
+/// variants:
+///
+/// - **`Terrain`**: L1 only (continental + biome topography). Cheap —
+///   single fbm chain per vertex, no per-vertex Voronoi-cell lookup.
+///   Used in fast-iteration mode (no `FLOWPLAN_FEATURE_INSTANCES`).
+/// - **`Composed`**: L1 + L3 (feature deltas). Adds ~50-100 ns / vertex
+///   (a `nearest_cell` lookup + delta dispatch) on top of L1, so the
+///   ~1.4 M-vertex disc rebuild grows by ~70-140 ms (~5-10 % of the
+///   pre-existing 1.5-2 s rebuild). Visible cost; required to render
+///   lake-cluster bowls, mesa plateaus, gas-station pads, etc.
+///
+/// Cloning is cheap — both variants are `Arc`-backed.
+#[derive(Clone)]
+pub enum HeightSource {
+    /// L1-only sampler (no L3 deltas).
+    Terrain(Arc<Terrain>),
+    /// L1+L3 composed sampler (feature deltas applied).
+    Composed(WorldRefsArc),
+}
+
+impl HeightSource {
+    fn height(&self, x: f32, z: f32) -> f32 {
+        match self {
+            Self::Terrain(t) => t.height(x, z),
+            Self::Composed(refs) => refs.height_at(x, z),
+        }
+    }
+}
 
 /// Streaming terrain disc radius (m). Terrain mesh is a circular disc
 /// of this radius, rendered in a rectangular bounding-box grid with
@@ -177,6 +210,10 @@ pub struct StreamingTerrain {
     center: Vec2,
     half_extent: f32,
     resolution: u32,
+    /// Sampler used for vertex height. `HeightSource::Terrain` for the
+    /// fast L1-only path; `HeightSource::Composed` to render L3 feature
+    /// deltas. Cloned per worker spawn — clones are `Arc` bumps.
+    height_source: HeightSource,
     /// True iff `maybe_rebuild` finalized a worker rebuild on the most
     /// recent call (i.e. mesh was swapped). Caller checks this to
     /// decide whether to re-upload to GPU.
@@ -199,20 +236,28 @@ impl StreamingTerrain {
     /// Initial bake — synchronous on the main thread so the first
     /// frame has a mesh to render. Builds a disc-shaped mesh of
     /// radius = `half_extent` (3.6.3c.5b-followup: circular load zone).
+    ///
+    /// `height_source` selects L1 vs L1+L3. See [`HeightSource`].
     #[must_use]
-    pub fn new(half_extent: f32, resolution: u32, initial_center: Vec2, terrain: &Terrain) -> Self {
+    pub fn new(
+        half_extent: f32,
+        resolution: u32,
+        initial_center: Vec2,
+        height_source: HeightSource,
+    ) -> Self {
         let cpu_mesh = CpuMesh::terrain_patch_disc_at(
             resolution,
             half_extent,
             half_extent, // disc_radius == half_extent (circle inscribed in square)
             (initial_center.x, initial_center.y),
-            |x, z| terrain.height(x, z),
+            |x, z| height_source.height(x, z),
         );
         Self {
             cpu_mesh,
             center: initial_center,
             half_extent,
             resolution,
+            height_source,
             just_rebuilt: true,
             last_rebuild_cpu_ms: 0.0,
             pending: None,
@@ -228,12 +273,12 @@ impl StreamingTerrain {
     ///
     /// **Kick-off phase**: if no worker is in flight AND camera has
     /// moved past [`REBUILD_THRESHOLD_M`] from current center, spawn
-    /// a new worker with a cloned `Terrain`.
+    /// a new worker with a cloned `HeightSource` (Arc bump).
     ///
     /// Main thread work per frame is effectively free — a channel probe
     /// plus a spawn decision. The 1 s-ish mesh-build cost lives on the
     /// worker thread, invisible to the render loop.
-    pub fn maybe_rebuild(&mut self, camera_pos_xz: Vec2, terrain: &Terrain) {
+    pub fn maybe_rebuild(&mut self, camera_pos_xz: Vec2) {
         self.just_rebuilt = false;
 
         // Large-jump path — if the camera has moved more than the mesh
@@ -244,7 +289,7 @@ impl StreamingTerrain {
         // only happen on discrete user actions (debug ↔ sim toggle,
         // spawn-near at init, future teleport).
         if camera_pos_xz.distance(self.center) > LARGE_JUMP_THRESHOLD_M {
-            self.sync_rebuild(camera_pos_xz, terrain);
+            self.sync_rebuild(camera_pos_xz);
             return;
         }
 
@@ -278,7 +323,7 @@ impl StreamingTerrain {
         // Phase 2 — kick off a new rebuild if needed.
         if self.pending.is_none() && camera_pos_xz.distance(self.center) > REBUILD_THRESHOLD_M {
             let (tx, rx) = std::sync::mpsc::channel();
-            let terrain_clone = terrain.clone();
+            let height_source = self.height_source.clone();
             let resolution = self.resolution;
             let half_extent = self.half_extent;
             let target_center = camera_pos_xz;
@@ -291,7 +336,7 @@ impl StreamingTerrain {
                         half_extent,
                         half_extent, // disc_radius
                         (target_center.x, target_center.y),
-                        |x, z| terrain_clone.height(x, z),
+                        |x, z| height_source.height(x, z),
                     );
                     let cpu_ms = t0.elapsed().as_secs_f32() * 1000.0;
                     // Receiver dropped ⇒ main thread gave up on us
@@ -334,7 +379,7 @@ impl StreamingTerrain {
     ///
     /// Invoked by [`Self::maybe_rebuild`] when the camera jumps further
     /// than [`LARGE_JUMP_THRESHOLD_M`] in one frame.
-    fn sync_rebuild(&mut self, camera_pos_xz: Vec2, terrain: &Terrain) {
+    fn sync_rebuild(&mut self, camera_pos_xz: Vec2) {
         // Drop in-flight worker; its result targets the now-obsolete
         // center and would only be written back as a stale mesh.
         self.pending = None;
@@ -346,7 +391,7 @@ impl StreamingTerrain {
             self.half_extent,
             self.half_extent,
             (camera_pos_xz.x, camera_pos_xz.y),
-            |x, z| terrain.height(x, z),
+            |x, z| self.height_source.height(x, z),
         );
         self.center = camera_pos_xz;
         self.last_rebuild_cpu_ms = t0.elapsed().as_secs_f32() * 1000.0;
@@ -640,12 +685,14 @@ mod tests {
         // Async rebuild: `maybe_rebuild` kicks off a worker; we poll
         // subsequent frames until finalize.
         let terrain = Terrain::from_seed(TEST_SEED);
-        let mut st = StreamingTerrain::new(SMALL_EXTENT, SMALL_CELLS, glam::Vec2::ZERO, &terrain);
+        let height_source = HeightSource::Terrain(Arc::new(terrain));
+        let mut st =
+            StreamingTerrain::new(SMALL_EXTENT, SMALL_CELLS, glam::Vec2::ZERO, height_source);
         assert!(st.just_rebuilt(), "initial (sync) build is a rebuild");
         assert_eq!(st.center(), glam::Vec2::ZERO);
 
         // Movement below threshold should NOT kick off a rebuild.
-        st.maybe_rebuild(glam::Vec2::new(REBUILD_THRESHOLD_M * 0.5, 0.0), &terrain);
+        st.maybe_rebuild(glam::Vec2::new(REBUILD_THRESHOLD_M * 0.5, 0.0));
         assert!(!st.just_rebuilt());
         assert!(!st.rebuild_in_flight());
         assert_eq!(st.center(), glam::Vec2::ZERO, "center unchanged");
@@ -653,7 +700,7 @@ mod tests {
         // Movement past threshold kicks off a worker. Poll until
         // finalize swaps the mesh in.
         let new_pos = glam::Vec2::new(REBUILD_THRESHOLD_M * 1.5, 0.0);
-        st.maybe_rebuild(new_pos, &terrain);
+        st.maybe_rebuild(new_pos);
         assert!(
             st.rebuild_in_flight() || st.just_rebuilt(),
             "expected worker in flight or immediate finalize"
@@ -661,7 +708,7 @@ mod tests {
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            st.maybe_rebuild(new_pos, &terrain);
+            st.maybe_rebuild(new_pos);
             if st.just_rebuilt() {
                 break;
             }
@@ -682,12 +729,14 @@ mod tests {
         // worker is left in flight. Prevents empty-scene artifact
         // after debug ↔ sim toggle across hundreds of km.
         let terrain = Terrain::from_seed(TEST_SEED);
-        let mut st = StreamingTerrain::new(SMALL_EXTENT, SMALL_CELLS, glam::Vec2::ZERO, &terrain);
+        let height_source = HeightSource::Terrain(Arc::new(terrain));
+        let mut st =
+            StreamingTerrain::new(SMALL_EXTENT, SMALL_CELLS, glam::Vec2::ZERO, height_source);
         assert!(st.just_rebuilt(), "initial bake");
 
         // First, start an async rebuild at a short distance (so there's
         // something to drop when the big jump arrives).
-        st.maybe_rebuild(glam::Vec2::new(REBUILD_THRESHOLD_M * 1.5, 0.0), &terrain);
+        st.maybe_rebuild(glam::Vec2::new(REBUILD_THRESHOLD_M * 1.5, 0.0));
         assert!(
             st.rebuild_in_flight() || st.just_rebuilt(),
             "async worker spawned (or immediate finalize)"
@@ -697,7 +746,7 @@ mod tests {
         // synchronous: just_rebuilt true, no pending worker, center
         // matches the new position, all on a single call.
         let jump_pos = glam::Vec2::new(LARGE_JUMP_THRESHOLD_M * 2.0, 0.0);
-        st.maybe_rebuild(jump_pos, &terrain);
+        st.maybe_rebuild(jump_pos);
         assert!(st.just_rebuilt(), "sync rebuild completed");
         assert!(
             !st.rebuild_in_flight(),
@@ -711,8 +760,13 @@ mod tests {
         // Same camera position → same mesh (byte-identical vertex data).
         let terrain = Terrain::from_seed(TEST_SEED);
         let center = glam::Vec2::new(12_345.0, -6_789.0);
-        let a = StreamingTerrain::new(SMALL_EXTENT, SMALL_CELLS, center, &terrain);
-        let b = StreamingTerrain::new(SMALL_EXTENT, SMALL_CELLS, center, &terrain);
+        // Share one Arc<Terrain> across both StreamingTerrain instances —
+        // the determinism test is about the same input → same output.
+        let arc_terrain = Arc::new(terrain);
+        let hs_a = HeightSource::Terrain(Arc::clone(&arc_terrain));
+        let hs_b = HeightSource::Terrain(Arc::clone(&arc_terrain));
+        let a = StreamingTerrain::new(SMALL_EXTENT, SMALL_CELLS, center, hs_a);
+        let b = StreamingTerrain::new(SMALL_EXTENT, SMALL_CELLS, center, hs_b);
         assert_eq!(a.cpu_mesh().vertices.len(), b.cpu_mesh().vertices.len());
         let eps = 1e-6_f32;
         for (va, vb) in a
@@ -760,7 +814,12 @@ mod tests {
         // samples wrap toroidally per flowplan_core::wrap_coord.
         let terrain = Terrain::from_seed(TEST_SEED);
         let edge = glam::Vec2::new(2_400_000.0, -2_400_000.0); // near corner
-        let st = StreamingTerrain::new(SMALL_EXTENT, SMALL_CELLS, edge, &terrain);
+        let st = StreamingTerrain::new(
+            SMALL_EXTENT,
+            SMALL_CELLS,
+            edge,
+            HeightSource::Terrain(Arc::new(terrain)),
+        );
         assert!(st.just_rebuilt());
         // All vertices finite (no NaN/inf from wrapped sampling).
         for v in &st.cpu_mesh().vertices {

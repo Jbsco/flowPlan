@@ -258,6 +258,13 @@ struct Runtime {
     /// debug HUD). `None` outside `FLOWPLAN_FEATURE_INSTANCES` mode.
     #[allow(dead_code)] // retained for future main-thread water queries
     hydrology: Option<std::sync::Arc<flowplan_world::HydrologyGraph>>,
+    /// L1+L3 composed-height bundle. `Some` when `FLOWPLAN_FEATURE_INSTANCES=1`
+    /// and the bakes (hydrology + hub catalog + foundations) succeeded;
+    /// the streaming-terrain mesh evaluates feature deltas via this
+    /// bundle so lake bowls / mesa plateaus / gas-station pads render.
+    /// `None` in fast-iteration mode — terrain is L1-only.
+    #[allow(dead_code)] // owned through StreamingTerrain.height_source clone
+    world_refs: Option<flowplan_world::composed::WorldRefsArc>,
     /// Background ambient-generation worker (Phase 3.6.3c.5c.2.c.12d).
     /// Spawned alongside `baked_assignments` + `hydrology`. Main thread
     /// enqueues `AmbientJob` on cell-enter with priority =
@@ -702,7 +709,7 @@ impl Runtime {
         let instances_enabled = std::env::var("FLOWPLAN_FEATURE_INSTANCES")
             .map(|v| v == "1")
             .unwrap_or(false);
-        let (baked_assignments, hydrology) = match (
+        let (baked_assignments, hydrology, world_refs) = match (
             scenario.is_none(),
             instances_enabled,
             sub_biome_catalog.as_ref(),
@@ -724,6 +731,8 @@ impl Runtime {
                     "flowplan: hub catalog baked in {:.1} s",
                     t1.elapsed().as_secs_f32()
                 );
+                let foundations =
+                    flowplan_world::feature_delta::HubFoundationMap::build(&hub_catalog, catalog);
                 let t2 = std::time::Instant::now();
                 let baked = flowplan_world::baked_assignments::BakedAssignments::bake(
                     catalog,
@@ -773,9 +782,17 @@ impl Runtime {
                         d / 1000.0
                     );
                 }
-                (Some(baked), Some(std::sync::Arc::new(hydrology)))
+                let hydrology_arc = std::sync::Arc::new(hydrology);
+                let world_refs_arc = flowplan_world::composed::WorldRefsArc::new(
+                    std::sync::Arc::new(terrain.clone()),
+                    std::sync::Arc::clone(&hydrology_arc),
+                    std::sync::Arc::clone(catalog),
+                    std::sync::Arc::new(hub_catalog),
+                    std::sync::Arc::new(foundations),
+                );
+                (Some(baked), Some(hydrology_arc), Some(world_refs_arc))
             },
-            _ => (None, None),
+            _ => (None, None, None),
         };
 
         // Spawn background ambient worker alongside the bake (5c.2.c.12d).
@@ -874,11 +891,17 @@ impl Runtime {
             None => glam::Vec2::new(env_spawn_x, env_spawn_z),
         };
         let (terrain_mesh, streaming_terrain) = if scenario.is_none() {
+            // L3-aware sampler when WorldRefs is built (FEATURE_INSTANCES=1
+            // with successful bake); otherwise L1-only fast path.
+            let height_source = world_refs.as_ref().map_or_else(
+                || crate::streaming::HeightSource::Terrain(std::sync::Arc::new(terrain.clone())),
+                |refs| crate::streaming::HeightSource::Composed(refs.clone()),
+            );
             let st = crate::streaming::StreamingTerrain::new(
                 crate::streaming::TERRAIN_HALF_EXTENT_M,
                 crate::streaming::TERRAIN_CELLS,
                 initial_center,
-                &terrain,
+                height_source,
             );
             (st.cpu_mesh().clone(), Some(st))
         } else {
@@ -1005,6 +1028,7 @@ impl Runtime {
             sub_biome_catalog,
             baked_assignments,
             hydrology,
+            world_refs,
             ambient_worker,
             ambient_cache: std::collections::HashMap::new(),
             last_terrain_rebuild_cpu_ms: 0.0,
@@ -1458,7 +1482,7 @@ impl Runtime {
             // Main-thread cost is now just channel probe + possible
             // worker spawn — sub-millisecond. The worker measures its
             // own CPU cost + reports via `last_rebuild_cpu_ms`.
-            st.maybe_rebuild(active_cam_pos_xz, &self.terrain);
+            st.maybe_rebuild(active_cam_pos_xz);
             if st.just_rebuilt() {
                 let t_gpu = Instant::now();
                 self.renderer

@@ -39,6 +39,21 @@ Post-tune calibration: `scenic_overlook` 37 → **12** placements (a viewpoint a
 
 `hot_springs` left at `temp_range_c: (-50, 5)` — climate window is conceptually correct (rare = cold). Calibration shows it stays near zero on canonical seed; revisit if visual-bench at 3.6.3c.4 confirms zero appearances.
 
+### L3 deltas wired into streaming terrain mesh (Task #273)
+
+Until this turn, the streaming terrain mesh sampled `terrain.height(x, z)` only — L1 (continental + biome topography) without the L3 feature deltas. So even though `compute_delta_at` and `WorldRefs::height_at` had been shipped in 3.6.3a, **none of the natural-feature deltas were ever visible in-game** (lake_cluster bowls, mesa_top plateaus, cirque scoops, cliff_coast drops). The 3.6.3c.2 dev/resupply flatten deltas inherited the same gap.
+
+**Shipped fix**:
+
+1. **`WorldRefsArc`** in `crates/world/src/composed.rs` — `Arc`-wrapped bundle of bake state (terrain, hydrology, sub-biome catalog, hub catalog, foundations) suitable for moving across thread boundaries. Mirrors `WorldRefs<'_>` but owning. Cloning is cheap (Arc bumps).
+2. **`HeightSource` enum** in `crates/app/src/streaming.rs` — `Terrain(Arc<Terrain>)` for fast L1-only iteration, `Composed(WorldRefsArc)` for L1+L3 render. `StreamingTerrain` owns one and clones into the worker thread per rebake.
+3. **Game-app wiring** — `WorldRefsArc` constructed alongside the existing `BakedAssignments` bake (gated by `FLOWPLAN_FEATURE_INSTANCES=1`). `StreamingTerrain::new` chooses the source: `world_refs.is_some()` ⇒ L3 path, else L1 fast path. Same flag, consistent ergonomics.
+4. **Test refactor** — 3 streaming tests updated to construct `HeightSource::Terrain(Arc::new(terrain))`. Cost: ~5 LOC. 9/9 streaming tests pass.
+
+**Performance** (estimated, not yet measured in production): L3 evaluation per vertex adds ~50-100 ns (`nearest_cell` lookup + delta dispatch) on top of L1's fbm. At 1.4 M vertices, the rebuild grows ~70-140 ms (~5-10 % of the existing 1.5-2 s rebuild). Visible cost; required for visibility.
+
+**What now renders**: every authored L3 delta — the 10 natural-signature deltas from 3.6.3a (`lake_cluster`, `alpine_tarn`, `cirque`, `mesa_top`, `book_cliffs`, `dune_field`, `bush_strip_clearing`, `sandy_beach`, `cliff_coast`, `protected_cove`) plus the 11 dev/resupply flattens from 3.6.3c.2 plus the tier-adaptive hub-foundation deltas. Plus all the additional natural deltas that landed in 5c.2 (slot_canyon, hoodoo_field, talus_slope, etc., 30+ total via the `natural_delta` dispatch).
+
 ### Feature-instance visibility — two-stage debug
 
 User playtest after the .12s wrap-fix landed: "I only see ambient objects, nothing flying around or with debug camera." Two compounding bugs surfaced. Both closed this turn.
