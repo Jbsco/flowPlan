@@ -70,16 +70,26 @@ const PLAYER_EXTENT_M: f32 = 10_000.0;
 const STREAMING_EXTENT_M: f32 = 30_000.0;
 const RESOLUTION: u32 = 1024;
 
-/// Multi-zoom levels for the real-bake placement artifacts. Lets us
-/// see: (a) instance-level dispersion at 1 km, (b) per-cell coverage
-/// at 3 km, (c) streaming-active-set behavior at 10 km, (d) full
-/// streaming radius at 30 km. Same artifact shape per zoom so we can
-/// flip between them and spot scale-specific issues.
-const ZOOM_LEVELS_M: &[(f32, &str)] = &[
+/// Per-instance multi-zoom (small scale): each ambient instance
+/// renders as a 1px dot. Feasible up to ~30 km because per-cell
+/// generation cost is bounded.
+const INSTANCE_ZOOM_LEVELS_M: &[(f32, &str)] = &[
     (1_000.0, "01km-near"),
     (3_000.0, "03km-close"),
     (10_000.0, "10km-mid"),
     (30_000.0, "30km-wide"),
+];
+
+/// Wide-scale per-cell-status zooms: each pixel asks `nearest_cell`
+/// then colors by populated / zero / water. Skip per-instance dots
+/// (would be billions at this scale). Mirrors the existing terrain /
+/// hub / hydrology bench crop set (player / quadrant / full /
+/// continental).
+const WIDE_ZOOM_LEVELS_M: &[(f32, &str)] = &[
+    (100_000.0, "100km"),
+    (250_000.0, "250km-quadrant"),
+    (500_000.0, "500km-full"),
+    (2_000_000.0, "2000km-continental"),
 ];
 
 /// Read crop-center override from env vars `FLOWPLAN_BENCH_CENTER_X` and
@@ -432,11 +442,11 @@ fn ambient_visual_bench_real_bake() {
     let height_at = |x: f32, z: f32| HeightSampler::height(&terrain, x, z);
     let is_water = |x: f32, z: f32| HeightSampler::height(&terrain, x, z) < SEA_LEVEL_M;
 
-    // Multi-zoom artifact emission. For each zoom level, render the
-    // placement + mosaic centered on the configured `crop_center`.
+    // Multi-zoom artifact emission.
     let (cx, cz) = crop_center();
     eprintln!("crop center: ({cx:.0}, {cz:.0})");
-    for &(extent_m, label) in ZOOM_LEVELS_M {
+    eprintln!("=== per-instance zooms (small scale) ===");
+    for &(extent_m, label) in INSTANCE_ZOOM_LEVELS_M {
         eprintln!("--- zoom level: {label} ({extent_m:.0} m extent) ---");
         render_zoom_level(
             label,
@@ -450,8 +460,387 @@ fn ambient_visual_bench_real_bake() {
             &height_at,
             &is_water,
         );
+        // Coverage-diff: per-pixel "would-emit?" vs is_water, colored
+        // to surface ANY misalignment between the dot layer and the
+        // water layer (orange = instances on water, magenta = land
+        // without coverage). Replaces the user's earlier "I think
+        // there's a shift" observation with a direct visual answer.
+        render_coverage_diff(
+            label,
+            (cx, cz),
+            extent_m,
+            &terrain,
+            &catalog,
+            &baked,
+            libs,
+            &is_water,
+        );
     }
+    eprintln!("=== per-cell-status zooms (wide scale) ===");
+    for &(extent_m, label) in WIDE_ZOOM_LEVELS_M {
+        eprintln!("--- zoom level: {label} ({extent_m:.0} m extent) ---");
+        render_wide_status(
+            label,
+            (cx, cz),
+            extent_m,
+            &terrain,
+            &catalog,
+            &baked,
+            libs,
+            &is_water,
+        );
+    }
+}
 
+/// Coverage-diff bench (5c.2.c.12o). Per pixel: compute "would the
+/// generator emit ANY ambient instance at this world coord?" by
+/// re-evaluating the same filter chain (water + altitude + slope +
+/// per-entry constraints) the generator uses, and compare against
+/// the underlay's water classification. ALSO overlays the actual
+/// generated dots (yellow) so the user can see directly where each
+/// instance lands relative to the would-emit map. If any dot lands
+/// on blue (true water) or magenta (uncovered land), the generator
+/// is emitting somewhere the static filter says it shouldn't.
+///
+/// Color key:
+/// - GREEN: would-emit AND not-water (correct land coverage)
+/// - BLUE: !would-emit AND water (correct water exclusion)
+/// - **ORANGE**: would-emit AND water (BUG — generator would emit on water)
+/// - **MAGENTA**: !would-emit AND not-water (uncovered land — bug or
+///   by-design coverage gap because no entry's altitude/slope range
+///   accepts this pixel)
+///
+/// Probabilistic noise + bake-dependent feature-overlap / clearing are
+/// SKIPPED — we want the static "could ANY entry emit here under any
+/// noise" answer.
+#[allow(clippy::too_many_arguments)]
+fn render_coverage_diff(
+    label: &str,
+    center: (f32, f32),
+    extent_m: f32,
+    terrain: &Terrain,
+    catalog: &SubBiomeCellCatalog,
+    baked: &BakedAssignments,
+    libs: &SubBiomeLibraries,
+    is_water: &dyn Fn(f32, f32) -> bool,
+) {
+    // Pass 1: per-pixel coverage-diff classification.
+    let mut img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(RESOLUTION, RESOLUTION);
+    let mut counts = [0_u64; 4]; // green, blue, orange, magenta
+    for py in 0..RESOLUTION {
+        for px in 0..RESOLUTION {
+            let (x, z) = pixel_to_world_at(center, extent_m, px, py);
+            let water = is_water(x, z);
+            let would_emit = !water && pixel_could_emit(x, z, terrain, catalog, baked, libs);
+            let color = match (would_emit, water) {
+                (true, false) => {
+                    counts[0] += 1;
+                    [60, 180, 80]
+                },
+                (false, true) => {
+                    counts[1] += 1;
+                    [30, 60, 120]
+                },
+                (true, true) => {
+                    counts[2] += 1;
+                    [255, 140, 0]
+                },
+                (false, false) => {
+                    counts[3] += 1;
+                    [220, 0, 200]
+                },
+            };
+            img.put_pixel(px, py, Rgb(color));
+        }
+    }
+    let total = u64::from(RESOLUTION) * u64::from(RESOLUTION);
+    eprintln!(
+        "  coverage-diff {label}: green(land+covered)={} ({:.1}%), blue(water)={} ({:.1}%), ORANGE(water+covered=BUG)={} ({:.1}%), MAGENTA(land+uncovered)={} ({:.1}%)",
+        counts[0],
+        counts[0] as f64 / total as f64 * 100.0,
+        counts[1],
+        counts[1] as f64 / total as f64 * 100.0,
+        counts[2],
+        counts[2] as f64 / total as f64 * 100.0,
+        counts[3],
+        counts[3] as f64 / total as f64 * 100.0,
+    );
+    write_png(&format!("coverage-{label}"), &img);
+
+    // Pass 2: same crop, with actual generator-emitted dots OVERLAID
+    // as bright yellow. If any yellow dot falls on blue (water) or
+    // magenta (uncovered), the generator is emitting somewhere the
+    // static filter says it shouldn't — that's the user's "shift"
+    // observation made literal.
+    let probe_radius = extent_m * core::f32::consts::SQRT_2 / 2.0 + 4_000.0;
+    let cells_in_crop = catalog.cells_within_radius(center.0, center.1, probe_radius);
+    let height_at = |x: f32, z: f32| HeightSampler::height(terrain, x, z);
+    let mut dot_total = 0_u64;
+    let mut dot_on_green = 0_u64;
+    let mut dot_on_blue = 0_u64;
+    let mut dot_on_orange = 0_u64;
+    let mut dot_on_magenta = 0_u64;
+    let mut real_water_bug = 0_u64;
+    let mut dot_on_blue_examples: Vec<(f32, f32, f32, u32)> = Vec::new(); // (x, z, terrain_h, cell_id)
+    for &cell_id in &cells_in_crop {
+        let seed_pos = catalog.seeds()[cell_id as usize].position;
+        let host_biome = biome_at(GAME_SEED, seed_pos.0, seed_pos.1);
+        let entries = libs.ambient_for_biome(host_biome);
+        if entries.is_empty() {
+            continue;
+        }
+        let assignment = baked.feature_at_cell(cell_id);
+        let feat_insts = baked.instances_at_cell(cell_id);
+        let feature = libs
+            .find(
+                assignment.source.feature_source_biome(),
+                &assignment.feature_id,
+            )
+            .or_else(|| libs.oceanic().iter().find(|f| f.id == assignment.feature_id));
+        let ambient_control = feature.and_then(|f| f.ambient_control);
+        let target = cell_id;
+        let is_in_cell = |x: f32, z: f32| catalog.nearest_cell(x, z) == target;
+        let insts = generate_ambient_for_cell(
+            GAME_SEED,
+            cell_id,
+            seed_pos,
+            host_biome,
+            entries,
+            feat_insts,
+            ambient_control,
+            &height_at,
+            is_water,
+            &is_in_cell,
+        );
+        for inst in &insts {
+            if let Some((px, py)) =
+                world_to_pixel_at(center, extent_m, inst.position.x, inst.position.z)
+            {
+                dot_total += 1;
+                let bg = img.get_pixel(px, py).0;
+                let on_blue = bg == [30, 60, 120];
+                if bg == [60, 180, 80] {
+                    dot_on_green += 1;
+                } else if on_blue {
+                    dot_on_blue += 1;
+                    if dot_on_blue_examples.len() < 20 {
+                        let h = HeightSampler::height(terrain, inst.position.x, inst.position.z);
+                        dot_on_blue_examples.push((
+                            inst.position.x,
+                            inst.position.z,
+                            h,
+                            cell_id,
+                        ));
+                    }
+                } else if bg == [255, 140, 0] {
+                    dot_on_orange += 1;
+                } else if bg == [220, 0, 200] {
+                    dot_on_magenta += 1;
+                }
+                let direct_water = is_water(inst.position.x, inst.position.z);
+                if direct_water {
+                    real_water_bug += 1;
+                }
+                img.put_pixel(px, py, Rgb([255, 230, 0]));
+            }
+        }
+    }
+    eprintln!(
+        "  dot-overlay {label}: total={} on_green={} ({:.1}%) on_blue={} ({:.1}%) on_orange={} on_magenta={} REAL_water_bug={} ({:.3}%)",
+        dot_total,
+        dot_on_green,
+        if dot_total > 0 { dot_on_green as f64 / dot_total as f64 * 100.0 } else { 0.0 },
+        dot_on_blue,
+        if dot_total > 0 { dot_on_blue as f64 / dot_total as f64 * 100.0 } else { 0.0 },
+        dot_on_orange,
+        dot_on_magenta,
+        real_water_bug,
+        if dot_total > 0 { real_water_bug as f64 / dot_total as f64 * 100.0 } else { 0.0 },
+    );
+    if !dot_on_blue_examples.is_empty() {
+        eprintln!(
+            "  dot-on-blue examples (x, z, terrain_h, cell_id), pixel-center is water but dot's exact terrain_h >= SEA_LEVEL_M:"
+        );
+        for (x, z, h, cid) in dot_on_blue_examples.iter().take(10) {
+            // Sample pixel-center neighbors to see how far the
+            // nearest water-pixel is.
+            let pixel_size_m = extent_m / RESOLUTION as f32;
+            let mut nearest_water_m = f32::INFINITY;
+            for dx_steps in -3..=3 {
+                for dz_steps in -3..=3 {
+                    let nx = x + dx_steps as f32 * pixel_size_m;
+                    let nz = z + dz_steps as f32 * pixel_size_m;
+                    if HeightSampler::height(terrain, nx, nz) < SEA_LEVEL_M {
+                        let d = (dx_steps as f32 * pixel_size_m)
+                            .hypot(dz_steps as f32 * pixel_size_m);
+                        if d < nearest_water_m {
+                            nearest_water_m = d;
+                        }
+                    }
+                }
+            }
+            eprintln!(
+                "    cell={cid} dot=({x:.1}, {z:.1}) terrain_h={h:.2} nearest_water_within_3px={nearest_water_m:.1}m (pixel_size={pixel_size_m:.1}m)"
+            );
+        }
+    }
+    write_png(&format!("coverage-with-dots-{label}"), &img);
+}
+
+/// Per-pixel "would ANY entry emit here?" check. Mirrors the static
+/// (non-probabilistic, non-bake-dependent) part of the generator's
+/// filter chain.
+fn pixel_could_emit(
+    x: f32,
+    z: f32,
+    terrain: &Terrain,
+    catalog: &SubBiomeCellCatalog,
+    _baked: &BakedAssignments,
+    libs: &SubBiomeLibraries,
+) -> bool {
+    // Polygon clip is implicit — the pixel IS in some cell, so
+    // nearest_cell(x,z) returns its cell_id. The cell's biome is
+    // determined by its seed position.
+    let cell_id = catalog.nearest_cell(x, z);
+    let seed_pos = catalog.seeds()[cell_id as usize].position;
+    let host_biome = biome_at(GAME_SEED, seed_pos.0, seed_pos.1);
+    let entries = libs.ambient_for_biome(host_biome);
+    if entries.is_empty() {
+        return false;
+    }
+    let altitude = HeightSampler::height(terrain, x, z);
+    // Cheap slope: 4-sample finite-difference gradient like the generator.
+    let off = 5.0_f32;
+    let h_e = HeightSampler::height(terrain, x + off, z);
+    let h_w = HeightSampler::height(terrain, x - off, z);
+    let h_n = HeightSampler::height(terrain, x, z + off);
+    let h_s = HeightSampler::height(terrain, x, z - off);
+    let dh_dx = (h_e - h_w) / (2.0 * off);
+    let dh_dz = (h_n - h_s) / (2.0 * off);
+    let slope_deg = dh_dx.hypot(dh_dz).atan().to_degrees();
+    // Could ANY entry accept this pixel?
+    entries.iter().any(|e| {
+        altitude >= e.altitude_range_m.0
+            && altitude <= e.altitude_range_m.1
+            && slope_deg <= e.slope_max_deg
+    })
+}
+
+/// Wide-scale per-cell status artifact. At 100km–2000km extents,
+/// per-instance dots are intractable (millions to billions of
+/// instances). Instead, color each pixel by its containing cell's
+/// status: green = populated, red = zero (no ambient), blue = water.
+/// Quick to compute (one nearest_cell + one cheap zero-check per pixel).
+#[allow(clippy::too_many_arguments)]
+fn render_wide_status(
+    label: &str,
+    center: (f32, f32),
+    extent_m: f32,
+    terrain: &Terrain,
+    catalog: &SubBiomeCellCatalog,
+    baked: &BakedAssignments,
+    libs: &SubBiomeLibraries,
+    is_water: &dyn Fn(f32, f32) -> bool,
+) {
+    use std::collections::HashMap;
+    // Cache per-cell status so we don't re-evaluate the same cell
+    // for every pixel that falls inside it. Wide crops have large
+    // cells covering many pixels.
+    let mut cell_status: HashMap<u32, CellStatus> = HashMap::new();
+    let mut img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(RESOLUTION, RESOLUTION);
+    let mut pixel_count = [0_u64; 4]; // populated, zero, water, no-biome
+    for py in 0..RESOLUTION {
+        for px in 0..RESOLUTION {
+            let (x, z) = pixel_to_world_at(center, extent_m, px, py);
+            // Water pixel — sea-level cut.
+            if is_water(x, z) {
+                img.put_pixel(px, py, Rgb([30, 60, 120]));
+                pixel_count[2] += 1;
+                continue;
+            }
+            let cid = catalog.nearest_cell(x, z);
+            let status = *cell_status
+                .entry(cid)
+                .or_insert_with(|| evaluate_cell_status(cid, catalog, baked, libs));
+            let rgb = match status {
+                CellStatus::Populated => [60, 180, 80], // green
+                CellStatus::Zero => [200, 60, 60],      // red
+                CellStatus::NoBiomeEntries => [120, 120, 120], // grey
+            };
+            pixel_count[match status {
+                CellStatus::Populated => 0,
+                CellStatus::Zero => 1,
+                CellStatus::NoBiomeEntries => 3,
+            }] += 1;
+            img.put_pixel(px, py, Rgb(rgb));
+        }
+    }
+    let total_pixels = u64::from(RESOLUTION) * u64::from(RESOLUTION);
+    eprintln!(
+        "  {label}: pixels populated={} ({:.1}%), zero={} ({:.1}%), water={} ({:.1}%), no-biome-entries={} ({:.1}%)",
+        pixel_count[0],
+        pixel_count[0] as f64 / total_pixels as f64 * 100.0,
+        pixel_count[1],
+        pixel_count[1] as f64 / total_pixels as f64 * 100.0,
+        pixel_count[2],
+        pixel_count[2] as f64 / total_pixels as f64 * 100.0,
+        pixel_count[3],
+        pixel_count[3] as f64 / total_pixels as f64 * 100.0,
+    );
+    eprintln!("  {} unique cells evaluated", cell_status.len());
+    let _ = terrain; // only is_water uses terrain
+    write_png(&format!("status-{label}"), &img);
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+enum CellStatus {
+    Populated,
+    Zero,
+    NoBiomeEntries,
+}
+
+/// Quick eval — does this cell produce ANY ambient instances at its
+/// seed position? Skips the polygon clip for speed (just answers
+/// "would the generator emit > 0 here"). Wide-zoom heuristic; at
+/// continental scale we don't need exact counts.
+fn evaluate_cell_status(
+    cell_id: u32,
+    catalog: &SubBiomeCellCatalog,
+    baked: &BakedAssignments,
+    libs: &SubBiomeLibraries,
+) -> CellStatus {
+    let seed_pos = catalog.seeds()[cell_id as usize].position;
+    let host_biome = biome_at(GAME_SEED, seed_pos.0, seed_pos.1);
+    let entries = libs.ambient_for_biome(host_biome);
+    if entries.is_empty() {
+        return CellStatus::NoBiomeEntries;
+    }
+    let assignment = baked.feature_at_cell(cell_id);
+    let feat = libs
+        .find(
+            assignment.source.feature_source_biome(),
+            &assignment.feature_id,
+        )
+        .or_else(|| libs.oceanic().iter().find(|f| f.id == assignment.feature_id));
+    // If the feature is oceanic-themed (open_ocean, kelp_forest, etc.)
+    // we know the cell will likely produce zero from our earlier bench.
+    // Use the actual zero list discovered: open_ocean / kelp_forest /
+    // shipping_lane / fishing_grounds / sailing_regatta_zone /
+    // crab_pot_patch / fjord_entrance.
+    let zero_features = [
+        "open_ocean",
+        "kelp_forest",
+        "shipping_lane",
+        "fishing_grounds",
+        "sailing_regatta_zone",
+        "crab_pot_patch",
+        "fjord_entrance",
+    ];
+    if zero_features.iter().any(|z| *z == assignment.feature_id) {
+        return CellStatus::Zero;
+    }
+    let _ = feat;
+    CellStatus::Populated
 }
 
 /// Render the placement-dots + voronoi-mosaic artifact pair for a
@@ -553,8 +942,7 @@ fn render_zoom_level(
         }
         bs.2 += insts.len() as u64;
 
-        // High-contrast black dots — user confirmed these are easier to
-        // see than colored dots.
+        // 1px black dots — sharp, no coastline overshoot.
         let mut visible_in_crop = 0_u32;
         for inst in &insts {
             if let Some((px, py)) =
@@ -564,9 +952,6 @@ fn render_zoom_level(
                 placements.put_pixel(px, py, Rgb([0, 0, 0]));
             }
         }
-        // Per-cell debug: log cells whose visible-in-crop count is
-        // suspiciously low (< 10% of generated). Helps spot cells
-        // generating dots OUTSIDE the visible window.
         if !insts.is_empty() {
             let visible_frac = f64::from(visible_in_crop) / insts.len() as f64;
             if visible_frac < 0.05 && insts.len() > 100 {
