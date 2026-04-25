@@ -186,7 +186,20 @@ fn worker_loop(
             continue;
         }
 
-        let height_at = |x: f32, z: f32| HeightSampler::height(terrain, x, z);
+        // Pre-wrap coords before noise sampling. perlin_2d wraps the
+        // cell index but not the fractional position; at world coords
+        // outside the canonical [0, WORLD_EXTENT_M) range the noise
+        // function samples at a different fractional cell position
+        // than at the canonical equivalent. Pre-wrapping ensures
+        // consistent terrain answers for cells with seeds near the
+        // wrap seam (5c.2.c.12r).
+        let height_at = |x: f32, z: f32| {
+            HeightSampler::height(
+                terrain,
+                flowplan_core::wrap_coord(x),
+                flowplan_core::wrap_coord(z),
+            )
+        };
         // Water filter: simple global SEA_LEVEL_M cut. Continuous,
         // smooth, no 2.5 km hydrology grid alignment. Lakes/rivers
         // at positive elevation skip the rejection — trees may
@@ -195,7 +208,11 @@ fn worker_loop(
         // per-cell hydrology lookup) was visibly worse.
         let _ = hydrology; // reserved for future per-pixel water-surface field
         let is_water = |x: f32, z: f32| {
-            HeightSampler::height(terrain, x, z) < SEA_LEVEL_M
+            HeightSampler::height(
+                terrain,
+                flowplan_core::wrap_coord(x),
+                flowplan_core::wrap_coord(z),
+            ) < SEA_LEVEL_M
         };
         let catalog_ref = catalog.as_ref();
         let target_cell = job.cell_id;

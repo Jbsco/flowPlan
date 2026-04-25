@@ -439,12 +439,74 @@ fn ambient_visual_bench_real_bake() {
         );
     }
 
-    let height_at = |x: f32, z: f32| HeightSampler::height(&terrain, x, z);
-    let is_water = |x: f32, z: f32| HeightSampler::height(&terrain, x, z) < SEA_LEVEL_M;
+    // 5c.2.c.12r: pre-wrap coords before terrain.height so the wrap
+    // seam at x = 0 / WORLD_EXTENT_M doesn't cause the noise function
+    // to sample different fractional cell positions for canonically-
+    // equivalent coords (e.g., literal -11001 vs +4988999). Without
+    // this, the bench's coverage classification disagrees with the
+    // generator's per-dot is_water at wrap-edge cells.
+    let height_at = |x: f32, z: f32| {
+        HeightSampler::height(
+            &terrain,
+            flowplan_core::wrap_coord(x),
+            flowplan_core::wrap_coord(z),
+        )
+    };
+    let is_water = |x: f32, z: f32| {
+        HeightSampler::height(
+            &terrain,
+            flowplan_core::wrap_coord(x),
+            flowplan_core::wrap_coord(z),
+        ) < SEA_LEVEL_M
+    };
 
     // Multi-zoom artifact emission.
     let (cx, cz) = crop_center();
     eprintln!("crop center: ({cx:.0}, {cz:.0})");
+    // 5×5 grid of 6km tiles covering the same 30km area. Each tile
+    // at 1024² = 5.86 m/px — 5× finer than the native 30km zoom.
+    // Lets us see if the user-observed dot/coverage shift persists
+    // at higher effective resolution.
+    eprintln!("=== 5x5 grid of 6km tiles (5.86 m/px each) ===");
+    let tile_extent = 6_000.0_f32;
+    for row in 0..5 {
+        for col in 0..5 {
+            let tx = cx + (col as f32 - 2.0) * tile_extent;
+            let tz = cz + (2.0 - row as f32) * tile_extent;
+            let tile_label = format!("grid-r{row}c{col}-{tx:+.0}_{tz:+.0}");
+            render_coverage_diff_hires(
+                &tile_label,
+                (tx, tz),
+                tile_extent,
+                1024,
+                &terrain,
+                &catalog,
+                &baked,
+                libs,
+                &is_water,
+            );
+        }
+    }
+
+    // High-resolution coverage-with-dots: render the 30km extent at
+    // 4096² instead of 1024² so each pixel is 7.3m instead of 29.3m.
+    // If the "shift" the user observed is sub-pixel terrain
+    // aliasing, the high-res version will show much tighter
+    // dot-to-coverage alignment. If a real geometric error, the
+    // shift stays the same in absolute meters.
+    eprintln!("=== high-res 30km coverage-with-dots (aliasing test) ===");
+    render_coverage_diff_hires(
+        "30km-hires-4096",
+        (cx, cz),
+        30_000.0,
+        4096,
+        &terrain,
+        &catalog,
+        &baked,
+        libs,
+        &is_water,
+    );
+
     eprintln!("=== per-instance zooms (small scale) ===");
     for &(extent_m, label) in INSTANCE_ZOOM_LEVELS_M {
         eprintln!("--- zoom level: {label} ({extent_m:.0} m extent) ---");
@@ -490,6 +552,130 @@ fn ambient_visual_bench_real_bake() {
             &is_water,
         );
     }
+}
+
+/// High-resolution coverage-with-dots variant. Renders at the
+/// caller-specified resolution (e.g., 4096²) instead of the global
+/// RESOLUTION (1024²). Pixel size at the same zoom drops to ¼,
+/// directly characterizing whether the user's observed "shift" is
+/// sub-pixel terrain aliasing (shrinks proportionally) or geometric
+/// error (stays same in meters).
+#[allow(clippy::too_many_arguments)]
+fn render_coverage_diff_hires(
+    label: &str,
+    center: (f32, f32),
+    extent_m: f32,
+    resolution: u32,
+    terrain: &Terrain,
+    catalog: &SubBiomeCellCatalog,
+    baked: &BakedAssignments,
+    libs: &SubBiomeLibraries,
+    is_water: &dyn Fn(f32, f32) -> bool,
+) {
+    let pixel_to_world = |px: u32, py: u32| -> (f32, f32) {
+        let u = (f32::from(px as u16) + 0.5) / resolution as f32;
+        let v = (f32::from(py as u16) + 0.5) / resolution as f32;
+        let x = center.0 + (u - 0.5) * extent_m;
+        let z = center.1 + (0.5 - v) * extent_m;
+        (x, z)
+    };
+    let world_to_pixel = |x: f32, z: f32| -> Option<(u32, u32)> {
+        let half_world = flowplan_core::WORLD_EXTENT_M * 0.5;
+        let mut dx = x - center.0;
+        let mut dz = z - center.1;
+        if dx > half_world {
+            dx -= flowplan_core::WORLD_EXTENT_M;
+        } else if dx < -half_world {
+            dx += flowplan_core::WORLD_EXTENT_M;
+        }
+        if dz > half_world {
+            dz -= flowplan_core::WORLD_EXTENT_M;
+        } else if dz < -half_world {
+            dz += flowplan_core::WORLD_EXTENT_M;
+        }
+        let u = dx / extent_m + 0.5;
+        let v = 0.5 - dz / extent_m;
+        if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
+            return None;
+        }
+        let px = (u * resolution as f32) as u32;
+        let py = (v * resolution as f32) as u32;
+        Some((px.min(resolution - 1), py.min(resolution - 1)))
+    };
+
+    let mut img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(resolution, resolution);
+    for py in 0..resolution {
+        for px in 0..resolution {
+            let (x, z) = pixel_to_world(px, py);
+            let water = is_water(x, z);
+            let would_emit = !water && pixel_could_emit(x, z, terrain, catalog, baked, libs);
+            let color = match (would_emit, water) {
+                (true, false) => [60, 180, 80],
+                (false, true) => [30, 60, 120],
+                (true, true) => [255, 140, 0],
+                (false, false) => [220, 0, 200],
+            };
+            img.put_pixel(px, py, Rgb(color));
+        }
+    }
+
+    let probe_radius = extent_m * core::f32::consts::SQRT_2 / 2.0 + 4_000.0;
+    let cells_in_crop = catalog.cells_within_radius(center.0, center.1, probe_radius);
+    let height_at = |x: f32, z: f32| HeightSampler::height(terrain, x, z);
+    let mut dot_total = 0_u64;
+    let mut dot_on_blue = 0_u64;
+    for &cell_id in &cells_in_crop {
+        let seed_pos = catalog.seeds()[cell_id as usize].position;
+        let host_biome = biome_at(GAME_SEED, seed_pos.0, seed_pos.1);
+        let entries = libs.ambient_for_biome(host_biome);
+        if entries.is_empty() {
+            continue;
+        }
+        let assignment = baked.feature_at_cell(cell_id);
+        let feat_insts = baked.instances_at_cell(cell_id);
+        let feature = libs
+            .find(
+                assignment.source.feature_source_biome(),
+                &assignment.feature_id,
+            )
+            .or_else(|| libs.oceanic().iter().find(|f| f.id == assignment.feature_id));
+        let ambient_control = feature.and_then(|f| f.ambient_control);
+        let target = cell_id;
+        let is_in_cell = |x: f32, z: f32| catalog.nearest_cell(x, z) == target;
+        let insts = generate_ambient_for_cell(
+            GAME_SEED,
+            cell_id,
+            seed_pos,
+            host_biome,
+            entries,
+            feat_insts,
+            ambient_control,
+            &height_at,
+            is_water,
+            &is_in_cell,
+        );
+        for inst in &insts {
+            if let Some((px, py)) = world_to_pixel(inst.position.x, inst.position.z) {
+                dot_total += 1;
+                let bg = img.get_pixel(px, py).0;
+                if bg == [30, 60, 120] {
+                    dot_on_blue += 1;
+                }
+                img.put_pixel(px, py, Rgb([255, 230, 0]));
+            }
+        }
+    }
+    let pixel_size_m = extent_m / resolution as f32;
+    eprintln!(
+        "  hires {label} ({}x{} px, {:.1}m/px): total_dots={}, on_blue={} ({:.1}%)",
+        resolution,
+        resolution,
+        pixel_size_m,
+        dot_total,
+        dot_on_blue,
+        if dot_total > 0 { dot_on_blue as f64 / dot_total as f64 * 100.0 } else { 0.0 },
+    );
+    write_png(&format!("coverage-with-dots-{label}"), &img);
 }
 
 /// Coverage-diff bench (5c.2.c.12o). Per pixel: compute "would the
@@ -708,13 +894,16 @@ fn pixel_could_emit(
     if entries.is_empty() {
         return false;
     }
-    let altitude = HeightSampler::height(terrain, x, z);
+    // Pre-wrap to canonical coords to match the generator's wrap-fix.
+    let xc = flowplan_core::wrap_coord(x);
+    let zc = flowplan_core::wrap_coord(z);
+    let altitude = HeightSampler::height(terrain, xc, zc);
     // Cheap slope: 4-sample finite-difference gradient like the generator.
     let off = 5.0_f32;
-    let h_e = HeightSampler::height(terrain, x + off, z);
-    let h_w = HeightSampler::height(terrain, x - off, z);
-    let h_n = HeightSampler::height(terrain, x, z + off);
-    let h_s = HeightSampler::height(terrain, x, z - off);
+    let h_e = HeightSampler::height(terrain, flowplan_core::wrap_coord(xc + off), zc);
+    let h_w = HeightSampler::height(terrain, flowplan_core::wrap_coord(xc - off), zc);
+    let h_n = HeightSampler::height(terrain, xc, flowplan_core::wrap_coord(zc + off));
+    let h_s = HeightSampler::height(terrain, xc, flowplan_core::wrap_coord(zc - off));
     let dh_dx = (h_e - h_w) / (2.0 * off);
     let dh_dz = (h_n - h_s) / (2.0 * off);
     let slope_deg = dh_dx.hypot(dh_dz).atan().to_degrees();

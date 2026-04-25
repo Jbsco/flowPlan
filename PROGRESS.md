@@ -400,6 +400,81 @@ All 4 steppings (.c.8 types/RON → .c.9 generator → .c.10 fBm fields → .c.1
 
 **Outcome**: bench artifacts confirm polygon-clip fix doubles populated-cell count and roughly doubles per-cell instance density vs the disc-sample baseline. **In-game improvement is more modest than the bench suggests** — the user's spawn screenshot still shows large empty expanses. Suspected next-cause: the `is_water` filter rejects ANY candidate inside a hydrology water-cell (`OpenOcean` / `OpenCoastal` / lake), but coastal cells extend onto land that's above sea level. Pixels at altitude 1-5 m visually rendered as green ground are being rejected because they're inside an `OpenCoastal` hydrology cell. **Fix** (next): change `is_water` from cell-classification check to elevation comparison — `terrain_height < water_surface_elevation` only.
 
+**5c.2.c.12r (wrap-seam noise discontinuity — the saga) — 2026-04-24 (Task #268)**.
+
+This is a writeup of a multi-iteration debugging arc that took several rounds of user pushback to resolve. The user was right; my defenses were wrong; the bench eventually proved it.
+
+### The observation
+After shipping toroidal-wrap fixes (.12m), polygon clip (.12i), elevation-aware water filter, and a coverage-diff bench (.12o), the user repeatedly observed in-game and bench artifacts: *"black dots in blue water, large empty land masses, shifts much greater than 1 pixel"*. They did not back down despite my repeated framing as rasterization aliasing.
+
+### The defense (wrong)
+I made several plausible-but-incomplete arguments:
+1. "Pixel-quantization at coastlines" — true but bounded to sub-pixel offsets.
+2. "REAL_water_bug = 0 confirms generator is correct" — true but only confirms the dot's literal-coord `is_water` returns false; doesn't confirm the underlay's `is_water` agrees with it.
+3. "Sub-pixel terrain noise creates fractal aliasing" — partial truth used to dismiss multi-pixel observations.
+
+Each defense had merit but didn't address the user's specific observations of LARGE shifts and EMPTY LAND MASSES. The user kept pushing, I kept rationalizing.
+
+### The breakthrough
+The 5×5 grid bench (.12q) at 5.86 m/pixel resolution produced wildly different `dot-on-blue %` per tile:
+- Tile r1c0 (`-12000, +6000`): **90.8%** dots on blue
+- Tile r2c4 (`+12000, 0`): 0.0%
+- Tile r0c0 (`-12000, +12000`): 50.9%
+
+90.8% can't be "1-pixel aliasing". The pattern correlated with **tiles in the negative-X / positive-Z quadrant** — the corner near the toroidal wrap seam (`x = 0` / `WORLD_EXTENT_M = 5_000_000`).
+
+### The root cause
+`perlin_2d(x, z, spacing_m)`:
+1. `xs = x / spacing_m`
+2. `ix = floor(xs)`, `fx = xs - ix`
+3. `wrap_cell_index(ix, n_cells)` ← **only the cell index wraps**, `fx` is computed from the literal `xs` BEFORE wrap
+
+For coords with the same canonical position (e.g., literal `-11001` ≡ canonical `4_988_999`) the noise function samples at the same wrapped cell index BUT with different fractional positions. Result: **noise is discontinuous across the wrap seam** unless `WORLD_EXTENT_M` is an integer multiple of `spacing_m` for every octave — and for fine octaves (60 m, 30 m), it isn't (`5_000_000 / 60 = 83333.33`).
+
+For ambient bench tiles centered near `x = -12000`:
+- Coverage map's `pixel_to_world_at` returns LITERAL coord `-12000ish`. `is_water(-12000, ...)` → terrain.height samples noise at literal coord with `fx` based on literal `xs`.
+- A dot from a wrap-edge cell has LITERAL coord `4_988_000ish`. `is_water` at the dot's coord samples noise at `fx` based on the OTHER side of the wrap.
+- These give DIFFERENT terrain values for the same canonical position → coverage classifies pixel as water, generator emits dot at land.
+
+`REAL_water_bug = 0` correctly reported the generator's per-emit check passes. The bug was in the *underlay* sampling at literal coords.
+
+### The fix (.12r)
+Pre-wrap coords via `flowplan_core::wrap_coord(x)` BEFORE calling `HeightSampler::height`. Applied in:
+- `crates/world/tests/ambient_visual_bench.rs::is_water` + `pixel_could_emit` + the bench's `height_at` closure
+- `crates/app/src/ambient_worker.rs` — the game's `is_water` and `height_at` closures so runtime ambient placement is also wrap-seam-stable
+
+This makes terrain queries return identical answers for canonically-equivalent coords regardless of literal input.
+
+### Testing gaps revealed
+1. **The wrap-seam noise bug had no unit test.** `perlin_2d` was tested for value range and reproducibility, not for continuity at `x = 0` ↔ `x = WORLD_EXTENT_M`. A simple test asserting `perlin_2d(-1.0, ..., spacing) ≈ perlin_2d(WORLD_EXTENT_M - 1.0, ..., spacing)` would have caught this years earlier.
+2. **The visual-bench pattern was incomplete.** Single-zoom artifacts at one center don't reveal seam-edge effects. Only the 5×5 grid at multiple centers near the seam exposed the spatial pattern.
+3. **`REAL_water_bug = 0` lulled me into false confidence.** The check verified "generator agrees with itself" but not "generator agrees with the underlay". A second check (`underlay_disagrees_with_generator_count`) would have flagged the inconsistency immediately.
+4. **My defensive framing slowed the diagnosis.** The user explicitly said "much greater than 1 pixel" multiple times. I should have built the disagreement-counting bench at the first such pushback, not the third.
+
+### Closing the gaps — SHIPPED 2026-04-24 (Tasks #269, #270)
+- **Noise-continuity unit tests added** (`crates/world/src/noise.rs::tests`):
+  - `perlin_seam_continuous_at_all_authored_wavelengths` — sweeps 25 wavelengths × 4 probe points × 2 axes; asserts `|perlin_2d(x, z) - perlin_2d(x + WORLD_EXTENT_M, z)| < 1e-3`. Pre-fix: 123 violations. Post-fix: 0.
+  - `fbm_seam_continuous_at_authored_octaves` — same invariant for fBm at terrain / weather / ambient octave configurations.
+- **`perlin_2d` pre-wraps internally.** `let x = wrap_coord(x); let z = wrap_coord(z);` at function entry. ~2 ns per call. All consumers (terrain, biome, weather, hydrology, hub_catalog, magnetic_variation, voronoi, ambient) now produce continuous noise across the wrap seam.
+- **Audit complete.** Every noise consumer reaches `perlin_2d` directly or via `fbm_2d_at_scale` / `ridged_multifractal_2d_at_scale` / `domain_warped_fbm_2d_at_scale`. No bypass paths. Existing consumer-side `wrap_coord` calls in `ambient_worker.rs` + `ambient_visual_bench.rs` are now redundant-but-harmless; kept for defense-in-depth.
+- **One regression caught + fixed.** `composed::tests::surface_at_returns_water_on_sea` was scanning `[-500km, +500km]` relying on pre-fix wrong-but-self-consistent terrain values. Updated to scan canonical `[0, +1Mm]` range.
+
+### Process gaps closed
+- **Pattern: "user reports shift greater than X" → build disagreement-counting bench BEFORE defending.** The 5×5 grid + coverage-with-dots is now the right diagnostic for any future scatter system. Pinned in `memory/ambient_visual_bench_pattern.md`.
+- **Pattern: invariant assertions when a wrap-aware system has math constraints.** The `perlin_2d` doc-comment said "WORLD_EXTENT_M / spacing_m must be integer for exact seam continuity" — but no test enforced it. The new unit tests now turn that doc-prose into compiled-assertion-with-CI-coverage.
+- **Visual-bench artifact pattern needs a "two-source disagreement" mode.** Coverage-diff artifacts where TWO independent classifiers (e.g., underlay-water vs generator-water) are compared per-pixel and disagreements highlighted in bright color. The orange/magenta scheme worked once we built it; a future scatter system should ship with this artifact from day 1.
+- **When a user reports "shift greater than X", build the diff bench BEFORE defending the existing model.** Visual-bench is fast and definitive.
+
+### The artifacts and what they actually reveal
+- `placements-XXkm.png`: dots on biome-color underlay. Shows generator output but NOT alignment with classification — easy to misread at coastlines.
+- `coverage-XXkm.png`: green/blue/orange/magenta classification. Reveals static-filter coverage, not dot alignment.
+- `coverage-with-dots-XXkm.png`: dots overlaid on coverage. **The diagnostic.** Yellow dots on blue/magenta surface as obvious bugs.
+- `mosaic-XXkm.png`: Voronoi cell tiling. Confirms cell coverage is gap-free; doesn't help with terrain-noise issues.
+- `status-XXkm.png` (wide-scale): per-cell populated/zero. Useful for continental coverage, not local debugging.
+- `coverage-with-dots-grid-rRcC-...png` (5×5 hi-res grid): **the breakthrough artifact**. Per-tile stats reveal spatial patterns (the wrap-seam quadrant in this case).
+
+`crates/world/tests/ambient_visual_bench.rs` ships with both small-scale (per-instance dots, 4 zooms) AND wide-scale (per-cell status, 4 zooms) AND the 5×5 grid. Pattern documented in `memory/ambient_visual_bench_pattern.md`.
+
 **5c.2.c.12m (toroidal-wrap seed coords) — 2026-04-24 (Task #263)**: ROOT CAUSE of "vast empty areas" found via multi-zoom bench artifacts (5c.2.c.12l, Task #262). `cells_within_radius` returns cells via toroidal-wrap distance, so cells near the player can have literal seed coords near WORLD_EXTENT_M (e.g., 4.99M when player is at -7000). Generator emits instances at those literal coords. Bench was plotting at literal coords → instances landed off-screen. Same bug in game: renderer projects literal-coord instances far from camera → off-screen-culled. Fix: in game_app.rs upload loop, wrap each cell's seed_pos to be within ±EXTENT/2 of camera before enqueueing the worker job. Per-candidate noise / biome / hydrology lookups all use `wrap_coord` internally so wrapped seed_pos is transparent to generation; only the FINAL emitted positions need to be near camera. Bench multi-zoom artifacts (1km / 3km / 10km / 30km) now show full coverage everywhere except true water bodies. Same fix shipped in `crates/world/tests/ambient_visual_bench.rs::world_to_pixel_at`. Note: feat_insts (baked feature instance positions) for wrap-edge cells are NOT wrapped; minor corner-case mismatch in is_within_any_footprint at wrap-edge only — deferred until in-game observation surfaces it.
 
 **5c.2.c.12l (multi-zoom bench) — 2026-04-24 (Task #262)**: Bench now emits placement + mosaic artifacts at 4 zoom levels (1km/3km/10km/30km) so we can introspect at near vs wide scales. `FLOWPLAN_BENCH_CENTER_X` / `_Z` env vars override crop center for diagnosing non-origin in-game positions. Per-cell visibility logging flags cells emitting <5% visible-in-crop dots — surfaced the toroidal-wrap bug above by showing cells with literal seeds near 4.99M.

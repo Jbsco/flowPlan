@@ -25,7 +25,7 @@
 //! `WORLD_EXTENT_M` evenly (e.g., 100000, 50000, 25000, 10000, 2000 m
 //! at the default 5000 km world extent).
 
-use flowplan_core::{splitmix64, wrap_cell_index, WORLD_EXTENT_M};
+use flowplan_core::{splitmix64, wrap_cell_index, wrap_coord, WORLD_EXTENT_M};
 
 /// Gradient direction at integer grid cell `(ix, iz)` for `(seed, octave)`.
 /// Grid wraps at `n_cells` — lookups at `ix + n_cells` produce identical
@@ -75,6 +75,15 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 /// `x + WORLD_EXTENT_M` is identical by construction.
 #[allow(clippy::cast_possible_truncation)]
 pub fn perlin_2d(seed: u64, octave: u32, x: f32, z: f32, spacing_m: f32) -> f32 {
+    // Pre-wrap to canonical [0, WORLD_EXTENT_M) range. Without this,
+    // canonically-equivalent inputs (e.g., literal -1.0 and
+    // WORLD_EXTENT_M - 1.0) sample at different fractional cell
+    // positions because `fx = xs - floor(xs)` is computed BEFORE the
+    // cell-index wrap. Result: noise discontinuity at the wrap seam,
+    // visible to consumers passing literal player-relative coords.
+    // 5c.2.c.12r — discovered via the ambient bench's 5×5 hi-res grid.
+    let x = wrap_coord(x);
+    let z = wrap_coord(z);
     #[allow(clippy::cast_possible_truncation)]
     let n_cells = (WORLD_EXTENT_M / spacing_m).round() as i64;
     let xs = x / spacing_m;
@@ -364,6 +373,108 @@ mod tests {
             let a = perlin_2d(42, 0, x, z, 2000.0);
             let b = perlin_2d(42, 0, x + WORLD_EXTENT_M, z, 2000.0);
             assert!((a - b).abs() < 1e-3, "x={x} z={z}: a={a} b={b}");
+        }
+    }
+
+    /// Wrap-seam regression test (5c.2.c.12r). The original
+    /// `perlin_wraps_toroidally` used spacing=2000m which divides
+    /// `WORLD_EXTENT_M` exactly (`5_000_000 / 2000 = 2500`). Ambient + many
+    /// other consumers use spacings that DON'T divide evenly:
+    /// `30m → 166666.67`, `60m → 83333.33`, `100m → 50000.0` (✓), `130m →
+    /// 38461.54`. Any spacing whose `WORLD_EXTENT_M / spacing` is
+    /// non-integer caused noise discontinuity at the wrap seam — at
+    /// literal `x = -ε` vs canonical `x = WORLD_EXTENT_M - ε`, perlin
+    /// sampled at different fractional cell positions and returned
+    /// different values.
+    ///
+    /// Bug discovered 2026-04-24 via the ambient bench's 5×5 hi-res
+    /// grid showing 90.8% dot-on-blue in tiles near the seam. Fix
+    /// applied at every ambient consumer site (pre-wrap with
+    /// `wrap_coord` before noise call). Long-term fix moves the
+    /// pre-wrap inside `perlin_2d` itself; this test asserts the
+    /// invariant either way.
+    #[test]
+    fn perlin_seam_continuous_at_all_authored_wavelengths() {
+        // Wavelengths actually used across the project. The 30/60/130
+        // values are the smoking-gun cases — they don't divide
+        // WORLD_EXTENT_M evenly and surfaced the wrap-seam bug.
+        let wavelengths = [
+            30.0_f32, 50.0, 60.0, 100.0, 120.0, 130.0, 140.0, 150.0, 180.0, 200.0,
+            250.0, 280.0, 350.0, 400.0, 420.0, 460.0, 500.0, 550.0, 600.0, 700.0,
+            800.0, 900.0, 1000.0, 2000.0, 5000.0,
+        ];
+        let probe_points = [(0.0_f32, 0.0_f32), (1234.5, -567.8), (-1.0, 1.0), (12_345.0, -54_321.0)];
+
+        let mut fail_count = 0_u32;
+        let mut max_diff = 0.0_f32;
+        let mut worst: (f32, (f32, f32), f32, f32) = (0.0, (0.0, 0.0), 0.0, 0.0);
+
+        for &spacing in &wavelengths {
+            for &(x, z) in &probe_points {
+                let a = perlin_2d(42, 0, x, z, spacing);
+                let b = perlin_2d(42, 0, x + WORLD_EXTENT_M, z, spacing);
+                let diff = (a - b).abs();
+                if diff > max_diff {
+                    max_diff = diff;
+                    worst = (spacing, (x, z), a, b);
+                }
+                if diff >= 1e-3 {
+                    fail_count += 1;
+                }
+                // Same for Z direction.
+                let c = perlin_2d(42, 0, x, z + WORLD_EXTENT_M, spacing);
+                let diff_z = (a - c).abs();
+                if diff_z > max_diff {
+                    max_diff = diff_z;
+                    worst = (spacing, (x, z), a, c);
+                }
+                if diff_z >= 1e-3 {
+                    fail_count += 1;
+                }
+            }
+        }
+        assert_eq!(
+            fail_count, 0,
+            "wrap-seam discontinuity at {} probes; worst: spacing={} m at ({},{}): {} vs {} (Δ={})",
+            fail_count,
+            worst.0,
+            worst.1 .0,
+            worst.1 .1,
+            worst.2,
+            worst.3,
+            max_diff,
+        );
+    }
+
+    /// fBm-level wrap-seam regression. fBm sums multiple octaves at
+    /// halving spacings, so even if the BASE spacing is integer-
+    /// divisor of `WORLD_EXTENT_M`, finer octaves may not be. Validates
+    /// the full multi-octave stack actually used by terrain / weather /
+    /// ambient density.
+    #[test]
+    fn fbm_seam_continuous_at_authored_octaves() {
+        let cases = [
+            // (base_spacing_m, octaves, label)
+            (60.0_f32, 4_u32, "ambient density coarse"),
+            (130.0, 4, "ambient maquis"),
+            (400.0, 4, "ambient olive"),
+            (500.0, 4, "ambient juniper"),
+            (1000.0, 4, "terrain fine"),
+            (2000.0, 6, "terrain regional"),
+            (5000.0, 4, "weather synoptic"),
+        ];
+        let probe_points = [(0.0_f32, 0.0_f32), (1234.5, -567.8), (12_345.0, -54_321.0)];
+
+        for &(spacing, octaves, label) in &cases {
+            for &(x, z) in &probe_points {
+                let a = fbm_2d(42, 0, x, z, spacing, octaves);
+                let b = fbm_2d(42, 0, x + WORLD_EXTENT_M, z, spacing, octaves);
+                let diff = (a - b).abs();
+                assert!(
+                    diff < 1e-3,
+                    "fbm seam discontinuous: {label} (spacing={spacing}m, octaves={octaves}) at ({x},{z}): {a} vs {b} (Δ={diff})"
+                );
+            }
         }
     }
 
