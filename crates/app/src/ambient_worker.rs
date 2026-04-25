@@ -26,6 +26,7 @@ use flowplan_world::feature_instances::{FeatureAmbientControl, FeatureInstance};
 use flowplan_world::hydrology::{HydrologyGraph, WaterClass};
 use flowplan_world::sub_biome::SubBiomeLibraries;
 use flowplan_world::terrain::{HeightSampler, Terrain};
+use flowplan_world::voronoi_cells::SubBiomeCellCatalog;
 use flowplan_world::SubBiomeCellId as CellId;
 
 /// Input to the ambient worker — everything it needs to generate a
@@ -96,20 +97,31 @@ pub struct AmbientWorker {
 
 impl AmbientWorker {
     /// Spawn the worker with read-only shared access to the world's
-    /// terrain + hydrology. Both are cloned into the worker (Terrain)
-    /// or Arc-shared (`HydrologyGraph`) — the worker never mutates.
+    /// terrain + hydrology + sub-biome catalog. Terrain is cloned;
+    /// hydrology + catalog are Arc-shared. The worker never mutates.
+    /// The catalog is needed for the per-cell Voronoi-polygon clip
+    /// (5c.2.c.12i) — replaces the old hardcoded disc-radius sampling.
     #[must_use]
     pub fn spawn(
         master_seed: u64,
         terrain: Terrain,
         hydrology: Arc<HydrologyGraph>,
+        catalog: Arc<SubBiomeCellCatalog>,
     ) -> Self {
         let (job_tx, job_rx) = channel::<AmbientJob>();
         let (result_tx, result_rx) = channel::<AmbientResult>();
         let thread = match thread::Builder::new()
             .name("flowplan-ambient-worker".into())
-            .spawn(move || worker_loop(master_seed, &terrain, &hydrology, &job_rx, &result_tx))
-        {
+            .spawn(move || {
+                worker_loop(
+                    master_seed,
+                    &terrain,
+                    &hydrology,
+                    &catalog,
+                    &job_rx,
+                    &result_tx,
+                );
+            }) {
             Ok(handle) => handle,
             Err(e) => panic!("spawn ambient worker thread: {e}"),
         };
@@ -139,6 +151,7 @@ fn worker_loop(
     master_seed: u64,
     terrain: &Terrain,
     hydrology: &Arc<HydrologyGraph>,
+    catalog: &Arc<SubBiomeCellCatalog>,
     job_rx: &Receiver<AmbientJob>,
     result_tx: &Sender<AmbientResult>,
 ) {
@@ -180,6 +193,9 @@ fn worker_loop(
                 .water_surface_at(x, z)
                 .is_some_and(|s| !matches!(s.class, WaterClass::DryChannel))
         };
+        let catalog_ref = catalog.as_ref();
+        let target_cell = job.cell_id;
+        let is_in_cell = |x: f32, z: f32| catalog_ref.nearest_cell(x, z) == target_cell;
 
         let instances = generate_ambient_for_cell(
             master_seed,
@@ -191,6 +207,7 @@ fn worker_loop(
             job.ambient_control,
             &height_at,
             &is_water,
+            &is_in_cell,
         );
 
         if result_tx
@@ -220,7 +237,8 @@ mod tests {
         // the primary-carpet altitude floor (+3 m).
         let terrain = Terrain::from_seed(42);
         let hydrology = Arc::new(HydrologyGraph::bake(42, &terrain));
-        AmbientWorker::spawn(42, terrain, hydrology)
+        let catalog = Arc::new(SubBiomeCellCatalog::bake(42));
+        AmbientWorker::spawn(42, terrain, hydrology, catalog)
     }
 
     /// Poll the worker up to `timeout_ms` waiting for a single result.

@@ -204,10 +204,14 @@ fn bounding_footprint_radius(_kind: PrimitiveKind, scale: glam::Vec3) -> f32 {
     scale.x.max(scale.z) * 0.5
 }
 
-/// Effective cell radius used for ambient candidate disc sampling.
-/// Approximates the Voronoi cell radius (cells have variable size
-/// from the power-diagram weighting). Good enough for MVP.
-const AMBIENT_CELL_RADIUS_M: f32 = 1000.0;
+/// Default bounding-box half-extent for candidate sampling per cell
+/// (m). The generator samples uniformly in `cell_pos ± this` square,
+/// then keeps only candidates whose nearest seed is the cell being
+/// generated. Sized generously to cover the largest realistic
+/// power-diagram cell (max ~3 km radius observed in spawn area; we
+/// use 4 km to be safe). Authors who want even larger cells can pass
+/// a per-cell extent through `generate_ambient_for_cell`.
+const AMBIENT_BBOX_HALF_M: f32 = 4_000.0;
 
 /// Ground-Y anchoring: for each primitive kind return the
 /// (center, scale) adjustment so bases sit on terrain.
@@ -242,11 +246,15 @@ fn ground_anchor_y(kind: PrimitiveKind, size_m: f32, ground_y: f32) -> (f32, gla
 ///   `None` (the default Option) = fully wild.
 /// - `height_at`: terrain sampler for altitude + ground anchor.
 /// - `is_water`: closure returning `true` if `(x, z)` is under a
-///   water surface (sea / lake / river). The caller owns the
-///   hydrology reference; tests pass `|_, _| false`. Water candidates
-///   are rejected regardless of altitude range — catches elevated
-///   lakes (terrain > 0 but water > terrain) that an altitude-only
-///   filter misses.
+///   water surface (sea / lake / river).
+/// - `is_in_cell`: closure returning `true` if `(x, z)` belongs to
+///   THIS cell's Voronoi polygon. Typically wraps
+///   `SubBiomeCellCatalog::nearest_cell(x, z) == cell_id`. Tests can
+///   pass `|_, _| true` to disable polygon clipping. This replaces
+///   the disc-radius approximation: per-cell candidates fall in the
+///   `cell_pos ± AMBIENT_BBOX_HALF_M` bounding box and are kept
+///   only if they belong to this cell — zero overlap with neighbors,
+///   zero gaps in coverage.
 ///
 /// Returns `Vec<FeatureInstance>` tagged with primitive kind + color;
 /// the renderer pipeline consumes them via the same upload path as
@@ -264,30 +272,43 @@ pub fn generate_ambient_for_cell(
     ambient_control: Option<FeatureAmbientControl>,
     height_at: &dyn Fn(f32, f32) -> f32,
     is_water: &dyn Fn(f32, f32) -> bool,
+    is_in_cell: &dyn Fn(f32, f32) -> bool,
 ) -> Vec<FeatureInstance> {
     if entries.is_empty() {
         return Vec::new();
     }
 
-    let cell_area_km2 =
-        core::f32::consts::PI * AMBIENT_CELL_RADIUS_M * AMBIENT_CELL_RADIUS_M / 1_000_000.0;
+    // Bounding-box area in km² — drives candidate count. The
+    // is_in_cell filter rejects candidates that belong to neighbor
+    // cells, so per-cell instance count ≈ density × cell area
+    // regardless of how big the bounding box is.
+    let bbox_side_m = AMBIENT_BBOX_HALF_M * 2.0;
+    let bbox_area_km2 = bbox_side_m * bbox_side_m / 1_000_000.0;
     let palette = ambient_palette_for(biome);
     let control = ambient_control.unwrap_or(FeatureAmbientControl::None);
     let mut out = Vec::new();
 
     for (entry_idx, entry) in entries.iter().enumerate() {
-        let target = (entry.density_per_km2 * cell_area_km2).ceil() as u32;
+        let target = (entry.density_per_km2 * bbox_area_km2).ceil() as u32;
         let entry_tag = mix_seed(0x4a47_45be_4143_4f56, entry_idx as u64); // "AMBIENT\0"-ish
         let entry_rng = mix_seed(mix_seed(master_seed, u64::from(cell_id)), entry_idx as u64);
 
         for i in 0..target {
             let cand_rng = mix_seed(entry_rng, u64::from(i));
 
-            // Uniform disc sample (area-preserving).
-            let angle = rand_unit(cand_rng, 1) * TAU;
-            let radius = rand_unit(cand_rng, 2).sqrt() * AMBIENT_CELL_RADIUS_M;
-            let px = cell_pos.0 + radius * angle.cos();
-            let pz = cell_pos.1 + radius * angle.sin();
+            // Uniform sample in the bounding-box square.
+            let ux = rand_unit(cand_rng, 1) * 2.0 - 1.0; // [-1, 1]
+            let uz = rand_unit(cand_rng, 2) * 2.0 - 1.0;
+            let px = cell_pos.0 + ux * AMBIENT_BBOX_HALF_M;
+            let pz = cell_pos.1 + uz * AMBIENT_BBOX_HALF_M;
+
+            // Voronoi-polygon clip — keep only candidates whose
+            // nearest seed is THIS cell. Cheap O(1) catalog lookup
+            // (5×5 grid neighborhood). Eliminates overlap with
+            // neighbor cells AND gaps between disc samples.
+            if !is_in_cell(px, pz) {
+                continue;
+            }
 
             // Water filter — cheap O(1) hydrology lookup, runs first
             // so we skip altitude sampling for water candidates.
@@ -483,6 +504,13 @@ mod tests {
         false
     }
 
+    /// Default polygon clip for tests: accept everything (single-cell
+    /// world). Real callers wrap `catalog.nearest_cell(x, z) ==
+    /// cell_id`.
+    fn always_in_cell(_x: f32, _z: f32) -> bool {
+        true
+    }
+
     fn boreal_forest_entry() -> AmbientEntry {
         AmbientEntry {
             kind: PrimitiveKind::Cone,
@@ -514,6 +542,7 @@ mod tests {
             None,
             &const_height(100.0),
             &no_water,
+            &always_in_cell,
         );
         assert!(
             !insts.is_empty(),
@@ -542,6 +571,7 @@ mod tests {
             None,
             &const_height(100.0),
             &no_water,
+            &always_in_cell,
         );
         assert!(insts.is_empty());
     }
@@ -559,6 +589,7 @@ mod tests {
             None,
             &const_height(50.0),
             &no_water,
+            &always_in_cell,
         );
         let b = generate_ambient_for_cell(
             42,
@@ -570,6 +601,7 @@ mod tests {
             None,
             &const_height(50.0),
             &no_water,
+            &always_in_cell,
         );
         assert_eq!(a.len(), b.len());
         for (l, r) in a.iter().zip(b.iter()) {
@@ -603,6 +635,7 @@ mod tests {
             }),
             &const_height(100.0),
             &no_water,
+            &always_in_cell,
         );
         for inst in &insts {
             let d = inst.position.x.hypot(inst.position.z);
@@ -640,6 +673,7 @@ mod tests {
             }),
             &const_height(100.0),
             &no_water,
+            &always_in_cell,
         );
 
         // Partition: close = distance < 60, far = distance > 100.
@@ -682,6 +716,7 @@ mod tests {
             None,
             &const_height(100.0),
             &no_water,
+            &always_in_cell,
         );
 
         // No ambient should land ON the runway rect (|x| < 750, |z| < 22.5).
@@ -733,6 +768,7 @@ mod tests {
             None,
             &const_height(100.0),
             &no_water,
+            &always_in_cell,
         );
         for inst in &insts {
             let on_runway = inst.position.z.abs() < 750.0 && inst.position.x.abs() < 22.5;
@@ -764,6 +800,7 @@ mod tests {
             None,
             &const_height(100.0),
             &no_water,
+            &always_in_cell,
         );
         let modulated_out = generate_ambient_for_cell(
             99,
@@ -775,6 +812,7 @@ mod tests {
             None,
             &const_height(100.0),
             &no_water,
+            &always_in_cell,
         );
 
         // Modulated should produce MORE instances (below-threshold
@@ -813,6 +851,7 @@ mod tests {
             None,
             &const_height(100.0),
             &no_water,
+            &always_in_cell,
         );
         let soft_out = generate_ambient_for_cell(
             11,
@@ -824,6 +863,7 @@ mod tests {
             None,
             &const_height(100.0),
             &no_water,
+            &always_in_cell,
         );
 
         // Both produce output.
@@ -880,6 +920,7 @@ mod tests {
             None,
             &const_height(100.0),
             &no_water,
+            &always_in_cell,
         );
         let stacked_insts = generate_ambient_for_cell(
             42,
@@ -891,6 +932,7 @@ mod tests {
             None,
             &const_height(100.0),
             &no_water,
+            &always_in_cell,
         );
 
         assert_eq!(
@@ -930,6 +972,7 @@ mod tests {
             None,
             &const_height(5.0),
             &everywhere_water,
+            &always_in_cell,
         );
         assert!(
             insts.is_empty(),
@@ -958,6 +1001,7 @@ mod tests {
             None, // wild — no clearing
             &const_height(100.0),
             &no_water,
+            &always_in_cell,
         );
         // Verify no ambient is INSIDE the 1m cylinder footprint
         // (scale.x / 2 = 1 m).

@@ -245,7 +245,7 @@ struct Runtime {
     streaming_cells: Option<crate::streaming::StreamingCellSet>,
     /// Sub-biome cell catalog — baked once, queried per frame by
     /// `streaming_cells.refresh`. None for scenario playback.
-    sub_biome_catalog: Option<flowplan_world::SubBiomeCellCatalog>,
+    sub_biome_catalog: Option<std::sync::Arc<flowplan_world::SubBiomeCellCatalog>>,
     /// Eager-baked per-cell feature assignments + instance lists
     /// (Phase 3.6.3c.5c.1). Built once at app init; the active-cell-set
     /// upload loop reads `instances_at_cell(cell_id)` for each entered
@@ -686,7 +686,9 @@ impl Runtime {
         // reposition the initial mesh center (avoiding a ~1 s async
         // rebuild at frame 0 when teleporting far from origin).
         let sub_biome_catalog = if scenario.is_none() {
-            Some(flowplan_world::SubBiomeCellCatalog::bake(WORLD_SEED))
+            Some(std::sync::Arc::new(
+                flowplan_world::SubBiomeCellCatalog::bake(WORLD_SEED),
+            ))
         } else {
             None
         };
@@ -777,14 +779,18 @@ impl Runtime {
         };
 
         // Spawn background ambient worker alongside the bake (5c.2.c.12d).
-        // Only when we have hydrology to share with it.
-        let ambient_worker = hydrology.as_ref().map(|hydro| {
-            crate::ambient_worker::AmbientWorker::spawn(
+        // Worker needs hydrology + sub-biome catalog (for the per-cell
+        // Voronoi-polygon clip — 5c.2.c.12i). Only spawn when both are
+        // present.
+        let ambient_worker = match (hydrology.as_ref(), sub_biome_catalog.as_ref()) {
+            (Some(hydro), Some(catalog)) => Some(crate::ambient_worker::AmbientWorker::spawn(
                 WORLD_SEED,
                 terrain.clone(),
                 std::sync::Arc::clone(hydro),
-            )
-        });
+                std::sync::Arc::clone(catalog),
+            )),
+            _ => None,
+        };
 
         // 3.6.3c.5c.1 diagnostic: `FLOWPLAN_SPAWN_NEAR_INSTANCE=1` puts
         // the debug camera 200 m south + 100 m above the populated cell

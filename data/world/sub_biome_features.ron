@@ -4507,21 +4507,19 @@
         "CoastalBoreal": [
             (
                 // Primary conifer canopy — tall pines / spruce.
-                // Uniform carpet: noise_floor=0.3 keeps sparse
-                // presence everywhere, density peaks where noise
-                // climbs. Wide taper + lower threshold so the whole
-                // valid altitude band reads as "forested".
-                // See MAPGEN § Density modulation vs gating.
+                // Uniform carpet at meaningful density so the whole
+                // valid altitude band reads as "forested" rather than
+                // sparse. See MAPGEN § Density modulation vs gating.
                 kind: Cone,
                 color_source: Secondary,
-                density_per_km2: 200.0,
+                density_per_km2: 380.0,
                 size_range_m: (5.0, 24.0),
                 scale_jitter: (0.65, 1.45),
                 noise_scale_m: 500.0,
                 noise_threshold: 0.1,
                 noise_taper: 0.4,
-                noise_floor: 0.3,
-                altitude_range_m: (3.0, 1500.0),
+                noise_floor: 0.4,
+                altitude_range_m: (0.0, 1500.0),
                 slope_max_deg: 35.0,
                 rng_stream: 0,
             ),
@@ -4538,7 +4536,7 @@
                 noise_scale_m: 140.0,
                 noise_threshold: 0.72,
                 noise_taper: 0.2,
-                altitude_range_m: (3.0, 1400.0),
+                altitude_range_m: (0.0, 1400.0),
                 slope_max_deg: 30.0,
                 rng_stream: 6,
             ),
@@ -4555,7 +4553,7 @@
                 noise_scale_m: 280.0,
                 noise_threshold: 0.55,
                 noise_taper: 0.18,
-                altitude_range_m: (3.0, 1400.0),
+                altitude_range_m: (0.0, 1400.0),
                 slope_max_deg: 30.0,
                 rng_stream: 3,
                 stacks: [
@@ -4591,7 +4589,7 @@
                 noise_scale_m: 200.0,
                 noise_threshold: 0.4,
                 noise_taper: 0.18,
-                altitude_range_m: (3.0, 1600.0),
+                altitude_range_m: (0.0, 1600.0),
                 slope_max_deg: 40.0,
                 rng_stream: 4,
                 stacks: [
@@ -4608,17 +4606,17 @@
             ),
             (
                 // Understory shrubs (spheres) — uniform carpet with
-                // noise_floor. Always some presence, denser in pockets.
+                // boosted floor for a meaningful baseline density.
                 kind: Sphere,
                 color_source: Secondary,
-                density_per_km2: 120.0,
+                density_per_km2: 380.0,
                 size_range_m: (0.4, 1.8),
                 scale_jitter: (0.55, 1.6),
                 noise_scale_m: 160.0,
                 noise_threshold: 0.1,
                 noise_taper: 0.35,
-                noise_floor: 0.3,
-                altitude_range_m: (2.0, 1800.0),
+                noise_floor: 0.45,
+                altitude_range_m: (0.0, 1800.0),
                 slope_max_deg: 50.0,
                 rng_stream: 1,
             ),
@@ -4919,20 +4917,39 @@
         "MediterraneanArchipelago": [
             (
                 // Olive trees + pines — low, wind-sculpted, widely varied.
-                // Uniform Mediterranean carpet; sparse everywhere,
-                // denser near lower valleys.
+                // Uniform Mediterranean carpet at meaningful density:
+                // this biome is the climate-decision-tree default and
+                // covers most of the spawn area, so it must read as
+                // densely vegetated, not as bare ground.
                 kind: Cone,
                 color_source: Secondary,
-                density_per_km2: 90.0,
+                density_per_km2: 320.0,
                 size_range_m: (2.0, 9.0),
                 scale_jitter: (0.7, 1.4),
                 noise_scale_m: 460.0,
                 noise_threshold: 0.12,
                 noise_taper: 0.38,
-                noise_floor: 0.3,
-                altitude_range_m: (3.0, 800.0),
+                noise_floor: 0.4,
+                altitude_range_m: (0.0, 800.0),
                 slope_max_deg: 45.0,
                 rng_stream: 0,
+            ),
+            (
+                // Olive understory — smaller scrubby second layer at
+                // higher density. Fills the visual gaps between the
+                // primary canopy.
+                kind: Cone,
+                color_source: Secondary,
+                density_per_km2: 250.0,
+                size_range_m: (1.2, 3.5),
+                scale_jitter: (0.7, 1.3),
+                noise_scale_m: 250.0,
+                noise_threshold: 0.1,
+                noise_taper: 0.35,
+                noise_floor: 0.45,
+                altitude_range_m: (0.0, 900.0),
+                slope_max_deg: 50.0,
+                rng_stream: 8,
             ),
             (
                 // Olive grove / pine copse — tight cluster pockets.
@@ -4944,7 +4961,7 @@
                 noise_scale_m: 160.0,
                 noise_threshold: 0.75,
                 noise_taper: 0.2,
-                altitude_range_m: (3.0, 700.0),
+                altitude_range_m: (0.0, 700.0),
                 slope_max_deg: 35.0,
                 rng_stream: 7,
             ),
@@ -4958,7 +4975,7 @@
                 noise_scale_m: 250.0,
                 noise_threshold: 0.55,
                 noise_taper: 0.18,
-                altitude_range_m: (5.0, 700.0),
+                altitude_range_m: (0.0, 700.0),
                 slope_max_deg: 35.0,
                 rng_stream: 3,
                 stacks: [
@@ -4984,18 +5001,18 @@
             ),
             (
                 // Maquis shrubland (dense low scrub) — the dominant
-                // mediterranean ground cover. noise_floor=0.4 means
-                // maquis is truly ubiquitous (as in reality).
+                // mediterranean ground cover. Authored at high density
+                // because real maquis is essentially carpet from above.
                 kind: Sphere,
                 color_source: Secondary,
-                density_per_km2: 220.0,
+                density_per_km2: 700.0,
                 size_range_m: (0.3, 1.5),
                 scale_jitter: (0.55, 1.55),
                 noise_scale_m: 150.0,
                 noise_threshold: 0.1,
                 noise_taper: 0.3,
-                noise_floor: 0.4,
-                altitude_range_m: (2.0, 1200.0),
+                noise_floor: 0.5,
+                altitude_range_m: (0.0, 1200.0),
                 slope_max_deg: 55.0,
                 rng_stream: 1,
             ),
@@ -5009,7 +5026,7 @@
                 noise_scale_m: 500.0,
                 noise_threshold: 0.38,
                 noise_taper: 0.2,
-                altitude_range_m: (3.0, 1800.0),
+                altitude_range_m: (0.0, 1800.0),
                 slope_max_deg: 70.0,
                 rng_stream: 2,
                 stacks: [
