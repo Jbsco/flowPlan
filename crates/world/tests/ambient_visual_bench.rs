@@ -51,11 +51,13 @@ use image::{ImageBuffer, Rgb};
 
 // Silence unused-crate-dependencies for transitive deps the integration
 // test target can see.
+use bincode as _;
 use glam as _;
 use libm as _;
 use rayon as _;
 use ron as _;
 use serde as _;
+use tracing as _;
 
 /// The actual game world seed (matches `crates/app/src/game_app.rs`
 /// WORLD_SEED). Diagnostic must use the same seed as the in-game spawn

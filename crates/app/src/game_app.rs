@@ -235,6 +235,14 @@ struct Runtime {
     /// camera as it moves, replacing the fixed-origin mesh used in earlier
     /// phases. None for scenario playback (uses fixed `Terrain::flat*`).
     streaming_terrain: Option<crate::streaming::StreamingTerrain>,
+    /// Chunked-Voronoi terrain streaming (Phase 3.6.3c.4). When
+    /// present, takes precedence over `streaming_terrain` — per-cell
+    /// chunks are baked async and uploaded incrementally as cells
+    /// enter/exit the streaming radius. Built only when `world_refs`
+    /// is available (`FLOWPLAN_FEATURE_INSTANCES=1` path); fast-
+    /// iteration mode keeps the legacy single-mesh
+    /// `streaming_terrain` path.
+    chunked_terrain: Option<crate::chunked_terrain::ChunkedTerrain>,
     /// Streaming water mesh — same pattern, follows active camera.
     streaming_water: Option<crate::streaming::StreamingWater>,
     /// Streaming Voronoi-cell active set (Phase 3.6.3c.5b Layer 2).
@@ -251,7 +259,7 @@ struct Runtime {
     /// upload loop reads `instances_at_cell(cell_id)` for each entered
     /// cell. None for scenario playback + during the 33 s bake window
     /// when the optional is taken by a background builder (5c.2+).
-    baked_assignments: Option<flowplan_world::baked_assignments::BakedAssignments>,
+    baked_assignments: Option<std::sync::Arc<flowplan_world::baked_assignments::BakedAssignments>>,
     /// Hydrology graph — retained after bake. `Arc` so the background
     /// ambient worker holds a read-only clone. Kept on main thread
     /// too for future water-surface queries (audio, feature streaming,
@@ -715,9 +723,11 @@ impl Runtime {
             sub_biome_catalog.as_ref(),
         ) {
             (true, true, Some(catalog)) => {
-                eprintln!(
-                    "flowplan: FLOWPLAN_FEATURE_INSTANCES=1 — baking feature assignments (~30-60 s)..."
-                );
+                eprintln!("flowplan: FLOWPLAN_FEATURE_INSTANCES=1 — preparing world bake...");
+                // Hydrology + hub catalog are needed regardless of cache
+                // hit (used for ambient worker, hub-foundation map, and
+                // potentially future systems). They're cheap relative
+                // to the BakedAssignments + Pass-2 work.
                 let t0 = std::time::Instant::now();
                 let hydrology = flowplan_world::HydrologyGraph::bake(WORLD_SEED, &terrain);
                 eprintln!(
@@ -733,56 +743,73 @@ impl Runtime {
                 );
                 let foundations =
                     flowplan_world::feature_delta::HubFoundationMap::build(&hub_catalog, catalog);
-                let t_groups = std::time::Instant::now();
-                let feature_groups =
-                    flowplan_world::feature_groups::FeatureGroupBundle::build_road_network(
-                        &hub_catalog,
-                        catalog,
+
+                // Try the bake cache. If it loads, skip Pass 1 + Bake +
+                // Pass 2 — they're deterministic per master_seed +
+                // BAKE_VERSION, so the cached output is byte-identical.
+                let (baked, feature_groups) = if let Some(cached) =
+                    flowplan_world::bake_cache::try_load(WORLD_SEED)
+                {
+                    eprintln!(
+                        "flowplan: bake cache HIT — loaded {} feature instances + {} road groups",
+                        cached.baked.total_instance_count(),
+                        cached.groups.len(),
                     );
-                eprintln!(
-                    "flowplan: feature groups (road network) baked in {:.2} s — {} groups across {} cells",
-                    t_groups.elapsed().as_secs_f64(),
-                    feature_groups.len(),
-                    feature_groups.cell_count(),
-                );
-                let t2 = std::time::Instant::now();
-                let baked = flowplan_world::baked_assignments::BakedAssignments::bake(
-                    catalog,
-                    &terrain,
-                    &hydrology,
-                    &hub_catalog,
-                    &feature_groups,
-                );
-                // Pass-2 (3.6.3c.3c): feature-emit access roads. Reads
-                // BakedAssignments to find cells whose authored
-                // `road_emit` is set, then A*s them onto the existing
-                // hub-trunk network. Mutates the bundle in place.
-                let mut feature_groups = feature_groups;
-                let t_emit = std::time::Instant::now();
-                let libs = flowplan_world::sub_biome::SubBiomeLibraries::shared();
-                let emit_cells = baked.collect_road_emit_cells(libs);
-                let emit_count = emit_cells.len();
-                feature_groups.extend_with_feature_emit_roads(
-                    &emit_cells,
-                    catalog,
-                    &terrain,
-                    &hydrology,
-                );
-                eprintln!(
-                    "flowplan: pass-2 emit roads baked in {:.2} s — {} emitting cells, bundle now has {} groups across {} cells",
-                    t_emit.elapsed().as_secs_f64(),
-                    emit_count,
-                    feature_groups.len(),
-                    feature_groups.cell_count(),
-                );
-                eprintln!(
-                    "flowplan: baked assignments in {:.1} s — {} total instances across {} cells ({} populated of {} world)",
-                    t2.elapsed().as_secs_f32(),
-                    baked.total_instance_count(),
-                    baked.populated_cell_count(),
-                    baked.populated_cell_count(),
-                    baked.stats().cell_count,
-                );
+                    (cached.baked, cached.groups)
+                } else {
+                    eprintln!("flowplan: bake cache MISS — running full bake (~6 min)...");
+                    let t_groups = std::time::Instant::now();
+                    let feature_groups =
+                        flowplan_world::feature_groups::FeatureGroupBundle::build_road_network(
+                            &hub_catalog,
+                            catalog,
+                        );
+                    eprintln!(
+                        "flowplan: feature groups (road network) baked in {:.2} s — {} groups across {} cells",
+                        t_groups.elapsed().as_secs_f64(),
+                        feature_groups.len(),
+                        feature_groups.cell_count(),
+                    );
+                    let t2 = std::time::Instant::now();
+                    let baked = flowplan_world::baked_assignments::BakedAssignments::bake(
+                        catalog,
+                        &terrain,
+                        &hydrology,
+                        &hub_catalog,
+                        &feature_groups,
+                    );
+                    eprintln!(
+                        "flowplan: baked assignments in {:.1} s — {} total instances across {} cells ({} populated of {} world)",
+                        t2.elapsed().as_secs_f32(),
+                        baked.total_instance_count(),
+                        baked.populated_cell_count(),
+                        baked.populated_cell_count(),
+                        baked.stats().cell_count,
+                    );
+                    // Pass-2 (3.6.3c.3c): feature-emit access roads.
+                    let mut feature_groups = feature_groups;
+                    let t_emit = std::time::Instant::now();
+                    let libs = flowplan_world::sub_biome::SubBiomeLibraries::shared();
+                    let emit_cells = baked.collect_road_emit_cells(libs);
+                    let emit_count = emit_cells.len();
+                    feature_groups.extend_with_feature_emit_roads(
+                        &emit_cells,
+                        catalog,
+                        &terrain,
+                        &hydrology,
+                    );
+                    eprintln!(
+                        "flowplan: pass-2 emit roads baked in {:.2} s — {} emitting cells, bundle now has {} groups across {} cells",
+                        t_emit.elapsed().as_secs_f64(),
+                        emit_count,
+                        feature_groups.len(),
+                        feature_groups.cell_count(),
+                    );
+                    // Save to cache for next launch — best-effort, won't
+                    // fail the bake if disk write fails.
+                    flowplan_world::bake_cache::save(WORLD_SEED, &baked, &feature_groups);
+                    (baked, feature_groups)
+                };
                 // Print ~8 sample populated-cell coordinates nearest the
                 // spawn (0, 0) so the player has a target to fly to.
                 // Uses the first instance's position (x, y, z); y is
@@ -818,6 +845,7 @@ impl Runtime {
                     );
                 }
                 let hydrology_arc = std::sync::Arc::new(hydrology);
+                let baked_arc = std::sync::Arc::new(baked);
                 let world_refs_arc = flowplan_world::composed::WorldRefsArc::new(
                     std::sync::Arc::new(terrain.clone()),
                     std::sync::Arc::clone(&hydrology_arc),
@@ -825,8 +853,9 @@ impl Runtime {
                     std::sync::Arc::new(hub_catalog),
                     std::sync::Arc::new(foundations),
                     std::sync::Arc::new(feature_groups),
+                    std::sync::Arc::clone(&baked_arc),
                 );
-                (Some(baked), Some(hydrology_arc), Some(world_refs_arc))
+                (Some(baked_arc), Some(hydrology_arc), Some(world_refs_arc))
             },
             _ => (None, None, None),
         };
@@ -927,20 +956,32 @@ impl Runtime {
             Some((pos, _, _)) => glam::Vec2::new(pos.x, pos.z),
             None => glam::Vec2::new(env_spawn_x, env_spawn_z),
         };
+        // Two terrain streaming modes (Phase 3.6.3c.4):
+        // - When `world_refs` is Some (FEATURE_INSTANCES=1): per-cell
+        //   chunked streaming. Initial mesh is empty; chunks load
+        //   incrementally. Replaces the legacy monolithic-disc rebuild.
+        // - When `world_refs` is None (fast iteration / scenarios):
+        //   keep the legacy `StreamingTerrain` (one big disc).
+        let chunked_terrain = world_refs
+            .as_ref()
+            .map(|refs| crate::chunked_terrain::ChunkedTerrain::new(refs.clone()));
         let (terrain_mesh, streaming_terrain) = if scenario.is_none() {
-            // L3-aware sampler when WorldRefs is built (FEATURE_INSTANCES=1
-            // with successful bake); otherwise L1-only fast path.
-            let height_source = world_refs.as_ref().map_or_else(
-                || crate::streaming::HeightSource::Terrain(std::sync::Arc::new(terrain.clone())),
-                |refs| crate::streaming::HeightSource::Composed(refs.clone()),
-            );
-            let st = crate::streaming::StreamingTerrain::new(
-                crate::streaming::TERRAIN_HALF_EXTENT_M,
-                crate::streaming::TERRAIN_CELLS,
-                initial_center,
-                height_source,
-            );
-            (st.cpu_mesh().clone(), Some(st))
+            if chunked_terrain.is_some() {
+                // Initial empty mesh — first frame's chunks haven't
+                // baked yet; renderer will swap to chunk-draw mode as
+                // soon as the first chunk arrives.
+                (CpuMesh::new("terrain"), None)
+            } else {
+                let height_source =
+                    crate::streaming::HeightSource::Terrain(std::sync::Arc::new(terrain.clone()));
+                let st = crate::streaming::StreamingTerrain::new(
+                    crate::streaming::TERRAIN_HALF_EXTENT_M,
+                    crate::streaming::TERRAIN_CELLS,
+                    initial_center,
+                    height_source,
+                );
+                (st.cpu_mesh().clone(), Some(st))
+            }
         } else {
             let m = CpuMesh::terrain_patch(TERRAIN_CELLS, TERRAIN_HALF_EXTENT, |x, z| {
                 terrain.height(x, z)
@@ -1060,6 +1101,7 @@ impl Runtime {
             renderer,
             terrain,
             streaming_terrain,
+            chunked_terrain,
             streaming_water,
             streaming_cells,
             sub_biome_catalog,
@@ -1515,6 +1557,42 @@ impl Runtime {
         // `active_camera` + `active_cam_pos_xz` were built earlier from
         // the snapshot read. In debug mode they follow the debug camera;
         // otherwise the sim camera. Streaming recenter uses them below.
+        // Chunked-terrain path (Phase 3.6.3c.4) takes precedence when
+        // present. Drains finished worker results into per-cell GPU
+        // meshes; old monolithic StreamingTerrain rebuild is skipped
+        // entirely for this code path.
+        if let (Some(chunked), Some(catalog)) = (
+            self.chunked_terrain.as_mut(),
+            self.sub_biome_catalog.as_ref(),
+        ) {
+            // Snapshot the current active set from the streaming-cell
+            // refresh below — but we need it before the cell-set
+            // refresh runs. Use the catalog's cells_within_radius
+            // directly; cheap (~ms).
+            let active = catalog.cells_within_radius(
+                active_cam_pos_xz.x,
+                active_cam_pos_xz.y,
+                crate::streaming::STREAM_RADIUS_M,
+            );
+            let update = chunked.update(&active, catalog, active_cam_pos_xz);
+            for cell_id in &update.exited {
+                self.renderer.evict_terrain_chunk(*cell_id);
+            }
+            for (cell_id, mesh) in &update.entered {
+                self.renderer
+                    .update_terrain_chunk(&self.device, *cell_id, mesh);
+            }
+            if !update.entered.is_empty() || !update.exited.is_empty() {
+                tracing::info!(
+                    target: "streaming",
+                    entered = update.entered.len(),
+                    exited = update.exited.len(),
+                    pending = chunked.pending_count(),
+                    resident = chunked.resident_count(),
+                    "chunked terrain update"
+                );
+            }
+        }
         if let Some(st) = self.streaming_terrain.as_mut() {
             // Main-thread cost is now just channel probe + possible
             // worker spawn — sub-millisecond. The worker measures its

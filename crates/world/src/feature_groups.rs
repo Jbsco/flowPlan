@@ -74,7 +74,7 @@ type EligibilityFn = fn(&crate::hub_catalog::HubEntry) -> bool;
 /// 3.6.3c.3c added the 5-tier road ladder; v1 used 4 kinds with `Road`
 /// as the umbrella paved-tier. The rename `Road` → `Paved` is reflected
 /// at every call site.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum FeatureGroupKind {
     /// Two-rut track — barely a road. Wagon ruts, ATV trail. Narrowest
     /// band, lightest depression. Emitted by very rural features
@@ -195,7 +195,7 @@ impl FeatureGroupKind {
 /// `~WORLD_EXTENT_M` rather than vertices that wrap mid-edge — the
 /// delta evaluator wraps query points before distance computation so
 /// the seam is invisible to consumers.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FeatureGroup {
     pub id: FeatureGroupId,
     pub kind: FeatureGroupKind,
@@ -215,7 +215,7 @@ pub struct FeatureGroup {
 /// the cell. The L3 delta evaluator only checks segments near
 /// `seg_idx` — at most 3 distance computes per cell-group pair
 /// instead of iterating the full polyline.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GroupMembership {
     pub group_id: FeatureGroupId,
     pub seg_idx: u16,
@@ -225,7 +225,7 @@ pub struct GroupMembership {
 ///
 /// Built once at world bake. Read-only at query time; cheap to share
 /// (held by `WorldRefsArc`).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct FeatureGroupBundle {
     groups: Vec<FeatureGroup>,
     /// `cell_id` → list of `(group_id, segment_index)` — each entry is

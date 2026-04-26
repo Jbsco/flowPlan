@@ -56,7 +56,7 @@ use crate::voronoi_cells::CellId;
 /// `HalfCylinder` (quonset-hut hangar roofs) + `FlatQuad` (runways /
 /// tarmac / road surfaces). Later milestones may add `StickTree`
 /// (composite) per memory `simple_primitives_render_direction`.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, Deserialize)]
 pub enum PrimitiveKind {
     /// Axis-aligned box; unit dimensions scaled per-instance. Used for
     /// buildings, sheds, cabins, shops.
@@ -348,7 +348,7 @@ pub struct PrimitiveComponent {
 /// ~48 bytes per instance; per-cell typical count is 5-10 → ~0.5 KB/cell
 /// × 25 K cells with `dwelling_cluster` = ~12 MB baked for this one
 /// feature. Sparse storage keeps total in the tens-of-megabytes range.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FeatureInstance {
     /// Which primitive mesh to render.
     pub primitive: PrimitiveKind,

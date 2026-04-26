@@ -711,6 +711,121 @@ impl CpuMesh {
         mesh
     }
 
+    /// Build a terrain mesh chunk for a single Voronoi cell (Phase 3.6.3c.4).
+    ///
+    /// Generates vertices on a **world-aligned uniform grid** with
+    /// spacing `cell_size_m`, then emits only the vertices whose
+    /// nearest Voronoi cell matches the target. Adjacent chunks
+    /// sample the SAME world-aligned grid, so vertex positions match
+    /// exactly at cell boundaries — no T-junctions, no gaps.
+    ///
+    /// `bbox` is the chunk's spatial extent (typically `cell_pos ±
+    /// max_cell_radius`). `in_cell` is the target-cell test: returns
+    /// true iff `(x, z)` is closest to the target Voronoi cell.
+    /// `sample_height` is L1+L3 composed height.
+    ///
+    /// **Vertex compression**: out-of-cell grid points don't enter the
+    /// VBO at all. The `remap` `HashMap` from `(grid_ix, grid_iz)` to
+    /// `vbo_idx` lets us emit triangles in compact form. Memory cost
+    /// per chunk: ~1100 vertices × 32 bytes ≈ 36 KB. At 440 active
+    /// chunks ≈ 16 MB total — well within budget.
+    ///
+    /// **Triangle emission**: only when ALL FOUR corner vertices of a
+    /// grid cell are in-cell. Mixed corners (cell-boundary cases) get
+    /// dropped — neighbor chunks pick them up from their side. The
+    /// Voronoi-edge stitching is implicit via shared world-grid vertex
+    /// positions.
+    #[allow(clippy::cast_possible_wrap)]
+    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn terrain_voronoi_chunk(
+        bbox_min: (f32, f32),
+        bbox_max: (f32, f32),
+        cell_size_m: f32,
+        in_cell: impl Fn(f32, f32) -> bool + Sync,
+        sample_height: impl Fn(f32, f32) -> f32 + Sync,
+        label: &str,
+    ) -> Self {
+        use rayon::prelude::*;
+        use std::collections::HashMap;
+
+        let mut mesh = Self::new(label);
+
+        // Snap bbox to world-aligned grid so adjacent chunks share
+        // exact vertex positions. `floor / ceil` extends slightly past
+        // the bbox; non-in-cell verts get dropped, so the overshoot is
+        // free.
+        let ix_lo = (bbox_min.0 / cell_size_m).floor() as i64;
+        let ix_hi = (bbox_max.0 / cell_size_m).ceil() as i64;
+        let iz_lo = (bbox_min.1 / cell_size_m).floor() as i64;
+        let iz_hi = (bbox_max.1 / cell_size_m).ceil() as i64;
+        let nx = (ix_hi - ix_lo + 1).max(0) as usize;
+        let nz = (iz_hi - iz_lo + 1).max(0) as usize;
+        let total = nx * nz;
+
+        // Phase 1 (parallel): per-grid-vertex eval → Option<Vertex>.
+        // None = out-of-cell, drop. Some = sampled vertex with normal.
+        let raw: Vec<Option<Vertex>> = (0..total)
+            .into_par_iter()
+            .map(|i| {
+                let ix = ix_lo + (i % nx) as i64;
+                let iz = iz_lo + (i / nx) as i64;
+                let x = ix as f32 * cell_size_m;
+                let z = iz as f32 * cell_size_m;
+                if !in_cell(x, z) {
+                    return None;
+                }
+                let y = sample_height(x, z);
+                let eps = cell_size_m * 0.5;
+                let dy_dx = (sample_height(x + eps, z) - sample_height(x - eps, z)) / (2.0 * eps);
+                let dy_dz = (sample_height(x, z + eps) - sample_height(x, z - eps)) / (2.0 * eps);
+                let normal = Vec3::new(-dy_dx, 1.0, -dy_dz).normalize_or(Vec3::Y);
+                let color = terrain_color_for_height(y);
+                Some(Vertex {
+                    position: [x, y, z],
+                    normal: [normal.x, normal.y, normal.z],
+                    uv: [
+                        (ix - ix_lo) as f32 / nx as f32,
+                        (iz - iz_lo) as f32 / nz as f32,
+                    ],
+                    color,
+                })
+            })
+            .collect();
+
+        // Phase 2 (serial): compress to dense VBO + remap table.
+        let mut remap: HashMap<usize, u32> = HashMap::with_capacity(total / 4);
+        for (i, v) in raw.iter().enumerate() {
+            if let Some(v) = v {
+                remap.insert(i, mesh.vertices.len() as u32);
+                mesh.vertices.push(*v);
+            }
+        }
+
+        // Phase 3 (serial): emit triangles where all 4 corners are
+        // in-cell. Cells with mixed corners are dropped — neighbor
+        // chunks own them.
+        mesh.indices.reserve(remap.len() * 6);
+        for iz_off in 0..(nz - 1) {
+            for ix_off in 0..(nx - 1) {
+                let tl = iz_off * nx + ix_off;
+                let tr = iz_off * nx + ix_off + 1;
+                let bl = (iz_off + 1) * nx + ix_off;
+                let br = (iz_off + 1) * nx + ix_off + 1;
+                if let (Some(&t), Some(&r), Some(&b), Some(&q)) = (
+                    remap.get(&tl),
+                    remap.get(&tr),
+                    remap.get(&bl),
+                    remap.get(&br),
+                ) {
+                    mesh.indices.extend_from_slice(&[t, b, r, r, b, q]);
+                }
+            }
+        }
+        mesh
+    }
+
     /// Build a flat water grid at `y = 0` with uniform color and upward normals.
     ///
     /// Tessellated (not a single quad) so Milestone 2.2.2 can apply Gerstner wave

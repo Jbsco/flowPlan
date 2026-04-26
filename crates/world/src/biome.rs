@@ -51,7 +51,7 @@
 use crate::weather::{humidity, temperature};
 
 /// Climate-based biome label. See module docs for the catalog rationale.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum BiomeClass {
     /// Warm + arid + mid-altitude plateau. Colorado Plateau analog.
     HighDesert,

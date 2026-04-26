@@ -37,11 +37,13 @@ use image::{ImageBuffer, Rgb};
 
 // Silence unused-crate-dependencies lint for transitive deps the integration
 // test target sees but doesn't itself name directly.
+use bincode as _;
 use glam as _;
 use libm as _;
 use rayon as _;
 use ron as _;
 use serde as _;
+use tracing as _;
 
 /// Full-world-scenario crop extent (m). 500 km — representative regional view.
 const FULL_EXTENT_M: f32 = 500_000.0;

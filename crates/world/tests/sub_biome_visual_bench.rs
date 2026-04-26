@@ -35,11 +35,13 @@ use flowplan_world::terrain::Terrain;
 use flowplan_world::voronoi_cells::SubBiomeCellCatalog;
 use image::{ImageBuffer, Rgb};
 
+use bincode as _;
 use glam as _;
 use libm as _;
 use rayon as _;
 use ron as _;
 use serde as _;
+use tracing as _;
 
 const FULL_EXTENT_M: f32 = 500_000.0;
 const CONTINENTAL_EXTENT_M: f32 = 2_000_000.0;

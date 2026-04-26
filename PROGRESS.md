@@ -39,6 +39,59 @@ Post-tune calibration: `scenic_overlook` 37 → **12** placements (a viewpoint a
 
 `hot_springs` left at `temp_range_c: (-50, 5)` — climate window is conceptually correct (rare = cold). Calibration shows it stays near zero on canonical seed; revisit if visual-bench at 3.6.3c.4 confirms zero appearances.
 
+### Phase 3.6.3c.4 — Voronoi-cell chunked terrain streaming (Task #279)
+
+User direction (architectural pivot, design-doc-aligned): "I figure everything we can chunk should be chunked - different circular ranges if necessary, but we do most layers on voronoi layers, so I think we should be able to leverage that architecture, even for ambient objects, weather, and yes water and terrain."
+
+The monolithic `StreamingTerrain` (one big 20 km × 20 km mesh, rebuild = re-sample 1.4 M vertices as a unit) doesn't scale. Even with all per-vertex cost optimizations (today's `BakedAssignments` lookup + polyline-distance fix), a rebuild touches the whole mesh and takes 1-7 s on parallel cores; at debug-cam top tier it triggers every second. Outflies the rebuild during normal play too. Replaced with **per-Voronoi-cell mesh chunks**.
+
+**Architecture**:
+
+- **Per-cell async build**: each Voronoi cell baked into its own `GpuMesh` on a worker thread. ~440 active cells in 22 km radius; ~5-25 cells enter/exit per camera move; per-camera-step cost = O(entered cells), not O(whole mesh).
+- **Worker pool**: 4 threads, shared priority queue (nearest-first by camera distance), result channel back to main. Cell-enter → enqueue; cell-exit → drop GPU mesh.
+- **World-aligned grid**: chunks sample `floor(bbox / 30 m)` × `30 m`-spaced grid origin at world (0, 0). Adjacent cells share exact vertex positions at boundaries → no z-fights, no T-junctions, no gaps.
+- **Vertex compression**: per-chunk VBO holds only in-cell vertices (typically ~1100/4500 of the bbox sample grid). Triangles emit only where all 4 corners are in-cell; remap table keeps memory tight (~36 KB per chunk × 440 = ~16 MB).
+
+**Files added / modified**:
+
+- `crates/assets/src/mesh.rs::CpuMesh::terrain_voronoi_chunk` — pure CPU mesh builder for one cell. Takes bbox, cell-size, `in_cell` predicate, height sampler.
+- `crates/app/src/chunked_terrain.rs` (new, ~390 LOC) — `ChunkedTerrain` manager + worker pool + priority queue + result drain. Universal pattern intended for water / weather / ambient to follow.
+- `crates/render/src/renderer.rs` — `terrain_chunks: HashMap<u32, GpuMesh>` field, `update_terrain_chunk` / `evict_terrain_chunk` API, render-pass branch (chunked iteration when `!terrain_chunks.is_empty()`, else single-mesh fallback).
+- `crates/app/src/game_app.rs` — `chunked_terrain: Option<ChunkedTerrain>` field. When `world_refs` is `Some` (FEATURE_INSTANCES=1 path), chunked path takes over; legacy `StreamingTerrain` path stays available for fast-iteration / scenarios.
+
+**Per-frame flow** (chunked path):
+
+1. `catalog.cells_within_radius(camera, 22 km)` → active cell list (already cheap, in use for instances/ambient).
+2. `chunked_terrain.update(active, catalog, camera)` → reconciles state map: enqueue entered, drop exited, drain finished worker results into `Pending` state.
+3. For each entered `(cell_id, mesh)`: `renderer.update_terrain_chunk(device, cell_id, mesh)` (uploads GPU mesh).
+4. For each exited `cell_id`: `renderer.evict_terrain_chunk(cell_id)` (frees GPU mesh).
+5. Render pass iterates `terrain_chunks.values()` and draws each (~440 small draw calls ≪ frame budget).
+
+**Estimated per-cell cost**: ~22 ms build (4500 verts × 5 µs L1+L3 sample) + ~1 ms GPU upload. With 4 workers, a 5-cell burst lands in ~25 ms wall-clock. Per camera move (~3-10 cells): bounded < 100 ms total, fully off-thread.
+
+**Universal pattern pinned for follow-on layers**:
+
+The chunked-async-Voronoi pattern (priority queue + worker pool + per-cell GPU resource + cell-enter/exit deltas + world-aligned-grid for boundary continuity) becomes the template for:
+
+- **Water (3.6.3c.5)** — per-cell flat quads, FFT-displaced later. Cells closer than terrain (smaller streaming radius — water-visibility horizon).
+- **Volumetric weather (3.6.3c.6)** — chunked at the W2 weather-Voronoi scale (~20-50 km cells), shader-side cloud-density texture per cell.
+- **Ambient + feature instances** — already chunked-by-cell (existing per-cell HashMap caches); will get formal worker-pool refactor matching this template later.
+
+Different layers can use different streaming radii; everything streams in/out as cells enter/leave their respective range.
+
+**Tests + gate**: 282 world-lib tests pass + workspace clippy + fmt clean. Empty mesh skip in `update_terrain_chunk` guards against degenerate cells (zero in-cell vertices). The legacy `StreamingTerrain` path is preserved (for scenarios + future fast-iteration mode) — no regression for runs without `FLOWPLAN_FEATURE_INSTANCES=1`.
+
+**Tradeoffs accepted**:
+
+- Memory: ~16 MB additional GPU-resident mesh data (vs ~45 MB for monolithic). Lower total.
+- Draw calls: ~440 vs 1. Modern GPUs handle this fine; cost dominated by index-buffer iteration not draw-call submission.
+- Initial frame after world-load: progressive (chunks pop in over ~100 ms instead of one big 5 s rebuild). User-visible as a brief pop-in but never as a hitch.
+
+**Pinned for follow-on polish**:
+
+- LOD: distant cells could use lower-resolution meshes (60m grid vs 30m). Not in v1; revisit if memory or draw-call count becomes painful.
+- Bake-cache the chunk meshes to disk (deterministic per `(seed, cell_id, BAKE_VERSION)`). Skipped for v1 since each chunk is fast to build; reconsider if startup remains painful after profiling.
+
 ### 3.6.3c.3c.1 — Polyline-distance perf fix (mesh rebuild 133s → ~1s)
 
 User playtest after 3.6.3c.3c shipped: "rebuilds in flight take about 133 seconds, leaving the currently rendered terrain crashes the game". Diagnosis: each terrain-mesh vertex evaluates `compute_group_delta_at`, which iterated ALL polyline segments × 9 wrap shifts per group membership. With 30K+ road groups in the bundle and long highway polylines (100+ segments), per-vertex cost was ~900-1100 distance computes. At 1.4M vertices × 10 group-cells per vertex = ~10B ops per rebuild = 133s.

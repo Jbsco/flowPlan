@@ -11,6 +11,7 @@ use flowplan_world::biome::biome_at;
 use flowplan_world::hydrology::{HydrologyGraph, WaterClass, SEA_LEVEL_M};
 use flowplan_world::terrain::{HeightSampler, Terrain};
 
+use bincode as _;
 use flowplan_core as _;
 use glam as _;
 use image as _;
@@ -18,6 +19,7 @@ use libm as _;
 use rayon as _;
 use ron as _;
 use serde as _;
+use tracing as _;
 
 const GAME_SEED: u64 = 0x1337_CAFE_B0A7_5EAF;
 

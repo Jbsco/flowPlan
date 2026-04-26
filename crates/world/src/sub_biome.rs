@@ -610,7 +610,7 @@ impl PlacementContext {
 
 /// Which biome library to sample from — the primary biome or an
 /// adjacent biome via bleed-over.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BiomeSource {
     /// Primary parent biome.
     Primary(BiomeClass),

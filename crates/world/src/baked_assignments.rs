@@ -97,8 +97,22 @@ const fn mix_seed(a: u64, b: u64) -> u64 {
 /// to `plain`" without occupying a real feature-id slot.
 const FALLBACK_INDEX: u16 = 0;
 
+/// Flattened representation of `BakedAssignments` for the bake cache.
+///
+/// Tuple of `(per_cell, per_cell_source, feature_ids, feature_id_index,
+/// per_cell_instances, stats)` — [`BakedAssignments::cache_repr_parts`]
+/// emits this; [`BakedAssignments::from_cache_repr`] consumes it.
+pub type CacheReprParts = (
+    Vec<u16>,
+    Vec<BiomeSource>,
+    Vec<String>,
+    HashMap<String, u16>,
+    HashMap<CellId, Vec<FeatureInstance>>,
+    BakeStats,
+);
+
 /// Bake-stat counters reported via [`BakedAssignments::stats`].
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct BakeStats {
     /// Total cells processed.
     pub cell_count: u32,
@@ -421,6 +435,38 @@ impl BakedAssignments {
     #[must_use]
     pub const fn spatial_hashes(&self) -> &SelfSpacingState {
         &self.spatial_hashes
+    }
+
+    /// Bake-cache reassembly (Phase 3.6.3c.3c.2). Reconstructs a
+    /// `BakedAssignments` from the cache's flat-tuple representation.
+    /// `spatial_hashes` defaults to empty — used only by post-bake
+    /// diagnostics, not gameplay; rebuilding it would require re-
+    /// running the bake's serial Phase B which defeats the cache.
+    #[must_use]
+    pub fn from_cache_repr(parts: CacheReprParts) -> Self {
+        Self {
+            per_cell: parts.0,
+            per_cell_source: parts.1,
+            feature_ids: parts.2,
+            feature_id_index: parts.3,
+            spatial_hashes: SelfSpacingState::new(),
+            per_cell_instances: parts.4,
+            stats: parts.5,
+        }
+    }
+
+    /// Bake-cache disassembly. Companion to `from_cache_repr`. Clones
+    /// the heavy collections — caller serializes them.
+    #[must_use]
+    pub fn cache_repr_parts(&self) -> CacheReprParts {
+        (
+            self.per_cell.clone(),
+            self.per_cell_source.clone(),
+            self.feature_ids.clone(),
+            self.feature_id_index.clone(),
+            self.per_cell_instances.clone(),
+            self.stats.clone(),
+        )
     }
 }
 

@@ -25,6 +25,7 @@
 
 use std::sync::Arc;
 
+use crate::baked_assignments::BakedAssignments;
 use crate::feature_delta::{compute_delta_at, HubFoundationMap};
 use crate::feature_groups::FeatureGroupBundle;
 use crate::hub_catalog::HubCatalog;
@@ -44,6 +45,13 @@ pub struct WorldRefs<'a> {
     pub hubs: &'a HubCatalog,
     pub foundations: &'a HubFoundationMap,
     pub feature_groups: &'a FeatureGroupBundle,
+    /// Pre-baked feature assignments. When present, the L3 evaluator
+    /// looks up each cell's natural-feature id from the cache (O(1)
+    /// `HashMap`) instead of re-running the placement pipeline per
+    /// query. Critical for the streaming-mesh rebuild path — without
+    /// this, the per-cell `feature_at_cell` call dominates rebuild
+    /// time at ~140 s for 1.4 M vertices.
+    pub baked: Option<&'a BakedAssignments>,
 }
 
 impl<'a> WorldRefs<'a> {
@@ -58,6 +66,7 @@ impl<'a> WorldRefs<'a> {
         hubs: &'a HubCatalog,
         foundations: &'a HubFoundationMap,
         feature_groups: &'a FeatureGroupBundle,
+        baked: Option<&'a BakedAssignments>,
     ) -> Self {
         Self {
             terrain,
@@ -66,6 +75,7 @@ impl<'a> WorldRefs<'a> {
             hubs,
             foundations,
             feature_groups,
+            baked,
         }
     }
 
@@ -83,6 +93,7 @@ impl<'a> WorldRefs<'a> {
             self.hubs,
             self.hydrology,
             self.feature_groups,
+            self.baked,
             self.terrain.seed(),
         );
         base + delta
@@ -105,6 +116,7 @@ impl<'a> WorldRefs<'a> {
             self.hubs,
             self.hydrology,
             self.feature_groups,
+            self.baked,
             self.terrain.seed(),
         );
         base + delta
@@ -124,6 +136,7 @@ impl<'a> WorldRefs<'a> {
             self.hubs,
             self.hydrology,
             self.feature_groups,
+            self.baked,
             self.terrain.seed(),
         )
     }
@@ -159,11 +172,12 @@ pub struct WorldRefsArc {
     pub hubs: Arc<HubCatalog>,
     pub foundations: Arc<HubFoundationMap>,
     pub feature_groups: Arc<FeatureGroupBundle>,
+    pub baked: Arc<BakedAssignments>,
 }
 
 impl WorldRefsArc {
-    /// Build the bundle from already-owned `Arc`s. All six must share
-    /// the same `master_seed`; we accept them without re-checking.
+    /// Build the bundle from already-owned `Arc`s. All seven must
+    /// share the same `master_seed`; we accept them without re-checking.
     #[must_use]
     pub const fn new(
         terrain: Arc<Terrain>,
@@ -172,6 +186,7 @@ impl WorldRefsArc {
         hubs: Arc<HubCatalog>,
         foundations: Arc<HubFoundationMap>,
         feature_groups: Arc<FeatureGroupBundle>,
+        baked: Arc<BakedAssignments>,
     ) -> Self {
         Self {
             terrain,
@@ -180,6 +195,7 @@ impl WorldRefsArc {
             hubs,
             foundations,
             feature_groups,
+            baked,
         }
     }
 
@@ -193,6 +209,7 @@ impl WorldRefsArc {
             &self.hubs,
             &self.foundations,
             &self.feature_groups,
+            Some(&self.baked),
         )
     }
 
@@ -248,7 +265,7 @@ mod tests {
     fn height_at_composes_l1_plus_l3() {
         let (t, h, s, hc, f) = bake_canonical();
         let groups = empty_groups();
-        let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &groups);
+        let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &groups, None);
         // Sample at origin: just verify it doesn't panic + returns
         // a finite value in the plausible world-envelope range.
         let composed = refs.height_at(1234.5, -6789.0);
@@ -263,7 +280,7 @@ mod tests {
     fn delta_at_equals_composed_minus_base() {
         let (t, h, s, hc, f) = bake_canonical();
         let groups = empty_groups();
-        let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &groups);
+        let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &groups, None);
         for &(x, z) in &[
             (1000.0_f32, -1000.0),
             (50_000.0, 25_000.0),
@@ -289,7 +306,7 @@ mod tests {
         // keeps the test stable and self-explanatory.
         let (t, h, s, hc, f) = bake_canonical();
         let groups = empty_groups();
-        let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &groups);
+        let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &groups, None);
         let mut found = false;
         'outer: for ix in 0..10 {
             for iz in 0..10 {
@@ -317,7 +334,7 @@ mod tests {
         // on them (hydrology continuity invariant).
         let (t, h, s, hc, f) = bake_canonical();
         let groups = empty_groups();
-        let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &groups);
+        let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &groups, None);
         let mut samples_checked = 0_u32;
         for ix in 0..30 {
             for iz in 0..30 {

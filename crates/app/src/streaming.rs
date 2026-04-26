@@ -39,7 +39,14 @@ use glam::Vec2;
 ///   lake-cluster bowls, mesa plateaus, gas-station pads, etc.
 ///
 /// Cloning is cheap — both variants are `Arc`-backed.
+///
+/// Phase 3.6.3c.4: the `Composed` variant is preserved for the
+/// legacy single-mesh `StreamingTerrain` path; chunked terrain now
+/// consumes `WorldRefsArc` directly. `dead_code` allow keeps the
+/// variant available for fast-iteration paths without forcing the
+/// chunked manager.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub enum HeightSource {
     /// L1-only sampler (no L3 deltas).
     Terrain(Arc<Terrain>),

@@ -24,6 +24,13 @@ rayon = { workspace = true }
 # queries. RON + serde are already workspace deps.
 ron = { workspace = true }
 serde = { workspace = true }
+# Compact binary serialization for the bake cache (Phase 3.6.3c.3c.2).
+# Used by `bake_cache::save` / `bake_cache::load`. Bake artifacts are
+# deterministic per master seed → safe to cache. World-load time only.
+bincode = { workspace = true }
+# Logging for cache load/save status. World crate uses it only here;
+# best-effort messages, never load-bearing.
+tracing = { workspace = true }
 # world depends on core only. Sim queries world's pure samplers for buoyancy
 # (Phase 2.5a) and ground effect (Phase 2.4.6); that's the sim -> world direction.
 

@@ -76,6 +76,13 @@ rayon = "1"
 serde = { version = "1", features = ["derive"] }
 ron = "0.8"
 toml = "0.8"
+# Bake cache (3.6.3c.3c.2): compact binary serialization of
+# BakedAssignments + FeatureGroupBundle so subsequent launches load
+# in seconds instead of re-running the 6+ minute bake. Approved as
+# pre-3.7 stopgap — the full 3.7 save format will use the same
+# serialization but live in the user-data dir with seed-creation
+# tooling.
+bincode = "1.3"
 
 # Logging / tracing
 tracing = "0.1"

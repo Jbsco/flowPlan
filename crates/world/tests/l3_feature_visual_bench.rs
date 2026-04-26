@@ -35,12 +35,14 @@ use flowplan_world::terrain::{HeightSampler, Terrain};
 use flowplan_world::voronoi_cells::SubBiomeCellCatalog;
 use image::{ImageBuffer, Rgb};
 
+use bincode as _;
 use flowplan_core as _;
 use glam as _;
 use libm as _;
 use rayon as _;
 use ron as _;
 use serde as _;
+use tracing as _;
 
 const FULL_EXTENT_M: f32 = 500_000.0;
 const CONTINENTAL_EXTENT_M: f32 = 2_000_000.0;
@@ -220,7 +222,7 @@ fn emit_l3_topo_artifacts() {
     // L3-composed topo with hillshade — the "what does the world
     // look like now" artifact post feature-delta composition.
     let (t, h, s, hc, f, fg) = shared_bake();
-    let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &fg);
+    let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &fg, None);
     let dir = output_dir();
 
     for &crop in CROPS {
@@ -262,7 +264,7 @@ fn emit_l3_delta_diff_artifacts() {
     // Diverging red/blue diff map showing where L3 differs from L1.
     // Blue = carved (negative delta), red = raised (positive delta).
     let (t, h, s, hc, f, fg) = shared_bake();
-    let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &fg);
+    let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &fg, None);
     let dir = output_dir();
     let max_abs_delta = 200.0_f32; // visualization scale — clamps wilder deltas
 
@@ -287,7 +289,7 @@ fn emit_l3_delta_diff_artifacts() {
 fn emit_surface_classification_artifacts() {
     // Surface class map — distinct color per SurfaceClass.
     let (t, h, s, hc, f, fg) = shared_bake();
-    let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &fg);
+    let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &fg, None);
     let dir = output_dir();
 
     for &crop in CROPS {
@@ -312,7 +314,7 @@ fn emit_hub_foundation_zoom_artifact() {
     // Zoom on a Major hub: side-by-side L1 vs L3 at ~3 km crop.
     // Shows the foundation flatten + skirt in action.
     let (t, h, s, hc, f, fg) = shared_bake();
-    let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &fg);
+    let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &fg, None);
     let dir = output_dir();
 
     // Find a Major hub to center on.
@@ -396,7 +398,7 @@ fn emit_delta_stats_diagnostic() {
     // Non-rendering diagnostic — counts cells with non-zero L3 delta
     // + reports surface-class distribution across a wide sample grid.
     let (t, h, s, hc, f, fg) = shared_bake();
-    let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &fg);
+    let refs = WorldRefs::new(&t, &h, &s, &hc, &f, &fg, None);
     let sample_n = 200_u32;
     let mut zero_delta = 0_u32;
     let mut pos_delta = 0_u32;

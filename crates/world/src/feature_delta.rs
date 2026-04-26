@@ -48,6 +48,7 @@ use std::collections::HashMap;
 
 use flowplan_core::{wrap_coord, WORLD_EXTENT_M};
 
+use crate::baked_assignments::BakedAssignments;
 use crate::feature_delta_impls;
 use crate::feature_groups::FeatureGroupBundle;
 use crate::hub_catalog::{HubCatalog, HubTier};
@@ -197,6 +198,7 @@ pub fn compute_delta_at(
     hubs: &HubCatalog,
     hydrology: &HydrologyGraph,
     feature_groups: &FeatureGroupBundle,
+    baked: Option<&BakedAssignments>,
     terrain_seed: u64,
 ) -> f32 {
     let cell_id = sub_biome.nearest_cell(x, z);
@@ -242,12 +244,21 @@ pub fn compute_delta_at(
             .map_or(ctx.base_altitude_m, |_h| ctx.base_altitude_m);
         feature_delta_impls::hub_foundation_delta(tier, &ctx, runway_datum)
     } else {
-        // Natural feature: look up the assigned feature_id for this
-        // cell (note — assign_feature is cheap; we recompute per query
-        // rather than eagerly bake the feature catalog).
-        let terrain = crate::terrain::Terrain::from_seed(terrain_seed);
-        let feature = sub_biome.feature_at_cell(cell_id, &terrain, hydrology);
-        feature_delta_impls::natural_delta(&feature.feature_id, &ctx)
+        // Natural feature: prefer the pre-baked assignment when
+        // available (O(1) HashMap lookup). Without baked, fall back
+        // to recomputing — `assign_feature` is non-trivial (placement
+        // context build + RNG retry loop, ~100 µs/call) so the
+        // streaming-mesh rebuild path REQUIRES baked to stay performant
+        // (1.4 M vertices × 100 µs = 140 s without baked).
+        let feature_id = if let Some(baked_ref) = baked {
+            baked_ref.feature_at_cell(cell_id).feature_id
+        } else {
+            let terrain = crate::terrain::Terrain::from_seed(terrain_seed);
+            sub_biome
+                .feature_at_cell(cell_id, &terrain, hydrology)
+                .feature_id
+        };
+        feature_delta_impls::natural_delta(&feature_id, &ctx)
     };
 
     // Hydrology continuity: suppress positive deltas on water cells.

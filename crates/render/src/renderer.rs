@@ -251,6 +251,11 @@ pub struct Renderer {
     outline_bg: wgpu::BindGroup,
     outline_params_buf: wgpu::Buffer,
     terrain: DrawModel,
+    /// Per-Voronoi-cell terrain chunks (Phase 3.6.3c.4). When non-
+    /// empty, the render loop draws each chunk in turn instead of the
+    /// single `terrain.mesh`. Cell-id keyed for cheap insert / evict
+    /// from the streaming pipeline.
+    terrain_chunks: std::collections::HashMap<u32, GpuMesh>,
     water: DrawModel,
     /// When `false`, the water pass is skipped on render. Used by wheels-variant
     /// scenario playback so a y=0 flat-land terrain isn't hidden by a y=0 water
@@ -620,6 +625,7 @@ impl Renderer {
             outline_bg,
             outline_params_buf,
             terrain,
+            terrain_chunks: std::collections::HashMap::new(),
             water,
             draw_water: true,
             water_follows_camera: true,
@@ -702,6 +708,40 @@ impl Renderer {
     /// alive until current GPU work finishes).
     pub fn update_terrain_mesh(&mut self, device: &wgpu::Device, mesh: &flowplan_assets::CpuMesh) {
         self.terrain.mesh = GpuMesh::upload(device, mesh);
+    }
+
+    /// Insert or replace a per-cell terrain chunk (Phase 3.6.3c.4).
+    /// When chunks are present, the render pass draws each chunk
+    /// instead of the single `terrain.mesh`. Caller manages the
+    /// active set via `update_terrain_chunk` + `evict_terrain_chunk`.
+    pub fn update_terrain_chunk(
+        &mut self,
+        device: &wgpu::Device,
+        cell_id: u32,
+        mesh: &flowplan_assets::CpuMesh,
+    ) {
+        // Skip empty meshes — chunks where the cell footprint produced
+        // zero in-cell vertices (rare; e.g. degenerate Voronoi cell
+        // entirely outside the bbox). Empty VBO is undefined-behavior
+        // bait; just skip the upload.
+        if mesh.vertices.is_empty() || mesh.indices.is_empty() {
+            return;
+        }
+        self.terrain_chunks
+            .insert(cell_id, GpuMesh::upload(device, mesh));
+    }
+
+    /// Drop a terrain chunk (cell exited the streaming radius).
+    pub fn evict_terrain_chunk(&mut self, cell_id: u32) {
+        self.terrain_chunks.remove(&cell_id);
+    }
+
+    /// True if the chunked-terrain path is active (>=1 chunk resident).
+    /// When false, the render loop falls back to the single
+    /// `terrain.mesh` (legacy / scenario / fast-iteration path).
+    #[must_use]
+    pub fn has_terrain_chunks(&self) -> bool {
+        !self.terrain_chunks.is_empty()
     }
 
     /// Replace the water `GpuMesh` from a freshly-built `CpuMesh`.
@@ -942,11 +982,27 @@ impl Renderer {
             pass.set_bind_group(0, &self.camera_bg, &[]);
             pass.set_bind_group(2, &self.scene_bg, &[]);
 
-            // Draw terrain.
+            // Draw terrain. Two modes:
+            //
+            // - **Chunked** (Phase 3.6.3c.4): per-Voronoi-cell meshes.
+            //   The terrain.bind_group's identity model matrix applies
+            //   to every chunk (chunks are in world coords), so we
+            //   bind it once and swap VBO/IBO per chunk. ~440 draw
+            //   calls at 22 km streaming radius — well within budget.
+            // - **Single** (legacy): one terrain.mesh, used by
+            //   scenario playback + fast-iteration mode.
             pass.set_bind_group(1, &self.terrain.bind_group, &[]);
-            pass.set_vertex_buffer(0, self.terrain.mesh.vbo.slice(..));
-            pass.set_index_buffer(self.terrain.mesh.ibo.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..self.terrain.mesh.index_count, 0, 0..1);
+            if self.terrain_chunks.is_empty() {
+                pass.set_vertex_buffer(0, self.terrain.mesh.vbo.slice(..));
+                pass.set_index_buffer(self.terrain.mesh.ibo.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..self.terrain.mesh.index_count, 0, 0..1);
+            } else {
+                for chunk in self.terrain_chunks.values() {
+                    pass.set_vertex_buffer(0, chunk.vbo.slice(..));
+                    pass.set_index_buffer(chunk.ibo.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..chunk.index_count, 0, 0..1);
+                }
+            }
 
             // Draw water with its own pipeline (Gerstner vertex displacement + water
             // fragment). Camera + model + scene bind groups are layout-compatible, so

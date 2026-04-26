@@ -11,6 +11,7 @@
 #![allow(unreachable_pub)]
 
 mod ambient_worker;
+mod chunked_terrain;
 mod debug_camera;
 mod debug_gizmo;
 mod debug_hud;
