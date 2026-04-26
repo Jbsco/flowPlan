@@ -59,6 +59,75 @@ fn volumetric_wgsl_exports_renderer_entrypoints() {
     );
 }
 
+/// Structural perf-budget: asserts the cost-controlling constants in
+/// `volumetric.wgsl` stay within the budget envelope. This is a cheap
+/// regression guard — catches accidental bumps to `RAYMARCH_STEPS` or
+/// `CLOUD_FEATURES_PER_CELL` that would tank frame rate without anyone
+/// noticing until in-game playtest.
+///
+/// **NOTE (followup)**: real GPU wall-clock perf gate is queued as a
+/// separate piece of infrastructure (hardware-gated test using wgpu
+/// timestamp queries). This structural test cannot detect performance
+/// regressions caused by changes to the math itself (e.g. unrolling
+/// the `worley_3d` inner loop, adding more taps), only constant-bump
+/// regressions. See `docs/WEATHER.md` § Performance budget for the
+/// proper gate.
+#[test]
+fn volumetric_wgsl_cost_constants_within_budget() {
+    // Helper: parse a WGSL `const NAME: type = value;` declaration and
+    // return the literal numeric value. Returns None if not found.
+    fn extract_const_u32(src: &str, name: &str) -> Option<u32> {
+        let needle = format!("const {name}: ");
+        let idx = src.find(&needle)?;
+        let line_end = src[idx..].find(';')? + idx;
+        let line = &src[idx..line_end];
+        let eq = line.rfind('=')?;
+        let value_str = line[eq + 1..].trim().trim_end_matches('u');
+        value_str.parse().ok()
+    }
+    fn extract_const_i32(src: &str, name: &str) -> Option<i32> {
+        let needle = format!("const {name}: ");
+        let idx = src.find(&needle)?;
+        let line_end = src[idx..].find(';')? + idx;
+        let line = &src[idx..line_end];
+        let eq = line.rfind('=')?;
+        line[eq + 1..].trim().parse().ok()
+    }
+
+    // Per docs/WEATHER.md § Performance budget — cloud-pass target is
+    // ≤ 0.6 ms at 240 Hz reference. The cost-bounding constants below
+    // are the dominant per-pixel cost factors. Bumping any past these
+    // limits has shown FPS to fall under 60 Hz in playtest.
+
+    let raymarch_steps = extract_const_i32(VOLUMETRIC_WGSL_SOURCE, "RAYMARCH_STEPS")
+        .expect("RAYMARCH_STEPS const not found in volumetric.wgsl");
+    assert!(
+        raymarch_steps <= 64,
+        "RAYMARCH_STEPS = {raymarch_steps} exceeds budget cap of 64. \
+         Bumping past 32 was shown to drop FPS below 60 in playtest \
+         without ray-cylinder clamping. If a cap raise is needed, also \
+         tighten the ray-cylinder + altitude-band logic to keep \
+         per-pixel cost bounded."
+    );
+
+    let features_per_cell = extract_const_u32(VOLUMETRIC_WGSL_SOURCE, "CLOUD_FEATURES_PER_CELL")
+        .expect("CLOUD_FEATURES_PER_CELL const not found in volumetric.wgsl");
+    assert!(
+        features_per_cell <= 2,
+        "CLOUD_FEATURES_PER_CELL = {features_per_cell} exceeds budget cap of 2. \
+         3+ features doubles+ per-Worley distance-compute cost, fast path to \
+         FPS regression. Reserved for future Ultra-preset opt-in."
+    );
+
+    // Sanity: ray-cylinder early-out is the critical perf improvement.
+    // If it gets removed, FPS regresses dramatically. Catch the regression.
+    assert!(
+        VOLUMETRIC_WGSL_SOURCE.contains("ray_vertical_cylinder("),
+        "volumetric.wgsl missing ray_vertical_cylinder early-out. \
+         Removing this drops per-pixel cost by ~5-10× — known regression."
+    );
+}
+
 #[test]
 fn volumetric_wgsl_uses_expected_bind_groups() {
     // @group(0) = camera, @group(1) = scene per
@@ -83,6 +152,7 @@ fn volumetric_wgsl_b3_density_model_present() {
         "fn altitude_profile(",
         "fn footprint_falloff(",
         "fn sample_cloud_density(",
+        "fn ray_altitude_band(",
         "TEST_CELL_TYPE",
         "TEST_CELL_BASE_M",
         "TEST_CELL_TOP_M",

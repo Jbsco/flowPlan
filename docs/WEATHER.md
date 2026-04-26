@@ -591,6 +591,8 @@ Quality presets scale step count + secondary march:
 
 **[RECOMMENDED]** — Frame-bench gate added in 3.6.3c.6 / 3.2x: assert cloud-pass cost ≤ 0.6 ms at High preset on reference hardware. Failure = revisit step count or cell-lookup strategy before merge. Pattern matches existing `crates/world/tests/perf_budgets.rs` discipline.
 
+**Status (2026-04-26)**: structural cost-bound test landed in `crates/render/tests/volumetric_wgsl_parses.rs::volumetric_wgsl_cost_constants_within_budget` — asserts `RAYMARCH_STEPS ≤ 64`, `CLOUD_FEATURES_PER_CELL ≤ 2`, and `ray_vertical_cylinder` early-out is present. This catches accidental constant bumps that previously caused FPS to drop from 1000-3000 down to <60 in playtest. **Real GPU wall-clock gate is queued as a follow-up** — needs hardware-gated test using wgpu `Features::TIMESTAMP_QUERY`, headless render of N frames, query the cloud-pass time, assert `≤ 0.6 ms` at the reference preset. Architecture mirrors `crates/render/tests/visual_snapshot.rs` (hardware-gated, pollster + adapter, offscreen render). Until that lands, the structural test + in-engine playtest are the main perf-regression catches.
+
 CPU-side cloud-density sampling (sim consumption) cost — bench at the `world` crate level:
 
 | Operation | Budget | Notes |

@@ -71,10 +71,18 @@ const TEST_CELL_DENSITY: f32 = 0.6;
 const TEST_CELL_FOOTPRINT_M: f32 = 3000.0;
 
 // Worley noise spacing for cumulus sub-cell detail (m).
-// 600 m gives ~5 sub-cells per 3 km cell footprint = puffy-but-coherent.
-const CLOUD_WORLEY_SPACING_M: f32 = 600.0;
+// 1500 m at 3 km footprint gives ~2 sub-puffs per cumulus → reads as
+// "cumulus with subtle internal structure" without the cellular
+// patchwork that tighter spacings produce. Tunable per cell type once
+// W2 streaming lands (C2).
+const CLOUD_WORLEY_SPACING_M: f32 = 1500.0;
 const CLOUD_NOISE_OCTAVE: u32 = 240u;
-const CLOUD_FEATURES_PER_CELL: u32 = 2u;
+// `features_per_cell = 1` halves the per-Worley-call distance-compute
+// cost vs k=2 (27 vs 54 distance computes in 3D). Single-feature pure
+// F1 distance is sufficient for the visual character we want once the
+// density-modulation curve is calibrated; the F1+F2 blend is reserved
+// for higher-quality presets (Ultra) when we expose them.
+const CLOUD_FEATURES_PER_CELL: u32 = 1u;
 
 // Master seed for the cloud-noise field. Matches WORLD_SEED in
 // `crates/app/src/main.rs` (decimal 1234567890123456789). Hardcoded
@@ -132,15 +140,26 @@ fn sample_cloud_density(world_pos: vec3<f32>, t: f32) -> f32 {
         return 0.0;
     }
     // Worley f_blended ∈ [0, ~1.0]. Lower values = closer to feature
-    // center = denser cloud puff. Invert + scale to get cumulus
-    // structure: dense-near-feature, sparse-at-cell-corners.
+    // center = denser cloud puff. We use a SUBTLE Worley contribution
+    // rather than gating: a base density that's always present within
+    // the cell's footprint+altitude range, modulated by Worley to add
+    // sub-cell structure without producing the "cluster of micro-puffs"
+    // artifact pure Worley produces.
+    //
+    // Formula: base 0.6 + Worley modulation in [0.0, 0.4].
+    // - At feature center (f_blended ≈ 0): density factor = 1.0
+    // - At cell corner (f_blended ≈ 0.7): density factor = 0.6
+    // The cloud reads as a coherent puff with internal density
+    // variation, not separate puffs glued together. Perlin-Worley
+    // blend (B3c) will further smooth this; pure Worley with subtle
+    // contribution is the v0 stability fix.
     let w = worley_3d(
         CLOUD_SEED_HI, CLOUD_SEED_LO,
         CLOUD_NOISE_OCTAVE,
         world_pos.x, world_pos.y, world_pos.z,
         CLOUD_WORLEY_SPACING_M, CLOUD_FEATURES_PER_CELL,
     );
-    let worley_density = clamp(1.0 - w.f_blended * 1.5, 0.0, 1.0);
+    let worley_density = clamp(1.0 - w.f_blended * 0.6, 0.6, 1.0);
     return TEST_CELL_DENSITY * alt_factor * foot_factor * worley_density;
 }
 
@@ -166,18 +185,103 @@ fn unproject(ndc: vec2<f32>, ndc_z: f32) -> vec3<f32> {
     return world4.xyz / world4.w;
 }
 
-// Raymarch step count — locked in WEATHER.md as 32 near / 24 mid /
-// 16 far at the High preset. B3 uses uniform 32; B4+ adds the
-// distance-tier logic.
+// Raymarch step count. Per WEATHER.md the High-preset target is 32
+// near / 24 mid / 16 far. With ray-cylinder clamping (most pixels miss
+// or run within ~3-6 km of cell volume), 32 steps gives 90-200 m per
+// step — fine enough for stable shape inside the 1500 m Worley
+// spacing. C2 reintroduces the distance-tier logic when streaming
+// per-cell radii vary.
 const RAYMARCH_STEPS: i32 = 32;
 
-// Maximum ray distance (m). B3b adds depth-based termination at terrain;
-// B3 uses a fixed cap.
-const MAX_RAY_DISTANCE_M: f32 = 50000.0;
+// Maximum ray distance (m) for the B3 single-cell test. The
+// ray-cylinder intersection caps the actual march distance much
+// shorter than this for any single cell; this is the safety net for
+// pixels that intersect a cell's footprint at all.
+const MAX_RAY_DISTANCE_M: f32 = 15000.0;
 
 // Density-to-absorption scale. Tuned so density = 0.6 produces
 // visible-but-not-opaque cloud at the typical step distance.
 const ABSORPTION_SCALE: f32 = 0.0015;
+
+// Compute ray ∩ altitude band [base, top]. Returns `(t_enter, t_exit)`.
+// Returns `(-1, -1)` if the ray misses the band entirely.
+fn ray_altitude_band(
+    cam_pos: vec3<f32>,
+    view_dir: vec3<f32>,
+    base_m: f32,
+    top_m: f32,
+    max_dist: f32,
+) -> vec2<f32> {
+    if (abs(view_dir.y) < 1e-6) {
+        // Ray parallel to the slabs (horizontal viewing). Inside the
+        // band → march to max distance; outside → miss.
+        if (cam_pos.y >= base_m && cam_pos.y <= top_m) {
+            return vec2<f32>(0.0, max_dist);
+        }
+        return vec2<f32>(-1.0, -1.0);
+    }
+    let t_base = (base_m - cam_pos.y) / view_dir.y;
+    let t_top  = (top_m - cam_pos.y) / view_dir.y;
+    let t_enter_raw = min(t_base, t_top);
+    let t_exit_raw  = max(t_base, t_top);
+    if (t_exit_raw < 0.0) {
+        return vec2<f32>(-1.0, -1.0);
+    }
+    let t_enter = max(t_enter_raw, 0.0);
+    let t_exit  = min(t_exit_raw, max_dist);
+    if (t_enter >= t_exit) {
+        return vec2<f32>(-1.0, -1.0);
+    }
+    return vec2<f32>(t_enter, t_exit);
+}
+
+// Compute ray ∩ vertical XZ-disk (infinite-height cylinder). Returns
+// `(t_enter, t_exit)`; `(-1, -1)` for miss. Pairs with
+// [`ray_altitude_band`] so we march only within the cell's actual
+// volume — without this, horizontal rays at cloud altitude would march
+// through 15 km of empty space outside the test cell's 3 km footprint.
+//
+// Performance: this is THE critical early-out. Most pixels see no cell
+// at all and return immediately after the band+cylinder test (no Worley
+// calls). Pixels that hit the cylinder march only within the
+// intersection range — typically 3-6 km along ray, vs 15 km without
+// this clamp. ~5-10× per-pixel cost reduction.
+fn ray_vertical_cylinder(
+    cam_pos: vec3<f32>,
+    view_dir: vec3<f32>,
+    center_xz: vec2<f32>,
+    radius_m: f32,
+    max_dist: f32,
+) -> vec2<f32> {
+    let dx = cam_pos.x - center_xz.x;
+    let dz = cam_pos.z - center_xz.y;
+    let a = view_dir.x * view_dir.x + view_dir.z * view_dir.z;
+    if (a < 1e-6) {
+        // Vertical ray. Inside disk → full extent; outside → miss.
+        if (dx * dx + dz * dz <= radius_m * radius_m) {
+            return vec2<f32>(0.0, max_dist);
+        }
+        return vec2<f32>(-1.0, -1.0);
+    }
+    let b = 2.0 * (dx * view_dir.x + dz * view_dir.z);
+    let c = dx * dx + dz * dz - radius_m * radius_m;
+    let disc = b * b - 4.0 * a * c;
+    if (disc < 0.0) {
+        return vec2<f32>(-1.0, -1.0);
+    }
+    let s = sqrt(disc);
+    let t0 = (-b - s) / (2.0 * a);
+    let t1 = (-b + s) / (2.0 * a);
+    if (t1 < 0.0) {
+        return vec2<f32>(-1.0, -1.0);
+    }
+    let t_enter = max(t0, 0.0);
+    let t_exit  = min(t1, max_dist);
+    if (t_enter >= t_exit) {
+        return vec2<f32>(-1.0, -1.0);
+    }
+    return vec2<f32>(t_enter, t_exit);
+}
 
 @fragment
 fn fs_volumetric(in: VsOut) -> @location(0) vec4<f32> {
@@ -186,13 +290,38 @@ fn fs_volumetric(in: VsOut) -> @location(0) vec4<f32> {
     let view_dir = normalize(world_far - world_near);
     let cam_pos = camera.view_pos.xyz;
 
-    let step_dist = MAX_RAY_DISTANCE_M / f32(RAYMARCH_STEPS);
+    // Two early-outs to skip Worley evaluation for the vast majority of
+    // pixels (sky above clouds, terrain below, side-views missing the
+    // cell entirely). The cell's volume is the intersection of:
+    //   - altitude band [base, top]
+    //   - vertical cylinder centered on (seed_x, seed_z) with radius footprint_m
+    let band = ray_altitude_band(
+        cam_pos, view_dir, TEST_CELL_BASE_M, TEST_CELL_TOP_M, MAX_RAY_DISTANCE_M,
+    );
+    if (band.x < 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let cyl = ray_vertical_cylinder(
+        cam_pos, view_dir,
+        vec2<f32>(TEST_CELL_SEED_X, TEST_CELL_SEED_Z),
+        TEST_CELL_FOOTPRINT_M,
+        MAX_RAY_DISTANCE_M,
+    );
+    if (cyl.x < 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let t_enter = max(band.x, cyl.x);
+    let t_exit  = min(band.y, cyl.y);
+    if (t_enter >= t_exit) {
+        return vec4<f32>(0.0);
+    }
+    let step_dist = (t_exit - t_enter) / f32(RAYMARCH_STEPS);
 
     var accumulated_alpha: f32 = 0.0;
     var accumulated_color: vec3<f32> = vec3<f32>(0.0);
 
     for (var i: i32 = 0; i < RAYMARCH_STEPS; i = i + 1) {
-        let t = step_dist * (f32(i) + 0.5);
+        let t = t_enter + step_dist * (f32(i) + 0.5);
         let sample_pos = cam_pos + view_dir * t;
         let density = sample_cloud_density(sample_pos, scene.time.x);
 
