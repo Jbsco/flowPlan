@@ -188,6 +188,30 @@ const WATER_FOLLOW_SNAP_M: f32 = 4.0;
 /// has the latest shader edits.
 pub const WATER_WGSL_SOURCE: &str = include_str!("water.wgsl");
 
+/// Cloud-noise WGSL source — Worley + PCG hash + helpers.
+///
+/// Exported so (a) the cloud raymarcher (Phase 3.6.3c.6 / 3.2x) can
+/// `include_str!` this same file via this constant if a higher-level
+/// shader composer lands, and (b) the offline `cloud_noise_wgsl_parses`
+/// test can run naga validation without booting wgpu.
+///
+/// Bit-identical to `flowplan_world::noise::worley_2d` /
+/// `worley_3d` per `docs/WEATHER.md` § Worley noise primitive — same
+/// PCG hash, same rounding, same constants. Verified by GPU readback
+/// in the bit-identity gate (Phase B4).
+pub const CLOUD_NOISE_WGSL_SOURCE: &str = include_str!("cloud_noise.wgsl");
+
+/// Volumetric cloud raymarcher WGSL source (Phase 3.6.3c.6 / 3.2x B2).
+///
+/// Empty raymarch skeleton — full-screen triangle pass that runs after
+/// outline + before widgets, returns transparent in B2. B3 adds the
+/// W2 weather-cell sampling + Perlin-Worley sub-cell detail. B4 adds
+/// CPU-GPU bit-identity gate.
+///
+/// See `docs/WEATHER.md` § Cloud rendering technique for technique
+/// decisions (pass placement, density storage, lighting model).
+pub const VOLUMETRIC_WGSL_SOURCE: &str = include_str!("volumetric.wgsl");
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct SceneUniform {
@@ -241,6 +265,9 @@ pub struct Renderer {
     water_pipeline: wgpu::RenderPipeline,
     outline_pipeline: wgpu::RenderPipeline,
     sky_pipeline: wgpu::RenderPipeline,
+    /// Volumetric cloud raymarcher pipeline (Phase 3.6.3c.6 / 3.2x B2
+    /// skeleton — returns transparent; B3+ adds density sampling).
+    volumetric_pipeline: wgpu::RenderPipeline,
     depth_view: wgpu::TextureView,
     camera_buf: wgpu::Buffer,
     camera_bg: wgpu::BindGroup,
@@ -334,6 +361,12 @@ impl Renderer {
         let sky_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("flowplan-sky-shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("sky.wgsl").into()),
+        });
+        // Cloud raymarcher (3.6.3c.6 / 3.2x B2). Empty in skeleton form;
+        // bound to render-pass slot for B3+ to fill in.
+        let volumetric_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("flowplan-volumetric-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("volumetric.wgsl").into()),
         });
         let water_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("flowplan-water-shader"),
@@ -461,6 +494,23 @@ impl Renderer {
         });
         let sky_pipeline =
             build_sky_pipeline(device, &sky_pipeline_layout, &sky_shader, surface_format);
+
+        // Volumetric cloud pipeline layout shares the camera + scene bind groups with
+        // sky. B3+ adds a third group for scene-depth read-only access (ray
+        // termination at terrain). The skeleton (B2) doesn't read depth; uniform
+        // bindings are sufficient.
+        let volumetric_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("flowplan-volumetric-pipeline-layout"),
+                bind_group_layouts: &[&camera_bgl, &scene_bgl],
+                push_constant_ranges: &[],
+            });
+        let volumetric_pipeline = build_volumetric_pipeline(
+            device,
+            &volumetric_pipeline_layout,
+            &volumetric_shader,
+            surface_format,
+        );
 
         let outline_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("outline-params-ubo"),
@@ -619,6 +669,7 @@ impl Renderer {
             water_pipeline,
             outline_pipeline,
             sky_pipeline,
+            volumetric_pipeline,
             depth_view,
             camera_buf,
             camera_bg,
@@ -1101,6 +1152,38 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
+        // Volumetric cloud pass (Phase 3.6.3c.6 / 3.2x B2 — skeleton).
+        // Runs AFTER outline so cel-shaded silhouettes apply to opaque
+        // geometry first; clouds then composite over outlined scene
+        // (where cloud is dense enough, it occludes both terrain and
+        // outline — correct atmospheric layering). B3 will add the
+        // depth attachment for ray termination at terrain. B2's empty
+        // raymarch returns alpha = 0, so this pass is a visual no-op
+        // until then.
+        //
+        // Pass ordering pinned per docs/WEATHER.md § Render pass
+        // placement: sky → scene → outline → cloud → widgets.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("flowplan-volumetric-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.volumetric_pipeline);
+            pass.set_bind_group(0, &self.camera_bg, &[]);
+            pass.set_bind_group(1, &self.scene_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
         // Widget passes (Phase 2.4.2c orientation gizmo + 2.4.4e attitude indicator).
         // Each widget has its own ortho view-proj and screen-space rectangle. Drawn
         // last so the widgets always overlay; no depth attachment. Scissor rect
@@ -1467,6 +1550,61 @@ fn build_sky_pipeline(
             conservative: false,
         },
         // Sky runs without a depth attachment (full-screen, before scene).
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
+/// Build the volumetric cloud raymarcher pipeline (Phase 3.6.3c.6 / 3.2x B2).
+///
+/// Full-screen triangle pass running AFTER outline + BEFORE widgets. Composites
+/// alpha-blended over the rendered scene. B3 adds depth attachment for
+/// scene-depth read-only ray termination; B2 skeleton uses no depth.
+///
+/// Per `docs/WEATHER.md` § Cloud rendering technique → Composite + cel-shading:
+/// banded alpha quantization happens shader-side; pipeline blend is standard
+/// pre-multiplied src-over for the alpha-composited cloud color over scene.
+fn build_volumetric_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    surface_format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("flowplan-volumetric-pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: "vs_volumetric",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: "fs_volumetric",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: surface_format,
+                // Cloud composites src-alpha over scene color. With B2's
+                // alpha = 0 output, this is a no-op — the scene below shows
+                // through unchanged.
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        // No depth attachment in B2 skeleton. B3 adds depth read-only for ray
+        // termination at terrain.
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview: None,

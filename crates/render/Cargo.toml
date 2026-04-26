@@ -40,3 +40,7 @@ notify = { version = "6", optional = true }
 insta = "1.34"
 image = "0.25"
 pollster = { workspace = true }
+# naga is already a transitive dep via wgpu; declared here as a dev-dep
+# so tests can offline-parse WGSL sources without a GPU device. Used by
+# `cloud_noise_wgsl_parses` test (Phase 3.6.3c.6 / 3.2x B1).
+naga = { version = "22.1", default-features = false, features = ["wgsl-in"] }

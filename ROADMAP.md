@@ -511,18 +511,20 @@ Phase 2.5 bench scenarios have run Linux-only. Before Phase 3.6 world-bake work 
 - [ ] **Research-based Mac / Steam Deck coverage:** since those platforms aren't directly testable at this time (see user-memory `hardware_access_constraints`), survey public game-dev + scientific-computing determinism reports for Apple Silicon (ARM / NEON) and AMD APU drivers. Document findings + risks. Full verification of those platforms deferred to [Phase 6.1 determinism hardening](#milestone-61-determinism-hardening-cross-platform) when hardware access lands.
 - [ ] Output: cross-platform bench report committed to `docs/determinism-report.md`; any fixes from the Linux/Windows smoke test (likely minimal with libm + fp-contract pinned); documented risk register for Mac/Deck pending direct test.
 
-### Cloud rendering research memo (pre-3.2x)
+### Weather implementation reference (pre-3.2x → SHIPPED 2026-04-25)
 
-Volumetric cloud implementation has real design space that needs surveying before 3.2x implementation starts. Light task, bounded to ~1 page of design memo + a prototype recommendation. **Critical requirements surfacing from gameplay side (pinned):**
+[**`docs/WEATHER.md`**](../docs/WEATHER.md) — implementation reference companion to [MAPGEN.md § Three-layer weather composition](../MAPGEN.md#three-layer-weather-composition-second-application-of-the-pattern). Originally scoped as `docs/CLOUDS.md` (a focused cloud-rendering research memo) but expanded to cover the surrounding weather subsystem context — particle system architecture, fog + visibility coupling, sim cloud-fly-through hookups, atmospheric optics deferral — because cloud-rendering decisions can't be made in isolation from those neighbors. Pattern matches MAPGEN.md → WORLD_GEN.md (design doc + implementation reference).
+
+**Critical requirements pinned (also captured in WEATHER.md):**
 
 - **Fly-through semantics:** players will invariably fly through low clouds. Billboard-based approaches fundamentally cannot render camera-inside-cloud — rejected. Raymarched volumetric is required. See `cloud_flythrough_requirement` memory.
 - **CPU-samplable density field:** the sim must query cloud density each tick for turbulence (scales with density-gradient magnitude), visibility reduction (hundreds of meters inside dense cloud), and icing probability (cold + moist cloud interior). Implies **CPU-GPU shared noise field** — same Perlin-Worley formula runs on both sides, bit-identical by construction. Pattern matches `world::water_height(x, z, t)` from Phase 2.2.
 
-- [ ] Survey references: Schneider & Vos "The Real-Time Volumetric Cloudscapes of Horizon: Zero Dawn" (SIGGRAPH 2015); Andrew Schneider GDC follow-ups at Guerrilla; Frostbite "Physically Based Sky, Atmosphere and Cloud Rendering" (SIGGRAPH 2016); Sebastian Lague's accessible YouTube walk-through.
-- [ ] Pick v1 scope: Perlin-Worley noise field (2-3 octaves), raymarch 32-48 steps near / 16-24 far, banded-alpha via quantized density sampling for cel-shading compatibility, simple sun-lit vs shadow-side shading (no multi-scatter).
-- [ ] Pin CPU-GPU shared noise architecture: shared formula, shared parameters, deterministic from master seed; `world::cloud_density(x, y, z, t)` signature for sim consumption.
-- [ ] Defer beyond v1: cloud shadows on terrain, volumetric light scattering through gaps, multi-layer cloud decks.
-- [ ] Output: `docs/CLOUDS.md` design memo committed; 3.2x implementation uses it as the spec.
+- [x] Survey references: Schneider & Vos "The Real-Time Volumetric Cloudscapes of Horizon: Zero Dawn" (SIGGRAPH 2015); Andrew Schneider GDC follow-ups at Guerrilla; Frostbite "Physically Based Sky, Atmosphere and Cloud Rendering" (SIGGRAPH 2016); Sebastian Lague's accessible YouTube walk-through. *(References pinned in WEATHER.md; survey work happens during 3.6.3c.6 / 3.2x implementation as needed.)*
+- [x] Pick v1 scope: Perlin-Worley noise field (2-3 octaves), raymarch 32-48 steps near / 16-24 far, banded-alpha via quantized density sampling for cel-shading compatibility, simple sun-lit vs shadow-side shading (no multi-scatter). *(Locked in WEATHER.md § Cloud rendering technique.)*
+- [x] Pin CPU-GPU shared noise architecture: shared formula, shared parameters, deterministic from master seed; `world::cloud_density(x, y, z, t)` signature for sim consumption. *(Already shipped in `crates/world/src/weather/deltas.rs` per Phase 3.2.3; CPU side complete, GPU port lands in 3.6.3c.6.)*
+- [x] Defer beyond v1: cloud shadows on terrain, volumetric light scattering through gaps, multi-layer cloud decks. *(Plus atmospheric optics — halos, sun dogs, rainbows, crepuscular rays — deferred to Phase 5.5 polish per WEATHER.md.)*
+- [x] Output: `docs/WEATHER.md` design + implementation reference committed; 3.6.3c.6 + 3.2x implementation use it as the spec.
 
 ### Design-doc closures (pre-Phase-4 commitments)
 

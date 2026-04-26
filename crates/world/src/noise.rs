@@ -365,6 +365,448 @@ pub fn domain_warped_fbm_2d_at_scale(
     )
 }
 
+/// Result of a Worley (cellular) noise sample.
+///
+/// Returned by [`worley_2d`] and [`worley_3d`]. All three values are
+/// always populated — the caller picks whichever matches the use case.
+/// Distances are normalized by `spacing_m`, so each value is in
+/// approximately `[0, ~1.5)` — `f1 < f2` always.
+///
+/// - `f1`: distance to nearest feature point. Sharp cellular structure.
+///   Use for hard cellular look (rare; Perlin dominates the cloud blend).
+/// - `f2`: distance to second-nearest feature point. Always `>= f1`.
+///   Use raw for "wide" cellular bands.
+/// - `f_blended`: F1+F2 smoothstep blend at feature boundary. Soft
+///   cellular structure with no hard edges. Default cloud-noise output
+///   for cumulus / nimbus / squall (per WEATHER.md cell-type table).
+/// - `f2_minus_f1`: derived `f2 - f1`. Wispy striated patterns; use for
+///   secondary-octave detail on squall / frontal cells.
+#[derive(Copy, Clone, Debug)]
+pub struct WorleyResult {
+    pub f1: f32,
+    pub f2: f32,
+    pub f_blended: f32,
+}
+
+impl WorleyResult {
+    /// `f2 - f1`. Wispy striated patterns. Always non-negative.
+    #[must_use]
+    pub fn f2_minus_f1(self) -> f32 {
+        self.f2 - self.f1
+    }
+}
+
+/// Maximum supported features per cell at any single octave.
+///
+/// Multi-feature Worley (per [`docs/WEATHER.md`](../../../../docs/WEATHER.md#worley-noise-primitive))
+/// places `k` deterministically-jittered feature points per grid cell,
+/// where `k ∈ [1, 3]` per region (varies via a coarse Perlin density
+/// field — see [`features_per_cell_at`]). Stack-allocated `[f32; 4]`
+/// scratch buffer is sized for `k_max = 3` plus one slot of slack so
+/// insertion-sort doesn't index past the end.
+const WORLEY_MAX_FEATURES_PER_CELL: usize = 3;
+
+/// 2D PCG hash mixing 4 u32 inputs into 2 u32 outputs.
+///
+/// Pure u32 arithmetic with natural wrap-on-overflow — bit-identical
+/// CPU↔GPU when both use u32 wrapping multiply (Rust `wrapping_mul`,
+/// WGSL native `*` on `u32`). This is the foundation of cloud-noise
+/// determinism per [`docs/WEATHER.md`](../../../../docs/WEATHER.md#cpu-gpu-bit-identity).
+///
+/// The hash is a derivation of the well-known PCG-2D family adapted
+/// for bias-free distribution across all 32 bits of each output word.
+/// Reference: <https://www.shadertoy.com/view/XlGcRh>.
+fn pcg_2d_hash(v_in: [u32; 2]) -> [u32; 2] {
+    let mut v = v_in;
+    v[0] = v[0]
+        .wrapping_mul(1_664_525)
+        .wrapping_add(v[1])
+        .wrapping_add(1_013_904_223);
+    v[1] = v[1]
+        .wrapping_mul(1_664_525)
+        .wrapping_add(v[0])
+        .wrapping_add(1_013_904_223);
+    v[0] ^= v[0] >> 16;
+    v[1] ^= v[1] >> 16;
+    v[0] = v[0].wrapping_mul(1_664_525).wrapping_add(v[1]);
+    v[1] = v[1].wrapping_mul(1_664_525).wrapping_add(v[0]);
+    v[0] ^= v[0] >> 16;
+    v[1] ^= v[1] >> 16;
+    v
+}
+
+/// 3D PCG hash — 6 u32 inputs (the per-axis hash inputs) into 3 u32
+/// outputs. Same family as [`pcg_2d_hash`] extended to 3 channels.
+fn pcg_3d_hash(v_in: [u32; 3]) -> [u32; 3] {
+    let mut v = v_in;
+    v[0] = v[0]
+        .wrapping_mul(1_664_525)
+        .wrapping_add(v[1])
+        .wrapping_add(1_013_904_223);
+    v[1] = v[1]
+        .wrapping_mul(1_664_525)
+        .wrapping_add(v[2])
+        .wrapping_add(1_013_904_223);
+    v[2] = v[2]
+        .wrapping_mul(1_664_525)
+        .wrapping_add(v[0])
+        .wrapping_add(1_013_904_223);
+    v[0] ^= v[0] >> 16;
+    v[1] ^= v[1] >> 16;
+    v[2] ^= v[2] >> 16;
+    v[0] = v[0].wrapping_mul(1_664_525).wrapping_add(v[1]);
+    v[1] = v[1].wrapping_mul(1_664_525).wrapping_add(v[2]);
+    v[2] = v[2].wrapping_mul(1_664_525).wrapping_add(v[0]);
+    v[0] ^= v[0] >> 16;
+    v[1] ^= v[1] >> 16;
+    v[2] ^= v[2] >> 16;
+    v
+}
+
+/// Compress a 64-bit master seed into 32 bits for the u32 hash chain.
+///
+/// PCG-family hashes need u32-sized state. The full 64-bit `master_seed`
+/// must distinctly identify a world even after this compression — using
+/// xor-fold (high half ⊕ low half) preserves bit entropy from both
+/// halves into the 32-bit output. Combined with the per-call mixing in
+/// [`pcg_2d_hash`] / [`pcg_3d_hash`], the effective entropy after
+/// hashing is full 32 bits.
+///
+/// Note: this means seeds differing ONLY in their high 32 bits AND
+/// having a coincidentally-identical xor-fold will hash to the same
+/// cloud-noise output. The probability is 2⁻³² ≈ 0 for our use case;
+/// world-distinct seeds are guaranteed by the `master_seed` being mixed
+/// with octave + cell coords + `feature_idx` in the hash chain.
+#[allow(clippy::cast_possible_truncation)]
+fn seed_to_u32(seed: u64) -> u32 {
+    ((seed >> 32) ^ seed) as u32
+}
+
+/// 2D feature-jitter offset for Worley noise.
+///
+/// Returns `(jx, jz) ∈ [0, 1)²` for the `feature_idx`-th feature in
+/// grid cell `(ix, iz)`. Deterministic per `(seed, octave, ix, iz,
+/// feature_idx)`. Uses the u32 PCG hash chain for CPU↔GPU bit-identity
+/// per WEATHER.md.
+///
+/// Hash inputs include `wrap_cell_index` on `(ix, iz)` so canonical
+/// and wrapped-equivalent grid cells produce identical jitter, the
+/// same wrap discipline as Perlin's `gradient`.
+#[allow(clippy::cast_sign_loss)]
+#[allow(clippy::cast_possible_truncation)] // intentional truncation: hash inputs only need low 32 bits
+fn feature_jitter(
+    seed: u64,
+    octave: u32,
+    ix: i64,
+    iz: i64,
+    n_cells: i64,
+    feature_idx: u32,
+) -> (f32, f32) {
+    let ix_w = wrap_cell_index(ix, n_cells) as u32;
+    let iz_w = wrap_cell_index(iz, n_cells) as u32;
+    // Mix seed + octave + feature_idx into the 2 input slots so the
+    // PCG hash diffuses all 5 inputs across both output u32s.
+    let s0 = seed_to_u32(seed)
+        ^ octave.wrapping_mul(0x517C_C1B7)
+        ^ feature_idx.wrapping_mul(0xD243_67E1)
+        ^ ix_w;
+    let s1 = seed_to_u32(seed).rotate_left(13)
+        ^ octave.wrapping_mul(0x9E37_79B9)
+        ^ feature_idx.wrapping_mul(0xBF58_476D)
+        ^ iz_w;
+    let h = pcg_2d_hash([s0, s1]);
+    // Two independent unit fractions from the hash. Top 24 bits per
+    // word for [0, 1) range with 24-bit precision (matches f32 mantissa).
+    #[allow(clippy::cast_precision_loss)]
+    let jx = ((h[0] >> 8) as f32) / ((1u32 << 24) as f32);
+    #[allow(clippy::cast_precision_loss)]
+    let jz = ((h[1] >> 8) as f32) / ((1u32 << 24) as f32);
+    (jx, jz)
+}
+
+/// 3D feature-jitter offset for Worley noise. Y axis is unbounded
+/// (altitude) — does NOT wrap. Hash uses [`pcg_3d_hash`] for the same
+/// CPU↔GPU bit-identity discipline as the 2D variant.
+#[allow(clippy::cast_sign_loss)]
+#[allow(clippy::cast_possible_truncation)] // intentional truncation: hash inputs only need low 32 bits
+fn feature_jitter_3d(
+    seed: u64,
+    octave: u32,
+    ix: i64,
+    iy: i64,
+    iz: i64,
+    n_cells: i64,
+    feature_idx: u32,
+) -> (f32, f32, f32) {
+    let ix_w = wrap_cell_index(ix, n_cells) as u32;
+    let iz_w = wrap_cell_index(iz, n_cells) as u32;
+    // Y axis hashes via direct cast of the (potentially negative) i64
+    // into u32 with its own distinguishing constant. Negative altitudes
+    // produce different bit patterns from positives, no collision risk.
+    let iy_h = (iy as u32).wrapping_mul(0xC2B2_AE35);
+    let s0 = seed_to_u32(seed)
+        ^ octave.wrapping_mul(0x517C_C1B7)
+        ^ feature_idx.wrapping_mul(0xD243_67E1)
+        ^ ix_w;
+    let s1 = seed_to_u32(seed).rotate_left(11) ^ octave.wrapping_mul(0xC4CE_B9FE) ^ iy_h;
+    let s2 = seed_to_u32(seed).rotate_left(23)
+        ^ octave.wrapping_mul(0x9E37_79B9)
+        ^ feature_idx.wrapping_mul(0xBF58_476D)
+        ^ iz_w;
+    let h = pcg_3d_hash([s0, s1, s2]);
+    #[allow(clippy::cast_precision_loss)]
+    let jx = ((h[0] >> 8) as f32) / ((1u32 << 24) as f32);
+    #[allow(clippy::cast_precision_loss)]
+    let jy = ((h[1] >> 8) as f32) / ((1u32 << 24) as f32);
+    #[allow(clippy::cast_precision_loss)]
+    let jz = ((h[2] >> 8) as f32) / ((1u32 << 24) as f32);
+    (jx, jy, jz)
+}
+
+/// Insert `value` into a sorted-ascending array, dropping the largest
+/// element to make room. `arr` must be initialized with `f32::INFINITY`
+/// for the "empty" slots so the first inserts naturally fall into place.
+///
+/// Used by Worley to track the two smallest distance² values across
+/// the 9 (2D) or 27 (3D) feature-cell neighborhood without sorting the
+/// full list.
+fn insert_sorted_top2(arr: &mut [f32; 4], value: f32) {
+    if value < arr[0] {
+        arr[3] = arr[2];
+        arr[2] = arr[1];
+        arr[1] = arr[0];
+        arr[0] = value;
+    } else if value < arr[1] {
+        arr[3] = arr[2];
+        arr[2] = arr[1];
+        arr[1] = value;
+    } else if value < arr[2] {
+        arr[3] = arr[2];
+        arr[2] = value;
+    } else if value < arr[3] {
+        arr[3] = value;
+    }
+}
+
+/// Smoothstep at feature boundaries: produces F1+F2 blend with soft
+/// cellular structure and no hard edges. Pattern parallels biome
+/// edge-blending — when one feature is a clear winner (`f1 ≪ f2`),
+/// returns near-`f1`; in boundary regions (`f1 ≈ f2`), returns weighted
+/// blend.
+///
+/// Per [`docs/WEATHER.md`](../../../../docs/WEATHER.md#multi-feature-parallel-to-biome-blending):
+/// this is the v1 default, not a future enhancement. Pure-feature-per-cell
+/// hard F1 boundaries are visually too uniform.
+fn smooth_blend(f1: f32, f2: f32) -> f32 {
+    // (f2 - f1) / f2 ∈ [0, 1]. Near 1 = clear winner; near 0 = boundary.
+    // Smoothstep produces C¹ continuous blend weight.
+    let raw_t = if f2 > 1e-6 {
+        ((f2 - f1) / f2).clamp(0.0, 1.0)
+    } else {
+        // f2 ≈ 0 means we're sitting on a feature point (impossible
+        // unless query coincides with a jittered feature) — return f1
+        // unblended.
+        1.0
+    };
+    let smoothed = raw_t * raw_t * (3.0 - 2.0 * raw_t);
+    // f1 + (f2 - f1) × (1 - smoothed) × 0.5
+    // When raw_t = 1 (clear winner): smoothed = 1, blend = f1.
+    // When raw_t = 0 (boundary): smoothed = 0, blend = (f1 + f2) × 0.5.
+    f1 + (f2 - f1) * (1.0 - smoothed) * 0.5
+}
+
+/// Single-octave 2D Worley (cellular) noise with multi-feature
+/// per-cell + F1+F2 smooth-blend.
+///
+/// Places `features_per_cell` jittered feature points per grid cell.
+/// Returns the smallest two distances in the 3×3 grid neighborhood,
+/// normalized by `spacing_m`, plus a smoothstep-blended composite.
+/// Toroidal-wrap-aware via [`wrap_cell_index`] — same wrap discipline
+/// as [`perlin_2d`].
+///
+/// Cost: `9 × features_per_cell` distance computes per sample. At
+/// `features_per_cell = 2` that's 18 distance computes per sample;
+/// at `features_per_cell = 3` it's 27.
+///
+/// **Wrap invariant**: `WORLD_EXTENT_M / spacing_m` must be integer
+/// (callers enforce via spacing divisibility). Output at `x` and
+/// `x + WORLD_EXTENT_M` is identical by construction.
+///
+/// **Determinism**: pure function of inputs. libm-discipline
+/// (uses [`libm::sqrtf`], [`libm::floorf`]). Within-platform bit-
+/// identical; cross-platform deferred to Phase 6.1 hardening.
+#[allow(clippy::cast_possible_truncation)]
+pub fn worley_2d(
+    seed: u64,
+    octave: u32,
+    x: f32,
+    z: f32,
+    spacing_m: f32,
+    features_per_cell: u32,
+) -> WorleyResult {
+    debug_assert!(
+        features_per_cell >= 1 && features_per_cell <= WORLEY_MAX_FEATURES_PER_CELL as u32,
+        "features_per_cell must be in [1, 3]"
+    );
+    let x = wrap_coord(x);
+    let z = wrap_coord(z);
+    #[allow(clippy::cast_possible_truncation)]
+    let n_cells = (WORLD_EXTENT_M / spacing_m).round() as i64;
+    #[allow(clippy::cast_precision_loss)]
+    let effective_spacing = WORLD_EXTENT_M / n_cells as f32;
+    let xs = x / effective_spacing;
+    let zs = z / effective_spacing;
+    #[allow(clippy::cast_possible_truncation)]
+    let ix0 = libm::floorf(xs) as i64;
+    #[allow(clippy::cast_possible_truncation)]
+    let iz0 = libm::floorf(zs) as i64;
+    #[allow(clippy::cast_precision_loss)]
+    let qx = xs - ix0 as f32;
+    #[allow(clippy::cast_precision_loss)]
+    let qz = zs - iz0 as f32;
+
+    let mut top2 = [f32::INFINITY; 4];
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            for k in 0..features_per_cell {
+                let (jx, jz) = feature_jitter(seed, octave, ix0 + dx, iz0 + dz, n_cells, k);
+                #[allow(clippy::cast_precision_loss)]
+                let fx = dx as f32 + jx - qx;
+                #[allow(clippy::cast_precision_loss)]
+                let fz = dz as f32 + jz - qz;
+                let d2 = fx * fx + fz * fz;
+                insert_sorted_top2(&mut top2, d2);
+            }
+        }
+    }
+
+    let f1 = libm::sqrtf(top2[0]);
+    let f2 = libm::sqrtf(top2[1]);
+    WorleyResult {
+        f1,
+        f2,
+        f_blended: smooth_blend(f1, f2),
+    }
+}
+
+/// Single-octave 3D Worley with multi-feature + F1+F2 smooth-blend.
+///
+/// Y axis (altitude) does NOT wrap; it's unbounded by world topology.
+/// X and Z axes wrap toroidally per the Worley 2D variant.
+///
+/// Cost: `27 × features_per_cell` distance computes per sample. At
+/// `features_per_cell = 2` that's 54; at `features_per_cell = 3` it's
+/// 81. GPU bench cost ~15-25 ns at `k = 2` on modern hardware (per
+/// WEATHER.md performance budget — fits inside the cloud-pass budget).
+///
+/// **Use case**: cloud raymarcher samples a 3D Worley field per ray
+/// step for sub-cell cloud detail. Octave slot `[240, 280)` per the
+/// octave-offset convention.
+#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::too_many_arguments)]
+pub fn worley_3d(
+    seed: u64,
+    octave: u32,
+    x: f32,
+    y: f32,
+    z: f32,
+    spacing_m: f32,
+    features_per_cell: u32,
+) -> WorleyResult {
+    debug_assert!(
+        features_per_cell >= 1 && features_per_cell <= WORLEY_MAX_FEATURES_PER_CELL as u32,
+        "features_per_cell must be in [1, 3]"
+    );
+    let x = wrap_coord(x);
+    let z = wrap_coord(z);
+    // Y unwrapped — altitude is bounded by physics, not topology.
+    #[allow(clippy::cast_possible_truncation)]
+    let n_cells = (WORLD_EXTENT_M / spacing_m).round() as i64;
+    #[allow(clippy::cast_precision_loss)]
+    let effective_spacing = WORLD_EXTENT_M / n_cells as f32;
+    let xs = x / effective_spacing;
+    let ys = y / effective_spacing;
+    let zs = z / effective_spacing;
+    #[allow(clippy::cast_possible_truncation)]
+    let ix0 = libm::floorf(xs) as i64;
+    #[allow(clippy::cast_possible_truncation)]
+    let iy0 = libm::floorf(ys) as i64;
+    #[allow(clippy::cast_possible_truncation)]
+    let iz0 = libm::floorf(zs) as i64;
+    #[allow(clippy::cast_precision_loss)]
+    let qx = xs - ix0 as f32;
+    #[allow(clippy::cast_precision_loss)]
+    let qy = ys - iy0 as f32;
+    #[allow(clippy::cast_precision_loss)]
+    let qz = zs - iz0 as f32;
+
+    let mut top2 = [f32::INFINITY; 4];
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                for k in 0..features_per_cell {
+                    let (jx, jy, jz) =
+                        feature_jitter_3d(seed, octave, ix0 + dx, iy0 + dy, iz0 + dz, n_cells, k);
+                    #[allow(clippy::cast_precision_loss)]
+                    let fx = dx as f32 + jx - qx;
+                    #[allow(clippy::cast_precision_loss)]
+                    let fy = dy as f32 + jy - qy;
+                    #[allow(clippy::cast_precision_loss)]
+                    let fz = dz as f32 + jz - qz;
+                    let d2 = fx * fx + fy * fy + fz * fz;
+                    insert_sorted_top2(&mut top2, d2);
+                }
+            }
+        }
+    }
+
+    let f1 = libm::sqrtf(top2[0]);
+    let f2 = libm::sqrtf(top2[1]);
+    WorleyResult {
+        f1,
+        f2,
+        f_blended: smooth_blend(f1, f2),
+    }
+}
+
+/// Per-region feature-count `k ∈ {1, 2, 3}` for multi-feature Worley.
+///
+/// Sampled from a coarse Perlin density field at `density_spacing_m`
+/// (typically 10× the Worley spacing — produces regional clustering of
+/// dense vs sparse cellular structure). Per
+/// [`docs/WEATHER.md`](../../../../docs/WEATHER.md#per-cell-feature-count-variation):
+/// some regions have dense cumulus (k=3, lots of small puffs); others
+/// have isolated patterns (k=1, fewer larger clouds).
+///
+/// `density_octave_offset` should be disjoint from the Worley octave
+/// (`[240, 280)` in the cloud-noise slot — pick something in `[280,
+/// 290)` for the density field).
+#[must_use]
+pub fn features_per_cell_at(
+    seed: u64,
+    density_octave_offset: u32,
+    cell_x_world_m: f32,
+    cell_z_world_m: f32,
+    density_spacing_m: f32,
+) -> u32 {
+    let raw = perlin_2d(
+        seed,
+        density_octave_offset,
+        cell_x_world_m,
+        cell_z_world_m,
+        density_spacing_m,
+    );
+    // Perlin returns ~[-0.707, 0.707]; normalize to [0, 1].
+    let normalized = ((raw + 0.707) / 1.414).clamp(0.0, 1.0);
+    if normalized > 0.66 {
+        3
+    } else if normalized > 0.33 {
+        2
+    } else {
+        1
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::cast_precision_loss)] // test grid iteration: i32→f32 cast is idiomatic
 mod tests {
@@ -637,5 +1079,260 @@ mod tests {
         );
         // Domain warp compounds f32 precision loss; tolerance is higher.
         assert!((a - b).abs() < 0.1, "warped fbm seam: {a} vs {b}");
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Worley noise tests (multi-feature, F1+F2 blend, toroidal wrap)
+    // ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn worley_2d_deterministic() {
+        let a = worley_2d(42, 240, 100.0, 200.0, 1000.0, 2);
+        let b = worley_2d(42, 240, 100.0, 200.0, 1000.0, 2);
+        assert_eq!(a.f1.to_bits(), b.f1.to_bits());
+        assert_eq!(a.f2.to_bits(), b.f2.to_bits());
+        assert_eq!(a.f_blended.to_bits(), b.f_blended.to_bits());
+    }
+
+    #[test]
+    fn worley_3d_deterministic() {
+        let a = worley_3d(42, 240, 100.0, 500.0, 200.0, 1000.0, 2);
+        let b = worley_3d(42, 240, 100.0, 500.0, 200.0, 1000.0, 2);
+        assert_eq!(a.f1.to_bits(), b.f1.to_bits());
+        assert_eq!(a.f2.to_bits(), b.f2.to_bits());
+        assert_eq!(a.f_blended.to_bits(), b.f_blended.to_bits());
+    }
+
+    #[test]
+    fn worley_2d_f1_le_f2_invariant() {
+        // F1 must always be <= F2 by definition; covers the
+        // insertion-sort logic across many sample positions.
+        for ix in 0..20 {
+            for iz in 0..20 {
+                let x = (ix as f32 - 10.0) * 137.0;
+                let z = (iz as f32 - 10.0) * 191.0;
+                let r = worley_2d(42, 240, x, z, 1000.0, 2);
+                assert!(r.f1 <= r.f2, "f1={} f2={} at ({x}, {z})", r.f1, r.f2);
+                assert!(r.f1 >= 0.0, "f1 negative at ({x}, {z})");
+                assert!(r.f2 >= 0.0, "f2 negative at ({x}, {z})");
+            }
+        }
+    }
+
+    #[test]
+    fn worley_3d_f1_le_f2_invariant() {
+        for ix in 0..10 {
+            for iy in 0..10 {
+                for iz in 0..10 {
+                    let x = (ix as f32 - 5.0) * 137.0;
+                    let y = (iy as f32 - 5.0) * 113.0;
+                    let z = (iz as f32 - 5.0) * 191.0;
+                    let r = worley_3d(42, 240, x, y, z, 1000.0, 2);
+                    assert!(r.f1 <= r.f2, "f1 > f2 at ({x},{y},{z})");
+                    assert!(r.f1 >= 0.0);
+                    assert!(r.f2 >= 0.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn worley_2d_wraps_toroidally() {
+        // Same wrap discipline as Perlin — sampling at x and x + W
+        // must produce identical results.
+        for &(x, z) in &[(0.0, 0.0), (1234.5, -567.8), (250_000.0, -100_000.0)] {
+            for k in 1..=3 {
+                let a = worley_2d(42, 240, x, z, 1000.0, k);
+                let b = worley_2d(42, 240, x + WORLD_EXTENT_M, z, 1000.0, k);
+                let c = worley_2d(42, 240, x, z + WORLD_EXTENT_M, 1000.0, k);
+                assert!(
+                    (a.f1 - b.f1).abs() < 1e-3,
+                    "x-wrap f1 at ({x},{z}, k={k}): {} vs {}",
+                    a.f1,
+                    b.f1
+                );
+                assert!(
+                    (a.f1 - c.f1).abs() < 1e-3,
+                    "z-wrap f1 at ({x},{z}, k={k}): {} vs {}",
+                    a.f1,
+                    c.f1
+                );
+                assert!((a.f_blended - b.f_blended).abs() < 1e-3, "x-wrap f_blended");
+            }
+        }
+    }
+
+    #[test]
+    fn worley_2d_seam_continuous_at_authored_wavelengths() {
+        // Mirrors the Perlin seam-continuity test for spacings that
+        // don't divide WORLD_EXTENT_M evenly. Catches the same class
+        // of wrap-fractional bugs (5c.2.c.12r) at the Worley layer.
+        let wavelengths = [
+            100.0_f32, 250.0, 500.0, 1000.0, 1500.0, 2000.0, 5000.0, 10_000.0,
+        ];
+        let probe_points = [(0.0, 0.0), (1234.5, -567.8), (-1.0, 1.0)];
+
+        let mut max_diff = 0.0_f32;
+        for &spacing in &wavelengths {
+            for &(x, z) in &probe_points {
+                let a = worley_2d(42, 240, x, z, spacing, 2);
+                let b = worley_2d(42, 240, x + WORLD_EXTENT_M, z, spacing, 2);
+                let diff = (a.f_blended - b.f_blended).abs();
+                if diff > max_diff {
+                    max_diff = diff;
+                }
+                assert!(
+                    diff < 1e-3,
+                    "seam f_blended @ spacing={spacing} ({x},{z}): {} vs {}",
+                    a.f_blended,
+                    b.f_blended
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn worley_2d_different_seeds_decorrelated() {
+        // Different seeds at the same position should produce different
+        // distance values across at least some samples in a small grid.
+        let mut differs_at_least_once = false;
+        for ix in 0..10 {
+            for iz in 0..10 {
+                let x = ix as f32 * 200.0;
+                let z = iz as f32 * 200.0;
+                let r1 = worley_2d(1, 240, x, z, 1000.0, 2);
+                let r2 = worley_2d(2, 240, x, z, 1000.0, 2);
+                if r1.f1.to_bits() != r2.f1.to_bits() {
+                    differs_at_least_once = true;
+                }
+            }
+        }
+        assert!(
+            differs_at_least_once,
+            "seeds 1 vs 2 produced identical Worley fields"
+        );
+    }
+
+    #[test]
+    fn worley_2d_feature_count_varies_output() {
+        // k=1 (sparse) vs k=3 (dense) must produce visibly different
+        // distance distributions. f1 with k=3 should be smaller on
+        // average since more candidate features per cell ↓ closest-
+        // distance.
+        let mut sum_f1_k1 = 0.0_f32;
+        let mut sum_f1_k3 = 0.0_f32;
+        let mut count = 0_u32;
+        for ix in 0..30 {
+            for iz in 0..30 {
+                let x = ix as f32 * 73.0;
+                let z = iz as f32 * 89.0;
+                sum_f1_k1 += worley_2d(42, 240, x, z, 1000.0, 1).f1;
+                sum_f1_k3 += worley_2d(42, 240, x, z, 1000.0, 3).f1;
+                count += 1;
+            }
+        }
+        let avg_k1 = sum_f1_k1 / count as f32;
+        let avg_k3 = sum_f1_k3 / count as f32;
+        assert!(
+            avg_k3 < avg_k1,
+            "k=3 should pack features tighter than k=1: avg_f1 k1={avg_k1} k3={avg_k3}"
+        );
+    }
+
+    #[test]
+    fn worley_blended_between_f1_and_f2() {
+        // f_blended should always lie within [f1, f2] inclusive — it's
+        // a weighted mix, not an extrapolation.
+        for ix in 0..20 {
+            for iz in 0..20 {
+                let x = (ix as f32 - 10.0) * 137.0;
+                let z = (iz as f32 - 10.0) * 191.0;
+                let r = worley_2d(42, 240, x, z, 1000.0, 2);
+                assert!(
+                    r.f_blended >= r.f1 - 1e-5 && r.f_blended <= r.f2 + 1e-5,
+                    "f_blended {} not in [f1={}, f2={}]",
+                    r.f_blended,
+                    r.f1,
+                    r.f2
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn worley_at_feature_point_has_near_zero_f1() {
+        // Querying near a feature point should give near-zero f1.
+        // We synthesize this by computing the feature position
+        // explicitly, then sampling at it.
+        let spacing = 1000.0_f32;
+        #[allow(clippy::cast_possible_truncation)]
+        let n_cells = (WORLD_EXTENT_M / spacing).round() as i64;
+        let effective_spacing = WORLD_EXTENT_M / n_cells as f32;
+        for ix in 0..5 {
+            for iz in 0..5 {
+                let (jx, jz) = feature_jitter(42, 240, ix, iz, n_cells, 0);
+                let fx_world = (ix as f32 + jx) * effective_spacing;
+                let fz_world = (iz as f32 + jz) * effective_spacing;
+                let r = worley_2d(42, 240, fx_world, fz_world, spacing, 2);
+                assert!(
+                    r.f1 < 0.05,
+                    "f1 at feature point should be near 0; got {} at ({fx_world}, {fz_world})",
+                    r.f1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn worley_3d_y_axis_does_not_wrap() {
+        // Y axis is unbounded altitude, NOT toroidal. Sampling at very
+        // different Y values must produce different distance results.
+        let r_low = worley_3d(42, 240, 0.0, 100.0, 0.0, 1000.0, 2);
+        let r_high = worley_3d(42, 240, 0.0, 5_000.0, 0.0, 1000.0, 2);
+        // At different altitudes the closest feature in 3D space differs
+        // unless we got astronomically lucky — assert decorrelation.
+        assert!(
+            (r_low.f1 - r_high.f1).abs() > 0.01,
+            "3D Worley should differ across y; got {} vs {}",
+            r_low.f1,
+            r_high.f1
+        );
+    }
+
+    #[test]
+    fn features_per_cell_in_valid_range() {
+        // All grid samples must produce k ∈ [1, 3].
+        for ix in 0..30 {
+            for iz in 0..30 {
+                let x = ix as f32 * 1000.0;
+                let z = iz as f32 * 1000.0;
+                let k = features_per_cell_at(42, 280, x, z, 10_000.0);
+                assert!((1..=3).contains(&k), "k out of range at ({x}, {z}): {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn features_per_cell_varies_across_world() {
+        // Coarse Perlin sampling should produce a mix of 1, 2, 3
+        // across a sample grid — tests the density-field
+        // distribution isn't degenerate.
+        let mut counts = [0_u32; 4];
+        for ix in 0..40 {
+            for iz in 0..40 {
+                let x = ix as f32 * 5000.0;
+                let z = iz as f32 * 5000.0;
+                let k = features_per_cell_at(42, 280, x, z, 10_000.0);
+                counts[k as usize] += 1;
+            }
+        }
+        // At least some of each should appear; 0% of one tier would
+        // signal a broken density-field threshold.
+        for k in 1..=3 {
+            assert!(
+                counts[k] > 0,
+                "no cells with k={k}; distribution: {counts:?}"
+            );
+        }
     }
 }

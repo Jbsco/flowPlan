@@ -42,6 +42,7 @@ use bytemuck as _;
 use flowplan_world as _;
 use image as _;
 use insta as _;
+use naga as _;
 #[cfg(feature = "shader-hot-reload")]
 use notify as _;
 use pollster as _;

@@ -26,7 +26,10 @@ pub mod hot_reload;
 
 pub use debug_lines::{DebugLineBatch, DebugLineVertex, DebugLinesRenderer};
 pub use instances::{InstanceGpuData, InstanceRenderer};
-pub use renderer::{Renderer, SceneParams, ShadingParams, WATER_WGSL_SOURCE};
+pub use renderer::{
+    Renderer, SceneParams, ShadingParams, CLOUD_NOISE_WGSL_SOURCE, VOLUMETRIC_WGSL_SOURCE,
+    WATER_WGSL_SOURCE,
+};
 pub use telemetry::Telemetry;
 
 // Dev-deps are consumed by `tests/visual_snapshot.rs` (Tier-3, hardware-gated). Mark
@@ -38,6 +41,8 @@ use flowplan_world as _;
 use image as _;
 #[cfg(test)]
 use insta as _;
+#[cfg(test)]
+use naga as _;
 #[cfg(test)]
 use pollster as _;
 
