@@ -62,10 +62,15 @@ jobs:
   test:
     name: cargo test --workspace
     runs-on: ubuntu-latest
-    # Workspace tests alone are ~3-5 min wall + cold-cache compile; previously
-    # the job also ran flight_bench --release inline and consistently timed
-    # out at the 20-min cap. flight_bench is now its own job (`flight-bench`).
-    timeout-minutes: 20
+    # Workspace tests are CPU-bound: cold-cache compile of the workspace +
+    # ~5 min of tests (the world crate alone hits ~2m10s for its 295 tests
+    # post-Worley addition). The flight-bench split (own job) helped, but
+    # cold-cache CI runs still push toward the original 20-min cap.
+    # 30-min budget gives headroom while keeping the job a single discrete
+    # gate. If this proves chronic, next step is to further split by crate
+    # (`world` separately from `app/render/sim/etc.`) so both halves fit
+    # under 20 min in parallel.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
