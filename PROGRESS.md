@@ -3,6 +3,175 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
+## 2026-04-26 (iteration 19) — Phase 3.6.3c.6 / 3.2x volumetric clouds: B1-B3c shipped
+
+Volumetric cloud rendering reaches first-visible state. The complete A-B path from WEATHER.md design memo lands across this iteration: Worley noise primitive (CPU + GPU bit-identity), cloud shader skeleton wired into the render pipeline, density sampling with hardcoded test cell, depth termination so clouds clip at scene geometry, lighting stand-in for sun-lit/shadow gradient, and Perlin-Worley blend per the locked WEATHER.md design.
+
+### docs/WEATHER.md — implementation reference
+
+[`docs/WEATHER.md`](docs/WEATHER.md) — companion implementation reference to MAPGEN.md's three-layer weather composition design. Originally scoped as `docs/CLOUDS.md` (focused cloud-rendering memo); expanded to cover the surrounding subsystem: status snapshot, architecture reference, cloud rendering technique decisions (LOCKED vs RECOMMENDED markers per item), Worley noise primitive, particle system architecture, atmospheric character per cell type (`AtmosphericMood` enum with parameter table), fog + visibility coupling, atmospheric optics architectural prep, sim cloud-fly-through hookups, performance budget, determinism, open questions. Cited from CLAUDE.md docs stack.
+
+Key locked decisions (from design discussion + user pushback during memo drafting):
+
+- **Async chunked-weather streaming**: established pattern, sync→async retrofits proved costly historically.
+- **Multi-feature Worley with F1+F2 smooth-blend**: parallels biome edge-bleed-over; pure single-feature rejected as too cellular.
+- **Particle pool with instanced billboards**: distance visibility decisive (storm visible at 30 km).
+- **Day/night cloud shading at v1 architectural priority**: visual experience IS gameplay; in-engine renders are the producer; vivid sunsets and morning mist are primary eyecatches.
+- **Atmospheric character per cell type**: 6 moods (Bright/Serene/Vivid/Cool/Dark/Dramatic), per-frame derivation from cell+sun+precip+time, `AtmosphericMoodParams` uniform schema (fog_tint, sun_color_modulation, ambient_modulation, cloud_lit/shadow_tint, sky_desaturation).
+- **Atmospheric optics elevated**: hooks land in 3.2x; visual polish in 5.5 (sun halo, sun dog, rainbow, crepuscular rays via free dividend of volumetric raymarch, lightning, alpenglow).
+
+### B1 — Worley noise primitive (Rust + WGSL)
+
+`crates/world/src/noise.rs`:
+
+- **`pcg_2d_hash` / `pcg_3d_hash`**: pure u32 PCG hash chain (1664525u multiplier, 1013904223u increment). Bit-identical CPU↔GPU when both use wrap-on-overflow arithmetic. Replaces splitmix64 (u64) for cloud-noise where WGSL portability matters.
+- **`worley_2d` / `worley_3d`**: multi-feature-per-cell Worley with F1+F2 smooth-blend. Returns `WorleyResult { f1, f2, f_blended }`. Toroidal X+Z wrap (Y unbounded in 3D). 1-3 features per cell via `features_per_cell` parameter.
+- **`features_per_cell_at`**: per-region density via coarse Perlin-driven density field — produces regional clustering of dense vs sparse cellular structure (matches real weather: convective regions cluster, subtropical highs have isolated cumulus).
+- **`cloud_perlin_3d`**: single-octave 3D Perlin using the same PCG hash chain. Y unbounded; X+Z wrap. ~3-5× cheaper than Worley.
+- 19 new unit tests: determinism, range, wrap, decorrelated seeds, smooth continuity, F1/F2 invariants, multi-feature density variation.
+
+`crates/render/src/cloud_noise.wgsl` (~270 LOC):
+
+- Hand-rolled WGSL port matching all Rust functions exactly. Same constants, same hash chain, same rounding.
+- Public-API: `worley_2d`, `worley_3d`, `cloud_perlin_3d` + their helpers.
+- Locked discipline: any change to either side requires coordinated update + bit-identity re-baseline.
+
+`crates/render/tests/cloud_noise_wgsl_parses.rs` (4 offline parse tests):
+
+- Naga frontend parse + validator.
+- Expected function names present (catches accidental rename).
+- WorleyResult struct with f1/f2/f_blended fields.
+- PCG constants match Rust (`PCG_MULT = 1664525u`, `PCG_INC = 1013904223u`).
+
+Octave-offset slot reserved: `[240, 280)` for cloud noise (Worley = 240, Perlin = 241+, future fBm octaves as needed). Documented in WEATHER.md.
+
+### B2 — Cloud shader skeleton + render-pass slot
+
+`crates/render/src/volumetric.wgsl` (initial skeleton):
+
+- Full-screen triangle vertex shader.
+- Camera unproject → world view-ray reconstruction (mirrors `sky.wgsl` pattern).
+- Empty raymarch loop (32 placeholder steps), all return zero density.
+- Banded-alpha cel-shading quantization (6 bands per WEATHER.md LOCKED design).
+- Returns `vec4(0,0,0,0)` — visual no-op.
+
+`crates/render/src/renderer.rs`:
+
+- New `volumetric_pipeline` field. Pipeline created at startup with 2 bind groups (camera + scene); B3b adds depth bind group.
+- New render-pass slot **after outline, before widgets** (locked ordering per WEATHER.md): `sky → scene → outline → cloud → widgets`. Outline runs before cloud so cel-shaded silhouettes apply to opaque geometry; cloud composites over outlined scene.
+- Pipeline composes `cloud_noise.wgsl + volumetric.wgsl` at shader-creation time. Single source of truth for noise primitives — changes in cloud_noise propagate automatically.
+
+`crates/render/tests/volumetric_wgsl_parses.rs` (4 initial offline parse tests):
+
+- Naga validates the **composed** source (cloud_noise + volumetric).
+- B3 density-model symbols, bind groups, structural perf-budget constants.
+
+### B3 — Density sampling: visible test cloud
+
+`crates/render/src/volumetric.wgsl` (B3 evolution):
+
+- Hardcoded `TEST_CELL_*` constants — single Cumulus at world origin XZ, `[base=1500m, top=2500m]`, density 0.6, footprint radius 3 km.
+- `altitude_profile(cell_type, y, base, top)` mirrors Rust `weather::deltas::altitude_profile`. Parabolic peak for convective, flat for stratus, zero outside band.
+- `footprint_falloff(world_xz, seed_xz, radius_m)` smoothstep cell membership for B3 single-cell. C2 replaces with Voronoi-cell membership.
+- `sample_cloud_density(world_pos, t)` composes peak density × altitude profile × footprint falloff × Worley sub-cell.
+- Cell types mirror Rust enum (CELL_CLEAR_AIR / CUMULUS / NIMBUS / STRATUS / SQUALL / FRONTAL).
+
+**Visual result**: visible cumulus puff at world origin altitude 1500-2500 m. User confirmed in-game. Initial cellular-patchwork artifact addressed by perf-polish iteration below.
+
+### B3 perf-polish — ray-cylinder + adaptive sampling + structural perf-gate
+
+User flagged FPS regression after initial B3 (1000-3000 fps → <60 fps when cloud in view). Three compounding fixes:
+
+- **Ray-vertical-cylinder early-out**: solves quadratic against the cell's footprint disk. Pixels missing the cylinder return `vec4(0)` immediately — no Worley calls. Combined with `ray_altitude_band`, the raymarch loop now runs only over the cell's actual volume (typically 1-3 km along ray instead of 15 km). Single biggest cost reduction.
+- **`CLOUD_FEATURES_PER_CELL` 2 → 1**: halves Worley distance-compute cost (27 vs 54 in 3D).
+- **Adaptive step count**: `actual_steps = clamp(ceil(band_length / 400m), 4, 32)`. Vertical view through 1 km slab uses ~3-4 steps, grazing view through 5 km caps at ~13. Per-pixel cost scales with cloud-volume traversed, not fixed 32 regardless of intersection length.
+
+**Structural perf-gate** in `volumetric_wgsl_parses.rs::volumetric_wgsl_cost_constants_within_budget`:
+
+- `RAYMARCH_STEPS_MAX ≤ 64` (catches accidental constant bump).
+- `RAYMARCH_TARGET_STEP_M ≥ 200` (catches overdraw via too-fine sampling).
+- `CLOUD_FEATURES_PER_CELL ≤ 2` (k=3 doubles+ Worley cost).
+- `ray_vertical_cylinder` early-out present (catches accidental removal — known regression class).
+
+User confirmed: in-game stability much improved, cloud holds shape under camera move.
+
+### B3b — Depth termination
+
+`crates/render/src/renderer.rs`:
+
+- New `volumetric_depth_bgl` (depth-only bind group layout) + `volumetric_depth_bg` fields. `build_volumetric_depth_bind_group` mirrors `build_outline_bind_group`.
+- Pipeline layout extended to 3 bind groups (camera + scene + depth).
+- `resize()` rebuilds the cloud depth bind group alongside the outline one.
+
+`crates/render/src/volumetric.wgsl`:
+
+- New `@group(2) @binding(0) var scene_depth: texture_depth_2d`.
+- Fragment samples depth via `textureLoad(scene_depth, frag_pixel, 0)`.
+- For `depth < 1.0` (scene hit): unprojects to camera-relative world position at that depth, computes `t_terrain = length(unprojected)` directly. **Critical caveat**: camera-relative rendering (Phase 3.6.3c.5d) means `inverse_view_proj` does NOT include camera translation, so the unprojected position is already camera-relative — do NOT subtract `cam_pos`. Initial implementation had this bug (subtracted twice), causing depth termination to silently not bite. Fixed.
+- `t_exit = min(min(band.y, cyl.y), t_terrain)` — three-way clamp ensures clouds end at whichever terminator comes first.
+
+Now correctly clips against terrain, water, **aircraft**, and feature instances. Cockpit view inside cloud doesn't show cloud through cockpit panels; exterior view inside cloud renders cloud volume between camera and aircraft naturally.
+
+### B3 lighting stand-in — altitude-gradient sun-lit/shadow
+
+User flagged grey transparency without directional shading. Cheap stand-in until E1 polish:
+
+- `altitude_t = (sample_y - base) / (top - base)` → top of cloud reads as sun-lit, bottom as shadowed.
+- `sun_height = clamp(scene.sun_dir.y, 0, 1)` modulates the gradient (overhead sun → strong gradient; horizon sun → flatter).
+- `lit_factor = mix(0.4, altitude_t, sun_height)`. `sample_color = mix(shadow_color × 0.85, sun_lit_color × 1.4, lit_factor)`.
+- Zero extra density samples per step — same per-step cost as before. Real Beer-Lambert shadow march documented as locked design for E1 polish.
+
+### B3c — Perlin-Worley blend
+
+Per WEATHER.md § Sub-cell detail noise. For Cumulus: 0.7 worley_struct + 0.3 perlin_norm.
+
+`crates/render/src/volumetric.wgsl`:
+
+- `CLOUD_PERLIN_SPACING_M = 600 m` (5 wavelengths per 3 km cell — fine cauliflower texture; tighter than Worley's 2000 m so Perlin adds variation rather than duplicating Worley's scale).
+- `CLOUD_PERLIN_OCTAVE = 241u` (Worley = 240; octave-offset convention).
+- `CUMULUS_WORLEY_WEIGHT = 0.7` + `CUMULUS_PERLIN_WEIGHT = 0.3` per WEATHER.md cell-type table.
+- `sample_cloud_density`: `cloud_factor = 0.7 × worley_struct + 0.3 × perlin_norm`. Worley dominates puff *structure* (where puffs are); Perlin adds *variation* within puffs.
+- `perlin_norm = clamp((perlin_raw + 0.7) / 1.4, 0, 1)` — maps typical Perlin range `[-0.7, 0.7]` to `[0, 1]` (instead of theoretical `[-1, 1]`); 1.4× more contrast in Perlin contribution.
+
+User confirmed "definitely catching the puff variation now". The cellular-patchwork is replaced by puffs with internal cauliflower texture.
+
+### Perf-gate: 1080p / 144 Hz / 3 ms
+
+Hardware-gated GPU perf-gate via wgpu `Features::TIMESTAMP_QUERY`. Per user direction (2026-04-26):
+
+- **Resolution**: 1080p (1920×1080). Most desktop dev/play machines run 1080p; gate measurements directly comparable to in-game framerate.
+- **Target**: 144 Hz at 1080p (6.94 ms per frame). Cloud-pass budget at 3 ms leaves 4 ms for other passes. Tight but achievable.
+- **Current cost**: 1.011 ms median (989 fps cloud + minimal scene). 3× headroom on the 3 ms gate.
+- Gate runs via `./flowplan test-cloud-perf` (release build, ~30 sec). Hardware-gated by `hardware-tests` feature.
+
+**Cost growth from B3 evolution** (informative, all at 1080p):
+- B2 skeleton (transparent, no math): not measured (visual no-op).
+- B3 initial (Worley + cylinder + adaptive): ~0.4 ms.
+- B3b depth termination: ~0.4 ms (no measurable impact — depth fetch is cheap).
+- B3 lighting stand-in: ~0.4 ms (no impact — pure math, no extra samples).
+- B3c Perlin-Worley blend at fine spacing (600 m) + tightened normalization: ~1.0 ms (~2× from adding Perlin call per step + early-out triggering less often due to better-distributed alpha).
+
+User-pinned posture: **playtesting trumps the gate**. When in-game shows a regression that the gate missed, tighten the budget. When the gate fails on legitimate work, measure on reference hardware first; only relax if reference also shows the regression. Document each adjustment.
+
+### Reference hardware locked (informative)
+
+User's dev machine for these measurements: **AMD Radeon RX 7900 GRE + Ryzen 7 7700X + 64 GB DDR5**. Used as the reference for "if this hits 144 Hz at 1080p, more modest systems should comfortably hit 60 Hz at 1080p". Reference per DESIGN.md (RTX 3060 / RX 6600) is on the lower end of what 7900 GRE represents — measurements here are likely 2-3× faster than DESIGN reference.
+
+### Test counts
+
+- 31 noise tests (Rust): 13 Worley + 6 Perlin + 12 Perlin-2D/fBm/ridged.
+- 7 volumetric parse tests (offline): naga validation, entry points, bind groups, B3 density model, B3b depth termination, B3c Perlin blend, structural perf-budget.
+- 4 cloud_noise parse tests: naga validation, expected functions, struct, PCG constants.
+- 1 cloud_pass_perf hardware-gated test.
+
+### Pinned for next steps
+
+- **B3c quality polish** (E1 / future): proper Beer-Lambert shadow march toward sun (~30% extra cost), fBm with 2-3 Perlin octaves for fractal cumulus detail.
+- **B4 GPU readback bit-identity test**: sample N points on CPU vs GPU, hash both, assert identical. Hardware-gated. Locked design but defers until C1 streaming brings real cell state into the equation.
+- **C1 ChunkedWeather streaming**: replace hardcoded test cell with universal-pattern streaming manager. Async worker pool (per `chunked_voronoi_layers_universal` memory). Per-cell GPU resource (storage buffer of `GpuWeatherCell` structs). Per-pass pixel iteration over active cell list — needs spatial-index lookup to keep cost bounded as cell count rises (~80-200 cells in 50 km streaming radius).
+- **C2 Renderer + storage-buffer integration**: builds on C1; replaces test-cell uniforms with indexed lookup.
+- **Particle system + atmospheric character + fog coupling**: queued for 3.2x via WEATHER.md design.
+
 ## 2026-04-25 (iteration 18) — Phase 3.6.3c.2 (Per-cell deltas for 11 dev/resupply features) + tuning
 
 Tightens the L3 heightfield pipeline: the developments + resupply features authored in 3.6.3b now emit modest flatten deltas, so cultivated / built / waterfront cells visually settle into their host terrain instead of riding the full base-octave noise. Tunes the over-strict `scenic_overlook` placement rule that .12i diagnostic flagged at zero placements.

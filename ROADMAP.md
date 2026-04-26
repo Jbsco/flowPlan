@@ -1036,9 +1036,29 @@ Per-Voronoi-cell water chunks following the universal chunked pattern. Each cell
 - [x] **Renderer integration** — `water_chunks` HashMap, `update_water_chunk` / `evict_water_chunk` API, render-pass branch. Legacy single-mesh path preserved for scenarios.
 - [x] **Game-app wiring** — `ChunkedWater` constructed alongside `ChunkedTerrain`; same `scenario.is_none()` gating.
 
-**3.6.3c.6 — Volumetric weather chunks: pending.**
+**3.6.3c.6 — Volumetric weather chunks: B1-B3c shipped 2026-04-26, C1+ pending.**
 
 Volumetric-cloud sampling per W2 weather Voronoi cell (~20-50 km cells). Shader-side cloud-density texture. Builds on the chunked-Voronoi pattern.
+
+Shipped in 2026-04-26 iteration:
+
+- [x] **`docs/WEATHER.md`** — implementation reference companion to MAPGEN's three-layer weather composition design. Locks technique decisions (Perlin-Worley blend, ray-cylinder early-out, banded alpha cel-shading, atmospheric character per cell type, etc.) per LOCKED / RECOMMENDED markers. Cited from CLAUDE.md docs stack.
+- [x] **B1 — Worley noise primitive (CPU + WGSL)**: u32 PCG hash chain (bit-identity-capable), `worley_2d` / `worley_3d` with multi-feature F1+F2 smooth-blend, `cloud_perlin_3d`, `features_per_cell_at` for regional density variation. Octave-offset slot `[240, 280)` reserved.
+- [x] **B2 — cloud shader skeleton**: `volumetric.wgsl` empty raymarch, render pipeline + pass slot. Pass ordering locked: `sky → scene → outline → cloud → widgets`.
+- [x] **B3 — density sampling**: hardcoded test Cumulus at world origin, altitude profile + footprint falloff + Worley sub-cell detail. Visible cumulus puff in-game.
+- [x] **B3 perf-polish**: ray-vertical-cylinder early-out, adaptive step count (4-32 depending on band length), structural perf-budget regression test (`RAYMARCH_STEPS_MAX ≤ 64`, `CLOUD_FEATURES_PER_CELL ≤ 2`, etc.).
+- [x] **B3b — depth termination**: cloud raymarch clips at scene depth (terrain, water, aircraft, instances). Camera-relative-rendering caveat resolved (do not subtract `cam_pos` from already-camera-relative unprojected coord).
+- [x] **B3 lighting stand-in**: altitude-gradient sun-lit/shadow shading until B3c+ shadow march lands.
+- [x] **B3c — Perlin-Worley blend**: 0.7 worley_struct + 0.3 perlin_norm per WEATHER.md Cumulus mapping. Visible internal puff variation.
+- [x] **GPU wall-clock perf-gate**: `crates/render/tests/cloud_pass_perf.rs`. **Locked at 1080p / 144 Hz target / 3 ms budget** per user direction 2026-04-26. Hardware-gated via `Features::TIMESTAMP_QUERY`. Run via `./flowplan test-cloud-perf`. Current cost: 1.0 ms median (989 fps cloud + minimal scene on RX 7900 GRE).
+
+Pending:
+
+- [ ] **B4 — GPU readback bit-identity test**: sample N reference points CPU vs GPU, hash both, assert identical. Hardware-gated.
+- [ ] **C1 ChunkedWeather streaming manager**: universal-pattern async-worker streaming per `chunked_voronoi_layers_universal` memory. Storage buffer of `GpuWeatherCell` structs populated as W2 cells enter streaming radius (~50 km).
+- [ ] **C2 — multi-cell rendering integration**: replace hardcoded test-cell constants with indexed cell-state lookup. Spatial-index needed to keep per-pixel cost bounded as cell count rises (80-200 active cells).
+- [ ] **B3c+ shadow march** (E1 / future): proper Beer-Lambert toward sun, fBm with multiple Perlin octaves for fractal detail.
+- [ ] Atmospheric character per cell type (`AtmosphericMood` driving fog tint / sun_color / sky desaturation), fog coupling, particle system — all queued for 3.2x via WEATHER.md design.
 
 **3.6.3c.7 — Palette-adaptation render integration: pending.** *(Was 3.6.3c.4 in earlier roadmap; renumbered when chunked terrain claimed the 4 slot.)*
 
