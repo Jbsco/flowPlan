@@ -764,17 +764,24 @@ let coverage_strength = rh_score * temp_score;       // 0..1, both factors must 
 The cell still classifies discretely (most-qualified type wins for type-specific behavior — altitude band, color tint, life-cycle duration). But `coverage_strength` is continuous and used to modulate visual density:
 
 ```wgsl
-// Shader-side (sample_cloud_density):
+// Shader-side (sample_cloud_density) — linear-remap form.
 let raw_factor = worley_w * worley_struct + perlin_w * perlin_norm;
 let coverage_threshold = 1.0 - cell.coverage_strength;
-let cloud_factor = smoothstep(coverage_threshold, coverage_threshold + 0.1, raw_factor);
+let cloud_factor = clamp(
+    (raw_factor - coverage_threshold) / cell.coverage_strength,
+    0.0,
+    1.0,
+);
 return cell.density * alt_factor * cloud_factor;
 ```
 
 So:
-- `coverage_strength = 1.0`: threshold = 0, all noise above 0 produces cloud → solid.
-- `coverage_strength = 0.5`: threshold = 0.5, only the upper half of noise values produces cloud → broken.
-- `coverage_strength = 0.0`: threshold = 1.0, no noise produces cloud → empty.
+- `coverage_strength = 1.0`: threshold = 0, `cloud_factor = raw_factor` — full noise gradient passes through, soft cloud edges preserved (Beer-Lambert + cel-shading rely on this).
+- `coverage_strength = 0.5`: threshold = 0.5, only `raw_factor > 0.5` produces cloud, linearly remapped above threshold → broken with soft falloff.
+- `coverage_strength = 0.1`: threshold = 0.9, only the top 10% of noise values produce cloud → very sparse but soft.
+- `coverage_strength = 0.0`: shader early-out skips the cell entirely.
+
+> **Why linear remap and not `smoothstep`?** The original design proposed `smoothstep(threshold, threshold + 0.1, raw_factor)`, but in-game observation 2026-04-26 showed it saturates `cloud_factor` to ~1.0 for any `raw_factor > threshold + 0.10`. That eliminates the gradual density falloff at cloud edges — the banded-alpha cel-shading at the end of `fs_volumetric` (`floor(accumulated_alpha * 6.0) / 6.0`) needs a smooth alpha ramp as the ray traverses the cloud's soft rim, otherwise `accumulated_alpha` jumps past all 6 bands instantly and produces a hard silhouette. Linear remap preserves the soft gradient above threshold while still gating the bottom of the noise field for marginal cells. The smoothstep form may return as a tunable *feathered-edge* mode in CM-7 if there's a use case where punched-out gaps read better than soft transitions.
 
 **Cross-cell continuity**: adjacent cells with similar inputs have similar `coverage_strength` → similar visual density. The Worley/Perlin noise field is continuous across cell boundaries (already verified by tessellation discipline) → cloud structure flows naturally. Cells differing in coverage_strength produce a **gradient of cloud cover** across the world, like real synoptic-scale weather where humidity and temperature vary smoothly.
 
@@ -799,12 +806,28 @@ prefix disambiguates from overall ROADMAP phase numbering.
 | CM-1 | Fix find_nearest_active_cell to include ClearAir cells. Sentinel pattern for empty buffer slots (`seed_pos = 1e9`). Resolves "leaving cell vanishes clouds" symptom. | **shipped 2026-04-26** | volumetric.wgsl, game_app.rs, cloud_pass_perf.rs |
 | CM-2 | `CellState.coverage_strength: f32` field + per-type smoothstep computation in `compute_coverage_strength()`. Edge bounds CENTER on the binary threshold (score ~0.5 per axis at threshold; product 0.25 for 2-factor types, 0.125 for nimbus). ClearAir margin capped at 0.15. Lifecycle attenuation tracks coverage through build/peak/dissipate. 11 new tests. | **shipped 2026-04-26** | weather/cell_state.rs |
 | CM-3 | `GpuWeatherCell.coverage_strength` (replaces padding slot). Plumb via `WeatherCellSnapshot` → game_app upload. WGSL `_pad: u32` → `coverage_strength: f32`. | **shipped 2026-04-26** | renderer.rs, game_app.rs, volumetric.wgsl, cloud_pass_perf.rs |
-| CM-4 | WGSL `sample_cloud_density` applies `coverage_strength` to `cloud_factor` via smoothstep modulation (`coverage_threshold = 1 - coverage_strength`; `smoothstep(threshold, threshold + 0.10, raw_factor)`). CPU side: ClearAir cells with margin > 0 get `HAZE_BASE/TOP_ALTITUDE_M` + `HAZE_DENSITY` so the shader has something to sample. Marginal cells produce gaps in coverage rather than just dimmer coverage. | **shipped 2026-04-26** | volumetric.wgsl, weather/cell_state.rs |
+| CM-4 | WGSL `sample_cloud_density` applies `coverage_strength` to `cloud_factor` via **linear remap** modulation (`cloud_factor = clamp((raw_factor - (1 - cov)) / cov, 0, 1)`). At cov=1 this is the identity — full Beer-Lambert + cel-shaded rim preserved (the banded-alpha cel-shading needs gradual alpha buildup). Marginal cells gate the bottom of the noise field while keeping the linear ramp above. CPU side: ClearAir cells with margin > 0 get `HAZE_BASE/TOP_ALTITUDE_M` + `HAZE_DENSITY` so the shader has something to sample. Revised from initial `smoothstep` formulation after in-game observation showed it killed soft cloud edges. | **shipped 2026-04-26** | volumetric.wgsl, weather/cell_state.rs |
 | CM-5 | Altitude-band noise perturbation tied to `coverage_strength` (bumpy cloud tops, varied bases). Per-type amplitudes via `altitude_perturbation_amplitude(cell_type)`: Cumulus (500/200), Nimbus (1500/400), Stratus (50/30), Squall (700/250), Frontal (400/150), ClearAir/haze (50/50). One Perlin-3D call per ray sample at fixed y=0 with ALT_PERTURB_SPACING_M = 3 km wavelength. Cost: +200 µs cloud-pass (2.995 ms median post-CM-5). | **shipped 2026-04-26** | volumetric.wgsl |
-| CM-6 | Per-cell-type Worley spacing variation (formerly priority ladder #4b). Stratus smooth, Squall textured, Cumulus puffy. | pending | volumetric.wgsl |
-| CM-7 | Tuning pass + in-game observation. | pending | constants in cell_state.rs / volumetric.wgsl |
+| **CM-6** (was CM-8) | **Boundary blending** (STRUCTURAL — sequenced first because CM-7..CM-9 build on the 2-cell blended per-sample inputs; promoted from priority ladder #6 on 2026-04-26 after in-game playtest surfaced "clouds vanish when leaving a cell"). `find_nearest_active_cell` returns the two nearest cell indices; `sample_cloud_density` blends `(density, base_altitude_m, top_altitude_m, coverage_strength, cell_type)` from both cells by smoothstep over distance-to-Voronoi-midline. Adjacent same-type cells fuse into one body of weather; different-type cells transition smoothly. Cost: doubles per-sample noise + altitude_profile work, ~+50% per-pixel. | pending | volumetric.wgsl |
+| **CM-7** (was CM-9) | **Vertical-distribution carving tied to margin/noise** (PINNED 2026-04-26 user direction). The current modulation `density = cell.density × alt_factor(y) × cloud_factor(noise)` modulates the entire altitude band uniformly — a marginal cell is a thin scaled-down parabolic blob, not a scattered set of lobes. Real cumulus distribute mass as **discrete vertical lobes at varying altitudes within the band**, with gaps between, lobe count tracking margin. Implementation candidates: (a) anisotropic noise sampling (scale `y` by ~2-4× when calling cloud_perlin_3d/worley_3d → shorter vertical wavelength, free); (b) `alt_factor_carved = alt_factor × (1 - carve_amp × vertical_perlin)` so the parabola gets pitted with sky-gaps; (c) couple `carve_amp` to `(1 - coverage_strength)` so marginal cells carve aggressively (sparse lobes), well-qualified cells barely carve (continuous mass). Cost: 0-1 extra Perlin call per sample depending on approach. May share machinery with CM-8 (per-cell-type Worley spacing). | pending | volumetric.wgsl |
+| **CM-8** (was CM-6) | Per-cell-type Worley spacing variation (formerly priority ladder #4b). Stratus smooth, Squall textured, Cumulus puffy. Independent from CM-7 but fits same iteration. | pending | volumetric.wgsl |
+| **CM-9** (was CM-7) | Tuning pass + in-game observation. Finalization step; needs CM-6..CM-8 to land first. | pending | constants in cell_state.rs / volumetric.wgsl |
 
-Each sub-phase ships as its own update to PROGRESS.md + memory pin, given proximity to compaction. Sub-phases land in order — each builds on the previous.
+Each sub-phase ships as its own update to PROGRESS.md + memory pin, given proximity to compaction. Sub-phases land in order — each builds on the previous. **CM-6..CM-9 were re-ordered 2026-04-26 to front-load structural work (boundary blending) before features that depend on its 2-cell per-sample inputs.**
+
+### Post-CM-9: additional W1/W2/W3 couplings (PINNED 2026-04-26)
+
+User direction: "we have a lot of weather layers/hooks that we can use to distribute clouds realistically." These hooks already exist in `crates/world/src/weather/` but the cloud-rendering shader doesn't fully leverage them yet. Pinned for post-CM-9 expansion (some may motivate restructuring CM-N if playtest surfaces them as gating):
+
+| Hook (existing in `weather/`) | How clouds could leverage it | Plumbing required |
+|---|---|---|
+| `wind::wind_at(x, y, z, time)` direction | **Cumulus tilt** — tops lean downwind by amount proportional to vertical shear. effective_top.xz shifted by `tilt_vec × (y - base) / depth`. | Add `wind_dir_at_alt: vec2<f32>` to `GpuWeatherCell` (8 bytes). |
+| `frontal::nearest_segment` graph | **Banded structure** along frontal-graph segments, oriented perpendicular to graph tangent. | Per-cell flag + tangent direction in `GpuWeatherCell`; in shader, override Perlin/Worley axes. |
+| `weather::deltas::updraft_at(...)` | **Tall narrow features** in strong-updraft regions — couples with CM-7's vertical carving (more carving + more vertical extent). | Already in W3 deltas; could ride coverage_strength's altitude amplitude in CM-5 or pair with CM-7. |
+| `weather::deltas::precipitation_rate_at(...)` | **Per-cell precipitation visualization** (rain/snow particle systems). Not cloud-density; see priority ladder #10-11. | Particle pool design pending. |
+| Cross-cell adjacency-biased evolution (priority ladder #13) | Cells bias their next re-roll toward neighbor cell types so weather sprawls (fronts move as bands, storms organize into lines). | Requires cycle-time decision to consult neighbor states. Pinned design; not in this CM-N pass. |
+| `humidity::sea_level_humidity_with_terrain` | **Already exercised** at cell-state-compute time → `coverage_strength`. Free. | Done. |
+| Orographic / rain-shadow modifiers | **Already exercised** through humidity. Free. | Done. |
 
 **Smoothstep edge bounds (CM-2 calibration, 2026-04-26)** — final values centered so each axis returns ~0.5 at the binary threshold:
 
@@ -857,7 +880,7 @@ estimates assume single-developer focused work; visual impact is the
 | 4 | **Continuous qualification margin** (per-cell `coverage_strength` derived from W1 inputs; threshold smoothstep instead of binary; ClearAir gets nonzero strength near cloud-formation margin) | medium | very high — fixes "identical cumulus everywhere"; produces organic coverage gradients; cells with marginal qualification show breaks in cover; design above | **Sub-phases CM-1..CM-5 shipped 2026-04-26**; CM-6, CM-7 pending |
 | 4b | Per-cell-type Worley spacing (Stratus smooth, Squall textured edges, Cumulus puffy) — lands inside the #4 pass | small | medium — visual differentiation | CM-6 (sub-phase of #4 above); pending |
 | 5 | Beer-Lambert shadow march (proper sun lighting toward the sun) | medium | high — dramatic light/shadow on cumulus | E1 polish per WEATHER.md |
-| 6 | Boundary blending (smoothstep across cell edges using `distance_to_edge`) | medium | high — fixes "hard cell boundaries" visible at type transitions | implementation-pending; design locked |
+| 6 | Boundary blending (smoothstep across cell edges using `distance_to_edge`) | medium | high — fixes "hard cell boundaries" visible at type transitions | **promoted into continuous-margin pass as CM-8 on 2026-04-26** after in-game playtest |
 | 7 | AtmosphericMood per cell type (fog tint / sun_color / sky desaturation per cell) | medium | high — mood reads at distance (sunset over fair-weather vs squall) | 3.2x scope per WEATHER.md |
 | 8 | Fog + visibility coupling (sim's `visibility_at` → render fog density per frame) | small | medium — flying into cloud feels right | 3.2x scope |
 | 9 | Particle system architecture (preallocated pool, instanced billboards) | medium | foundation | 3.2x scope |

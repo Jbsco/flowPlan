@@ -203,6 +203,25 @@ fn find_nearest_active_cell(world_xz: vec2<f32>) -> u32 {
     return best_idx;
 }
 
+// Per-pixel ray-start jitter hash. Returns a deterministic value in
+// `[0, 1)` derived from integer pixel coords. Replaces the fixed
+// `0.5` step-midpoint offset in the raymarch loop so adjacent pixels
+// sample the cloud at scattered `t` offsets — band-edge artifacts from
+// the discrete altitude_profile transitions get dithered across pixels
+// and read as soft texture rather than visible horizontal rings.
+//
+// PCG-style integer hash: cheap (~10 ALU), no precision concerns at
+// modest screen sizes, no state. For temporal stability with a moving
+// camera the hash could mix in a frame counter for TAA-style temporal
+// integration; not needed at present (static shots show no banding).
+fn pixel_hash_unit(p: vec2<i32>) -> f32 {
+    var h: u32 = u32(p.x) * 1597334677u + u32(p.y) * 3812015801u;
+    h = (h ^ (h >> 16u)) * 2246822519u;
+    h = (h ^ (h >> 13u)) * 3266489917u;
+    h = h ^ (h >> 16u);
+    return f32(h) * (1.0 / 4294967296.0);
+}
+
 // Per-cell-type altitude-perturbation amplitudes (m). Returns
 // `vec2(top_amp_m, base_amp_m)`. Cumulus / nimbus get bumpy convective
 // tops; stratus stays nearly flat (its physical signature is a uniform
@@ -310,19 +329,30 @@ fn sample_cloud_density(world_pos: vec3<f32>) -> f32 {
     let perlin_norm = clamp((perlin_raw + 0.7) / 1.4, 0.0, 1.0);
     let weights = perlin_worley_weights_for_type(cell.cell_type);
     let raw_factor = weights.x * worley_struct + weights.y * perlin_norm;
-    // Continuous-margin modulation. coverage_strength = 1.0 → threshold
-    // = 0, smoothstep almost everything passes (solid). 0.5 → only the
-    // upper half of the noise field passes (broken / sparse). 0 → nothing
-    // (skipped by early-out above). Per `docs/WEATHER.md § Continuous
-    // qualification margin`. Rather than `cell.coverage_strength` being
-    // a uniform multiplier (which would just scale everything down),
-    // smoothstep gates by noise threshold so visual structure changes:
-    // marginal cells get *gaps in coverage*, not just dimmer coverage.
+    // Continuous-margin modulation — LINEAR REMAP of [coverage_threshold,
+    // 1.0] to [0, 1] so noise above the threshold passes through with
+    // preserved gradient. The earlier smoothstep formulation
+    // (smoothstep(threshold, threshold+0.10, raw_factor)) saturated to
+    // ~1.0 for any raw_factor > threshold + 0.10, eliminating the soft
+    // density falloff at cloud edges that the banded-alpha cel-shading
+    // relies on. Linear remap preserves identity at cov=1.0 (no
+    // modulation; full Beer-Lambert + cel-shaded rim) and still gates
+    // the bottom of the noise field for marginal cells (gaps in
+    // coverage where noise < threshold). Per
+    // `docs/WEATHER.md § Continuous qualification margin`.
+    //
+    // - cov=1.0: cloud_factor = raw_factor (identity).
+    // - cov=0.5: cloud_factor = max(0, (raw_factor - 0.5) * 2.0) — gates
+    //   bottom half, preserves linear ramp above.
+    // - cov=0.1: cloud_factor = max(0, (raw_factor - 0.9) * 10.0) — only
+    //   top 10% of noise survives, but with soft falloff.
+    // - cov=0: skipped by early-out above; division by zero never
+    //   reached.
     let coverage_threshold = 1.0 - cell.coverage_strength;
-    let cloud_factor = smoothstep(
-        coverage_threshold,
-        coverage_threshold + 0.10,
-        raw_factor,
+    let cloud_factor = clamp(
+        (raw_factor - coverage_threshold) / cell.coverage_strength,
+        0.0,
+        1.0,
     );
     return cell.density * alt_factor * cloud_factor;
 }
@@ -499,11 +529,20 @@ fn fs_volumetric(in: VsOut) -> @location(0) vec4<f32> {
     let actual_steps = i32(min(f32(RAYMARCH_STEPS_MAX), max(want_steps, 4.0)));
     let step_dist = band_length / f32(actual_steps);
 
+    // Per-pixel ray-start jitter — replaces the fixed 0.5 step-midpoint
+    // with a deterministic-per-pixel offset in [0, 1). Hides the
+    // horizontal band-edge artifacts from altitude_profile discrete
+    // transitions: adjacent pixels' rays sample at scattered t offsets,
+    // so the band boundaries dither across pixels and read as soft
+    // texture instead of visible rings (the user-observed "stair-stepping"
+    // 2026-04-26).
+    let jitter = pixel_hash_unit(frag_pixel);
+
     var accumulated_alpha: f32 = 0.0;
     var accumulated_color: vec3<f32> = vec3<f32>(0.0);
 
     for (var i: i32 = 0; i < actual_steps; i = i + 1) {
-        let t = t_enter + step_dist * (f32(i) + 0.5);
+        let t = t_enter + step_dist * (f32(i) + jitter);
         let sample_pos = cam_pos + view_dir * t;
         let density = sample_cloud_density(sample_pos);
         if (density <= 0.0) {
