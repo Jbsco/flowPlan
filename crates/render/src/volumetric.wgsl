@@ -71,11 +71,11 @@ const TEST_CELL_DENSITY: f32 = 0.6;
 const TEST_CELL_FOOTPRINT_M: f32 = 3000.0;
 
 // Worley noise spacing for cumulus sub-cell detail (m).
-// 1500 m at 3 km footprint gives ~2 sub-puffs per cumulus → reads as
-// "cumulus with subtle internal structure" without the cellular
-// patchwork that tighter spacings produce. Tunable per cell type once
-// W2 streaming lands (C2).
-const CLOUD_WORLEY_SPACING_M: f32 = 1500.0;
+// 2000 m at 3 km footprint gives ~1-2 sub-puffs per cumulus — reads as
+// "cumulus with single internal puff" rather than cellular patchwork.
+// Allows the F1 distance to span more of the ray, so density is more
+// stable as camera moves. Tunable per cell type once W2 streaming lands.
+const CLOUD_WORLEY_SPACING_M: f32 = 2000.0;
 const CLOUD_NOISE_OCTAVE: u32 = 240u;
 // `features_per_cell = 1` halves the per-Worley-call distance-compute
 // cost vs k=2 (27 vs 54 distance computes in 3D). Single-feature pure
@@ -185,13 +185,18 @@ fn unproject(ndc: vec2<f32>, ndc_z: f32) -> vec3<f32> {
     return world4.xyz / world4.w;
 }
 
-// Raymarch step count. Per WEATHER.md the High-preset target is 32
-// near / 24 mid / 16 far. With ray-cylinder clamping (most pixels miss
-// or run within ~3-6 km of cell volume), 32 steps gives 90-200 m per
-// step — fine enough for stable shape inside the 1500 m Worley
-// spacing. C2 reintroduces the distance-tier logic when streaming
-// per-cell radii vary.
-const RAYMARCH_STEPS: i32 = 32;
+// Maximum raymarch step count — upper bound for the adaptive sampler.
+// Per WEATHER.md the High-preset target is 32 near. The adaptive
+// sampler picks the number of steps based on actual band length so
+// short bands (vertical view through 1 km slab) use ~4-6 steps and
+// long bands (grazing view through 5+ km) approach this cap.
+const RAYMARCH_STEPS_MAX: i32 = 32;
+
+// Target step distance (m). With Worley spacing 2000 m, sampling
+// every ~400 m gives 5 samples per feature wavelength — enough for
+// stable shape per Nyquist, well below the perceptual flicker
+// threshold. Adaptive step count = ceil(band_length / target_step).
+const RAYMARCH_TARGET_STEP_M: f32 = 400.0;
 
 // Maximum ray distance (m) for the B3 single-cell test. The
 // ray-cylinder intersection caps the actual march distance much
@@ -315,12 +320,20 @@ fn fs_volumetric(in: VsOut) -> @location(0) vec4<f32> {
     if (t_enter >= t_exit) {
         return vec4<f32>(0.0);
     }
-    let step_dist = (t_exit - t_enter) / f32(RAYMARCH_STEPS);
+    // Adaptive step count: shorter bands (vertical view through cloud
+    // slab) get fewer steps, longer bands (grazing view) up to the
+    // RAYMARCH_STEPS_MAX cap. Per-pixel Worley cost scales with actual
+    // step count — far cheaper than fixed 32 steps regardless of
+    // intersection length.
+    let band_length = t_exit - t_enter;
+    let want_steps = ceil(band_length / RAYMARCH_TARGET_STEP_M);
+    let actual_steps = i32(min(f32(RAYMARCH_STEPS_MAX), max(want_steps, 4.0)));
+    let step_dist = band_length / f32(actual_steps);
 
     var accumulated_alpha: f32 = 0.0;
     var accumulated_color: vec3<f32> = vec3<f32>(0.0);
 
-    for (var i: i32 = 0; i < RAYMARCH_STEPS; i = i + 1) {
+    for (var i: i32 = 0; i < actual_steps; i = i + 1) {
         let t = t_enter + step_dist * (f32(i) + 0.5);
         let sample_pos = cam_pos + view_dir * t;
         let density = sample_cloud_density(sample_pos, scene.time.x);

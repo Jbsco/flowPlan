@@ -93,21 +93,39 @@ fn volumetric_wgsl_cost_constants_within_budget() {
         let eq = line.rfind('=')?;
         line[eq + 1..].trim().parse().ok()
     }
+    fn extract_const_f32(src: &str, name: &str) -> Option<f32> {
+        let needle = format!("const {name}: ");
+        let idx = src.find(&needle)?;
+        let line_end = src[idx..].find(';')? + idx;
+        let line = &src[idx..line_end];
+        let eq = line.rfind('=')?;
+        line[eq + 1..].trim().parse().ok()
+    }
 
     // Per docs/WEATHER.md § Performance budget — cloud-pass target is
     // ≤ 0.6 ms at 240 Hz reference. The cost-bounding constants below
     // are the dominant per-pixel cost factors. Bumping any past these
     // limits has shown FPS to fall under 60 Hz in playtest.
 
-    let raymarch_steps = extract_const_i32(VOLUMETRIC_WGSL_SOURCE, "RAYMARCH_STEPS")
-        .expect("RAYMARCH_STEPS const not found in volumetric.wgsl");
+    let raymarch_steps = extract_const_i32(VOLUMETRIC_WGSL_SOURCE, "RAYMARCH_STEPS_MAX")
+        .expect("RAYMARCH_STEPS_MAX const not found in volumetric.wgsl");
     assert!(
         raymarch_steps <= 64,
-        "RAYMARCH_STEPS = {raymarch_steps} exceeds budget cap of 64. \
+        "RAYMARCH_STEPS_MAX = {raymarch_steps} exceeds budget cap of 64. \
          Bumping past 32 was shown to drop FPS below 60 in playtest \
          without ray-cylinder clamping. If a cap raise is needed, also \
          tighten the ray-cylinder + altitude-band logic to keep \
          per-pixel cost bounded."
+    );
+
+    let target_step = extract_const_f32(VOLUMETRIC_WGSL_SOURCE, "RAYMARCH_TARGET_STEP_M")
+        .expect("RAYMARCH_TARGET_STEP_M const not found in volumetric.wgsl");
+    assert!(
+        target_step >= 200.0,
+        "RAYMARCH_TARGET_STEP_M = {target_step} is below 200 m floor. \
+         Smaller target steps mean more samples per ray = higher per-pixel \
+         cost. Adaptive sampler picks ceil(band_length / target_step); \
+         dropping below 200 m fast-tracks fps regression."
     );
 
     let features_per_cell = extract_const_u32(VOLUMETRIC_WGSL_SOURCE, "CLOUD_FEATURES_PER_CELL")
