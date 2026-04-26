@@ -56,7 +56,7 @@
 )]
 
 use flowplan_assets::CpuMesh;
-use flowplan_render::{Renderer, ShadingParams};
+use flowplan_render::{GpuWeatherCell, Renderer, ShadingParams, MAX_WEATHER_CELLS};
 use flowplan_sim::SimSnapshot;
 use glam::{Quat, Vec3};
 
@@ -249,6 +249,24 @@ fn cloud_pass_within_perf_budget() {
     });
 
     let snap = build_cloud_view_snapshot();
+
+    // Populate the volumetric cell buffer with one Cumulus test cell at
+    // world origin (matches the camera's look target). Without this the
+    // shader's per-cell early-out skips all 64 default-zeroed slots →
+    // cloud pass effectively no-op, perf measurement is meaningless.
+    // C1+C2 streams real W2 cells; the test mimics that for a single
+    // representative cell.
+    let mut test_cells = [GpuWeatherCell::default(); MAX_WEATHER_CELLS];
+    test_cells[0] = GpuWeatherCell {
+        seed_pos: [0.0, 0.0],
+        base_altitude_m: 1500.0,
+        top_altitude_m: 2500.0,
+        density: 0.6,
+        storm_phase: 0.0,
+        cell_type: 1, // Cumulus
+        padding: 0,
+    };
+    renderer.update_weather_cells(&queue, &test_cells);
 
     // Warmup — first frames include shader compilation, pipeline
     // caching, etc. Discard them.

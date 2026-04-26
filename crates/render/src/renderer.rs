@@ -212,6 +212,42 @@ pub const CLOUD_NOISE_WGSL_SOURCE: &str = include_str!("cloud_noise.wgsl");
 /// decisions (pass placement, density storage, lighting model).
 pub const VOLUMETRIC_WGSL_SOURCE: &str = include_str!("volumetric.wgsl");
 
+/// Maximum W2 weather cells the volumetric raymarcher can hold (C2).
+///
+/// Storage buffer is sized to this constant. The actual active cell
+/// count varies (typically ~25-50 in 50 km streaming radius); unused
+/// slots carry `density = 0` so the shader's per-cell early-out skips
+/// them. 64 gives 1.3-2× margin over typical active count, room for
+/// future denser weather (e.g. squall-line concentrations).
+pub const MAX_WEATHER_CELLS: usize = 64;
+
+/// GPU layout for one W2 weather cell. Matches `GpuWeatherCell` in
+/// `volumetric.wgsl`. std430-friendly: 32 bytes per cell, 16-byte
+/// natural alignment via the `seed_pos: vec2<f32>` lead.
+///
+/// Populated by `Renderer::update_weather_cells` from the
+/// `WeatherCellSnapshot` records produced by `ChunkedWeather`. Unused
+/// slots are zero-filled — the shader treats `density <= 0` as
+/// "skip this slot".
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable, Default)]
+pub struct GpuWeatherCell {
+    /// World XZ position of the cell's seed (for footprint distance).
+    pub seed_pos: [f32; 2],
+    pub base_altitude_m: f32,
+    pub top_altitude_m: f32,
+    pub density: f32,
+    pub storm_phase: f32,
+    /// Cell type discriminant: 0=ClearAir, 1=Cumulus, 2=Nimbus,
+    /// 3=Stratus, 4=Squall, 5=Frontal. Matches the Rust
+    /// `weather::cell_state::CellType` enum order + the `CELL_*`
+    /// constants in `volumetric.wgsl`.
+    pub cell_type: u32,
+    /// Padding to keep the struct at 32 bytes (8 × f32).
+    #[doc(hidden)]
+    pub padding: u32,
+}
+
 /// Compute shader source for the CPU-GPU bit-identity gate (B4).
 ///
 /// Composed with [`CLOUD_NOISE_WGSL_SOURCE`]; the test compute shader
@@ -285,6 +321,11 @@ pub struct Renderer {
     /// Bind group binding the depth view for the cloud raymarcher to
     /// sample. Rebuilt on resize alongside `outline_bg`.
     volumetric_depth_bg: wgpu::BindGroup,
+    /// Storage buffer of W2 weather cells (Phase 3.6.3c.6 / 3.2x C2).
+    /// Populated by `update_weather_cells`. Sized for `MAX_WEATHER_CELLS`
+    /// — unused slots have `density = 0` so the shader skips them.
+    volumetric_cells_buf: wgpu::Buffer,
+    volumetric_cells_bg: wgpu::BindGroup,
     depth_view: wgpu::TextureView,
     camera_buf: wgpu::Buffer,
     camera_bg: wgpu::BindGroup,
@@ -539,10 +580,32 @@ impl Renderer {
                     count: None,
                 }],
             });
+        // Cells bind group (C2): storage buffer of W2 weather cells.
+        // Replaces the hardcoded test cell from B3 — multi-cell tessellated
+        // weather streamed by ChunkedWeather (universal pattern).
+        let volumetric_cells_bgl =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("flowplan-volumetric-cells-bgl"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
         let volumetric_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("flowplan-volumetric-pipeline-layout"),
-                bind_group_layouts: &[&camera_bgl, &scene_bgl, &volumetric_depth_bgl],
+                bind_group_layouts: &[
+                    &camera_bgl,
+                    &scene_bgl,
+                    &volumetric_depth_bgl,
+                    &volumetric_cells_bgl,
+                ],
                 push_constant_ranges: &[],
             });
         let volumetric_pipeline = build_volumetric_pipeline(
@@ -553,6 +616,20 @@ impl Renderer {
         );
         let volumetric_depth_bg =
             build_volumetric_depth_bind_group(device, &volumetric_depth_bgl, &depth_view);
+        let volumetric_cells_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("flowplan-volumetric-cells-storage"),
+            size: (MAX_WEATHER_CELLS * core::mem::size_of::<GpuWeatherCell>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let volumetric_cells_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("flowplan-volumetric-cells-bg"),
+            layout: &volumetric_cells_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: volumetric_cells_buf.as_entire_binding(),
+            }],
+        });
 
         let outline_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("outline-params-ubo"),
@@ -714,6 +791,8 @@ impl Renderer {
             volumetric_pipeline,
             volumetric_depth_bgl,
             volumetric_depth_bg,
+            volumetric_cells_buf,
+            volumetric_cells_bg,
             depth_view,
             camera_buf,
             camera_bg,
@@ -925,6 +1004,38 @@ impl Renderer {
     }
 
     /// Handle a window resize.
+    /// Upload an array of W2 weather cells into the volumetric pipeline's
+    /// storage buffer (Phase 3.6.3c.6 / 3.2x C2). Caller passes a slice
+    /// of `GpuWeatherCell` packed POD records — typically converted from
+    /// `WeatherCellSnapshot` by the `ChunkedWeather` consumer in
+    /// `game_app`.
+    ///
+    /// Caller is responsible for:
+    /// - Slice length ≤ [`MAX_WEATHER_CELLS`]. Excess entries are
+    ///   silently truncated; the structural perf-budget tests should
+    ///   catch over-budget cell counts before they reach this API.
+    /// - Unused tail slots cleared to zero so the shader's
+    ///   `density <= 0` per-cell early-out skips them.
+    pub fn update_weather_cells(&mut self, queue: &wgpu::Queue, cells: &[GpuWeatherCell]) {
+        let n = cells.len().min(MAX_WEATHER_CELLS);
+        if n == 0 {
+            return;
+        }
+        queue.write_buffer(
+            &self.volumetric_cells_buf,
+            0,
+            bytemuck::cast_slice(&cells[..n]),
+        );
+    }
+
+    /// Clear all weather cells (zero out the storage buffer). Use when
+    /// transitioning out of a free-flight scene where weather streaming
+    /// was active.
+    pub fn clear_weather_cells(&mut self, queue: &wgpu::Queue) {
+        let zeros = [GpuWeatherCell::default(); MAX_WEATHER_CELLS];
+        queue.write_buffer(&self.volumetric_cells_buf, 0, bytemuck::cast_slice(&zeros));
+    }
+
     pub fn resize(&mut self, device: &wgpu::Device, size: (u32, u32)) {
         self.depth_view = create_depth_view(device, size);
         // Outline bind group references the depth view by handle; rebuild it so the
@@ -1230,6 +1341,7 @@ impl Renderer {
             pass.set_bind_group(0, &self.camera_bg, &[]);
             pass.set_bind_group(1, &self.scene_bg, &[]);
             pass.set_bind_group(2, &self.volumetric_depth_bg, &[]);
+            pass.set_bind_group(3, &self.volumetric_cells_bg, &[]);
             pass.draw(0..3, 0..1);
         }
 

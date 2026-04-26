@@ -247,6 +247,9 @@ struct Runtime {
     /// as `chunked_terrain` but for water — per-cell flat-quad meshes,
     /// smaller streaming radius, no `WorldRefsArc` dep.
     chunked_water: Option<crate::chunked_water::ChunkedWater>,
+    /// Chunked W2 weather streaming (Phase 3.6.3c.6 / 3.2x C1 + C2).
+    /// `None` for scenario playback (deterministic still-air mode).
+    chunked_weather: Option<crate::chunked_weather::ChunkedWeather>,
     /// Streaming water mesh — same pattern, follows active camera.
     streaming_water: Option<crate::streaming::StreamingWater>,
     /// Streaming Voronoi-cell active set (Phase 3.6.3c.5b Layer 2).
@@ -979,6 +982,17 @@ impl Runtime {
         } else {
             None
         };
+        // Chunked weather (Phase 3.6.3c.6 C1+C2) — same gating. Streams
+        // W2 cell state into a CPU cache; per-frame update pushes the
+        // active set to the volumetric pipeline's storage buffer.
+        let chunked_weather = if scenario.is_none() {
+            Some(crate::chunked_weather::ChunkedWeather::new(
+                WORLD_SEED,
+                std::sync::Arc::new(terrain.clone()),
+            ))
+        } else {
+            None
+        };
         let (terrain_mesh, streaming_terrain) = if scenario.is_none() {
             if chunked_terrain.is_some() {
                 // Initial empty mesh — first frame's chunks haven't
@@ -1124,6 +1138,7 @@ impl Runtime {
             streaming_terrain,
             chunked_terrain,
             chunked_water,
+            chunked_weather,
             streaming_water,
             streaming_cells,
             sub_biome_catalog,
@@ -1644,6 +1659,50 @@ impl Runtime {
                 );
             }
         }
+        // Chunked weather update (Phase 3.6.3c.6 / 3.2x C2). Streams
+        // W2 cell state into the volumetric pipeline's storage buffer.
+        // Smaller surface than terrain/water — no GPU mesh chunks, just
+        // a refreshed cell array per frame.
+        if let Some(chunked) = self.chunked_weather.as_mut() {
+            let update = chunked.update(active_cam_pos_xz, self.sim.wave_time);
+            // Pack the resident set into GPU layout. C1+ polish: maintain
+            // a stable buffer-slot mapping so we can do incremental
+            // updates instead of full rebuilds. For now, full rebuild
+            // every frame is fine — active set is ~25-50 cells × 32 B =
+            // ~1.5 KB, queue.write_buffer is cheap.
+            let mut gpu_cells: Vec<flowplan_render::GpuWeatherCell> = chunked
+                .iter_resident()
+                .take(flowplan_render::MAX_WEATHER_CELLS)
+                .map(|snap| flowplan_render::GpuWeatherCell {
+                    seed_pos: [snap.seed_pos.x, snap.seed_pos.y],
+                    base_altitude_m: snap.state.base_altitude_m,
+                    top_altitude_m: snap.state.top_altitude_m,
+                    density: snap.state.density,
+                    storm_phase: snap.state.storm_phase,
+                    cell_type: snap.state.cell_type as u32,
+                    padding: 0,
+                })
+                .collect();
+            // Pad the tail with zeros so the shader's per-cell early-out
+            // (density ≤ 0) skips unused slots. queue.write_buffer only
+            // writes the prefix we send; older content stays in untouched
+            // tail slots. To clear those out we need to write the full
+            // buffer once per frame — fine at 1.5 KB.
+            while gpu_cells.len() < flowplan_render::MAX_WEATHER_CELLS {
+                gpu_cells.push(flowplan_render::GpuWeatherCell::default());
+            }
+            self.renderer.update_weather_cells(&self.queue, &gpu_cells);
+            if !update.entered.is_empty() || !update.exited.is_empty() {
+                tracing::info!(
+                    target: "streaming",
+                    entered = update.entered.len(),
+                    exited = update.exited.len(),
+                    pending = chunked.pending_count(),
+                    resident = chunked.resident_count(),
+                    "chunked weather update"
+                );
+            }
+        }
         if let Some(st) = self.streaming_terrain.as_mut() {
             // Main-thread cost is now just channel probe + possible
             // worker spawn — sub-millisecond. The worker measures its
@@ -1973,6 +2032,10 @@ impl Runtime {
                     .as_ref()
                     .map_or(0, crate::streaming::StreamingCellSet::active_count),
                 instance_count: self.renderer.instance_count(),
+                weather_cell_count: self
+                    .chunked_weather
+                    .as_ref()
+                    .map_or(0, crate::chunked_weather::ChunkedWeather::resident_count),
                 last_terrain_cpu_ms: self.last_terrain_rebuild_cpu_ms,
                 last_terrain_gpu_ms: self.last_terrain_rebuild_gpu_ms,
                 rebuild_in_flight: self

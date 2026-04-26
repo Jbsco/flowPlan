@@ -431,6 +431,10 @@ pub struct DebugCameraOverlay<'a> {
     /// `Renderer::instance_count()`. Zero when `FLOWPLAN_FEATURE_INSTANCES=1`
     /// is unset + during the pre-upload frames while bake is in flight.
     pub instance_count: u32,
+    /// Active W2 weather cells streamed by `ChunkedWeather` (Phase
+    /// 3.6.3c.6 / 3.2x C1). Reads `ChunkedWeather::resident_count()`.
+    /// Zero in scenario playback (weather streaming disabled).
+    pub weather_cell_count: usize,
     /// Most recent terrain mesh-rebuild CPU cost (worker thread).
     pub last_terrain_cpu_ms: f32,
     /// Most recent terrain mesh-rebuild GPU upload cost.
@@ -493,6 +497,7 @@ fn build_debug_camera_ui(ctx: &Context, frame_ms: f32, o: &DebugCameraOverlay<'_
             ui.separator();
             ui.label(format!("active cells  {}", o.active_cell_count));
             ui.label(format!("instances     {}", o.instance_count));
+            ui.label(format!("weather cells {}", o.weather_cell_count));
             ui.separator();
             let (status_color, status_text) = if o.rebuild_in_flight {
                 (

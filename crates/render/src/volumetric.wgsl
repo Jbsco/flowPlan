@@ -48,8 +48,24 @@ struct SceneUniform {
 // at integer pixel coords (no sampler needed).
 @group(2) @binding(0) var scene_depth: texture_depth_2d;
 
+// W2 weather cell array (C2). Replaces the hardcoded test cell from
+// B3 — multi-cell streamed weather populated by ChunkedWeather.
+// Layout matches `crates/render/src/renderer.rs::GpuWeatherCell`
+// (32 bytes, 8 × f32 / u32). Unused slots have density = 0 so the
+// per-cell early-out skips them.
+struct GpuWeatherCell {
+    seed_pos: vec2<f32>,        // world XZ of the cell's seed position
+    base_altitude_m: f32,       // cloud base altitude
+    top_altitude_m: f32,        // cloud top altitude
+    density: f32,               // peak density [0, 1]; 0 = unused / clear
+    storm_phase: f32,           // life-cycle phase [0, 1)
+    cell_type: u32,             // CELL_* discriminant
+    _pad: u32,
+}
+@group(3) @binding(0) var<storage, read> weather_cells: array<GpuWeatherCell>;
+
 // ──────────────────────────────────────────────────────────────────
-// B3 cloud-density model
+// Cloud-density model
 // ──────────────────────────────────────────────────────────────────
 
 // Cell types — match Rust `weather::cell_state::CellType` discriminant.
@@ -60,20 +76,12 @@ const CELL_STRATUS: u32   = 3u;
 const CELL_SQUALL: u32    = 4u;
 const CELL_FRONTAL: u32   = 5u;
 
-// Hardcoded test cell for B3 — single cumulus at world origin XZ.
-// Pinned values match what the user can fly over from canonical spawn.
-// C2 replaces this with a per-cell storage buffer populated by
-// ChunkedWeather streaming.
-const TEST_CELL_TYPE: u32 = CELL_CUMULUS;
-const TEST_CELL_SEED_X: f32 = 0.0;
-const TEST_CELL_SEED_Z: f32 = 0.0;
-const TEST_CELL_BASE_M: f32 = 1500.0;
-const TEST_CELL_TOP_M: f32 = 2500.0;
-const TEST_CELL_DENSITY: f32 = 0.6;
-// Footprint radius (m). Within this XZ distance from seed_pos, the cell
-// is "in" — outside, density falls to 0. Real W2 cells are Voronoi
-// regions; this is a circular approximation for the single-cell B3 demo.
-const TEST_CELL_FOOTPRINT_M: f32 = 3000.0;
+// Per-cell footprint radius (m). C2 ships a single global footprint;
+// future polish can vary per cell type (storms wider than fair-weather
+// cumulus, stratus = full Voronoi cell). 6 km gives meaningful visible
+// area at typical viewing distances (5-30 km) without overlapping
+// neighboring cells (W2 spacing ~25 km).
+const CELL_FOOTPRINT_M: f32 = 6000.0;
 
 // Worley noise spacing for cumulus sub-cell detail (m).
 // 2000 m at 3 km footprint gives ~1-2 sub-puffs per cumulus — reads as
@@ -103,12 +111,13 @@ const CLOUD_PERLIN_OCTAVE: u32 = 241u;
 const CUMULUS_WORLEY_WEIGHT: f32 = 0.7;
 const CUMULUS_PERLIN_WEIGHT: f32 = 0.3;
 
-// Master seed for the cloud-noise field. Matches WORLD_SEED in
-// `crates/app/src/main.rs` (decimal 1234567890123456789). Hardcoded
-// for B3; B4+ will plumb through camera/scene uniform. Split as
-// (high32, low32) to match WGSL's u32-only PCG hash.
-const CLOUD_SEED_HI: u32 = 0x112210F4u;
-const CLOUD_SEED_LO: u32 = 0x7DE98115u;
+// Master seed for the cloud-noise field. Must match `WORLD_SEED` in
+// `crates/app/src/game_app.rs` (`0x1337_CAFE_B0A7_5EAF`). Hardcoded
+// for now; future polish will plumb through a uniform buffer when
+// seeds become per-save configurable. Split as (high32, low32) for
+// the WGSL u32-only PCG hash chain.
+const CLOUD_SEED_HI: u32 = 0x1337CAFEu;
+const CLOUD_SEED_LO: u32 = 0xB0A75EAFu;
 
 // Altitude profile within a cell's [base, top] band. Returns scalar
 // in [0, 1] that scales peak density to local density at altitude `y`.
@@ -143,29 +152,28 @@ fn footprint_falloff(world_xz: vec2<f32>, seed_xz: vec2<f32>, radius_m: f32) -> 
     return t * t * (3.0 - 2.0 * t);
 }
 
-// Combined cloud density at a world-space sample point. Composes:
-//   peak density × altitude profile × footprint falloff × Worley sub-cell
-fn sample_cloud_density(world_pos: vec3<f32>, t: f32) -> f32 {
+// Combined cloud density at a world-space sample point for a specific
+// W2 cell. Composes:
+//   cell.density × altitude profile × footprint falloff × Perlin-Worley blend
+//
+// The Perlin-Worley blend per cell type (WEATHER.md § Sub-cell detail
+// noise). For Cumulus / Nimbus / Squall: 0.7 Worley + 0.3 Perlin.
+// Stratus / Frontal use a different blend ratio (deferred — currently
+// all cell types use the same blend; future polish per-type weights).
+fn sample_cloud_density(world_pos: vec3<f32>, cell: GpuWeatherCell) -> f32 {
     let alt_factor = altitude_profile(
-        TEST_CELL_TYPE, world_pos.y, TEST_CELL_BASE_M, TEST_CELL_TOP_M,
+        cell.cell_type, world_pos.y,
+        cell.base_altitude_m, cell.top_altitude_m,
     );
     if (alt_factor <= 0.0) {
         return 0.0;
     }
     let foot_factor = footprint_falloff(
-        world_pos.xz, vec2<f32>(TEST_CELL_SEED_X, TEST_CELL_SEED_Z), TEST_CELL_FOOTPRINT_M,
+        world_pos.xz, cell.seed_pos, CELL_FOOTPRINT_M,
     );
     if (foot_factor <= 0.0) {
         return 0.0;
     }
-    // Perlin-Worley blend (B3c) per WEATHER.md § Sub-cell detail
-    // noise. Worley provides the cellular puffiness (where puffs are
-    // and aren't); Perlin provides smooth fill (variation within
-    // puffs). The blend produces real cumulus character: solid where
-    // Worley says puff, wispy where Perlin sets edge texture.
-    //
-    // Worley structure: 1 - f_blended. Range [0, ~1] — high near
-    // feature center (puff core), low at cell corners (puff edge).
     let w = worley_3d(
         CLOUD_SEED_HI, CLOUD_SEED_LO,
         CLOUD_WORLEY_OCTAVE,
@@ -173,14 +181,6 @@ fn sample_cloud_density(world_pos: vec3<f32>, t: f32) -> f32 {
         CLOUD_WORLEY_SPACING_M, CLOUD_FEATURES_PER_CELL,
     );
     let worley_struct = clamp(1.0 - w.f_blended, 0.0, 1.0);
-
-    // Perlin variation. Theoretical bound is [-1, 1] but typical 3D
-    // Perlin samples land in [-0.7, 0.7] (the trilinear interpolation
-    // of unit-vector dot-products rarely reaches the corners). Map
-    // typical-range to [0, 1] so the Perlin contribution actually
-    // saturates the contribution range — without this, most samples
-    // cluster near 0.5 and the variation is invisible against the
-    // Worley structure.
     let perlin_raw = cloud_perlin_3d(
         CLOUD_SEED_HI, CLOUD_SEED_LO,
         CLOUD_PERLIN_OCTAVE,
@@ -188,13 +188,10 @@ fn sample_cloud_density(world_pos: vec3<f32>, t: f32) -> f32 {
         CLOUD_PERLIN_SPACING_M,
     );
     let perlin_norm = clamp((perlin_raw + 0.7) / 1.4, 0.0, 1.0);
-
-    // Cumulus blend: 70% Worley structure + 30% Perlin variation.
     let cloud_factor =
         CUMULUS_WORLEY_WEIGHT * worley_struct +
         CUMULUS_PERLIN_WEIGHT * perlin_norm;
-
-    return TEST_CELL_DENSITY * alt_factor * foot_factor * cloud_factor;
+    return cell.density * alt_factor * foot_factor * cloud_factor;
 }
 
 struct VsOut {
@@ -238,9 +235,13 @@ const RAYMARCH_TARGET_STEP_M: f32 = 400.0;
 // pixels that intersect a cell's footprint at all.
 const MAX_RAY_DISTANCE_M: f32 = 15000.0;
 
-// Density-to-absorption scale. Tuned so density = 0.6 produces
-// visible-but-not-opaque cloud at the typical step distance.
-const ABSORPTION_SCALE: f32 = 0.0015;
+// Density-to-absorption scale. Tuned for the W2 cumulus-density range
+// (~0.35 peak per `weather::cell_state::parameterize`). At 0.0022 a
+// max-density sample contributes ~7% alpha per 100 m step → visible
+// but translucent cumulus over typical 16-step ray spans. Earlier
+// 0.0015 was tuned for the B3 hardcoded TEST_CELL with density 0.6;
+// real W2 cumulus needs slightly higher absorption to read as visible.
+const ABSORPTION_SCALE: f32 = 0.0022;
 
 // Compute ray ∩ altitude band [base, top]. Returns `(t_enter, t_exit)`.
 // Returns `(-1, -1)` if the ray misses the band entirely.
@@ -330,18 +331,7 @@ fn fs_volumetric(in: VsOut) -> @location(0) vec4<f32> {
     let cam_pos = camera.view_pos.xyz;
 
     // B3b — sample scene depth so cloud rays terminate at scene
-    // geometry (terrain, water, vehicle, instances). depth_ndc ∈ [0, 1];
-    // 1.0 = sky / cleared (no scene hit, no termination needed).
-    // Anything < 1.0 = solid pixel.
-    //
-    // Camera-relative rendering caveat: per Phase 3.6.3c.5d the
-    // inverse_view_proj used here is `(proj * rotation_only_view).inverse()`
-    // — it does NOT include the camera translation. So `unproject(ndc,
-    // depth)` returns the position **relative to the camera**, not
-    // absolute world. Distance from camera = `length(unprojected)` —
-    // do NOT subtract cam_pos again. (Subtracting cam_pos was a bug
-    // that made the aircraft appear to not write depth: t_terrain came
-    // out wildly wrong, so the clamp didn't bite.)
+    // geometry. depth_ndc ∈ [0, 1]; 1.0 = sky / cleared.
     let frag_pixel = vec2<i32>(in.clip_pos.xy);
     let depth_ndc = textureLoad(scene_depth, frag_pixel, 0);
     var t_terrain = MAX_RAY_DISTANCE_M;
@@ -350,86 +340,88 @@ fn fs_volumetric(in: VsOut) -> @location(0) vec4<f32> {
         t_terrain = length(depth_pos_cam_rel);
     }
 
-    // Two early-outs to skip Worley evaluation for the vast majority of
-    // pixels (sky above clouds, terrain below, side-views missing the
-    // cell entirely). The cell's volume is the intersection of:
-    //   - altitude band [base, top]
-    //   - vertical cylinder centered on (seed_x, seed_z) with radius footprint_m
-    //   - ray distance ≤ scene-depth distance (B3b)
-    let band = ray_altitude_band(
-        cam_pos, view_dir, TEST_CELL_BASE_M, TEST_CELL_TOP_M, MAX_RAY_DISTANCE_M,
-    );
-    if (band.x < 0.0) {
-        return vec4<f32>(0.0);
-    }
-    let cyl = ray_vertical_cylinder(
-        cam_pos, view_dir,
-        vec2<f32>(TEST_CELL_SEED_X, TEST_CELL_SEED_Z),
-        TEST_CELL_FOOTPRINT_M,
-        MAX_RAY_DISTANCE_M,
-    );
-    if (cyl.x < 0.0) {
-        return vec4<f32>(0.0);
-    }
-    let t_enter = max(band.x, cyl.x);
-    let t_exit  = min(min(band.y, cyl.y), t_terrain);
-    if (t_enter >= t_exit) {
-        return vec4<f32>(0.0);
-    }
-    // Adaptive step count: shorter bands (vertical view through cloud
-    // slab) get fewer steps, longer bands (grazing view) up to the
-    // RAYMARCH_STEPS_MAX cap. Per-pixel Worley cost scales with actual
-    // step count — far cheaper than fixed 32 steps regardless of
-    // intersection length.
-    let band_length = t_exit - t_enter;
-    let want_steps = ceil(band_length / RAYMARCH_TARGET_STEP_M);
-    let actual_steps = i32(min(f32(RAYMARCH_STEPS_MAX), max(want_steps, 4.0)));
-    let step_dist = band_length / f32(actual_steps);
-
+    // Multi-cell raymarch (C2). Iterate the active W2 cells; per cell,
+    // compute ray-cylinder ∩ ray-altitude-band intersection, march
+    // through that, accumulate alpha + color via standard pre-multiplied
+    // alpha-over composition. Cells that don't intersect the ray skip
+    // immediately at the band/cylinder check (no Worley calls).
+    //
+    // Iteration order: storage-buffer order. Pre-multiplied alpha-over
+    // is associative + commutative for non-overlapping density, so
+    // unsorted iteration is correct for the typical "scattered cumulus"
+    // pattern. Future polish (sorted iteration for storm overlap or
+    // dense Stratus decks) can z-sort the active set on the CPU side
+    // before upload.
     var accumulated_alpha: f32 = 0.0;
     var accumulated_color: vec3<f32> = vec3<f32>(0.0);
 
-    for (var i: i32 = 0; i < actual_steps; i = i + 1) {
-        let t = t_enter + step_dist * (f32(i) + 0.5);
-        let sample_pos = cam_pos + view_dir * t;
-        let density = sample_cloud_density(sample_pos, scene.time.x);
-
-        // Beer-Lambert single-scatter accumulation along the view ray.
-        let absorption = 1.0 - exp(-density * step_dist * ABSORPTION_SCALE);
-
-        // Cheap directional shading via altitude gradient. Top of cloud
-        // band reads as sun-lit; bottom reads as shadowed. When sun is
-        // overhead (sun_dir.y ≈ 1) the gradient is strongest; at low
-        // sun the shading flattens.
-        //
-        // **Stand-in for real lighting**: the locked design (WEATHER.md
-        // § Cloud rendering technique → Lighting model) calls for a
-        // Beer-Lambert shadow-march from the sample toward the sun,
-        // accumulating density along that secondary ray. This costs an
-        // extra 6 density samples per primary step (~50% per-pixel
-        // overhead). Deferred to E1 polish where the shading model
-        // gets tuned alongside the Perlin-Worley blend (B3c). The
-        // altitude gradient below is the cheap interim — gives the
-        // cloud directional character without the shadow-march cost.
-        let altitude_t = clamp(
-            (sample_pos.y - TEST_CELL_BASE_M) / (TEST_CELL_TOP_M - TEST_CELL_BASE_M),
-            0.0,
-            1.0,
+    let cell_count = arrayLength(&weather_cells);
+    for (var cell_idx: u32 = 0u; cell_idx < cell_count; cell_idx = cell_idx + 1u) {
+        let cell = weather_cells[cell_idx];
+        // Empty / clear-air slot: density 0 → skip (no Worley calls).
+        if (cell.density <= 0.0 || cell.cell_type == CELL_CLEAR_AIR) {
+            continue;
+        }
+        let band = ray_altitude_band(
+            cam_pos, view_dir,
+            cell.base_altitude_m, cell.top_altitude_m,
+            MAX_RAY_DISTANCE_M,
         );
-        let sun_height = clamp(scene.sun_dir.y, 0.0, 1.0);
-        let lit_factor = mix(0.4, altitude_t, sun_height);
+        if (band.x < 0.0) {
+            continue;
+        }
+        let cyl = ray_vertical_cylinder(
+            cam_pos, view_dir, cell.seed_pos, CELL_FOOTPRINT_M, MAX_RAY_DISTANCE_M,
+        );
+        if (cyl.x < 0.0) {
+            continue;
+        }
+        let t_enter = max(band.x, cyl.x);
+        let t_exit  = min(min(band.y, cyl.y), t_terrain);
+        if (t_enter >= t_exit) {
+            continue;
+        }
+        // Adaptive step count: short bands → fewer steps; long bands
+        // capped at RAYMARCH_STEPS_MAX. Per-pixel Worley cost scales
+        // with actual step count.
+        let band_length = t_exit - t_enter;
+        let want_steps = ceil(band_length / RAYMARCH_TARGET_STEP_M);
+        let actual_steps = i32(min(f32(RAYMARCH_STEPS_MAX), max(want_steps, 4.0)));
+        let step_dist = band_length / f32(actual_steps);
 
-        // Sun-lit warm + ambient-cool shadow. Brighter / more saturated
-        // sun_lit boosts contrast against terrain backgrounds.
-        let sun_lit_color = scene.sun_color.rgb * 1.4;
-        let shadow_color = scene.ambient.rgb * 0.85;
-        let sample_color = mix(shadow_color, sun_lit_color, lit_factor);
+        for (var i: i32 = 0; i < actual_steps; i = i + 1) {
+            let t = t_enter + step_dist * (f32(i) + 0.5);
+            let sample_pos = cam_pos + view_dir * t;
+            let density = sample_cloud_density(sample_pos, cell);
 
-        accumulated_color = accumulated_color
-            + sample_color * absorption * (1.0 - accumulated_alpha);
-        accumulated_alpha = accumulated_alpha
-            + absorption * (1.0 - accumulated_alpha);
+            let absorption = 1.0 - exp(-density * step_dist * ABSORPTION_SCALE);
 
+            // Altitude-gradient lighting stand-in (WEATHER.md § Lighting
+            // model — proper shadow march reserved for E1 polish).
+            let altitude_t = clamp(
+                (sample_pos.y - cell.base_altitude_m)
+                    / max(cell.top_altitude_m - cell.base_altitude_m, 1.0),
+                0.0,
+                1.0,
+            );
+            let sun_height = clamp(scene.sun_dir.y, 0.0, 1.0);
+            let lit_factor = mix(0.4, altitude_t, sun_height);
+
+            let sun_lit_color = scene.sun_color.rgb * 1.4;
+            let shadow_color = scene.ambient.rgb * 0.85;
+            let sample_color = mix(shadow_color, sun_lit_color, lit_factor);
+
+            accumulated_color = accumulated_color
+                + sample_color * absorption * (1.0 - accumulated_alpha);
+            accumulated_alpha = accumulated_alpha
+                + absorption * (1.0 - accumulated_alpha);
+
+            if (accumulated_alpha > 0.99) {
+                break;
+            }
+        }
+
+        // Stop iterating cells once fully opaque — no benefit to more.
         if (accumulated_alpha > 0.99) {
             break;
         }

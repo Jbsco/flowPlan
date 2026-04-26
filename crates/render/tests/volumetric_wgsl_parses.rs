@@ -149,8 +149,8 @@ fn volumetric_wgsl_cost_constants_within_budget() {
 #[test]
 fn volumetric_wgsl_uses_expected_bind_groups() {
     // @group(0) = camera, @group(1) = scene, @group(2) = scene depth
-    // (B3b — for ray termination at terrain). Per `docs/WEATHER.md`
-    // § Cloud rendering technique → Render pass placement.
+    // (B3b — for ray termination at terrain), @group(3) = weather cells
+    // storage buffer (C2 — multi-cell streamed weather).
     assert!(
         VOLUMETRIC_WGSL_SOURCE.contains("@group(0) @binding(0) var<uniform> camera"),
         "volumetric.wgsl missing camera bind group at @group(0)"
@@ -162,6 +162,10 @@ fn volumetric_wgsl_uses_expected_bind_groups() {
     assert!(
         VOLUMETRIC_WGSL_SOURCE.contains("@group(2) @binding(0) var scene_depth"),
         "volumetric.wgsl missing depth bind group at @group(2) (B3b)"
+    );
+    assert!(
+        VOLUMETRIC_WGSL_SOURCE.contains("@group(3) @binding(0) var<storage, read> weather_cells"),
+        "volumetric.wgsl missing weather-cells bind group at @group(3) (C2)"
     );
 }
 
@@ -181,29 +185,32 @@ fn volumetric_wgsl_b3b_depth_termination_present() {
 }
 
 #[test]
-fn volumetric_wgsl_b3_density_model_present() {
-    // B3 ships altitude_profile + footprint_falloff + sample_cloud_density
-    // + a hardcoded test-cell so clouds become visible. Catches
-    // accidental rollback to the B2 transparent stub.
+fn volumetric_wgsl_density_model_present() {
+    // C2: density model functions are present + storage-buffer iteration
+    // replaced the hardcoded test cell.
     for name in [
         "fn altitude_profile(",
         "fn footprint_falloff(",
         "fn sample_cloud_density(",
         "fn ray_altitude_band(",
-        "TEST_CELL_TYPE",
-        "TEST_CELL_BASE_M",
-        "TEST_CELL_TOP_M",
+        "fn ray_vertical_cylinder(",
+        "struct GpuWeatherCell",
+        "weather_cells",
     ] {
         assert!(
             VOLUMETRIC_WGSL_SOURCE.contains(name),
-            "volumetric.wgsl missing B3 density-model symbol `{name}`"
+            "volumetric.wgsl missing density-model symbol `{name}`"
         );
     }
-    // B3 calls Worley directly — make sure the function name reference
-    // matches what cloud_noise.wgsl exports.
     assert!(
         VOLUMETRIC_WGSL_SOURCE.contains("worley_3d("),
-        "volumetric.wgsl B3 must call worley_3d"
+        "volumetric.wgsl must call worley_3d"
+    );
+    // Catch accidental rollback to single hardcoded cell.
+    assert!(
+        !VOLUMETRIC_WGSL_SOURCE.contains("TEST_CELL_TYPE"),
+        "volumetric.wgsl still references the B3 hardcoded TEST_CELL — \
+         C2 should iterate the storage-buffer cell array"
     );
 }
 
