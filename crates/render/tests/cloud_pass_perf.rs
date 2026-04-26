@@ -251,12 +251,20 @@ fn cloud_pass_within_perf_budget() {
     let snap = build_cloud_view_snapshot();
 
     // Populate the volumetric cell buffer with one Cumulus test cell at
-    // world origin (matches the camera's look target). Without this the
-    // shader's per-cell early-out skips all 64 default-zeroed slots →
-    // cloud pass effectively no-op, perf measurement is meaningless.
-    // C1+C2 streams real W2 cells; the test mimics that for a single
-    // representative cell.
-    let mut test_cells = [GpuWeatherCell::default(); MAX_WEATHER_CELLS];
+    // world origin (matches the camera's look target). Empty slots use
+    // the sentinel pattern (seed_pos = 1e9) so the shader's
+    // `find_nearest_active_cell` distance check naturally excludes
+    // them per the tessellation-discipline contract.
+    let empty_slot = GpuWeatherCell {
+        seed_pos: [1.0e9, 1.0e9],
+        base_altitude_m: 0.0,
+        top_altitude_m: 0.0,
+        density: 0.0,
+        storm_phase: 0.0,
+        cell_type: 0,
+        coverage_strength: 0.0,
+    };
+    let mut test_cells = [empty_slot; MAX_WEATHER_CELLS];
     test_cells[0] = GpuWeatherCell {
         seed_pos: [0.0, 0.0],
         base_altitude_m: 1500.0,
@@ -264,7 +272,11 @@ fn cloud_pass_within_perf_budget() {
         density: 0.6,
         storm_phase: 0.0,
         cell_type: 1, // Cumulus
-        padding: 0,
+        // Mid-strength margin so the perf test exercises the
+        // smoothstep-modulated cloud_factor path (Phase 4 of the
+        // continuous-margin refactor) — not the trivial
+        // coverage=1 path that bypasses modulation.
+        coverage_strength: 0.7,
     };
     renderer.update_weather_cells(&queue, &test_cells);
 

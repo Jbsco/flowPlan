@@ -51,8 +51,12 @@ struct SceneUniform {
 // W2 weather cell array (C2). Replaces the hardcoded test cell from
 // B3 — multi-cell streamed weather populated by ChunkedWeather.
 // Layout matches `crates/render/src/renderer.rs::GpuWeatherCell`
-// (32 bytes, 8 × f32 / u32). Unused slots have density = 0 so the
-// per-cell early-out skips them.
+// (32 bytes, 8 × f32 / u32). Unused slots use sentinel
+// `seed_pos = (1e9, 1e9)` so the nearest-cell lookup naturally
+// excludes them (huge distance never wins min). Real ClearAir cells
+// sit with valid seed_pos + density=0 — they DO participate in
+// nearest-cell lookup so cumulus cells stay within their Voronoi
+// region. Per `docs/WEATHER.md § Tessellation discipline`.
 struct GpuWeatherCell {
     seed_pos: vec2<f32>,        // world XZ of the cell's seed position
     base_altitude_m: f32,       // cloud base altitude
@@ -60,7 +64,12 @@ struct GpuWeatherCell {
     density: f32,               // peak density [0, 1]; 0 = unused / clear
     storm_phase: f32,           // life-cycle phase [0, 1)
     cell_type: u32,             // CELL_* discriminant
-    _pad: u32,
+    coverage_strength: f32,     // continuous qualification margin [0, 1]
+                                // 1.0 = solid, 0.5 = broken/sparse,
+                                // 0.0 = empty. ClearAir near threshold
+                                // gets 0..0.15 → wispy haze.
+                                // PINNED 2026-04-26 (`docs/WEATHER.md
+                                // § Continuous qualification margin`).
 }
 @group(3) @binding(0) var<storage, read> weather_cells: array<GpuWeatherCell>;
 
@@ -146,29 +155,44 @@ fn altitude_profile(cell_type: u32, y_alt_m: f32, base_m: f32, top_m: f32) -> f3
     }
 }
 
-// Find the active cell whose seed_pos is nearest to `world_xz` —
-// implements W2 Voronoi tessellation by brute-force scan over the
-// active set. Per-cell `density <= 0` slots (empty / clear-air) are
-// skipped early. Returns the cell's index in the storage buffer; the
-// caller reads density/type/etc. from that slot.
+// Find the cell whose seed_pos is nearest to `world_xz` — implements
+// W2 Voronoi tessellation by brute-force scan over the buffered active
+// set. Returns the cell's index in the storage buffer.
 //
-// Per WEATHER.md § "No-weather is a type of weather" — every XZ point
-// owns one cell; clear-air cells return density 0 → no cloud rendered
-// at that point. This replaces the C2 v1 circular-footprint shortcut
-// (which produced scattered puffs with gaps between cells) with the
-// correct continuous tessellation.
+// **Critical**: includes ClearAir cells in the search. A clear-air
+// cell legitimately "owns" its Voronoi region; the caller (sample
+// density) handles density=0 by returning zero contribution. Skipping
+// clear-air would cause a single cumulus cell to "fill the world" out
+// to the next cumulus cell (since the nearest non-empty would be
+// returned for samples actually in clear-air regions). 2026-04-26 bug
+// fix discovered during in-game playtest — "clouds vanish when
+// leaving a cell" symptom.
 //
-// Cost: ~50-64 distance checks per call. At 32 ray-steps per pixel,
-// ~1.5-2k checks per pixel — modest GPU compute (~0.2 ms at 1080p).
+// Empty / unfilled buffer slots (density=0 AND seed_pos at origin)
+// are skipped via the `is_empty_slot` test below — these are
+// uninitialized tail slots, not real clear-air cells. Real clear-air
+// cells have a valid `seed_pos` populated by ChunkedWeather.
+//
+// Cost: ~50-64 distance checks per call. At ~24 ray-steps per pixel,
+// ~1.5-2k checks per pixel — modest GPU compute. Still the dominant
+// per-pixel cost; future optimization options documented in
+// `docs/WEATHER.md § Tessellation discipline`.
+//
+// Per WEATHER.md § "No-weather is a type of weather": every XZ point
+// owns one cell; clear-air cells render zero density, but they still
+// participate in the tessellation so cumulus cells stay bounded to
+// their actual Voronoi regions.
 fn find_nearest_active_cell(world_xz: vec2<f32>) -> u32 {
     var best_idx: u32 = 0u;
     var best_dist_sq: f32 = 1.0e30;
     let cell_count = arrayLength(&weather_cells);
     for (var i = 0u; i < cell_count; i = i + 1u) {
         let cell = weather_cells[i];
-        if (cell.density <= 0.0) {
-            continue;
-        }
+        // Empty buffer-tail slots are filled with a sentinel `seed_pos`
+        // (e.g. 1e9, 1e9) by `Renderer::update_weather_cells` so the
+        // distance check naturally excludes them — no special check
+        // required. Real ClearAir cells have valid seed_pos and DO
+        // participate in nearest-cell lookup (per tessellation rule).
         let d = world_xz - cell.seed_pos;
         let dsq = d.x * d.x + d.y * d.y;
         if (dsq < best_dist_sq) {
@@ -178,6 +202,32 @@ fn find_nearest_active_cell(world_xz: vec2<f32>) -> u32 {
     }
     return best_idx;
 }
+
+// Per-cell-type altitude-perturbation amplitudes (m). Returns
+// `vec2(top_amp_m, base_amp_m)`. Cumulus / nimbus get bumpy convective
+// tops; stratus stays nearly flat (its physical signature is a uniform
+// layer); squall + frontal get moderate variation. Modulated by
+// `coverage_strength` at sample time so marginal cells stay flat
+// regardless of type. PINNED amplitudes per
+// `docs/WEATHER.md § Cloud altitude variation` and the
+// `weather_continuous_coverage_margin` memory pin
+// (continuous-margin sub-phase 5, inside project Phase 3.6.3c.6 / 3.2x).
+fn altitude_perturbation_amplitude(cell_type: u32) -> vec2<f32> {
+    switch cell_type {
+        case 1u: { return vec2<f32>(500.0, 200.0); }   // Cumulus — puffy
+        case 2u: { return vec2<f32>(1500.0, 400.0); }  // Nimbus — deep convection
+        case 3u: { return vec2<f32>(50.0, 30.0); }     // Stratus — flat layer
+        case 4u: { return vec2<f32>(700.0, 250.0); }   // Squall — textured
+        case 5u: { return vec2<f32>(400.0, 150.0); }   // Frontal — moderate
+        default: { return vec2<f32>(50.0, 50.0); }     // ClearAir / haze — subtle
+    }
+}
+
+// Spacing for the long-wavelength altitude-perturbation Perlin field.
+// ~3 km wavelength → bumps a few cells wide, suitable for "convective
+// top" mental model. Independent from CLOUD_PERLIN_SPACING_M (which
+// drives sub-cell density-noise structure at ~800 m).
+const ALT_PERTURB_SPACING_M: f32 = 3000.0;
 
 // Per-cell-type Perlin-Worley blend weights (WEATHER.md § Sub-cell
 // detail noise). Cumulus = puffy distinct cells. Nimbus = bulky
@@ -212,12 +262,34 @@ fn perlin_worley_weights_for_type(cell_type: u32) -> vec2<f32> {
 fn sample_cloud_density(world_pos: vec3<f32>) -> f32 {
     let cell_idx = find_nearest_active_cell(world_pos.xz);
     let cell = weather_cells[cell_idx];
-    if (cell.density <= 0.0 || cell.cell_type == CELL_CLEAR_AIR) {
+    // PINNED 2026-04-26: gate on coverage_strength, not density. ClearAir
+    // cells with nonzero margin (W1 approaching a cloud-bearing
+    // threshold) carry haze parameters and SHOULD render → wispy
+    // transitions. True clear sky has coverage_strength == 0 and is
+    // skipped here.
+    if (cell.coverage_strength <= 0.0 || cell.density <= 0.0) {
         return 0.0;
     }
+    // CM-5: Per-sample altitude perturbation. Sample a long-wavelength
+    // Perlin field at the sample's (x, z) — fixed y=0 keeps the
+    // perturbation a function of horizontal position only, so the cloud
+    // top/base form a coherent bumpy surface rather than per-altitude
+    // jitter. Per-type amplitude × coverage_strength means high-margin
+    // cumulus / nimbus cells get bumpy convective tops, marginal cells
+    // and stratus stay flat. Adds one Perlin-3D call per ray sample.
+    let amp = altitude_perturbation_amplitude(cell.cell_type);
+    let perturb = cloud_perlin_3d(
+        CLOUD_SEED_HI, CLOUD_SEED_LO,
+        CLOUD_PERLIN_OCTAVE,
+        world_pos.x, 0.0, world_pos.z,
+        ALT_PERTURB_SPACING_M,
+    );
+    let perturb_scaled = perturb * cell.coverage_strength;
+    let effective_base = cell.base_altitude_m + perturb_scaled * amp.y;
+    let effective_top = cell.top_altitude_m + perturb_scaled * amp.x;
     let alt_factor = altitude_profile(
         cell.cell_type, world_pos.y,
-        cell.base_altitude_m, cell.top_altitude_m,
+        effective_base, effective_top,
     );
     if (alt_factor <= 0.0) {
         return 0.0;
@@ -237,7 +309,21 @@ fn sample_cloud_density(world_pos: vec3<f32>) -> f32 {
     );
     let perlin_norm = clamp((perlin_raw + 0.7) / 1.4, 0.0, 1.0);
     let weights = perlin_worley_weights_for_type(cell.cell_type);
-    let cloud_factor = weights.x * worley_struct + weights.y * perlin_norm;
+    let raw_factor = weights.x * worley_struct + weights.y * perlin_norm;
+    // Continuous-margin modulation. coverage_strength = 1.0 → threshold
+    // = 0, smoothstep almost everything passes (solid). 0.5 → only the
+    // upper half of the noise field passes (broken / sparse). 0 → nothing
+    // (skipped by early-out above). Per `docs/WEATHER.md § Continuous
+    // qualification margin`. Rather than `cell.coverage_strength` being
+    // a uniform multiplier (which would just scale everything down),
+    // smoothstep gates by noise threshold so visual structure changes:
+    // marginal cells get *gaps in coverage*, not just dimmer coverage.
+    let coverage_threshold = 1.0 - cell.coverage_strength;
+    let cloud_factor = smoothstep(
+        coverage_threshold,
+        coverage_threshold + 0.10,
+        raw_factor,
+    );
     return cell.density * alt_factor * cloud_factor;
 }
 

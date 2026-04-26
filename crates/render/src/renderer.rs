@@ -227,8 +227,8 @@ pub const MAX_WEATHER_CELLS: usize = 64;
 ///
 /// Populated by `Renderer::update_weather_cells` from the
 /// `WeatherCellSnapshot` records produced by `ChunkedWeather`. Unused
-/// slots are zero-filled — the shader treats `density <= 0` as
-/// "skip this slot".
+/// slots use the sentinel `seed_pos = (1e9, 1e9)` — the shader's
+/// nearest-cell lookup naturally excludes them via distance comparison.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable, Default)]
 pub struct GpuWeatherCell {
@@ -243,9 +243,16 @@ pub struct GpuWeatherCell {
     /// `weather::cell_state::CellType` enum order + the `CELL_*`
     /// constants in `volumetric.wgsl`.
     pub cell_type: u32,
-    /// Padding to keep the struct at 32 bytes (8 × f32).
-    #[doc(hidden)]
-    pub padding: u32,
+    /// Continuous coverage qualification margin in `[0, 1]` — how
+    /// strongly the cell's W1 inputs satisfy its type's preconditions.
+    /// PINNED design 2026-04-26 (`docs/WEATHER.md § Continuous
+    /// qualification margin`). The shader modulates `cloud_factor` via
+    /// smoothstep around `1 - coverage_strength`, so cells well above
+    /// threshold render solid coverage and marginal cells render
+    /// broken / sparse. `ClearAir` cells with W1 approaching cloud
+    /// thresholds get a small nonzero margin (capped 0.15) → wispy
+    /// haze in transition zones.
+    pub coverage_strength: f32,
 }
 
 /// Compute shader source for the CPU-GPU bit-identity gate (B4).

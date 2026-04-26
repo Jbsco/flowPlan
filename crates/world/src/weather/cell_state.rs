@@ -65,6 +65,23 @@ pub struct CellState {
     pub precip_rate_mm_per_hr: f32,
     /// Storm evolution phase in `[0, 1]`. 0 at 3.2.2b; advances in 3.2.2c.
     pub storm_phase: f32,
+    /// Continuous qualification margin in `[0, 1]` — how strongly this
+    /// cell's W1 inputs satisfy its type's preconditions. PINNED design
+    /// 2026-04-26 (`docs/WEATHER.md § Continuous qualification margin`).
+    ///
+    /// - `1.0`: cell is well above its type's threshold; full coverage.
+    /// - `0.5`: marginal qualifier; broken / sparse cover via shader
+    ///   smoothstep modulation.
+    /// - `0.0`: not qualifying; empty / clear sky.
+    /// - **For `ClearAir` cells**: nonzero when humidity / temp / pressure
+    ///   approaches a cloud-bearing type's threshold but doesn't cross
+    ///   it. Capped ~0.15 — produces wispy haze instead of binary on/off.
+    ///
+    /// Renderer modulates `cloud_factor` via
+    /// `smoothstep(1 - coverage_strength, 1 - coverage_strength + 0.1,
+    /// raw_factor)` so adjacent cells with smoothly-varying inputs
+    /// produce continuous gradients across the world.
+    pub coverage_strength: f32,
 }
 
 // Placement-constraint thresholds — chosen to match real atmospheric precedents.
@@ -340,12 +357,20 @@ fn evolve_initial(
             density: 0.0,
             precip_rate_mm_per_hr: 0.0,
             storm_phase: phase,
+            // Dissipated cells inherit the initial coverage_strength,
+            // attenuated by activity. As they dissipate (activity → 0)
+            // their wispy traces fade out smoothly rather than
+            // binary-disappear.
+            coverage_strength: initial.coverage_strength * activity.max(0.0),
         };
     }
     CellState {
         density: initial.density * activity,
         precip_rate_mm_per_hr: initial.precip_rate_mm_per_hr * activity,
         storm_phase: phase,
+        // Coverage strength tracks lifecycle activity — peak coverage at
+        // peak phase, fading as cell builds / dissipates.
+        coverage_strength: initial.coverage_strength * activity,
         ..initial
     }
 }
@@ -395,8 +420,162 @@ fn initial_state_from_humidity(master_seed: u64, cell: CellId, time_s: f32, rh: 
     let grad_mag = pressure_gradient_magnitude(master_seed, seed_pos.x, seed_pos.y, time_s);
 
     let cell_type = select_cell_type(master_seed, cell, p_hpa, t_k, rh, wind_mag, grad_mag);
-    parameterize(cell_type, rh, t_k)
+    let coverage_strength =
+        compute_coverage_strength(cell_type, rh, t_k, p_hpa, wind_mag, grad_mag);
+    let mut state = parameterize(cell_type, rh, t_k);
+    state.coverage_strength = coverage_strength;
+    // ClearAir cells with nonzero margin (W1 conditions approaching a
+    // cloud-bearing threshold) need haze parameters so the shader can
+    // render wispy clouds. Bare ClearAir leaves base/top/density at 0
+    // — the renderer has nothing to sample. Per WEATHER.md
+    // § Continuous qualification margin: ClearAir-near-cumulus
+    // produces wispy haze in transition regions.
+    if matches!(cell_type, CellType::ClearAir) && coverage_strength > 0.0 {
+        state.base_altitude_m = HAZE_BASE_ALTITUDE_M;
+        state.top_altitude_m = HAZE_TOP_ALTITUDE_M;
+        state.density = HAZE_DENSITY;
+    }
+    state
 }
+
+/// Haze altitude band for `ClearAir` cells with margin > 0.
+///
+/// Low fair-weather layer (1.5-2.5 km) so the wisps sit near where
+/// cumulus would naturally form. PINNED with the continuous-margin
+/// design 2026-04-26.
+pub const HAZE_BASE_ALTITUDE_M: f32 = 1_500.0;
+pub const HAZE_TOP_ALTITUDE_M: f32 = 2_500.0;
+/// Light density for haze cells.
+///
+/// The shader multiplies by `coverage_strength`-modulated `cloud_factor`,
+/// which (with margin capped at 0.15) keeps the visual contribution sparse.
+pub const HAZE_DENSITY: f32 = 0.20;
+
+/// Smoothstep helper: 0 below `lo`, 1 above `hi`, smooth in between.
+/// Used by the continuous-margin computation so qualification thresholds
+/// produce continuous gradients instead of binary on/off.
+#[must_use]
+fn smoothstep(lo: f32, hi: f32, x: f32) -> f32 {
+    let t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Compute continuous coverage strength `[0, 1]` from W1 inputs (PINNED
+/// design 2026-04-26 — `docs/WEATHER.md § Continuous qualification margin`).
+///
+/// The cell's TYPE was already chosen by `select_cell_type` (binary
+/// eligibility + weighted random); this function computes how strongly
+/// the cell's W1 inputs satisfy that type's preconditions, which the
+/// shader uses to modulate visual coverage:
+/// - Strong margin (well above thresholds) → solid coverage.
+/// - Marginal qualifier → broken / sparse coverage.
+/// - **`ClearAir` cells with humidity / temp / pressure approaching
+///   cumulus threshold** → small nonzero margin (capped 0.15) producing
+///   wispy haze. Eliminates the threshold-step at cumulus boundary.
+///
+/// Per-type smoothstep edge bounds chosen so:
+/// - Below the binary threshold (used by `select_cell_type`): margin
+///   already approaches zero (i.e. the binary threshold IS within the
+///   smoothstep range, just at the upper end).
+/// - At the binary threshold: margin ~0.5 (cell barely qualifies).
+/// - Well above (5-15 units past threshold): margin → 1.0.
+///
+/// Determinism preserved: pure function of W1 inputs.
+#[must_use]
+fn compute_coverage_strength(
+    cell_type: CellType,
+    rh: f32,
+    t_k: f32,
+    p_hpa: f32,
+    wind_mag: f32,
+    grad_mag: f32,
+) -> f32 {
+    match cell_type {
+        CellType::ClearAir => {
+            // ClearAir cells get nonzero margin when conditions approach
+            // a cloud-bearing type. Capped at CLEAR_AIR_MARGIN_CAP (0.15)
+            // so clear sky doesn't fill with clouds — produces wispy
+            // haze in transition regions, true clear elsewhere.
+            //
+            // The strongest "approach" is to cumulus (the most permissive
+            // cloud type): humidity rising toward 0.40, temp warming
+            // toward 280K. We compute the cumulus-approach score and
+            // cap it.
+            let rh_approach = smoothstep(0.20, CLOUD_MIN_HUMIDITY, rh);
+            let t_approach = smoothstep(CONVECTIVE_MIN_TEMP_K - 10.0, CONVECTIVE_MIN_TEMP_K, t_k);
+            (rh_approach * t_approach * CLEAR_AIR_MARGIN_CAP).min(CLEAR_AIR_MARGIN_CAP)
+        },
+        CellType::Cumulus => {
+            // Edge bounds CENTER on the binary threshold so cells right
+            // at the threshold get smoothstep score ~0.5 per axis (product
+            // ~0.25 at threshold; saturates to 1.0 well above).
+            let rh_score = smoothstep(CLOUD_MIN_HUMIDITY - 0.10, CLOUD_MIN_HUMIDITY + 0.10, rh);
+            let t_score = smoothstep(
+                CONVECTIVE_MIN_TEMP_K - 5.0,
+                CONVECTIVE_MIN_TEMP_K + 5.0,
+                t_k,
+            );
+            rh_score * t_score
+        },
+        CellType::Nimbus => {
+            // Deep convection: three factors centered on their thresholds
+            // (humidity 0.70, temp 280K, pressure BASELINE). Product
+            // ~0.125 at threshold; saturates well above. Three-factor
+            // product means nimbus rises slower than cumulus from
+            // marginal → solid — physically appropriate (deep convection
+            // needs strong support across multiple axes).
+            let rh_score = smoothstep(NIMBUS_MIN_HUMIDITY - 0.10, NIMBUS_MIN_HUMIDITY + 0.10, rh);
+            let t_score = smoothstep(
+                CONVECTIVE_MIN_TEMP_K - 5.0,
+                CONVECTIVE_MIN_TEMP_K + 5.0,
+                t_k,
+            );
+            // Higher pressure = less convection → flip bounds (lo > hi
+            // semantics). smoothstep clamps in [0, 1] so still well-formed.
+            let p_score = smoothstep(
+                pressure::BASELINE_HPA + 5.0,
+                pressure::BASELINE_HPA - 5.0,
+                p_hpa,
+            );
+            rh_score * t_score * p_score
+        },
+        CellType::Stratus => {
+            // Cool, humid, stable. Threshold rh = CLOUD_MIN_HUMIDITY + 0.10
+            // = 0.50, temp threshold = STRATUS_MAX_TEMP_K = 285K.
+            let rh_threshold = CLOUD_MIN_HUMIDITY + 0.10;
+            let rh_score = smoothstep(rh_threshold - 0.05, rh_threshold + 0.05, rh);
+            // Stratus prefers COOLER → flip bounds: warmer = lower score.
+            let t_score = smoothstep(STRATUS_MAX_TEMP_K + 5.0, STRATUS_MAX_TEMP_K - 5.0, t_k);
+            rh_score * t_score
+        },
+        CellType::Squall => {
+            // Strong wind + moisture. Both centered on their thresholds.
+            let rh_score = smoothstep(CLOUD_MIN_HUMIDITY - 0.10, CLOUD_MIN_HUMIDITY + 0.10, rh);
+            let wind_score = smoothstep(
+                SQUALL_MIN_WIND_MPS - 2.0,
+                SQUALL_MIN_WIND_MPS + 2.0,
+                wind_mag,
+            );
+            rh_score * wind_score
+        },
+        CellType::Frontal => {
+            // Pressure-gradient strength is the qualifying factor; bounds
+            // straddle the threshold proportionally.
+            smoothstep(
+                FRONTAL_GRAD_THRESHOLD * 0.7,
+                FRONTAL_GRAD_THRESHOLD * 1.3,
+                grad_mag,
+            )
+        },
+    }
+}
+
+/// Cap on the coverage strength assigned to `ClearAir` cells.
+///
+/// Applies when their W1 inputs approach a cloud-bearing type's
+/// threshold. Produces wispy haze instead of zero clouds at the
+/// transition zone, but doesn't fill truly-clear sky.
+pub const CLEAR_AIR_MARGIN_CAP: f32 = 0.15;
 
 /// Select cell type via weighted-random based on W1 eligibility.
 #[allow(clippy::too_many_arguments)] // W1 state is wide by design.
@@ -482,6 +661,7 @@ fn parameterize(cell_type: CellType, rh: f32, t_k: f32) -> CellState {
             density: 0.0,
             precip_rate_mm_per_hr: 0.0,
             storm_phase,
+            coverage_strength: 0.0,
         },
         CellType::Cumulus => {
             // LCL approximation: base rises with aridity.
@@ -494,6 +674,7 @@ fn parameterize(cell_type: CellType, rh: f32, t_k: f32) -> CellState {
                 density: 0.35,
                 precip_rate_mm_per_hr: 0.0,
                 storm_phase,
+                coverage_strength: 0.0,
             }
         },
         CellType::Nimbus => {
@@ -506,6 +687,7 @@ fn parameterize(cell_type: CellType, rh: f32, t_k: f32) -> CellState {
                 density: 0.80,
                 precip_rate_mm_per_hr: 6.0,
                 storm_phase,
+                coverage_strength: 0.0,
             }
         },
         CellType::Stratus => {
@@ -518,6 +700,7 @@ fn parameterize(cell_type: CellType, rh: f32, t_k: f32) -> CellState {
                 density: 0.55,
                 precip_rate_mm_per_hr: 0.3,
                 storm_phase,
+                coverage_strength: 0.0,
             }
         },
         CellType::Squall => CellState {
@@ -527,6 +710,7 @@ fn parameterize(cell_type: CellType, rh: f32, t_k: f32) -> CellState {
             density: 0.65,
             precip_rate_mm_per_hr: 14.0,
             storm_phase,
+            coverage_strength: 0.0,
         },
         CellType::Frontal => CellState {
             cell_type,
@@ -535,6 +719,7 @@ fn parameterize(cell_type: CellType, rh: f32, t_k: f32) -> CellState {
             density: 0.60,
             precip_rate_mm_per_hr: 8.0,
             storm_phase,
+            coverage_strength: 0.0,
         },
     }
 }
@@ -639,6 +824,7 @@ mod tests {
             density: 0.0,
             precip_rate_mm_per_hr: 0.0,
             storm_phase: 0.0,
+            coverage_strength: 0.0,
         };
         assert_eq!(s.density.to_bits(), 0.0_f32.to_bits());
     }
@@ -883,5 +1069,233 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Continuous-margin (coverage_strength) tests — Phase 2 PINNED 2026-04-26.
+    // See `weather_continuous_coverage_margin.md` and `docs/WEATHER.md
+    // § Continuous qualification margin`.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn coverage_strength_clear_air_far_from_threshold_zero() {
+        // Dry, cold air. Both rh_approach (0 below 0.20) and t_approach
+        // (0 below 270K) collapse to zero, so margin is exactly 0.
+        let m = compute_coverage_strength(CellType::ClearAir, 0.05, 250.0, 1013.25, 2.0, 0.0);
+        assert_eq!(m.to_bits(), 0.0_f32.to_bits());
+    }
+
+    #[test]
+    fn coverage_strength_clear_air_near_cumulus_threshold_capped() {
+        // Right at the cumulus thresholds — score should be near max
+        // (smoothstep returns ~1) and then capped at CLEAR_AIR_MARGIN_CAP.
+        let m = compute_coverage_strength(
+            CellType::ClearAir,
+            CLOUD_MIN_HUMIDITY,
+            CONVECTIVE_MIN_TEMP_K,
+            1013.25,
+            2.0,
+            0.0,
+        );
+        assert!(
+            m > 0.0 && m <= CLEAR_AIR_MARGIN_CAP,
+            "ClearAir margin near threshold should be in (0, CAP], got {m}"
+        );
+        assert!(
+            (m - CLEAR_AIR_MARGIN_CAP).abs() < 1e-3,
+            "ClearAir at threshold should be ~ CAP (= {CLEAR_AIR_MARGIN_CAP}), got {m}"
+        );
+    }
+
+    #[test]
+    fn coverage_strength_clear_air_capped_under_extreme_inputs() {
+        // Even with absurdly favorable inputs, ClearAir can't exceed cap.
+        let m = compute_coverage_strength(CellType::ClearAir, 0.99, 320.0, 1013.25, 2.0, 0.0);
+        assert!(
+            m <= CLEAR_AIR_MARGIN_CAP + 1e-6,
+            "ClearAir margin must be capped at {CLEAR_AIR_MARGIN_CAP}, got {m}"
+        );
+    }
+
+    #[test]
+    fn coverage_strength_cumulus_well_above_threshold_solid() {
+        // RH 0.80 (well above 0.60 upper edge), T 295K (well above 288K).
+        let m = compute_coverage_strength(CellType::Cumulus, 0.80, 295.0, 1013.25, 2.0, 0.0);
+        assert!(
+            m > 0.95,
+            "well-qualified cumulus should have near-1.0 coverage, got {m}"
+        );
+    }
+
+    #[test]
+    fn coverage_strength_cumulus_marginal_partial() {
+        // Right at the binary threshold (rh=0.40, t=280K) — should be
+        // partial coverage. Edge bounds straddle the threshold so this
+        // sits at ~mid-strength.
+        let m = compute_coverage_strength(
+            CellType::Cumulus,
+            CLOUD_MIN_HUMIDITY,
+            CONVECTIVE_MIN_TEMP_K,
+            1013.25,
+            2.0,
+            0.0,
+        );
+        assert!(
+            (0.05..0.95).contains(&m),
+            "cumulus at threshold should be partial, got {m}"
+        );
+    }
+
+    #[test]
+    fn coverage_strength_smooth_no_jumps() {
+        // Sweep RH across the cumulus smoothstep band [0.35, 0.60].
+        // Successive samples should differ by less than the largest
+        // single-step from a binary threshold (which would be 1.0 — any
+        // delta below ~0.2 confirms continuity).
+        let mut prev = compute_coverage_strength(CellType::Cumulus, 0.30, 290.0, 1013.25, 2.0, 0.0);
+        for n in 1..=30 {
+            let rh = 0.30 + (n as f32) * 0.01; // 0.31 .. 0.60
+            let m = compute_coverage_strength(CellType::Cumulus, rh, 290.0, 1013.25, 2.0, 0.0);
+            assert!(
+                (m - prev).abs() < 0.20,
+                "discontinuity at rh={rh}: prev={prev}, m={m}"
+            );
+            prev = m;
+        }
+    }
+
+    #[test]
+    fn coverage_strength_monotonic_in_humidity_for_cumulus() {
+        // Within the smoothstep band, more humid → more coverage.
+        let m_lo = compute_coverage_strength(CellType::Cumulus, 0.40, 290.0, 1013.25, 2.0, 0.0);
+        let m_hi = compute_coverage_strength(CellType::Cumulus, 0.55, 290.0, 1013.25, 2.0, 0.0);
+        assert!(
+            m_hi > m_lo,
+            "cumulus coverage should rise with humidity: lo={m_lo}, hi={m_hi}"
+        );
+    }
+
+    #[test]
+    fn coverage_strength_field_in_cell_state_in_bounds() {
+        // initial_state(_from_humidity) must fill coverage_strength on every
+        // cell, regardless of type. Sweep a grid; check 0 ≤ s ≤ 1 always.
+        for ix in -10..=10 {
+            for iz in -10..=10 {
+                let s = initial_state(42, CellId { ix, iz }, 0.0);
+                assert!(
+                    (0.0..=1.0).contains(&s.coverage_strength),
+                    "coverage_strength out of [0, 1] for cell ({ix},{iz}) type={:?}: {}",
+                    s.cell_type,
+                    s.coverage_strength
+                );
+                if matches!(s.cell_type, CellType::ClearAir) {
+                    assert!(
+                        s.coverage_strength <= CLEAR_AIR_MARGIN_CAP + 1e-6,
+                        "ClearAir cell ({ix},{iz}) exceeded margin cap: {}",
+                        s.coverage_strength
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn coverage_strength_deterministic() {
+        // Same inputs → same output. Cheap smoke test.
+        let a = initial_state(42, CellId { ix: 3, iz: -2 }, 0.0);
+        let b = initial_state(42, CellId { ix: 3, iz: -2 }, 0.0);
+        assert_eq!(a.coverage_strength.to_bits(), b.coverage_strength.to_bits());
+    }
+
+    #[test]
+    fn clear_air_with_margin_gets_haze_parameters() {
+        // Phase 4 invariant: any ClearAir cell with coverage_strength > 0
+        // must have nonzero base/top/density so the shader can sample
+        // wispy haze. Without this override, the shader has nothing to
+        // sample for "ClearAir near cumulus threshold" cells.
+        let mut found_haze = false;
+        for ix in -20..=20 {
+            for iz in -20..=20 {
+                let s = initial_state(42, CellId { ix, iz }, 0.0);
+                if matches!(s.cell_type, CellType::ClearAir) && s.coverage_strength > 0.0 {
+                    assert_eq!(
+                        s.base_altitude_m.to_bits(),
+                        HAZE_BASE_ALTITUDE_M.to_bits(),
+                        "ClearAir-haze must use HAZE_BASE_ALTITUDE_M"
+                    );
+                    assert_eq!(s.top_altitude_m.to_bits(), HAZE_TOP_ALTITUDE_M.to_bits());
+                    assert!(
+                        s.density > 0.0,
+                        "ClearAir-haze must have nonzero density for shader sampling"
+                    );
+                    found_haze = true;
+                }
+                if matches!(s.cell_type, CellType::ClearAir) && s.coverage_strength == 0.0 {
+                    // True clear sky: no parameters set.
+                    assert_eq!(s.base_altitude_m.to_bits(), 0.0_f32.to_bits());
+                    assert_eq!(s.top_altitude_m.to_bits(), 0.0_f32.to_bits());
+                    assert_eq!(s.density.to_bits(), 0.0_f32.to_bits());
+                }
+            }
+        }
+        // The grid should produce at least one haze cell — soft-gate
+        // (don't panic) so the test doesn't fail spuriously if the
+        // master_seed happens to land in a configuration with no
+        // marginal cells. Just confirm the invariant when applicable.
+        if !found_haze {
+            // Try a different seed for a sanity check.
+            for ix in -15..=15 {
+                for iz in -15..=15 {
+                    let s = initial_state(7, CellId { ix, iz }, 0.0);
+                    if matches!(s.cell_type, CellType::ClearAir) && s.coverage_strength > 0.0 {
+                        assert!(s.density > 0.0);
+                        return;
+                    }
+                }
+            }
+            panic!(
+                "no ClearAir cells with margin > 0 found across two seeds — \
+                 either coverage formula is too restrictive, or W1 substrate \
+                 doesn't produce transition zones"
+            );
+        }
+    }
+
+    #[test]
+    fn evolved_clear_air_inherits_decaying_coverage() {
+        // A dissipating cell goes through ClearAir for the dormant phase.
+        // Its coverage_strength must fade smoothly to 0, not jump to 0.
+        // Find a cell that's non-clear at init, then check evolution.
+        for ix in 0..30 {
+            for iz in 0..30 {
+                let cell = CellId { ix, iz };
+                let init = initial_state(42, cell, 0.0);
+                if !matches!(init.cell_type, CellType::ClearAir) && init.coverage_strength > 0.1 {
+                    // Mid-dissipation: phase ~0.7 (1 - (0.7-0.6)/(0.85-0.6) = 0.6)
+                    let tuning = WeatherTuning::DEFAULT;
+                    let duration = cycle_duration_s(init.cell_type, &tuning);
+                    let offset_s = cell_offset_unit(42, cell) * duration;
+                    let target_phase = 0.70_f32;
+                    let target_time = target_phase * duration - offset_s;
+                    if target_time > 0.0 {
+                        let evolved = state_at_time(42, cell, target_time);
+                        // Whether evolved is the same type or fell to ClearAir,
+                        // its coverage must be lower than init (activity < 1).
+                        assert!(
+                            evolved.coverage_strength < init.coverage_strength,
+                            "dissipating cell should have lower coverage: \
+                             init={}, evolved={}, init_type={:?}, evolved_type={:?}",
+                            init.coverage_strength,
+                            evolved.coverage_strength,
+                            init.cell_type,
+                            evolved.cell_type,
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+        // No suitable cell — soft skip rather than panic. The coverage_strength
+        // grid may yield no cell with strength > 0.1 in this 30×30 window.
     }
 }

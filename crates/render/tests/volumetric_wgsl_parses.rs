@@ -191,6 +191,7 @@ fn volumetric_wgsl_density_model_present() {
     // replaced the hardcoded test cell.
     for name in [
         "fn altitude_profile(",
+        "fn altitude_perturbation_amplitude(",
         "fn find_nearest_active_cell(",
         "fn perlin_worley_weights_for_type(",
         "fn sample_cloud_density(",
@@ -199,6 +200,8 @@ fn volumetric_wgsl_density_model_present() {
         "weather_cells",
         "GLOBAL_CLOUD_BASE_M",
         "GLOBAL_CLOUD_TOP_M",
+        "ALT_PERTURB_SPACING_M",
+        "coverage_strength",
     ] {
         assert!(
             VOLUMETRIC_WGSL_SOURCE.contains(name),

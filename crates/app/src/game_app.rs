@@ -1680,16 +1680,28 @@ impl Runtime {
                     density: snap.state.density,
                     storm_phase: snap.state.storm_phase,
                     cell_type: snap.state.cell_type as u32,
-                    padding: 0,
+                    coverage_strength: snap.state.coverage_strength,
                 })
                 .collect();
-            // Pad the tail with zeros so the shader's per-cell early-out
-            // (density ≤ 0) skips unused slots. queue.write_buffer only
-            // writes the prefix we send; older content stays in untouched
-            // tail slots. To clear those out we need to write the full
-            // buffer once per frame — fine at 1.5 KB.
+            // Pad the tail with sentinel-positioned cells so the
+            // shader's `find_nearest_active_cell` distance check
+            // naturally excludes them — empty slots sit at world
+            // (1e9, 1e9), distance from any real point is huge → never
+            // wins the min. Per WEATHER.md § Tessellation discipline,
+            // real ClearAir cells (with valid seed_pos but density=0)
+            // DO participate in nearest-cell lookup. Critical for
+            // correct tessellation: a cumulus cell only "owns" its
+            // Voronoi region, not all space until the next cumulus.
             while gpu_cells.len() < flowplan_render::MAX_WEATHER_CELLS {
-                gpu_cells.push(flowplan_render::GpuWeatherCell::default());
+                gpu_cells.push(flowplan_render::GpuWeatherCell {
+                    seed_pos: [1.0e9, 1.0e9], // sentinel: far beyond world
+                    base_altitude_m: 0.0,
+                    top_altitude_m: 0.0,
+                    density: 0.0,
+                    storm_phase: 0.0,
+                    cell_type: 0,
+                    coverage_strength: 0.0,
+                });
             }
             self.renderer.update_weather_cells(&self.queue, &gpu_cells);
             if !update.entered.is_empty() || !update.exited.is_empty() {

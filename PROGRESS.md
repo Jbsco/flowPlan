@@ -61,7 +61,31 @@ Budget bumped 3.0 → 3.5 ms at 1080p. Tessellation refactor (per-step nearest-c
 
 ### Pinned next steps (from priority ladder)
 
-- **#4 continuous qualification margin** (~80-100 LOC, **NEW user-pinned 2026-04-26**): replace binary cell-type classification with continuous `coverage_strength` via smoothstep over W1 inputs. Cells well above threshold = solid; marginal qualifiers = broken / sparse cover; ClearAir cells near threshold get wispy haze instead of zero. Produces organic coverage gradients across the world; eliminates "all cumulus cells render identically." Design pinned in WEATHER.md § Continuous qualification margin + memory `weather_continuous_coverage_margin`. **Important to land BEFORE further rendering work** so all subsequent calibration uses the right model. Includes #4b per-cell-type Worley spacing as a sub-item.
+#### Continuous-margin refactor (priority ladder #4) — IN PROGRESS — sub-phases CM-1 .. CM-7
+
+> **Sub-phase naming**: CM-N below are *internal sub-phases of the
+> continuous-margin refactor*. They sit inside project Phase 3.6.3c.6
+> / 3.2x — they are NOT to be confused with overall ROADMAP phases.
+> Use "CM-N" in conversation and code comments to disambiguate.
+
+User direction 2026-04-26 (post-tessellation playtest): the discrete cell-type classification produces "all cumulus cells render identically" + sharp on/off at thresholds. Tessellation in-game also revealed two follow-on items: **(a) "leaving the cell causes all cloud rendering to vanish"** symptom (root cause: shader was skipping ClearAir cells in nearest-cell lookup, allowing a single cumulus cell to "fill the world" until the next cumulus); **(b) cloud ceiling/height uniformity** — base/top variation across cells exists but is too subtle visually, needs noise-perturbation per ray-sample within each cell, scaled by `coverage_strength` so high-margin cells get full convective height variation while marginal cells stay flat.
+
+Refactor decomposed into 7 sub-phases, each shipping as its own checkpoint with PROGRESS + memory updates. Status:
+
+- **CM-1 (shipped 2026-04-26)** — Fix `find_nearest_active_cell` to include ClearAir cells; sentinel pattern (`seed_pos = 1e9`) for empty buffer slots so distance check naturally excludes them. Real ClearAir cells now own their Voronoi region and produce zero density at samples within it. **This fixes the "clouds vanish when leaving cell" symptom**: previously a cumulus cell's params extended unbounded past its Voronoi region until the next cumulus, ignoring intermediate clear-air. Now strict tessellation. Files: `volumetric.wgsl`, `game_app.rs`, `cloud_pass_perf.rs`. Workspace gate green; perf 2.5 ms median (under 3.5 ms budget).
+- **CM-2 (shipped 2026-04-26)** — `CellState.coverage_strength: f32` field. Per-type smoothstep computation in `compute_coverage_strength()`: edge bounds CENTER on the binary threshold so cells right at threshold get score ~0.5 per axis (product 0.25 for 2-factor types, 0.125 for 3-factor nimbus). ClearAir cells get nonzero margin (capped at `CLEAR_AIR_MARGIN_CAP = 0.15`) when conditions approach the cumulus threshold. `evolve_initial` also tracks coverage through the lifecycle: peak phase → peak coverage; dissipating cells get attenuated coverage that fades smoothly to 0. 11 new tests cover boundary cases, monotonicity, smoothness, ClearAir cap, and the `CellState`-field-set invariant. All 96 weather lib tests + 28 cell_state tests passing.
+- **CM-3 (shipped 2026-04-26)** — `GpuWeatherCell.padding: u32` → `GpuWeatherCell.coverage_strength: f32`. struct stays 32 bytes (8 × f32, std430 alignment unchanged). Plumbed via game_app's `iter_resident().map(...)` conversion + sentinel-pad loop. Layout-matched in WGSL `GpuWeatherCell` struct (`_pad: u32` → `coverage_strength: f32`). Full workspace builds clean.
+- **CM-4 (shipped 2026-04-26)** — Two parts:
+  1. **CPU side**: `initial_state_from_humidity` now overrides ClearAir cells with margin > 0 to use haze altitude band + density (`HAZE_BASE_ALTITUDE_M = 1500`, `HAZE_TOP_ALTITUDE_M = 2500`, `HAZE_DENSITY = 0.20`). Without this, the shader's altitude_profile would return 0 for any ray sample inside a ClearAir cell since base/top defaulted to 0. Test `clear_air_with_margin_gets_haze_parameters` enforces the invariant.
+  2. **Shader side**: `sample_cloud_density` early-out now gates on `coverage_strength <= 0 || density <= 0` (was `density <= 0 || cell_type == CLEAR_AIR`). Apply smoothstep modulation: `coverage_threshold = 1 - coverage_strength`, then `cloud_factor = smoothstep(threshold, threshold + 0.10, raw_factor)`. `coverage = 1.0` → solid; `coverage = 0.5` → only top half of noise field passes (broken/sparse); `coverage → 0` → only highest noise peaks survive. Marginal cells produce gaps in coverage rather than just dimmer coverage — visual structure changes, not just luminance.
+- **CM-5 (shipped 2026-04-26)** — Altitude-band noise perturbation tied to `coverage_strength`. Per-sample Perlin call at fixed y=0 (so the perturbation is a function of horizontal (x,z) only — coherent bumpy surface, not per-altitude jitter) modulates effective `top_altitude_m` and `base_altitude_m` by per-cell-type amplitudes × `coverage_strength`. Per-type pinned in `altitude_perturbation_amplitude(cell_type)`: Cumulus (500/200), Nimbus (1500/400), Stratus (50/30), Squall (700/250), Frontal (400/150), ClearAir/haze (50/50). One extra Perlin-3D call per ray sample at ALT_PERTURB_SPACING_M = 3 km. Cloud-pass perf: 2.995 ms median (was 2.794 ms pre-CM-5; +200 µs cost), still under 3.5 ms gate. Bit-identity test still green; weather lib all 97 tests pass.
+- **CM-6 (pending)** — Per-cell-type Worley spacing variation (formerly priority ladder #4b). Stratus smooth, Squall textured, Cumulus puffy.
+- **CM-7 (pending)** — Tuning pass + in-game observation.
+
+Design fully encoded in `docs/WEATHER.md § Continuous qualification margin` + memory pins `weather_continuous_coverage_margin` and `weather_tessellation_discipline`. **Important to land BEFORE further rendering work** so all subsequent calibration (per-type Worley, shadow march, atmospheric mood, particles) uses the right model.
+
+#### Other queued (post-continuous-margin)
+
 - **#5 Beer-Lambert shadow march** (~80 LOC + ~30% perf cost): proper sun-lit / shadow-side shading via secondary ray toward sun.
 - **#6 boundary blending** (~50-80 LOC): smoothstep blend across cell edges using `distance_to_edge`. Fixes visible boundaries between different-type cells.
 
