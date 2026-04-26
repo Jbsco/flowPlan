@@ -39,6 +39,33 @@ Post-tune calibration: `scenic_overlook` 37 → **12** placements (a viewpoint a
 
 `hot_springs` left at `temp_range_c: (-50, 5)` — climate window is conceptually correct (rare = cold). Calibration shows it stays near zero on canonical seed; revisit if visual-bench at 3.6.3c.4 confirms zero appearances.
 
+### Phase 3.6.3c.5 — Chunked water mesh streaming (Task #282)
+
+Continues the universal chunked-Voronoi pattern (memory `chunked_voronoi_layers_universal`). Replaces the legacy monolithic `StreamingWater` (single 20 km × 20 km flat-grid mesh, recenters on camera at threshold) with **per-Voronoi-cell flat-quad chunks**. Same shape as 3.6.3c.4 chunked terrain but simpler (no fbm height eval, uniform color, no L3 deltas).
+
+**Files added / modified**:
+
+- `crates/assets/src/mesh.rs::CpuMesh::water_voronoi_chunk` — per-cell water mesh builder. Same world-aligned-grid + centroid-owned-grid-quad ownership + vertex compression as terrain. No height sampling (Y=0 always); uniform `+Y` normal; uniform color from caller.
+- `crates/app/src/chunked_water.rs` (new, ~280 LOC) — `ChunkedWater` manager. 2-worker pool (vs terrain's 4 — water builds are ~1 ms each, no need to saturate cores), shared priority queue, condvar wake. No `WorldRefsArc` dependency (water is flat); only needs `SubBiomeCellCatalog` for the `nearest_cell` test.
+- `crates/render/src/renderer.rs` — `water_chunks: HashMap<u32, GpuMesh>` field, `update_water_chunk` / `evict_water_chunk` API, render-pass branch (chunked iteration when present, single-mesh fallback for scenarios).
+- `crates/app/src/game_app.rs` — `chunked_water: Option<ChunkedWater>` field. When `scenario.is_none() && sub_biome_catalog.is_some()`, chunked path takes over; legacy `StreamingWater` preserved for scenario playback.
+
+**Key parameters** (chunked-water-specific):
+
+| Constant | Value | Rationale |
+| --- | --- | --- |
+| `WATER_GRID_M` | 60 m | Half terrain density — water doesn't need fine detail until FFT lands |
+| `WATER_STREAM_RADIUS_M` | 15 km | Smaller than terrain's 22 km — water visibility is horizon-limited |
+| `MAX_WORKERS` | 2 | Per-chunk build is ~1 ms; 4 workers would idle |
+
+**FFT integration prep** (Phase 3.5b future):
+
+Each water chunk becomes the unit of FFT displacement. Per-cell uniform buffers can carry chop / wave-direction / amplitude (eventually sourced from the W2 weather Voronoi overlay — chunked weather, also per-cell). Vertex shader displaces vertex Y per the FFT texture. Boundary continuity preserved by world-aligned grid: adjacent cells' shared vertex positions get identical FFT samples.
+
+**Tests + gate**: workspace clippy + fmt + tests all green. Existing `streaming_water_rebuilds_at_threshold` test still passes (legacy path preserved for scenarios).
+
+**Pinned for 3.6.3c.6**: volumetric weather chunks at the W2 weather Voronoi scale (~20-50 km cells). Same template applies.
+
 ### Perf-budget regression tests + dead-code hub-iter cleanup (Task #281)
 
 User direction (sustaining): "any tests we can introduce for frame rate or compute budget? we need a way to stay on top of this aspect of performance".

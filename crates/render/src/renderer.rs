@@ -257,6 +257,10 @@ pub struct Renderer {
     /// from the streaming pipeline.
     terrain_chunks: std::collections::HashMap<u32, GpuMesh>,
     water: DrawModel,
+    /// Per-Voronoi-cell water chunks (Phase 3.6.3c.5). Same pattern
+    /// as `terrain_chunks` — when non-empty, render loop draws each
+    /// instead of the single `water.mesh`.
+    water_chunks: std::collections::HashMap<u32, GpuMesh>,
     /// When `false`, the water pass is skipped on render. Used by wheels-variant
     /// scenario playback so a y=0 flat-land terrain isn't hidden by a y=0 water
     /// mesh. Default `true` so free-flight and water-scenario playback retain
@@ -627,6 +631,7 @@ impl Renderer {
             terrain,
             terrain_chunks: std::collections::HashMap::new(),
             water,
+            water_chunks: std::collections::HashMap::new(),
             draw_water: true,
             water_follows_camera: true,
             draw_vehicle: true,
@@ -749,6 +754,32 @@ impl Renderer {
     /// Same pattern as [`Self::update_terrain_mesh`] for water streaming.
     pub fn update_water_mesh(&mut self, device: &wgpu::Device, mesh: &flowplan_assets::CpuMesh) {
         self.water.mesh = GpuMesh::upload(device, mesh);
+    }
+
+    /// Insert or replace a per-cell water chunk (Phase 3.6.3c.5).
+    /// Mirror of `update_terrain_chunk` for water.
+    pub fn update_water_chunk(
+        &mut self,
+        device: &wgpu::Device,
+        cell_id: u32,
+        mesh: &flowplan_assets::CpuMesh,
+    ) {
+        if mesh.vertices.is_empty() || mesh.indices.is_empty() {
+            return;
+        }
+        self.water_chunks
+            .insert(cell_id, GpuMesh::upload(device, mesh));
+    }
+
+    /// Drop a water chunk (cell exited the streaming radius).
+    pub fn evict_water_chunk(&mut self, cell_id: u32) {
+        self.water_chunks.remove(&cell_id);
+    }
+
+    /// True if the chunked-water path is active (>=1 chunk resident).
+    #[must_use]
+    pub fn has_water_chunks(&self) -> bool {
+        !self.water_chunks.is_empty()
     }
 
     pub fn set_water_visible(&mut self, visible: bool) {
@@ -1013,9 +1044,19 @@ impl Renderer {
                 pass.set_bind_group(0, &self.camera_bg, &[]);
                 pass.set_bind_group(2, &self.scene_bg, &[]);
                 pass.set_bind_group(1, &self.water.bind_group, &[]);
-                pass.set_vertex_buffer(0, self.water.mesh.vbo.slice(..));
-                pass.set_index_buffer(self.water.mesh.ibo.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..self.water.mesh.index_count, 0, 0..1);
+                if self.water_chunks.is_empty() {
+                    // Legacy single-mesh path — scenarios + fast-iteration.
+                    pass.set_vertex_buffer(0, self.water.mesh.vbo.slice(..));
+                    pass.set_index_buffer(self.water.mesh.ibo.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..self.water.mesh.index_count, 0, 0..1);
+                } else {
+                    // Chunked path — iterate active per-cell water meshes.
+                    for chunk in self.water_chunks.values() {
+                        pass.set_vertex_buffer(0, chunk.vbo.slice(..));
+                        pass.set_index_buffer(chunk.ibo.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..chunk.index_count, 0, 0..1);
+                    }
+                }
             }
 
             // Back to the scene pipeline for the vehicle. Skipped when

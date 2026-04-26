@@ -12,6 +12,7 @@
 
 mod ambient_worker;
 mod chunked_terrain;
+mod chunked_water;
 mod debug_camera;
 mod debug_gizmo;
 mod debug_hud;

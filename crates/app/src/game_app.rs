@@ -243,6 +243,10 @@ struct Runtime {
     /// iteration mode keeps the legacy single-mesh
     /// `streaming_terrain` path.
     chunked_terrain: Option<crate::chunked_terrain::ChunkedTerrain>,
+    /// Chunked-Voronoi water streaming (Phase 3.6.3c.5). Same shape
+    /// as `chunked_terrain` but for water — per-cell flat-quad meshes,
+    /// smaller streaming radius, no `WorldRefsArc` dep.
+    chunked_water: Option<crate::chunked_water::ChunkedWater>,
     /// Streaming water mesh — same pattern, follows active camera.
     streaming_water: Option<crate::streaming::StreamingWater>,
     /// Streaming Voronoi-cell active set (Phase 3.6.3c.5b Layer 2).
@@ -965,6 +969,16 @@ impl Runtime {
         let chunked_terrain = world_refs
             .as_ref()
             .map(|refs| crate::chunked_terrain::ChunkedTerrain::new(refs.clone()));
+        // Chunked water (Phase 3.6.3c.5) — same gating as chunked
+        // terrain (built when scenario is None + sub-biome catalog
+        // exists). No world_refs dependency since water is flat.
+        let chunked_water = if scenario.is_none() {
+            sub_biome_catalog.as_ref().map(|catalog| {
+                crate::chunked_water::ChunkedWater::new(std::sync::Arc::clone(catalog), WATER_COLOR)
+            })
+        } else {
+            None
+        };
         let (terrain_mesh, streaming_terrain) = if scenario.is_none() {
             if chunked_terrain.is_some() {
                 // Initial empty mesh — first frame's chunks haven't
@@ -989,13 +1003,20 @@ impl Runtime {
             (m, None)
         };
         let (water_mesh, streaming_water) = if scenario.is_none() {
-            let sw = crate::streaming::StreamingWater::new(
-                crate::streaming::WATER_HALF_EXTENT_M,
-                crate::streaming::WATER_CELLS,
-                initial_center,
-                WATER_COLOR,
-            );
-            (sw.cpu_mesh().clone(), Some(sw))
+            if chunked_water.is_some() {
+                // Chunked water active — initial empty mesh; chunks
+                // load incrementally. Renderer's chunked-iteration
+                // branch takes over as soon as the first chunk arrives.
+                (CpuMesh::new("water"), None)
+            } else {
+                let sw = crate::streaming::StreamingWater::new(
+                    crate::streaming::WATER_HALF_EXTENT_M,
+                    crate::streaming::WATER_CELLS,
+                    initial_center,
+                    WATER_COLOR,
+                );
+                (sw.cpu_mesh().clone(), Some(sw))
+            }
         } else {
             let m = CpuMesh::water_grid(WATER_CELLS, WATER_HALF_EXTENT, WATER_COLOR);
             (m, None)
@@ -1102,6 +1123,7 @@ impl Runtime {
             terrain,
             streaming_terrain,
             chunked_terrain,
+            chunked_water,
             streaming_water,
             streaming_cells,
             sub_biome_catalog,
@@ -1590,6 +1612,35 @@ impl Runtime {
                     pending = chunked.pending_count(),
                     resident = chunked.resident_count(),
                     "chunked terrain update"
+                );
+            }
+        }
+        // Chunked-water update — same shape as chunked-terrain, smaller
+        // streaming radius (water visibility is horizon-limited).
+        if let (Some(chunked), Some(catalog)) =
+            (self.chunked_water.as_mut(), self.sub_biome_catalog.as_ref())
+        {
+            let active = catalog.cells_within_radius(
+                active_cam_pos_xz.x,
+                active_cam_pos_xz.y,
+                crate::chunked_water::WATER_STREAM_RADIUS_M,
+            );
+            let update = chunked.update(&active, catalog, active_cam_pos_xz);
+            for cell_id in &update.exited {
+                self.renderer.evict_water_chunk(*cell_id);
+            }
+            for (cell_id, mesh) in &update.entered {
+                self.renderer
+                    .update_water_chunk(&self.device, *cell_id, mesh);
+            }
+            if !update.entered.is_empty() || !update.exited.is_empty() {
+                tracing::info!(
+                    target: "streaming",
+                    entered = update.entered.len(),
+                    exited = update.exited.len(),
+                    pending = chunked.pending_count(),
+                    resident = chunked.resident_count(),
+                    "chunked water update"
                 );
             }
         }

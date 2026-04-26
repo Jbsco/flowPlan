@@ -875,6 +875,132 @@ impl CpuMesh {
         mesh
     }
 
+    /// Build a water mesh chunk for a single Voronoi cell (Phase 3.6.3c.5).
+    ///
+    /// Mirror of [`Self::terrain_voronoi_chunk`] but for the water
+    /// surface. Same world-aligned grid + centroid-owned ownership +
+    /// vertex compression so adjacent water chunks share exact vertex
+    /// positions at boundaries (no z-fight, no T-junctions).
+    ///
+    /// **Differences from terrain**:
+    /// - All vertex Y = 0 (flat surface; FFT displacement applies in
+    ///   the vertex shader at render time per Phase 3.5b).
+    /// - Uniform `+Y` normal (no per-vertex gradient sample).
+    /// - Uniform color from `color` parameter (no terrain-altitude
+    ///   ramp).
+    /// - No `sample_height` callback needed — water surface is the
+    ///   reference plane.
+    ///
+    /// **Per-cell cost**: trivial. ~1100 in-cell verts × 32 bytes ≈
+    /// 36 KB per chunk; build is ~1 ms even single-threaded (no fbm
+    /// noise eval). Chunk pool can use fewer workers than terrain.
+    #[allow(clippy::cast_possible_wrap)]
+    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::expect_used)] // owned-grid-cell invariant
+    pub fn water_voronoi_chunk(
+        bbox_min: (f32, f32),
+        bbox_max: (f32, f32),
+        cell_size_m: f32,
+        in_cell: impl Fn(f32, f32) -> bool + Sync,
+        color: [f32; 4],
+        label: &str,
+    ) -> Self {
+        use rayon::prelude::*;
+        use std::collections::HashMap;
+
+        let mut mesh = Self::new(label);
+
+        let ix_lo = (bbox_min.0 / cell_size_m).floor() as i64;
+        let ix_hi = (bbox_max.0 / cell_size_m).ceil() as i64;
+        let iz_lo = (bbox_min.1 / cell_size_m).floor() as i64;
+        let iz_hi = (bbox_max.1 / cell_size_m).ceil() as i64;
+        let nx = (ix_hi - ix_lo + 1).max(0) as usize;
+        let nz = (iz_hi - iz_lo + 1).max(0) as usize;
+        let total = nx * nz;
+
+        // Pass 1: per grid-cell, determine ownership via centroid test.
+        let n_grid_cells_x = nx.saturating_sub(1);
+        let n_grid_cells_z = nz.saturating_sub(1);
+        let n_grid_cells = n_grid_cells_x * n_grid_cells_z;
+        let owned: Vec<bool> = (0..n_grid_cells)
+            .into_par_iter()
+            .map(|gi| {
+                let ix_off = gi % n_grid_cells_x;
+                let iz_off = gi / n_grid_cells_x;
+                let ix = ix_lo + ix_off as i64;
+                let iz = iz_lo + iz_off as i64;
+                let cx = ix as f32 * cell_size_m + cell_size_m * 0.5;
+                let cz = iz as f32 * cell_size_m + cell_size_m * 0.5;
+                in_cell(cx, cz)
+            })
+            .collect();
+
+        // Pass 2: mark vertices for inclusion (any adjacent owned grid cell).
+        let mut include_vertex: Vec<bool> = vec![false; total];
+        for iz_off in 0..n_grid_cells_z {
+            for ix_off in 0..n_grid_cells_x {
+                if !owned[iz_off * n_grid_cells_x + ix_off] {
+                    continue;
+                }
+                let tl = iz_off * nx + ix_off;
+                let tr = iz_off * nx + ix_off + 1;
+                let bl = (iz_off + 1) * nx + ix_off;
+                let br = (iz_off + 1) * nx + ix_off + 1;
+                include_vertex[tl] = true;
+                include_vertex[tr] = true;
+                include_vertex[bl] = true;
+                include_vertex[br] = true;
+            }
+        }
+
+        // Pass 3: build VBO + remap. No height sample needed — water
+        // is flat at Y=0. The vertex shader applies any FFT
+        // displacement per Phase 3.5b.
+        let mut remap: HashMap<usize, u32> = HashMap::with_capacity(total / 4);
+        for (i, included) in include_vertex.iter().enumerate() {
+            if !*included {
+                continue;
+            }
+            let ix = ix_lo + (i % nx) as i64;
+            let iz = iz_lo + (i / nx) as i64;
+            let x = ix as f32 * cell_size_m;
+            let z = iz as f32 * cell_size_m;
+            remap.insert(i, mesh.vertices.len() as u32);
+            mesh.vertices.push(Vertex {
+                position: [x, 0.0, z],
+                normal: [0.0, 1.0, 0.0],
+                uv: [
+                    (ix - ix_lo) as f32 / nx as f32,
+                    (iz - iz_lo) as f32 / nz as f32,
+                ],
+                color,
+            });
+        }
+
+        // Pass 4: emit triangles for owned grid cells.
+        mesh.indices
+            .reserve(owned.iter().filter(|b| **b).count() * 6);
+        for iz_off in 0..n_grid_cells_z {
+            for ix_off in 0..n_grid_cells_x {
+                if !owned[iz_off * n_grid_cells_x + ix_off] {
+                    continue;
+                }
+                let tl = iz_off * nx + ix_off;
+                let tr = iz_off * nx + ix_off + 1;
+                let bl = (iz_off + 1) * nx + ix_off;
+                let br = (iz_off + 1) * nx + ix_off + 1;
+                let &t = remap.get(&tl).expect("water: owned tl missing");
+                let &r = remap.get(&tr).expect("water: owned tr missing");
+                let &b = remap.get(&bl).expect("water: owned bl missing");
+                let &q = remap.get(&br).expect("water: owned br missing");
+                mesh.indices.extend_from_slice(&[t, b, r, r, b, q]);
+            }
+        }
+        mesh
+    }
+
     /// Build a flat water grid at `y = 0` with uniform color and upward normals.
     ///
     /// Tessellated (not a single quad) so Milestone 2.2.2 can apply Gerstner wave

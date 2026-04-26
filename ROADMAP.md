@@ -1025,9 +1025,14 @@ Architectural pivot. Replaces the v1 monolithic `StreamingTerrain` (one big 20 k
 - [x] **3.6.3c.4.1 fixes**: centroid-ownership (closes water-line cell-boundary gap bug); detached worker shutdown (no `join()` so ESC closes promptly even mid-build).
 - [x] **Bake cache** (3.6.3c.3c.2 / 3.7-precursor): `BakedAssignments` + `FeatureGroupBundle` serialized to `target/world-bake-cache/<seed>-vN.bin` via bincode. Subsequent launches load in seconds instead of re-running the 6-min bake.
 
-**3.6.3c.5 — Chunked water + FFT integration: pending.**
+**3.6.3c.5 — Chunked water mesh streaming: SHIPPED 2026-04-25 (Task #282).**
 
-Following the chunked-Voronoi pattern from 3.6.3c.4. Each cell = its own water-quad mesh (flat for v1, FFT-displaced later per Phase 3.5b).
+Per-Voronoi-cell water chunks following the universal chunked pattern. Each cell = its own flat-quad mesh; FFT displacement per Phase 3.5b plugs in via shader-side per-cell uniform buffers without re-architecting.
+
+- [x] **`CpuMesh::water_voronoi_chunk`** — per-cell builder. World-aligned 60 m grid + centroid-owned ownership + vertex compression. No height sample (Y=0); uniform `+Y` normal; uniform color.
+- [x] **`ChunkedWater` manager** — 2-worker pool, priority queue, condvar wake. `WATER_STREAM_RADIUS_M = 15 km` (smaller than terrain's 22 km — water visibility is horizon-limited). No `WorldRefsArc` dep.
+- [x] **Renderer integration** — `water_chunks` HashMap, `update_water_chunk` / `evict_water_chunk` API, render-pass branch. Legacy single-mesh path preserved for scenarios.
+- [x] **Game-app wiring** — `ChunkedWater` constructed alongside `ChunkedTerrain`; same `scenario.is_none()` gating.
 
 **3.6.3c.6 — Volumetric weather chunks: pending.**
 
