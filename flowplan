@@ -67,7 +67,7 @@ ${BOLD}GATES${RESET}
 
 ${BOLD}CI (via act)${RESET}
   ci                   Run the full quality-gate workflow locally via act.
-  ci-job <name>        Run a specific job: fmt | clippy | test | bench
+  ci-job <name>        Run a specific job: fmt | clippy | test | flight-bench | bench
   ci-perf              Run the nightly perf-budget workflow.
 
 ${BOLD}BUILD${RESET}
@@ -235,7 +235,7 @@ cmd_ci-job() {
     require_act
     local job="${1:-}"
     if [[ -z "$job" ]]; then
-        err "ci-job needs a job name (fmt | clippy | test | bench)"
+        err "ci-job needs a job name (fmt | clippy | test | flight-bench | bench)"
         exit 1
     fi
     step "act push -j $job"

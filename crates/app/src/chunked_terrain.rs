@@ -144,6 +144,15 @@ struct WorkerShared {
     result_tx: Sender<ChunkResult>,
     /// World refs for height sampling (composed L1+L3) + cell catalog.
     world_refs: WorldRefsArc,
+    /// Current camera position. Main thread writes per frame in
+    /// `update()`; workers read at pop time to recompute current
+    /// distance + drop jobs whose cell drifted out of the streaming
+    /// radius (3.6.3c.5.1 staleness check). Avoids ~25 ms of wasted
+    /// mesh-build work per stale cell.
+    camera_pos: std::sync::RwLock<Vec2>,
+    /// Streaming radius (m) — copied at construction. Used by workers
+    /// for the staleness check.
+    streaming_radius_m: f32,
 }
 
 /// Chunked terrain manager.
@@ -176,6 +185,8 @@ impl ChunkedTerrain {
             shutdown: Mutex::new(false),
             result_tx: tx,
             world_refs,
+            camera_pos: std::sync::RwLock::new(Vec2::ZERO),
+            streaming_radius_m: crate::streaming::STREAM_RADIUS_M,
         });
         let mut workers = Vec::with_capacity(MAX_WORKERS);
         for i in 0..MAX_WORKERS {
@@ -209,6 +220,12 @@ impl ChunkedTerrain {
         catalog: &SubBiomeCellCatalog,
         camera_xz: Vec2,
     ) -> ChunkUpdate {
+        // Publish current camera so workers can recompute distance at
+        // pop time and skip stale jobs (3.6.3c.5.1).
+        if let Ok(mut pos) = self.shared.camera_pos.write() {
+            *pos = camera_xz;
+        }
+
         // 1. Detect newly-entered cells (in active_cells but not in
         //    states + not in resident). Enqueue their build jobs.
         let active_set: std::collections::HashSet<CellId> = active_cells.iter().copied().collect();
@@ -373,6 +390,26 @@ fn worker_loop(shared: &Arc<WorkerShared>) {
 fn build_chunk(shared: &Arc<WorkerShared>, job: ChunkJob) {
     let cell_id = job.cell_id;
     let (sx, sz) = job.seed_pos;
+
+    // Pop-time staleness check (3.6.3c.5.1): recompute distance to
+    // the CURRENT camera, not the camera-at-enqueue. If the cell
+    // drifted out of the streaming radius (typical at debug-cam top
+    // tier where the camera may have moved several radii in the time
+    // the job sat in the queue), discard without building. Saves
+    // ~25 ms of wasted mesh-build per stale cell.
+    if let Ok(cam) = shared.camera_pos.read() {
+        let dx = sx - cam.x;
+        let dz = sz - cam.y;
+        // Hysteresis factor 1.5× — prevents thrashing at the radius
+        // boundary. A cell that drifted just past `radius` is still
+        // worth building because it may re-enter on the next camera
+        // move; only drop ones that are clearly outside.
+        let staleness_radius = shared.streaming_radius_m * 1.5;
+        if dx.hypot(dz) > staleness_radius {
+            return;
+        }
+    }
+
     let bbox_min = (sx - MAX_CELL_RADIUS_M, sz - MAX_CELL_RADIUS_M);
     let bbox_max = (sx + MAX_CELL_RADIUS_M, sz + MAX_CELL_RADIUS_M);
 

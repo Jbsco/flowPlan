@@ -1,22 +1,25 @@
 # Cross-platform determinism check.
 #
-# Runs the flight-bench suite on Linux / macOS Intel / macOS Apple Silicon /
-# Windows, hashes the per-scenario CSV outputs, and fails the build if any
-# platform diverges from the Ubuntu baseline.
+# Runs the flight-bench suite on Linux / macOS Apple Silicon / Windows,
+# hashes the per-scenario CSV outputs, and reports any cross-platform
+# divergence (currently `continue-on-error` on the diff job — see comment
+# in `diff` below).
+#
+# **Manual trigger only as of 2026-04-25.** Cross-platform determinism is
+# deferred to Phase 6.1 (DESIGN.md / CODING_RULES.md § Determinism). Until
+# then the hash check has no enforcement value, and running it on every
+# push burned ~3 platforms × bench-time of Actions minutes per push for no
+# enforcement value. Re-enable `push:` / `pull_request:` triggers when the
+# 6.1 determinism work lands and we want regressions to actually fail the
+# build.
 #
 # See CODING_RULES.md § Determinism Discipline for the underlying rules
-# (libm / -fma / codegen-units=1). This workflow is the verification.
-#
-# Scoped narrowly to determinism verification; broader CI (fmt / clippy /
-# full test / frame budget) lands with the 3.4 CI milestone proper.
+# (libm / -fma / codegen-units=1). This workflow will be the verification.
 
 name: Cross-platform determinism
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-  workflow_dispatch: # manual trigger from the Actions UI
+  workflow_dispatch: # manual trigger only — determinism deferred to 6.1
 
 permissions:
   contents: read

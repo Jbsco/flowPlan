@@ -116,6 +116,11 @@ struct WorkerShared {
     result_tx: Sender<WaterChunkResult>,
     catalog: Arc<SubBiomeCellCatalog>,
     color: [f32; 4],
+    /// Current camera position. Written per frame by `update()`; read
+    /// at pop time for the staleness check (3.6.3c.5.1).
+    camera_pos: std::sync::RwLock<Vec2>,
+    /// Water streaming radius (m) — copied at construction.
+    streaming_radius_m: f32,
 }
 
 /// Chunked water manager.
@@ -141,6 +146,8 @@ impl ChunkedWater {
             result_tx: tx,
             catalog,
             color,
+            camera_pos: std::sync::RwLock::new(Vec2::ZERO),
+            streaming_radius_m: WATER_STREAM_RADIUS_M,
         });
         let mut workers = Vec::with_capacity(MAX_WORKERS);
         for i in 0..MAX_WORKERS {
@@ -167,6 +174,12 @@ impl ChunkedWater {
         catalog: &SubBiomeCellCatalog,
         camera_xz: Vec2,
     ) -> WaterChunkUpdate {
+        // Publish current camera so workers can recompute distance at
+        // pop time and skip stale jobs (3.6.3c.5.1).
+        if let Ok(mut pos) = self.shared.camera_pos.write() {
+            *pos = camera_xz;
+        }
+
         let active_set: std::collections::HashSet<CellId> = active_cells.iter().copied().collect();
         let mut new_jobs: Vec<WaterJob> = Vec::new();
         for &cell_id in &active_set {
@@ -290,6 +303,22 @@ fn worker_loop(shared: &Arc<WorkerShared>) {
 fn build_chunk(shared: &Arc<WorkerShared>, job: WaterJob) {
     let cell_id = job.cell_id;
     let (sx, sz) = job.seed_pos;
+
+    // Pop-time staleness check (3.6.3c.5.1): if camera has moved far
+    // enough that this cell is now well outside the streaming radius,
+    // discard without building. Same hysteresis (1.5×) as terrain.
+    // Water builds are cheaper (~1 ms vs ~25 ms terrain) so the win
+    // per skip is smaller, but cost of the check is also tiny — keeps
+    // the universal-pattern symmetric.
+    if let Ok(cam) = shared.camera_pos.read() {
+        let dx = sx - cam.x;
+        let dz = sz - cam.y;
+        let staleness_radius = shared.streaming_radius_m * 1.5;
+        if dx.hypot(dz) > staleness_radius {
+            return;
+        }
+    }
+
     let bbox_min = (sx - MAX_WATER_CELL_RADIUS_M, sz - MAX_WATER_CELL_RADIUS_M);
     let bbox_max = (sx + MAX_WATER_CELL_RADIUS_M, sz + MAX_WATER_CELL_RADIUS_M);
 

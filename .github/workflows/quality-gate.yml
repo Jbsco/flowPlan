@@ -62,6 +62,9 @@ jobs:
   test:
     name: cargo test --workspace
     runs-on: ubuntu-latest
+    # Workspace tests alone are ~3-5 min wall + cold-cache compile; previously
+    # the job also ran flight_bench --release inline and consistently timed
+    # out at the 20-min cap. flight_bench is now its own job (`flight-bench`).
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -78,6 +81,26 @@ jobs:
 
       - name: cargo test --workspace
         run: cargo test --workspace
+
+  flight-bench:
+    name: cargo test --release flight_bench
+    runs-on: ubuntu-latest
+    # Split out from `test` so the workspace test job stays under cap. Release
+    # build of the sim crate + full bench suite runs in ~5-10 min on a warm
+    # cache; allow 20 to absorb cold-cache compile.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (1.93)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93"
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: flight-bench
 
       - name: cargo test --release flight_bench
         run: cargo test -p flowplan-sim --test flight_bench --release

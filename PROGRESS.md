@@ -66,6 +66,40 @@ Each water chunk becomes the unit of FFT displacement. Per-cell uniform buffers 
 
 **Pinned for 3.6.3c.6**: volumetric weather chunks at the W2 weather Voronoi scale (~20-50 km cells). Same template applies.
 
+### Phase 3.6.3c.5.1 — Pop-time staleness check on chunk workers
+
+User direction after seeing 3.6.3c.4 + 3.6.3c.5 land: "are we still chunking in a spiral around the current player/camera position? I would expect this to produce the best result for current viewpoint, so long as it was spiralling outward from the current position it should ensure all the current nearest chunks are fully rendered". Confirmed yes — `cells_within_radius` plus the priority-queue ordering on `priority_dist_m` (camera-distance at enqueue time) already gives nearest-first. Then: "A+B seems good" — refers to the proposal to (A) carry-over the spiral-outward priority + (B) add a pop-time staleness check so workers can drop jobs that drifted out of range while sitting in the queue.
+
+**The drift problem**: the priority queue sorts by camera-distance *at enqueue time*. If the player teleports (debug-cam tier change), or just flies fast enough that 5-10 cells crossed the streaming-radius boundary while the queue was draining, those queued jobs are now wasted work — the cell is no longer in the active set. Without a check, a worker spends ~25 ms (terrain) / ~1 ms (water) building a chunk that the next frame's `update()` will drop.
+
+**Solution shape**: a tiny camera-position publish + recompute-distance-at-pop discipline. Both `WorkerShared`s gain `camera_pos: RwLock<Vec2>` + `streaming_radius_m: f32`. `update()` writes the current camera-position before `notify_all()`. `build_chunk()` reads the camera-position at job pop, recomputes distance, and returns early if outside `streaming_radius * 1.5` (hysteresis).
+
+**Files modified**:
+
+- `crates/app/src/chunked_terrain.rs` — `WorkerShared::camera_pos` + `streaming_radius_m`, `update()` writes camera, `build_chunk()` reads camera + does staleness check.
+- `crates/app/src/chunked_water.rs` — symmetric. Same pattern.
+
+**The 1.5× hysteresis factor**: a cell that drifted *just past* `radius` is still worth building because it may re-enter on the next camera move (player turning, debug-cam reversal). Only cells that are clearly outside (1.5× = 33 km terrain / 22.5 km water) get dropped. Prevents thrashing at the radius boundary without holding onto truly-stale work.
+
+**No additional tests**: the staleness check is a hot-path optimization, not a correctness change. Existing tests cover both the queue priority + cell-enter/exit reconciliation. A regression would manifest as chunks-loading-too-slowly during fast camera moves or extra GPU upload from now-redundant chunks — neither blockable in unit tests; covered by perf-budget integration testing later.
+
+**Universal-pattern propagation**: the staleness check joins priority queue + worker pool + per-cell GPU resource + cell-enter/exit deltas + world-aligned-grid for boundary continuity in the universal-chunked-Voronoi template. Any future layer (volumetric weather 3.6.3c.6, ambient instance pool refactor, NPC AI sim, etc.) that uses this pattern inherits the discipline.
+
+### CI rework: split test/flight-bench, disable cross-platform determinism
+
+User playtest of the previous CI runs: "github actions CI shows at least one action is too long for a time cutoff, might need to be split up, and we may want to disable the hash check since determinism is deferred at the moment."
+
+Confirmed via `gh run list`: every recent push hit the 20-min cap on the `cargo test --workspace` job in `.github/workflows/quality-gate.yml`. Inspection: that job ran BOTH `cargo test --workspace` (workspace tests, ~135 s for the world crate alone + the rest) AND `cargo test -p flowplan-sim --test flight_bench --release` (flight-bench, ~5-10 min in release mode) inline. With cold-cache compile times added, the 20-min cap was unreachable.
+
+**`quality-gate.yml`** — split the `test` job into:
+
+- `test`: `cargo test --workspace` only. 20-min budget should now fit comfortably (~5-10 min cold-cache).
+- `flight-bench`: `cargo test -p flowplan-sim --test flight_bench --release`. 20-min budget. Runs in parallel with `test`, so total wall-clock for the gate stays roughly the same; the difference is no single job hits the cap.
+
+**`determinism.yml`** — trigger removed for `push:` and `pull_request:`. Manual-only via `workflow_dispatch:`. Rationale: cross-platform determinism (libm / `-fma` / per-platform transcendental routes) is deferred to Phase 6.1 per CODING_RULES.md § Determinism Discipline. The `diff` job already had `continue-on-error: true` so it was non-enforcing, and burning ~3 platforms × bench-time per push for an advisory was wasted Actions minutes on a private repo. Re-enable triggers when 6.1 lands and we want regressions to fail the build.
+
+The `perf-budgets.yml` workflow already uses cron+manual triggering only — no change needed.
+
 ### Perf-budget regression tests + dead-code hub-iter cleanup (Task #281)
 
 User direction (sustaining): "any tests we can introduce for frame rate or compute budget? we need a way to stay on top of this aspect of performance".
