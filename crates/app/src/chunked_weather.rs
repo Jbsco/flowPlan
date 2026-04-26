@@ -63,6 +63,14 @@ pub const WEATHER_STREAM_RADIUS_M: f32 = 50_000.0;
 /// so the streaming pipeline is consistent across layers.
 pub const MAX_WORKERS: usize = 1;
 
+/// Sim-time interval (s) for periodic cell-state refresh. Weather cells
+/// evolve through life-cycle phases on minute scales (cumulus 1.5 h
+/// cycle, stratus 6 h, etc.), so re-sampling every 5 sim seconds keeps
+/// the GPU buffer aligned with the cells' continuous evolution without
+/// flooding the worker queue. C-polish 2026-04-26 — earlier C1
+/// implementation took state at cell-enter time only.
+pub const CELL_REFRESH_INTERVAL_S: f32 = 5.0;
+
 /// One worker job — re-sample cell state for `cell_id` at `sim_time`.
 #[derive(Clone)]
 struct WeatherJob {
@@ -205,7 +213,15 @@ impl ChunkedWeather {
             *pos = camera_xz;
         }
 
-        self.snapshot_sim_time_s = sim_time_s;
+        // Periodic refresh — re-sample resident cell state every
+        // CELL_REFRESH_INTERVAL_S sim seconds so cells visibly evolve
+        // through life-cycle phases (build → peak → dissipate). Without
+        // this, cells freeze at their initial state and weather appears
+        // static under the camera.
+        let refresh_due = sim_time_s >= self.snapshot_sim_time_s + CELL_REFRESH_INTERVAL_S;
+        if refresh_due {
+            self.snapshot_sim_time_s = sim_time_s;
+        }
 
         // Compute active cell set. Sample at GRID_SPACING_M / 2 spacing
         // so cells smaller than the average grid (variable-size power-
@@ -216,10 +232,14 @@ impl ChunkedWeather {
             self.shared.streaming_radius_m,
         );
 
-        // Enqueue jobs for newly-entered cells.
+        // Enqueue jobs for newly-entered cells AND for refresh-due
+        // resident cells. Refresh keeps the GPU buffer aligned with the
+        // ongoing cell evolution; new-cell load gets the fresh state at
+        // current time.
         let mut new_jobs: Vec<WeatherJob> = Vec::new();
         for cell_id in &active_set {
-            if !self.states.contains_key(cell_id) {
+            let already_loaded = self.states.contains_key(cell_id);
+            if !already_loaded {
                 let seed_pos = voronoi::seed_position(self.shared.master_seed, *cell_id);
                 let dx = seed_pos.x - camera_xz.x;
                 let dz = seed_pos.y - camera_xz.y;
@@ -230,6 +250,18 @@ impl ChunkedWeather {
                     priority_dist_m: dx.hypot(dz),
                 });
                 self.states.insert(*cell_id, WeatherChunkState::Loading);
+            } else if refresh_due {
+                // Re-sample existing resident — keeps current snapshot
+                // visible until the worker delivers the new one.
+                let seed_pos = voronoi::seed_position(self.shared.master_seed, *cell_id);
+                let dx = seed_pos.x - camera_xz.x;
+                let dz = seed_pos.y - camera_xz.y;
+                new_jobs.push(WeatherJob {
+                    cell_id: *cell_id,
+                    seed_pos,
+                    sim_time_s,
+                    priority_dist_m: dx.hypot(dz),
+                });
             }
         }
         if !new_jobs.is_empty() {

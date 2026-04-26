@@ -137,12 +137,13 @@ fn volumetric_wgsl_cost_constants_within_budget() {
          FPS regression. Reserved for future Ultra-preset opt-in."
     );
 
-    // Sanity: ray-cylinder early-out is the critical perf improvement.
-    // If it gets removed, FPS regresses dramatically. Catch the regression.
+    // Tessellation: shader uses nearest-cell lookup (not per-cell
+    // cylinder iteration). C2-polish 2026-04-26 — circular footprints
+    // were a wrong-feeling shortcut; tessellation is the locked design.
     assert!(
-        VOLUMETRIC_WGSL_SOURCE.contains("ray_vertical_cylinder("),
-        "volumetric.wgsl missing ray_vertical_cylinder early-out. \
-         Removing this drops per-pixel cost by ~5-10× — known regression."
+        VOLUMETRIC_WGSL_SOURCE.contains("find_nearest_active_cell("),
+        "volumetric.wgsl missing tessellation lookup — must use \
+         find_nearest_active_cell, not per-cell circular footprint"
     );
 }
 
@@ -190,12 +191,14 @@ fn volumetric_wgsl_density_model_present() {
     // replaced the hardcoded test cell.
     for name in [
         "fn altitude_profile(",
-        "fn footprint_falloff(",
+        "fn find_nearest_active_cell(",
+        "fn perlin_worley_weights_for_type(",
         "fn sample_cloud_density(",
         "fn ray_altitude_band(",
-        "fn ray_vertical_cylinder(",
         "struct GpuWeatherCell",
         "weather_cells",
+        "GLOBAL_CLOUD_BASE_M",
+        "GLOBAL_CLOUD_TOP_M",
     ] {
         assert!(
             VOLUMETRIC_WGSL_SOURCE.contains(name),

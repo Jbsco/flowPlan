@@ -76,12 +76,15 @@ const CELL_STRATUS: u32   = 3u;
 const CELL_SQUALL: u32    = 4u;
 const CELL_FRONTAL: u32   = 5u;
 
-// Per-cell footprint radius (m). C2 ships a single global footprint;
-// future polish can vary per cell type (storms wider than fair-weather
-// cumulus, stratus = full Voronoi cell). 6 km gives meaningful visible
-// area at typical viewing distances (5-30 km) without overlapping
-// neighboring cells (W2 spacing ~25 km).
-const CELL_FOOTPRINT_M: f32 = 6000.0;
+// Global cloud altitude band (m). Wide enough to cover all cell types:
+// cumulus (1200-4000), nimbus (900-12000), stratus (300-1400), squall
+// (500-5000), frontal (1000-6000). Per-cell base/top further constrain
+// where each cell contributes density. The shader uses these globals
+// for the ray-band early-out so a single ray traversal covers all
+// possible cloud altitudes; per-sample altitude_profile + cell type
+// then decides whether the sample is inside that cell's actual band.
+const GLOBAL_CLOUD_BASE_M: f32 = 200.0;
+const GLOBAL_CLOUD_TOP_M: f32 = 12500.0;
 
 // Worley noise spacing for cumulus sub-cell detail (m).
 // 2000 m at 3 km footprint gives ~1-2 sub-puffs per cumulus — reads as
@@ -143,35 +146,80 @@ fn altitude_profile(cell_type: u32, y_alt_m: f32, base_m: f32, top_m: f32) -> f3
     }
 }
 
-// Footprint falloff — smoothstep from full at center to 0 at footprint
-// edge. B3 single-cell approximation; C1+C2 use Voronoi-cell membership
-// (no falloff needed because the partition tessellates the plane).
-fn footprint_falloff(world_xz: vec2<f32>, seed_xz: vec2<f32>, radius_m: f32) -> f32 {
-    let d = length(world_xz - seed_xz);
-    let t = clamp(1.0 - d / radius_m, 0.0, 1.0);
-    return t * t * (3.0 - 2.0 * t);
+// Find the active cell whose seed_pos is nearest to `world_xz` —
+// implements W2 Voronoi tessellation by brute-force scan over the
+// active set. Per-cell `density <= 0` slots (empty / clear-air) are
+// skipped early. Returns the cell's index in the storage buffer; the
+// caller reads density/type/etc. from that slot.
+//
+// Per WEATHER.md § "No-weather is a type of weather" — every XZ point
+// owns one cell; clear-air cells return density 0 → no cloud rendered
+// at that point. This replaces the C2 v1 circular-footprint shortcut
+// (which produced scattered puffs with gaps between cells) with the
+// correct continuous tessellation.
+//
+// Cost: ~50-64 distance checks per call. At 32 ray-steps per pixel,
+// ~1.5-2k checks per pixel — modest GPU compute (~0.2 ms at 1080p).
+fn find_nearest_active_cell(world_xz: vec2<f32>) -> u32 {
+    var best_idx: u32 = 0u;
+    var best_dist_sq: f32 = 1.0e30;
+    let cell_count = arrayLength(&weather_cells);
+    for (var i = 0u; i < cell_count; i = i + 1u) {
+        let cell = weather_cells[i];
+        if (cell.density <= 0.0) {
+            continue;
+        }
+        let d = world_xz - cell.seed_pos;
+        let dsq = d.x * d.x + d.y * d.y;
+        if (dsq < best_dist_sq) {
+            best_dist_sq = dsq;
+            best_idx = i;
+        }
+    }
+    return best_idx;
 }
 
-// Combined cloud density at a world-space sample point for a specific
-// W2 cell. Composes:
-//   cell.density × altitude profile × footprint falloff × Perlin-Worley blend
+// Per-cell-type Perlin-Worley blend weights (WEATHER.md § Sub-cell
+// detail noise). Cumulus = puffy distinct cells. Nimbus = bulky
+// detailed. Stratus = smooth layered. Squall = textured edges. Frontal
+// = banded with detail.
+fn perlin_worley_weights_for_type(cell_type: u32) -> vec2<f32> {
+    switch cell_type {
+        case 1u: { return vec2<f32>(0.7, 0.3); }  // Cumulus
+        case 2u: { return vec2<f32>(0.5, 0.5); }  // Nimbus
+        case 3u: { return vec2<f32>(0.2, 0.8); }  // Stratus
+        case 4u: { return vec2<f32>(0.6, 0.4); }  // Squall
+        case 5u: { return vec2<f32>(0.4, 0.6); }  // Frontal
+        default: { return vec2<f32>(0.7, 0.3); }  // Cumulus default
+    }
+}
+
+// Cloud density at a world-space sample point.
 //
-// The Perlin-Worley blend per cell type (WEATHER.md § Sub-cell detail
-// noise). For Cumulus / Nimbus / Squall: 0.7 Worley + 0.3 Perlin.
-// Stratus / Frontal use a different blend ratio (deferred — currently
-// all cell types use the same blend; future polish per-type weights).
-fn sample_cloud_density(world_pos: vec3<f32>, cell: GpuWeatherCell) -> f32 {
+// Tessellated W2 model (C2-polish, 2026-04-26):
+// 1. Find which cell owns this XZ via nearest-cell lookup.
+// 2. If clear-air or empty slot, density = 0.
+// 3. Sample altitude_profile against the cell's [base, top] band.
+// 4. Apply Perlin-Worley blend per cell type — produces continuous
+//    cloud structure that flows naturally across cell boundaries when
+//    neighbors share a type, transitions visibly when types differ.
+//
+// The Worley + Perlin noise field is sampled at the absolute world
+// position (not cell-relative), so adjacent same-type cells produce a
+// single continuous cloud structure across their boundary — the
+// "front" or "deck" reads as one body of weather rather than two
+// separate puffs.
+fn sample_cloud_density(world_pos: vec3<f32>) -> f32 {
+    let cell_idx = find_nearest_active_cell(world_pos.xz);
+    let cell = weather_cells[cell_idx];
+    if (cell.density <= 0.0 || cell.cell_type == CELL_CLEAR_AIR) {
+        return 0.0;
+    }
     let alt_factor = altitude_profile(
         cell.cell_type, world_pos.y,
         cell.base_altitude_m, cell.top_altitude_m,
     );
     if (alt_factor <= 0.0) {
-        return 0.0;
-    }
-    let foot_factor = footprint_falloff(
-        world_pos.xz, cell.seed_pos, CELL_FOOTPRINT_M,
-    );
-    if (foot_factor <= 0.0) {
         return 0.0;
     }
     let w = worley_3d(
@@ -188,10 +236,9 @@ fn sample_cloud_density(world_pos: vec3<f32>, cell: GpuWeatherCell) -> f32 {
         CLOUD_PERLIN_SPACING_M,
     );
     let perlin_norm = clamp((perlin_raw + 0.7) / 1.4, 0.0, 1.0);
-    let cloud_factor =
-        CUMULUS_WORLEY_WEIGHT * worley_struct +
-        CUMULUS_PERLIN_WEIGHT * perlin_norm;
-    return cell.density * alt_factor * foot_factor * cloud_factor;
+    let weights = perlin_worley_weights_for_type(cell.cell_type);
+    let cloud_factor = weights.x * worley_struct + weights.y * perlin_norm;
+    return cell.density * alt_factor * cloud_factor;
 }
 
 struct VsOut {
@@ -217,11 +264,12 @@ fn unproject(ndc: vec2<f32>, ndc_z: f32) -> vec3<f32> {
 }
 
 // Maximum raymarch step count — upper bound for the adaptive sampler.
-// Per WEATHER.md the High-preset target is 32 near. The adaptive
-// sampler picks the number of steps based on actual band length so
-// short bands (vertical view through 1 km slab) use ~4-6 steps and
-// long bands (grazing view through 5+ km) approach this cap.
-const RAYMARCH_STEPS_MAX: i32 = 32;
+// 24 steps × 500m target = 12 km global band coverage. With Worley
+// spacing 1500m, 500m steps give 3 samples per noise wavelength —
+// adequate by Nyquist while keeping per-pixel cost bounded under the
+// tessellation cost added by per-step nearest-cell lookup (C2-polish
+// 2026-04-26). Was 32 in the per-cell-iteration era.
+const RAYMARCH_STEPS_MAX: i32 = 24;
 
 // Target step distance (m). With Worley spacing 2000 m, sampling
 // every ~400 m gives 5 samples per feature wavelength — enough for
@@ -340,88 +388,66 @@ fn fs_volumetric(in: VsOut) -> @location(0) vec4<f32> {
         t_terrain = length(depth_pos_cam_rel);
     }
 
-    // Multi-cell raymarch (C2). Iterate the active W2 cells; per cell,
-    // compute ray-cylinder ∩ ray-altitude-band intersection, march
-    // through that, accumulate alpha + color via standard pre-multiplied
-    // alpha-over composition. Cells that don't intersect the ray skip
-    // immediately at the band/cylinder check (no Worley calls).
-    //
-    // Iteration order: storage-buffer order. Pre-multiplied alpha-over
-    // is associative + commutative for non-overlapping density, so
-    // unsorted iteration is correct for the typical "scattered cumulus"
-    // pattern. Future polish (sorted iteration for storm overlap or
-    // dense Stratus decks) can z-sort the active set on the CPU side
-    // before upload.
+    // Tessellated raymarch (C2-polish 2026-04-26). Single ray traversal
+    // through the global cloud altitude band; per-sample nearest-cell
+    // lookup determines weather params at that XZ. This produces
+    // continuous tessellation per WEATHER.md § "No-weather is a type
+    // of weather" — every point belongs to a cell, clear-air cells
+    // contribute zero density, like-type adjacent cells appear as one
+    // continuous body of weather.
+    let band = ray_altitude_band(
+        cam_pos, view_dir,
+        GLOBAL_CLOUD_BASE_M, GLOBAL_CLOUD_TOP_M,
+        MAX_RAY_DISTANCE_M,
+    );
+    if (band.x < 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let t_enter = band.x;
+    let t_exit = min(band.y, t_terrain);
+    if (t_enter >= t_exit) {
+        return vec4<f32>(0.0);
+    }
+    let band_length = t_exit - t_enter;
+    let want_steps = ceil(band_length / RAYMARCH_TARGET_STEP_M);
+    let actual_steps = i32(min(f32(RAYMARCH_STEPS_MAX), max(want_steps, 4.0)));
+    let step_dist = band_length / f32(actual_steps);
+
     var accumulated_alpha: f32 = 0.0;
     var accumulated_color: vec3<f32> = vec3<f32>(0.0);
 
-    let cell_count = arrayLength(&weather_cells);
-    for (var cell_idx: u32 = 0u; cell_idx < cell_count; cell_idx = cell_idx + 1u) {
-        let cell = weather_cells[cell_idx];
-        // Empty / clear-air slot: density 0 → skip (no Worley calls).
-        if (cell.density <= 0.0 || cell.cell_type == CELL_CLEAR_AIR) {
+    for (var i: i32 = 0; i < actual_steps; i = i + 1) {
+        let t = t_enter + step_dist * (f32(i) + 0.5);
+        let sample_pos = cam_pos + view_dir * t;
+        let density = sample_cloud_density(sample_pos);
+        if (density <= 0.0) {
             continue;
         }
-        let band = ray_altitude_band(
-            cam_pos, view_dir,
-            cell.base_altitude_m, cell.top_altitude_m,
-            MAX_RAY_DISTANCE_M,
+        let absorption = 1.0 - exp(-density * step_dist * ABSORPTION_SCALE);
+
+        // Altitude-gradient lighting stand-in (WEATHER.md § Lighting
+        // model — proper shadow march reserved for E1 polish). Uses
+        // the global band rather than per-cell base/top so all cells
+        // share a consistent gradient — Stratus low + Cumulus high
+        // both read with the same overhead-sun behavior.
+        let altitude_t = clamp(
+            (sample_pos.y - GLOBAL_CLOUD_BASE_M)
+                / (GLOBAL_CLOUD_TOP_M - GLOBAL_CLOUD_BASE_M),
+            0.0,
+            1.0,
         );
-        if (band.x < 0.0) {
-            continue;
-        }
-        let cyl = ray_vertical_cylinder(
-            cam_pos, view_dir, cell.seed_pos, CELL_FOOTPRINT_M, MAX_RAY_DISTANCE_M,
-        );
-        if (cyl.x < 0.0) {
-            continue;
-        }
-        let t_enter = max(band.x, cyl.x);
-        let t_exit  = min(min(band.y, cyl.y), t_terrain);
-        if (t_enter >= t_exit) {
-            continue;
-        }
-        // Adaptive step count: short bands → fewer steps; long bands
-        // capped at RAYMARCH_STEPS_MAX. Per-pixel Worley cost scales
-        // with actual step count.
-        let band_length = t_exit - t_enter;
-        let want_steps = ceil(band_length / RAYMARCH_TARGET_STEP_M);
-        let actual_steps = i32(min(f32(RAYMARCH_STEPS_MAX), max(want_steps, 4.0)));
-        let step_dist = band_length / f32(actual_steps);
+        let sun_height = clamp(scene.sun_dir.y, 0.0, 1.0);
+        let lit_factor = mix(0.4, altitude_t, sun_height);
 
-        for (var i: i32 = 0; i < actual_steps; i = i + 1) {
-            let t = t_enter + step_dist * (f32(i) + 0.5);
-            let sample_pos = cam_pos + view_dir * t;
-            let density = sample_cloud_density(sample_pos, cell);
+        let sun_lit_color = scene.sun_color.rgb * 1.4;
+        let shadow_color = scene.ambient.rgb * 0.85;
+        let sample_color = mix(shadow_color, sun_lit_color, lit_factor);
 
-            let absorption = 1.0 - exp(-density * step_dist * ABSORPTION_SCALE);
+        accumulated_color = accumulated_color
+            + sample_color * absorption * (1.0 - accumulated_alpha);
+        accumulated_alpha = accumulated_alpha
+            + absorption * (1.0 - accumulated_alpha);
 
-            // Altitude-gradient lighting stand-in (WEATHER.md § Lighting
-            // model — proper shadow march reserved for E1 polish).
-            let altitude_t = clamp(
-                (sample_pos.y - cell.base_altitude_m)
-                    / max(cell.top_altitude_m - cell.base_altitude_m, 1.0),
-                0.0,
-                1.0,
-            );
-            let sun_height = clamp(scene.sun_dir.y, 0.0, 1.0);
-            let lit_factor = mix(0.4, altitude_t, sun_height);
-
-            let sun_lit_color = scene.sun_color.rgb * 1.4;
-            let shadow_color = scene.ambient.rgb * 0.85;
-            let sample_color = mix(shadow_color, sun_lit_color, lit_factor);
-
-            accumulated_color = accumulated_color
-                + sample_color * absorption * (1.0 - accumulated_alpha);
-            accumulated_alpha = accumulated_alpha
-                + absorption * (1.0 - accumulated_alpha);
-
-            if (accumulated_alpha > 0.99) {
-                break;
-            }
-        }
-
-        // Stop iterating cells once fully opaque — no benefit to more.
         if (accumulated_alpha > 0.99) {
             break;
         }

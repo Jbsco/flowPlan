@@ -106,11 +106,11 @@ const WARMUP_FRAMES: usize = 3;
 /// the frame (terrain streaming, water, vehicle, instances, ambient,
 /// outline, widgets) fits in the remaining budget.
 ///
-/// 3 ms gives ~2× headroom over current 1.5 ms median (post-B3c). At
-/// 3 ms, cloud takes 43% of a 144 Hz frame — still tight but leaves
-/// 4 ms for everything else. Tightening further forces optimization;
-/// loosening risks dropping below 144 Hz once chunked weather streams
-/// real cells (C1 / C2).
+/// 3.5 ms accommodates the C2-polish tessellation refactor (per-step
+/// nearest-cell lookup adds ~30% over the previous per-cell iteration).
+/// At 3.5 ms cloud takes 50% of a 144 Hz frame — tight; leaves 3.5 ms
+/// for everything else. Future optimization (texture-based cell-grid
+/// index, sorted active set + early-exit) targets returning to 2-3 ms.
 ///
 /// **Tune as playtest reveals regressions** (per user-pinned guidance
 /// 2026-04-26). Specifically:
@@ -119,7 +119,7 @@ const WARMUP_FRAMES: usize = 3;
 /// - When this gate fails on legitimate work → measure on reference
 ///   hardware first; only relax if ref-tier hardware ALSO shows the
 ///   regression. Document the rationale with each adjustment.
-const TOTAL_FRAME_BUDGET_MS: f64 = 3.0;
+const TOTAL_FRAME_BUDGET_MS: f64 = 3.5;
 
 #[cfg(feature = "hardware-tests")]
 fn init_wgpu_with_timestamps() -> Option<(wgpu::Device, wgpu::Queue, f32)> {

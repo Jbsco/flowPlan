@@ -1036,7 +1036,7 @@ Per-Voronoi-cell water chunks following the universal chunked pattern. Each cell
 - [x] **Renderer integration** — `water_chunks` HashMap, `update_water_chunk` / `evict_water_chunk` API, render-pass branch. Legacy single-mesh path preserved for scenarios.
 - [x] **Game-app wiring** — `ChunkedWater` constructed alongside `ChunkedTerrain`; same `scenario.is_none()` gating.
 
-**3.6.3c.6 — Volumetric weather chunks: B1-B3c shipped 2026-04-26, C1+ pending.**
+**3.6.3c.6 — Volumetric weather chunks: B1-B3c + C1 + C2 + C2-polish shipped 2026-04-26, future polish pending.**
 
 Volumetric-cloud sampling per W2 weather Voronoi cell (~20-50 km cells). Shader-side cloud-density texture. Builds on the chunked-Voronoi pattern.
 
@@ -1052,13 +1052,26 @@ Shipped in 2026-04-26 iteration:
 - [x] **B3c — Perlin-Worley blend**: 0.7 worley_struct + 0.3 perlin_norm per WEATHER.md Cumulus mapping. Visible internal puff variation.
 - [x] **GPU wall-clock perf-gate**: `crates/render/tests/cloud_pass_perf.rs`. **Locked at 1080p / 144 Hz target / 3 ms budget** per user direction 2026-04-26. Hardware-gated via `Features::TIMESTAMP_QUERY`. Run via `./flowplan test-cloud-perf`. Current cost: 1.0 ms median (989 fps cloud + minimal scene on RX 7900 GRE).
 
-Pending:
+Shipped 2026-04-26 follow-ups:
 
-- [ ] **B4 — GPU readback bit-identity test**: sample N reference points CPU vs GPU, hash both, assert identical. Hardware-gated.
-- [ ] **C1 ChunkedWeather streaming manager**: universal-pattern async-worker streaming per `chunked_voronoi_layers_universal` memory. Storage buffer of `GpuWeatherCell` structs populated as W2 cells enter streaming radius (~50 km).
-- [ ] **C2 — multi-cell rendering integration**: replace hardcoded test-cell constants with indexed cell-state lookup. Spatial-index needed to keep per-pixel cost bounded as cell count rises (80-200 active cells).
-- [ ] **B3c+ shadow march** (E1 / future): proper Beer-Lambert toward sun, fBm with multiple Perlin octaves for fractal detail.
-- [ ] Atmospheric character per cell type (`AtmosphericMood` driving fog tint / sun_color / sky desaturation), fog coupling, particle system — all queued for 3.2x via WEATHER.md design.
+- [x] **B4 — CPU-GPU agreement gate** — hardware-gated compute-shader test, max abs diff 3.3e-4 vs 5e-3 tolerance.
+- [x] **C1 — ChunkedWeather streaming manager** — universal-pattern async-worker streaming, 50 km radius, 25-50 active cells, pop-time staleness check.
+- [x] **C2 — multi-cell rendering integration** — `GpuWeatherCell` storage buffer (64-slot capacity), `Renderer::update_weather_cells` API, render-pass binds group(3) cells.
+- [x] **C2-polish (priority ladder #1-3)** — periodic 5 sim-second cell refresh; per-cell-type Perlin-Worley blend weights; **tessellation correction** (replaced circular footprints with nearest-cell lookup per WEATHER.md "no-weather is a type of weather"). Tessellation is THE locked architectural correction — same-type adjacent cells now appear as one continuous body of weather.
+
+Pending — see [`docs/WEATHER.md` § Implementation priority ladder](../docs/WEATHER.md#implementation-priority-ladder-post-c2-polish-2026-04-26) for the 17-item ranked list. Highlights:
+
+- [ ] **#4 per-cell-type Worley spacing** — Stratus smooth, Squall textured, Cumulus puffy.
+- [ ] **#5 Beer-Lambert shadow march** (E1) — proper sun-lit / shadow-side shading via secondary ray toward sun.
+- [ ] **#6 boundary blending** — smoothstep across cell edges using `distance_to_edge`. Fixes visible boundaries at type transitions.
+- [ ] **#7 AtmosphericMood per cell type** (3.2x) — fog tint / sun_color / sky desaturation per cell type.
+- [ ] **#8 fog + visibility coupling** (3.2x) — sim's `visibility_at` → render fog density.
+- [ ] **#9-11 particle system + rain/snow + wingtip mist + wake spray + wind debris** (3.2x).
+- [ ] **#12 sim cloud-fly-through effects** (3.2x) — turbulence amplification, visibility reduction, icing.
+- [ ] **#13 adjacency-biased cell evolution** (3.2.2c) — sprawling fronts.
+- [ ] **#14 cloud shadows on terrain**.
+- [ ] **#16 atmospheric optics** (5.5) — sun halo, sun dog, rainbow, crepuscular rays, lightning.
+- [ ] **#17 multiple weather layers at different altitudes** — late-milestone, needs design memo first.
 
 **3.6.3c.7 — Palette-adaptation render integration: pending.** *(Was 3.6.3c.4 in earlier roadmap; renumbered when chunked terrain claimed the 4 slot.)*
 

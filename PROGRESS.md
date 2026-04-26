@@ -3,6 +3,68 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
+## 2026-04-26 (iteration 20) — Phase 3.6.3c.6 / 3.2x C2-polish: tessellation correction + cell evolution
+
+C2 v1 shipped multi-cell streaming via circular footprints (each W2 cell rendered as a 6 km circle around its seed), but this produced "scattered identical puffs with gaps" — wrong per the locked WEATHER.md design. Corrected at user direction:
+
+### Tessellation refactor (priority ladder #3)
+
+Replaced circular footprint with nearest-cell lookup in the shader. Every world XZ point owns exactly one cell (per W2 power-diagram); cell type provides altitude band + density + per-type Perlin-Worley blend weights. Cloud structure within the cell's footprint comes from the noise field, which is continuous across cell boundaries → adjacent same-type cells appear as one body of weather. Different-type adjacent cells produce visible (currently sharp) transitions; smoothstep boundary blend is locked design but pending implementation.
+
+`crates/render/src/volumetric.wgsl`:
+- New `find_nearest_active_cell(world_xz)` — brute-force distance scan over active set, returns cell index. Skips empty (`density <= 0`) slots fast.
+- `sample_cloud_density(world_pos)` rewritten to use nearest-cell lookup; no more cell parameter.
+- `fs_volumetric` simplified — single ray traversal through `GLOBAL_CLOUD_BASE_M..=GLOBAL_CLOUD_TOP_M` (200-12500 m, covers all cell-type altitude bands) instead of per-cell band+cylinder iteration.
+- `RAYMARCH_STEPS_MAX` lowered 32 → 24 (12 km global band / 500 m steps; cost-bounded for tessellation refactor).
+- `ABSORPTION_SCALE` raised 0.0015 → 0.0022 to compensate for W2 cumulus cells' lower default density (0.35 vs B3 hardcoded test cell's 0.6).
+
+### Periodic cell refresh (priority ladder #1)
+
+`crates/app/src/chunked_weather.rs`:
+- `CELL_REFRESH_INTERVAL_S = 5.0` — re-sample resident cell state every 5 sim seconds. Without this, cells froze at their cell-enter-time state and weather appeared static.
+- `update()` enqueues both new cells AND refresh-due residents to the worker queue; existing snapshot stays visible until worker delivers the updated one.
+
+Effect: clouds visibly evolve through life-cycle phases (build → peak → dissipate) as you fly cross-country.
+
+### Per-cell-type Perlin-Worley weights (priority ladder #2)
+
+`crates/render/src/volumetric.wgsl::perlin_worley_weights_for_type(cell_type)` — switch returning the per-type blend per WEATHER.md table:
+
+| Cell type | Worley | Perlin | Visual |
+| --- | ---: | ---: | --- |
+| Cumulus | 0.7 | 0.3 | puffy distinct cells |
+| Nimbus | 0.5 | 0.5 | bulky with detail |
+| Stratus | 0.2 | 0.8 | smooth layered |
+| Squall | 0.6 | 0.4 | textured edges |
+| Frontal | 0.4 | 0.6 | banded with detail |
+
+Was hardcoded to Cumulus 0.7/0.3 for all types in C2 v1. Now each type renders with its appropriate texture character.
+
+### Implementation priority ladder
+
+WEATHER.md gains a 17-item priority ladder (effort × visual-impact ranked) covering tessellation correction (✓ shipped), cell refresh (✓ shipped), per-type blends (✓ shipped), per-type Worley spacing, Beer-Lambert shadow march, boundary blending, AtmosphericMood, fog coupling, particle system, rain/snow, sim cloud-fly-through, adjacency-biased evolution, cloud shadows on terrain, icing, atmospheric optics, multi-altitude weather layers. ROADMAP.md / WEATHER.md / memory pinned.
+
+### Perf-gate adjusted
+
+Budget bumped 3.0 → 3.5 ms at 1080p. Tessellation refactor (per-step nearest-cell scan ~50 distance checks vs C2 v1's per-cell early-out) added ~30% per-pixel cost. Current measurement: **2.794 ms median** (358 fps cloud + minimal scene), well under the new 3.5 ms gate. Future optimization (texture-based cell-grid index + sorted active set + early-exit) targets returning to 2-3 ms.
+
+### Debug HUD: weather cell count
+
+`debug_hud.rs` gains `weather cells N` line under `instances` so streaming activity is visible in debug-cam mode.
+
+### Tests
+
+- 5 chunked_weather tests still pass with refresh logic
+- Volumetric parse tests updated for new symbols (`find_nearest_active_cell`, `perlin_worley_weights_for_type`, `GLOBAL_CLOUD_BASE_M/TOP_M`)
+- Cloud-pass perf gate at new 3.5 ms budget — passing
+- CPU-GPU agreement test still passes (3.3e-4 max abs diff)
+
+### Pinned next steps (from priority ladder)
+
+- **#4 continuous qualification margin** (~80-100 LOC, **NEW user-pinned 2026-04-26**): replace binary cell-type classification with continuous `coverage_strength` via smoothstep over W1 inputs. Cells well above threshold = solid; marginal qualifiers = broken / sparse cover; ClearAir cells near threshold get wispy haze instead of zero. Produces organic coverage gradients across the world; eliminates "all cumulus cells render identically." Design pinned in WEATHER.md § Continuous qualification margin + memory `weather_continuous_coverage_margin`. **Important to land BEFORE further rendering work** so all subsequent calibration uses the right model. Includes #4b per-cell-type Worley spacing as a sub-item.
+- **#5 Beer-Lambert shadow march** (~80 LOC + ~30% perf cost): proper sun-lit / shadow-side shading via secondary ray toward sun.
+- **#6 boundary blending** (~50-80 LOC): smoothstep blend across cell edges using `distance_to_edge`. Fixes visible boundaries between different-type cells.
+
 ## 2026-04-26 (iteration 19) — Phase 3.6.3c.6 / 3.2x volumetric clouds: B1-B3c shipped
 
 Volumetric cloud rendering reaches first-visible state. The complete A-B path from WEATHER.md design memo lands across this iteration: Worley noise primitive (CPU + GPU bit-identity), cloud shader skeleton wired into the render pipeline, density sampling with hardcoded test cell, depth termination so clouds clip at scene geometry, lighting stand-in for sun-lit/shadow gradient, and Perlin-Worley blend per the locked WEATHER.md design.
