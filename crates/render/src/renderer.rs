@@ -265,9 +265,17 @@ pub struct Renderer {
     water_pipeline: wgpu::RenderPipeline,
     outline_pipeline: wgpu::RenderPipeline,
     sky_pipeline: wgpu::RenderPipeline,
-    /// Volumetric cloud raymarcher pipeline (Phase 3.6.3c.6 / 3.2x B2
-    /// skeleton — returns transparent; B3+ adds density sampling).
+    /// Volumetric cloud raymarcher pipeline (Phase 3.6.3c.6 / 3.2x).
+    /// B3 adds density sampling; B3b adds depth read-only for terrain
+    /// ray termination.
     volumetric_pipeline: wgpu::RenderPipeline,
+    /// Bind group layout for the cloud-pass depth read (B3b). Kept on
+    /// the renderer so resize can rebuild the bind group when the depth
+    /// view is recreated.
+    volumetric_depth_bgl: wgpu::BindGroupLayout,
+    /// Bind group binding the depth view for the cloud raymarcher to
+    /// sample. Rebuilt on resize alongside `outline_bg`.
+    volumetric_depth_bg: wgpu::BindGroup,
     depth_view: wgpu::TextureView,
     camera_buf: wgpu::Buffer,
     camera_bg: wgpu::BindGroup,
@@ -504,14 +512,28 @@ impl Renderer {
         let sky_pipeline =
             build_sky_pipeline(device, &sky_pipeline_layout, &sky_shader, surface_format);
 
-        // Volumetric cloud pipeline layout shares the camera + scene bind groups with
-        // sky. B3+ adds a third group for scene-depth read-only access (ray
-        // termination at terrain). The skeleton (B2) doesn't read depth; uniform
-        // bindings are sufficient.
+        // Volumetric cloud pipeline layout: camera + scene + depth groups.
+        // Depth bind group (3.6.3c.6 / 3.2x B3b) lets the cloud shader sample
+        // scene depth so rays terminate at terrain — no more clouds rendering
+        // through mountains.
+        let volumetric_depth_bgl =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("flowplan-volumetric-depth-bgl"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                }],
+            });
         let volumetric_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("flowplan-volumetric-pipeline-layout"),
-                bind_group_layouts: &[&camera_bgl, &scene_bgl],
+                bind_group_layouts: &[&camera_bgl, &scene_bgl, &volumetric_depth_bgl],
                 push_constant_ranges: &[],
             });
         let volumetric_pipeline = build_volumetric_pipeline(
@@ -520,6 +542,8 @@ impl Renderer {
             &volumetric_shader,
             surface_format,
         );
+        let volumetric_depth_bg =
+            build_volumetric_depth_bind_group(device, &volumetric_depth_bgl, &depth_view);
 
         let outline_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("outline-params-ubo"),
@@ -679,6 +703,8 @@ impl Renderer {
             outline_pipeline,
             sky_pipeline,
             volumetric_pipeline,
+            volumetric_depth_bgl,
+            volumetric_depth_bg,
             depth_view,
             camera_buf,
             camera_bg,
@@ -900,6 +926,10 @@ impl Renderer {
             &self.depth_view,
             &self.outline_params_buf,
         );
+        // Same for the volumetric cloud pass — its B3b depth bind group
+        // also points at the depth view and needs re-binding on resize.
+        self.volumetric_depth_bg =
+            build_volumetric_depth_bind_group(device, &self.volumetric_depth_bgl, &self.depth_view);
     }
 
     /// Intentional read accessor; render crate may grow multiple model-bind-group layouts.
@@ -1190,6 +1220,7 @@ impl Renderer {
             pass.set_pipeline(&self.volumetric_pipeline);
             pass.set_bind_group(0, &self.camera_bg, &[]);
             pass.set_bind_group(1, &self.scene_bg, &[]);
+            pass.set_bind_group(2, &self.volumetric_depth_bg, &[]);
             pass.draw(0..3, 0..1);
         }
 
@@ -1660,6 +1691,24 @@ fn build_outline_bind_group(
                 resource: params_buf.as_entire_binding(),
             },
         ],
+    })
+}
+
+/// Build the depth-only bind group for the volumetric cloud pass (B3b).
+/// Mirrors `build_outline_bind_group` for symmetry — both passes read
+/// the scene-pass depth view as a sampled depth texture.
+fn build_volumetric_depth_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    depth_view: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("flowplan-volumetric-depth-bg"),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(depth_view),
+        }],
     })
 }
 

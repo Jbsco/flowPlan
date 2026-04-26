@@ -43,6 +43,11 @@ struct SceneUniform {
 };
 @group(1) @binding(0) var<uniform> scene: SceneUniform;
 
+// Scene-pass depth texture (B3b). Used to terminate rays at terrain
+// so clouds don't render through mountains. Sampled via textureLoad
+// at integer pixel coords (no sampler needed).
+@group(2) @binding(0) var scene_depth: texture_depth_2d;
+
 // ──────────────────────────────────────────────────────────────────
 // B3 cloud-density model
 // ──────────────────────────────────────────────────────────────────
@@ -295,11 +300,33 @@ fn fs_volumetric(in: VsOut) -> @location(0) vec4<f32> {
     let view_dir = normalize(world_far - world_near);
     let cam_pos = camera.view_pos.xyz;
 
+    // B3b — sample scene depth so cloud rays terminate at scene
+    // geometry (terrain, water, vehicle, instances). depth_ndc ∈ [0, 1];
+    // 1.0 = sky / cleared (no scene hit, no termination needed).
+    // Anything < 1.0 = solid pixel.
+    //
+    // Camera-relative rendering caveat: per Phase 3.6.3c.5d the
+    // inverse_view_proj used here is `(proj * rotation_only_view).inverse()`
+    // — it does NOT include the camera translation. So `unproject(ndc,
+    // depth)` returns the position **relative to the camera**, not
+    // absolute world. Distance from camera = `length(unprojected)` —
+    // do NOT subtract cam_pos again. (Subtracting cam_pos was a bug
+    // that made the aircraft appear to not write depth: t_terrain came
+    // out wildly wrong, so the clamp didn't bite.)
+    let frag_pixel = vec2<i32>(in.clip_pos.xy);
+    let depth_ndc = textureLoad(scene_depth, frag_pixel, 0);
+    var t_terrain = MAX_RAY_DISTANCE_M;
+    if (depth_ndc < 1.0) {
+        let depth_pos_cam_rel = unproject(in.ndc, depth_ndc);
+        t_terrain = length(depth_pos_cam_rel);
+    }
+
     // Two early-outs to skip Worley evaluation for the vast majority of
     // pixels (sky above clouds, terrain below, side-views missing the
     // cell entirely). The cell's volume is the intersection of:
     //   - altitude band [base, top]
     //   - vertical cylinder centered on (seed_x, seed_z) with radius footprint_m
+    //   - ray distance ≤ scene-depth distance (B3b)
     let band = ray_altitude_band(
         cam_pos, view_dir, TEST_CELL_BASE_M, TEST_CELL_TOP_M, MAX_RAY_DISTANCE_M,
     );
@@ -316,7 +343,7 @@ fn fs_volumetric(in: VsOut) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0);
     }
     let t_enter = max(band.x, cyl.x);
-    let t_exit  = min(band.y, cyl.y);
+    let t_exit  = min(min(band.y, cyl.y), t_terrain);
     if (t_enter >= t_exit) {
         return vec4<f32>(0.0);
     }

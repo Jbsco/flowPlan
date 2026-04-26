@@ -148,9 +148,9 @@ fn volumetric_wgsl_cost_constants_within_budget() {
 
 #[test]
 fn volumetric_wgsl_uses_expected_bind_groups() {
-    // @group(0) = camera, @group(1) = scene per
-    // `docs/WEATHER.md` § Cloud rendering technique → Render pass
-    // placement. B3 adds @group(2) for depth read.
+    // @group(0) = camera, @group(1) = scene, @group(2) = scene depth
+    // (B3b — for ray termination at terrain). Per `docs/WEATHER.md`
+    // § Cloud rendering technique → Render pass placement.
     assert!(
         VOLUMETRIC_WGSL_SOURCE.contains("@group(0) @binding(0) var<uniform> camera"),
         "volumetric.wgsl missing camera bind group at @group(0)"
@@ -158,6 +158,25 @@ fn volumetric_wgsl_uses_expected_bind_groups() {
     assert!(
         VOLUMETRIC_WGSL_SOURCE.contains("@group(1) @binding(0) var<uniform> scene"),
         "volumetric.wgsl missing scene bind group at @group(1)"
+    );
+    assert!(
+        VOLUMETRIC_WGSL_SOURCE.contains("@group(2) @binding(0) var scene_depth"),
+        "volumetric.wgsl missing depth bind group at @group(2) (B3b)"
+    );
+}
+
+#[test]
+fn volumetric_wgsl_b3b_depth_termination_present() {
+    // B3b ships the depth-sampling logic that clamps t_exit to the
+    // terrain-pixel distance. Catches accidental rollback to B3 (no
+    // depth termination) which would render clouds through mountains.
+    assert!(
+        VOLUMETRIC_WGSL_SOURCE.contains("textureLoad(scene_depth"),
+        "volumetric.wgsl missing scene_depth textureLoad — B3b regression"
+    );
+    assert!(
+        VOLUMETRIC_WGSL_SOURCE.contains("t_terrain"),
+        "volumetric.wgsl missing t_terrain clamp — B3b regression"
     );
 }
 
