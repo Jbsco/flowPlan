@@ -365,17 +365,37 @@ fn fs_volumetric(in: VsOut) -> @location(0) vec4<f32> {
         let sample_pos = cam_pos + view_dir * t;
         let density = sample_cloud_density(sample_pos, scene.time.x);
 
-        // Beer-Lambert single-scatter accumulation. B3c will add a
-        // shadow-march toward sun; B3 uses uniform sun_color shading.
+        // Beer-Lambert single-scatter accumulation along the view ray.
         let absorption = 1.0 - exp(-density * step_dist * ABSORPTION_SCALE);
-        // Shading: sun-lit base color tinted with ambient. Cloud color
-        // brightens with sun direction; shadow side picks up ambient.
-        // B3c will replace this with secondary-march transmittance.
-        let sample_color = mix(
-            scene.ambient.rgb * 1.5,    // shadow tint
-            scene.sun_color.rgb * 1.2,  // sun-lit tint
-            0.7,                         // bias toward sun-lit; tune in E1
+
+        // Cheap directional shading via altitude gradient. Top of cloud
+        // band reads as sun-lit; bottom reads as shadowed. When sun is
+        // overhead (sun_dir.y ≈ 1) the gradient is strongest; at low
+        // sun the shading flattens.
+        //
+        // **Stand-in for real lighting**: the locked design (WEATHER.md
+        // § Cloud rendering technique → Lighting model) calls for a
+        // Beer-Lambert shadow-march from the sample toward the sun,
+        // accumulating density along that secondary ray. This costs an
+        // extra 6 density samples per primary step (~50% per-pixel
+        // overhead). Deferred to E1 polish where the shading model
+        // gets tuned alongside the Perlin-Worley blend (B3c). The
+        // altitude gradient below is the cheap interim — gives the
+        // cloud directional character without the shadow-march cost.
+        let altitude_t = clamp(
+            (sample_pos.y - TEST_CELL_BASE_M) / (TEST_CELL_TOP_M - TEST_CELL_BASE_M),
+            0.0,
+            1.0,
         );
+        let sun_height = clamp(scene.sun_dir.y, 0.0, 1.0);
+        let lit_factor = mix(0.4, altitude_t, sun_height);
+
+        // Sun-lit warm + ambient-cool shadow. Brighter / more saturated
+        // sun_lit boosts contrast against terrain backgrounds.
+        let sun_lit_color = scene.sun_color.rgb * 1.4;
+        let shadow_color = scene.ambient.rgb * 0.85;
+        let sample_color = mix(shadow_color, sun_lit_color, lit_factor);
+
         accumulated_color = accumulated_color
             + sample_color * absorption * (1.0 - accumulated_alpha);
         accumulated_alpha = accumulated_alpha

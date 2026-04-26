@@ -175,6 +175,8 @@ Worley provides the cellular puffiness; Perlin provides smooth fill. Octave coun
 
 **[LOCKED]** — Banded alpha cel-shading is the art-direction constraint (PLAN.md, FEATURES.md § 953-959, `volumetric_clouds_target` memory). Quantize accumulated transmittance into N bands (`[RECOMMENDED]` N=6 for v1) before output.
 
+**Status (2026-04-26)**: B3 ships an **altitude-gradient stand-in** (top of cloud reads as sun-lit, bottom as shadowed; gradient strength scales with `sun_dir.y` so low-sun gives flatter shading). This is the cheap interim until the proper shadow march lands — the cloud has directional character without the per-step secondary march cost. Real fix below queues for E1 polish where the shading model is tuned alongside the Perlin-Worley blend (B3c).
+
 **[RECOMMENDED]** — Single sun-lit / shadow-side shading via **one-bounce Beer-Lambert toward sun**:
 
 ```
