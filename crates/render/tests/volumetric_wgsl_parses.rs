@@ -206,3 +206,21 @@ fn volumetric_wgsl_b3_density_model_present() {
         "volumetric.wgsl B3 must call worley_3d"
     );
 }
+
+#[test]
+fn volumetric_wgsl_b3c_perlin_worley_blend_present() {
+    // B3c ships Perlin-Worley blend per WEATHER.md § Sub-cell detail.
+    // Catches accidental rollback to Worley-only.
+    assert!(
+        VOLUMETRIC_WGSL_SOURCE.contains("cloud_perlin_3d("),
+        "volumetric.wgsl missing cloud_perlin_3d call — B3c regression"
+    );
+    assert!(
+        VOLUMETRIC_WGSL_SOURCE.contains("CUMULUS_WORLEY_WEIGHT"),
+        "volumetric.wgsl missing CUMULUS_WORLEY_WEIGHT — B3c regression"
+    );
+    assert!(
+        VOLUMETRIC_WGSL_SOURCE.contains("CUMULUS_PERLIN_WEIGHT"),
+        "volumetric.wgsl missing CUMULUS_PERLIN_WEIGHT — B3c regression"
+    );
+}

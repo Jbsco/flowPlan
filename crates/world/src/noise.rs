@@ -769,6 +769,129 @@ pub fn worley_3d(
     }
 }
 
+/// 3D Perlin gradient at integer cell corner. Returns unit vector
+/// derived from the PCG hash chain — same pattern as
+/// [`feature_jitter_3d`] for CPU↔GPU bit-identity.
+///
+/// Uses `octave * 0x...EBA1u` constants distinct from Worley's
+/// `0xD24367E1u` so the same `(seed, octave, cell)` does not collide
+/// between the two noise systems. Caller should also use a Perlin-
+/// specific octave offset (Worley reserves 240, Perlin uses 241+).
+#[allow(clippy::cast_sign_loss)]
+#[allow(clippy::cast_possible_truncation)]
+fn cloud_perlin_gradient_3d(
+    seed: u64,
+    octave: u32,
+    ix: i64,
+    iy: i64,
+    iz: i64,
+    n_cells: i64,
+) -> [f32; 3] {
+    let ix_w = wrap_cell_index(ix, n_cells) as u32;
+    let iz_w = wrap_cell_index(iz, n_cells) as u32;
+    // Y axis hashes via direct cast; negative altitudes get distinct
+    // bit patterns from positives. Different multiplier from
+    // feature_jitter_3d's 0xC2B2_AE35 to avoid any collision.
+    let iy_h = (iy as u32).wrapping_mul(0x9E37_79B1);
+    let s0 = seed_to_u32(seed) ^ octave.wrapping_mul(0xCC9E_2D51) ^ ix_w;
+    let s1 = seed_to_u32(seed).rotate_left(7) ^ octave.wrapping_mul(0x1B87_3593) ^ iy_h;
+    let s2 = seed_to_u32(seed).rotate_left(19) ^ octave.wrapping_mul(0xCAFE_BABE) ^ iz_w;
+    let h = pcg_3d_hash([s0, s1, s2]);
+    // Map u32 → f32 in [-1, 1]. 2 / u32::MAX as f32 has tiny precision
+    // loss but matches WGSL's `f32(u32) * scale - 1.0` exactly when
+    // both compute `2 / 4294967295.0`. Use libm operations only — no
+    // platform-specific intrinsics.
+    #[allow(clippy::cast_precision_loss)]
+    let scale = 2.0_f32 / u32::MAX as f32;
+    #[allow(clippy::cast_precision_loss)]
+    let gx = (h[0] as f32) * scale - 1.0;
+    #[allow(clippy::cast_precision_loss)]
+    let gy = (h[1] as f32) * scale - 1.0;
+    #[allow(clippy::cast_precision_loss)]
+    let gz = (h[2] as f32) * scale - 1.0;
+    let len_sq = gx * gx + gy * gy + gz * gz;
+    let inv_len = if len_sq > 1e-6 {
+        1.0 / libm::sqrtf(len_sq)
+    } else {
+        1.0
+    };
+    [gx * inv_len, gy * inv_len, gz * inv_len]
+}
+
+/// Single-octave 3D Perlin noise for cloud sub-cell detail.
+///
+/// Pure u32 PCG hash chain → bit-identical CPU↔GPU when both use
+/// wrap-on-overflow arithmetic. Companion to [`worley_3d`] in the
+/// Perlin-Worley blend per
+/// [`docs/WEATHER.md`](../../../../docs/WEATHER.md#sub-cell-detail-noise).
+///
+/// **Distinct from existing `perlin_2d`**: this uses the u32 PCG hash
+/// (matches WGSL precisely), while the existing 2D Perlin uses the
+/// u64 splitmix64 hash (CPU-only, terrain/biome/weather consumer).
+/// Naming convention — "cloud_*" prefix marks the u32-hash family
+/// reserved for CPU-GPU shared cloud rendering.
+///
+/// Output range: roughly `[-1.0, 1.0]` (theoretical bound for unit
+/// gradients trilinearly interpolated; typical samples in `[-0.7, 0.7]`).
+///
+/// **Wrap invariant**: X and Z wrap toroidally via [`wrap_cell_index`]
+/// at `n_cells = WORLD_EXTENT_M / spacing_m`. Y axis (altitude) is
+/// unbounded — does NOT wrap.
+///
+/// **Cost**: ~8 hash calls + 8 dot products + trilinear interp.
+/// ~3-5× cheaper than [`worley_3d`] at `features_per_cell = 1`.
+#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::cast_sign_loss)]
+#[allow(clippy::many_single_char_names)] // (x,y,z,u,v,w,k) match standard Perlin notation
+pub fn cloud_perlin_3d(seed: u64, octave: u32, x: f32, y: f32, z: f32, spacing_m: f32) -> f32 {
+    let x = wrap_coord(x);
+    let z = wrap_coord(z);
+    // Y unwrapped — altitude bounded by physics, not topology.
+    let n_cells = (WORLD_EXTENT_M / spacing_m).round() as i64;
+    #[allow(clippy::cast_precision_loss)]
+    let effective_spacing = WORLD_EXTENT_M / n_cells as f32;
+    let xs = x / effective_spacing;
+    let ys = y / effective_spacing;
+    let zs = z / effective_spacing;
+    let ix = libm::floorf(xs) as i64;
+    let iy = libm::floorf(ys) as i64;
+    let iz = libm::floorf(zs) as i64;
+    #[allow(clippy::cast_precision_loss)]
+    let fx = xs - ix as f32;
+    #[allow(clippy::cast_precision_loss)]
+    let fy = ys - iy as f32;
+    #[allow(clippy::cast_precision_loss)]
+    let fz = zs - iz as f32;
+
+    // 8 corners, each contributes (gradient · offset_from_corner).
+    let mut dots = [0.0_f32; 8];
+    for k in 0..8 {
+        let dx = i64::from(k & 1);
+        let dy = i64::from((k >> 1) & 1);
+        let dz = i64::from((k >> 2) & 1);
+        let g = cloud_perlin_gradient_3d(seed, octave, ix + dx, iy + dy, iz + dz, n_cells);
+        #[allow(clippy::cast_precision_loss)]
+        let ofx = fx - dx as f32;
+        #[allow(clippy::cast_precision_loss)]
+        let ofy = fy - dy as f32;
+        #[allow(clippy::cast_precision_loss)]
+        let ofz = fz - dz as f32;
+        dots[k as usize] = g[0] * ofx + g[1] * ofy + g[2] * ofz;
+    }
+
+    let u = fade(fx);
+    let v = fade(fy);
+    let w = fade(fz);
+
+    let nx00 = lerp(dots[0], dots[1], u);
+    let nx10 = lerp(dots[2], dots[3], u);
+    let nx01 = lerp(dots[4], dots[5], u);
+    let nx11 = lerp(dots[6], dots[7], u);
+    let nxy0 = lerp(nx00, nx10, v);
+    let nxy1 = lerp(nx01, nx11, v);
+    lerp(nxy0, nxy1, w)
+}
+
 /// Per-region feature-count `k ∈ {1, 2, 3}` for multi-feature Worley.
 ///
 /// Sampled from a coarse Perlin density field at `density_spacing_m`
@@ -1310,6 +1433,98 @@ mod tests {
                 assert!((1..=3).contains(&k), "k out of range at ({x}, {z}): {k}");
             }
         }
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // cloud_perlin_3d tests
+    // ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cloud_perlin_3d_deterministic() {
+        let a = cloud_perlin_3d(42, 241, 100.0, 500.0, 200.0, 1500.0);
+        let b = cloud_perlin_3d(42, 241, 100.0, 500.0, 200.0, 1500.0);
+        assert_eq!(a.to_bits(), b.to_bits());
+    }
+
+    #[test]
+    fn cloud_perlin_3d_in_unit_range() {
+        // Theoretical bound is ~[-1, 1]; typical samples are tighter.
+        // Catches buggy hashes that produce out-of-range output.
+        for ix in 0..15 {
+            for iy in 0..5 {
+                for iz in 0..15 {
+                    let x = (ix as f32 - 7.0) * 200.0;
+                    let y = (iy as f32 - 2.0) * 300.0;
+                    let z = (iz as f32 - 7.0) * 200.0;
+                    let v = cloud_perlin_3d(42, 241, x, y, z, 1500.0);
+                    assert!(
+                        (-1.5..=1.5).contains(&v),
+                        "perlin out of range at ({x}, {y}, {z}): {v}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cloud_perlin_3d_wraps_toroidally() {
+        // X+Z wrap, Y unbounded.
+        for &(x, y, z) in &[
+            (0.0_f32, 500.0, 0.0_f32),
+            (1234.5, 1500.0, -567.8),
+            (250_000.0, 2200.0, -100_000.0),
+        ] {
+            let a = cloud_perlin_3d(42, 241, x, y, z, 1500.0);
+            let b = cloud_perlin_3d(42, 241, x + WORLD_EXTENT_M, y, z, 1500.0);
+            let c = cloud_perlin_3d(42, 241, x, y, z + WORLD_EXTENT_M, 1500.0);
+            assert!((a - b).abs() < 1e-3, "x-wrap at ({x},{y},{z}): {a} vs {b}");
+            assert!((a - c).abs() < 1e-3, "z-wrap at ({x},{y},{z}): {a} vs {c}");
+        }
+    }
+
+    #[test]
+    fn cloud_perlin_3d_y_axis_does_not_wrap() {
+        // Different altitudes should produce different values.
+        let a = cloud_perlin_3d(42, 241, 100.0, 500.0, 100.0, 1500.0);
+        let b = cloud_perlin_3d(42, 241, 100.0, 5_000.0, 100.0, 1500.0);
+        assert!(
+            (a - b).abs() > 1e-3,
+            "perlin should differ across y; got {a} vs {b}"
+        );
+    }
+
+    #[test]
+    fn cloud_perlin_3d_different_seeds_decorrelated() {
+        let mut differs = false;
+        for ix in 0..10 {
+            for iz in 0..10 {
+                let x = ix as f32 * 200.0;
+                let z = iz as f32 * 200.0;
+                let a = cloud_perlin_3d(1, 241, x, 1500.0, z, 1500.0);
+                let b = cloud_perlin_3d(2, 241, x, 1500.0, z, 1500.0);
+                if a.to_bits() != b.to_bits() {
+                    differs = true;
+                    break;
+                }
+            }
+            if differs {
+                break;
+            }
+        }
+        assert!(differs, "perlin seeds 1 vs 2 produced identical output");
+    }
+
+    #[test]
+    fn cloud_perlin_3d_smooth_continuity() {
+        // Adjacent samples should be similar (Perlin is C2-continuous).
+        // Catches buggy gradient calc that produces discontinuities.
+        let a = cloud_perlin_3d(42, 241, 100.0, 1500.0, 100.0, 1500.0);
+        let b = cloud_perlin_3d(42, 241, 100.1, 1500.0, 100.0, 1500.0);
+        // ~0.0001% along cell, change should be tiny.
+        assert!(
+            (a - b).abs() < 0.01,
+            "perlin discontinuity at small offset: {a} vs {b}"
+        );
     }
 
     #[test]

@@ -73,6 +73,11 @@ fn cloud_noise_wgsl_exports_expected_functions() {
         "wrap_cell_index_u32",
         "seed_to_u32",
         "rotl_u32",
+        // B3c Perlin-Worley blend
+        "cloud_perlin_3d",
+        "cloud_perlin_gradient_3d",
+        "cloud_perlin_fade",
+        "cloud_perlin_lerp",
     ];
     for f in expected_fns {
         let signature = format!("fn {f}(");

@@ -78,16 +78,27 @@ const TEST_CELL_FOOTPRINT_M: f32 = 3000.0;
 // Worley noise spacing for cumulus sub-cell detail (m).
 // 2000 m at 3 km footprint gives ~1-2 sub-puffs per cumulus — reads as
 // "cumulus with single internal puff" rather than cellular patchwork.
-// Allows the F1 distance to span more of the ray, so density is more
-// stable as camera moves. Tunable per cell type once W2 streaming lands.
 const CLOUD_WORLEY_SPACING_M: f32 = 2000.0;
-const CLOUD_NOISE_OCTAVE: u32 = 240u;
+const CLOUD_WORLEY_OCTAVE: u32 = 240u;
 // `features_per_cell = 1` halves the per-Worley-call distance-compute
-// cost vs k=2 (27 vs 54 distance computes in 3D). Single-feature pure
-// F1 distance is sufficient for the visual character we want once the
-// density-modulation curve is calibrated; the F1+F2 blend is reserved
-// for higher-quality presets (Ultra) when we expose them.
+// cost vs k=2. Single-feature pure F1 distance is sufficient for the
+// visual character we want once the density-modulation curve is
+// calibrated; F1+F2 blend reserved for Ultra preset.
 const CLOUD_FEATURES_PER_CELL: u32 = 1u;
+
+// Perlin sub-cell detail (B3c). Spacing slightly smaller than Worley
+// so Perlin adds within-puff density variation rather than duplicating
+// Worley's cell shape. Octave 241 (Worley = 240) per WEATHER.md
+// octave-offset convention `[240, 280)` reserved for cloud noise.
+const CLOUD_PERLIN_SPACING_M: f32 = 1500.0;
+const CLOUD_PERLIN_OCTAVE: u32 = 241u;
+
+// Perlin-Worley blend weights per cell type (WEATHER.md § Sub-cell
+// detail noise). For Cumulus (current test cell): 0.7 worley + 0.3
+// perlin. C2 will store per-cell weights when the streaming buffer
+// includes cell type — for B3c the test cell is hardcoded Cumulus.
+const CUMULUS_WORLEY_WEIGHT: f32 = 0.7;
+const CUMULUS_PERLIN_WEIGHT: f32 = 0.3;
 
 // Master seed for the cloud-noise field. Matches WORLD_SEED in
 // `crates/app/src/main.rs` (decimal 1234567890123456789). Hardcoded
@@ -144,28 +155,37 @@ fn sample_cloud_density(world_pos: vec3<f32>, t: f32) -> f32 {
     if (foot_factor <= 0.0) {
         return 0.0;
     }
-    // Worley f_blended ∈ [0, ~1.0]. Lower values = closer to feature
-    // center = denser cloud puff. We use a SUBTLE Worley contribution
-    // rather than gating: a base density that's always present within
-    // the cell's footprint+altitude range, modulated by Worley to add
-    // sub-cell structure without producing the "cluster of micro-puffs"
-    // artifact pure Worley produces.
+    // Perlin-Worley blend (B3c) per WEATHER.md § Sub-cell detail
+    // noise. Worley provides the cellular puffiness (where puffs are
+    // and aren't); Perlin provides smooth fill (variation within
+    // puffs). The blend produces real cumulus character: solid where
+    // Worley says puff, wispy where Perlin sets edge texture.
     //
-    // Formula: base 0.6 + Worley modulation in [0.0, 0.4].
-    // - At feature center (f_blended ≈ 0): density factor = 1.0
-    // - At cell corner (f_blended ≈ 0.7): density factor = 0.6
-    // The cloud reads as a coherent puff with internal density
-    // variation, not separate puffs glued together. Perlin-Worley
-    // blend (B3c) will further smooth this; pure Worley with subtle
-    // contribution is the v0 stability fix.
+    // Worley structure: 1 - f_blended. Range [0, ~1] — high near
+    // feature center (puff core), low at cell corners (puff edge).
     let w = worley_3d(
         CLOUD_SEED_HI, CLOUD_SEED_LO,
-        CLOUD_NOISE_OCTAVE,
+        CLOUD_WORLEY_OCTAVE,
         world_pos.x, world_pos.y, world_pos.z,
         CLOUD_WORLEY_SPACING_M, CLOUD_FEATURES_PER_CELL,
     );
-    let worley_density = clamp(1.0 - w.f_blended * 0.6, 0.6, 1.0);
-    return TEST_CELL_DENSITY * alt_factor * foot_factor * worley_density;
+    let worley_struct = clamp(1.0 - w.f_blended, 0.0, 1.0);
+
+    // Perlin variation: native [-1, 1] → normalize to [0, 1].
+    let perlin_raw = cloud_perlin_3d(
+        CLOUD_SEED_HI, CLOUD_SEED_LO,
+        CLOUD_PERLIN_OCTAVE,
+        world_pos.x, world_pos.y, world_pos.z,
+        CLOUD_PERLIN_SPACING_M,
+    );
+    let perlin_norm = clamp((perlin_raw + 1.0) * 0.5, 0.0, 1.0);
+
+    // Cumulus blend: 70% Worley structure + 30% Perlin variation.
+    let cloud_factor =
+        CUMULUS_WORLEY_WEIGHT * worley_struct +
+        CUMULUS_PERLIN_WEIGHT * perlin_norm;
+
+    return TEST_CELL_DENSITY * alt_factor * foot_factor * cloud_factor;
 }
 
 struct VsOut {

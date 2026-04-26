@@ -227,6 +227,98 @@ fn worley_2d(
     return result;
 }
 
+// 3D Perlin noise — single octave. Companion to worley_3d for the
+// Perlin-Worley blend (WEATHER.md § sub-cell detail noise). Cheaper
+// than Worley (~3-5×). Same wrap discipline (X+Z wrap, Y unbounded).
+//
+// Bit-identical to Rust `cloud_perlin_3d` when both use u32 wrap-on-
+// overflow arithmetic.
+
+fn cloud_perlin_gradient_3d(
+    seed_hi: u32, seed_lo: u32,
+    octave: u32,
+    ix: i32, iy: i32, iz: i32, n_cells: i32,
+) -> vec3<f32> {
+    let ix_w = wrap_cell_index_u32(ix, n_cells);
+    let iz_w = wrap_cell_index_u32(iz, n_cells);
+    // Distinct multiplier from feature_jitter_3d's 0xC2B2AE35u to
+    // avoid collisions with Worley feature jitter.
+    let iy_h = u32(iy) * 0x9E3779B1u;
+    let s = seed_to_u32(seed_hi, seed_lo);
+    let s0 = s ^ (octave * 0xCC9E2D51u) ^ ix_w;
+    let s1 = rotl_u32(s, 7u) ^ (octave * 0x1B873593u) ^ iy_h;
+    let s2 = rotl_u32(s, 19u) ^ (octave * 0xCAFEBABEu) ^ iz_w;
+    let h = pcg_3d_hash(vec3<u32>(s0, s1, s2));
+    // Map u32 → f32 in [-1, 1]. Same precision behavior as Rust's
+    // `(h as f32) * (2.0 / u32::MAX as f32) - 1.0`.
+    let scale = 2.0 / 4294967295.0;
+    let gx = f32(h.x) * scale - 1.0;
+    let gy = f32(h.y) * scale - 1.0;
+    let gz = f32(h.z) * scale - 1.0;
+    let len_sq = gx * gx + gy * gy + gz * gz;
+    var inv_len = 1.0;
+    if (len_sq > 1e-6) {
+        inv_len = 1.0 / sqrt(len_sq);
+    }
+    return vec3<f32>(gx, gy, gz) * inv_len;
+}
+
+fn cloud_perlin_fade(t: f32) -> f32 {
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+fn cloud_perlin_lerp(a: f32, b: f32, t: f32) -> f32 {
+    return a + t * (b - a);
+}
+
+fn cloud_perlin_3d(
+    seed_hi: u32, seed_lo: u32,
+    octave: u32,
+    x: f32, y: f32, z: f32,
+    spacing_m: f32,
+) -> f32 {
+    let xw = wrap_coord(x);
+    let zw = wrap_coord(z);
+    let n_cells = i32(round(WORLD_EXTENT_M / spacing_m));
+    let effective_spacing = WORLD_EXTENT_M / f32(n_cells);
+    let xs = xw / effective_spacing;
+    let ys = y / effective_spacing;
+    let zs = zw / effective_spacing;
+    let ix = i32(floor(xs));
+    let iy = i32(floor(ys));
+    let iz = i32(floor(zs));
+    let fx = xs - f32(ix);
+    let fy = ys - f32(iy);
+    let fz = zs - f32(iz);
+
+    var dots: array<f32, 8>;
+    for (var k = 0; k < 8; k = k + 1) {
+        let dx = k & 1;
+        let dy = (k >> 1) & 1;
+        let dz = (k >> 2) & 1;
+        let g = cloud_perlin_gradient_3d(
+            seed_hi, seed_lo, octave,
+            ix + dx, iy + dy, iz + dz, n_cells,
+        );
+        let ofx = fx - f32(dx);
+        let ofy = fy - f32(dy);
+        let ofz = fz - f32(dz);
+        dots[k] = g.x * ofx + g.y * ofy + g.z * ofz;
+    }
+
+    let u = cloud_perlin_fade(fx);
+    let v = cloud_perlin_fade(fy);
+    let w = cloud_perlin_fade(fz);
+
+    let nx00 = cloud_perlin_lerp(dots[0], dots[1], u);
+    let nx10 = cloud_perlin_lerp(dots[2], dots[3], u);
+    let nx01 = cloud_perlin_lerp(dots[4], dots[5], u);
+    let nx11 = cloud_perlin_lerp(dots[6], dots[7], u);
+    let nxy0 = cloud_perlin_lerp(nx00, nx10, v);
+    let nxy1 = cloud_perlin_lerp(nx01, nx11, v);
+    return cloud_perlin_lerp(nxy0, nxy1, w);
+}
+
 fn worley_3d(
     seed_hi: u32, seed_lo: u32,
     octave: u32,
