@@ -47,6 +47,24 @@ Every design and implementation decision must honor this one-liner. If you are w
 - **No vibe coding.** Exploratory prototyping lives on a scratch branch and does not ship. Production code must trace to the design.
 - **Bench tests are dual-purpose.** The flight-test bench (`crates/sim/src/flight_bench.rs`) contains BOTH capability scenarios (aircraft correctly does X) AND envelope-limit scenarios (aircraft correctly fails when pushed past X). Players will push the model past realistic envelopes in normal play — the bench must verify that out-of-envelope behavior stays realistic. **Do not force-fit**: don't widen tolerances to mask envelope failures, don't soften scenario conditions to dodge failures, don't delete scenarios because "they fail." See `skills/flowplan-flight-bench/SKILL.md` Core Rule #9 and `skills/flowplan-flight-bench/references/model-gap-triage.md` for the discipline. When a bench scenario fails: first ask "is the aircraft behaving correctly per real-world physics?" If yes, the scenario needs re-classification (capability → envelope-limit), not a tolerance bump.
 
+## Dev entry point — `./flowplan`
+
+A unified shell script at the project root wraps the common dev tasks. Prefer it over raw `cargo` invocations for actions covered:
+
+| Task | Command | Notes |
+| --- | --- | --- |
+| Run game | `./flowplan run` | Default `northlander/floats`, release profile. Add `--aircraft catalina --variant wheels --instances` for variations; `--instances` sets `FLOWPLAN_FEATURE_INSTANCES=1` (full bake). |
+| Local gate (pre-push) | `./flowplan gate` | fmt + clippy + test |
+| Per-step gate | `./flowplan fmt-check` / `clippy` / `test` | Individual steps |
+| Perf-budget tests | `./flowplan test-perf` | Includes `#[ignore]` budgets — ~3 min |
+| Local CI via act | `./flowplan ci` / `ci-job <name>` / `ci-perf` | Mirrors GitHub Actions workflows |
+| Bake cache | `./flowplan cache-info` / `cache-clean` | Inspect / wipe `target/world-bake-cache/` |
+| Visual bench | `./flowplan bench <name>` (e.g. `feature_groups`) | Lists via `bench-list` |
+| Flight bench | `./flowplan flight-bench [--scenario X]` | Outputs to `target/flight-bench/` |
+| Help | `./flowplan help` | Authoritative list of subcommands |
+
+Add new subcommands by editing `flowplan` (the script) — append a `cmd_<name>()` function + register it in the `case` dispatch + add a help line. Bash, no compile cost, easy to extend. See `docs/CI.md` for the act configuration the `ci*` subcommands rely on.
+
 ## Agent-specific
 
 - Read this file, then the six specs in order. No shortcuts.
@@ -54,3 +72,4 @@ Every design and implementation decision must honor this one-liner. If you are w
 - No new dependencies without human approval. Approved dependencies are enumerated in [DESIGN.md](DESIGN.md#tech-stack).
 - When a spec doc is ambiguous, do not guess: propose a clarifying amendment and stop.
 - No commits unless explicitly asked.
+- Prefer `./flowplan <subcommand>` for common dev tasks; fall back to raw `cargo` for one-offs the script doesn't cover.

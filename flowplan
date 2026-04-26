@@ -1,0 +1,337 @@
+#!/usr/bin/env bash
+# flowPlan dev entry point.
+#
+# Single-script wrapper for build / run / gate / CI / bake-cache /
+# visual-bench / flight-bench. Subcommands compose: `./flowplan gate &&
+# ./flowplan run` runs the full pre-push gate then launches the game.
+#
+# Why bash, not xtask: zero compile overhead on each invocation; one
+# file; trivially composable with shell pipelines. Linux + macOS + WSL
+# users covered. Native Windows: use Git Bash or WSL.
+#
+# Add new subcommands by adding a `cmd_<name>()` function + a help
+# line. Keep subcommand names short + verb-shaped.
+
+set -euo pipefail
+
+# ───────────────────────────────────────────────────────────────────────
+# Defaults — override via env or CLI flags below.
+# ───────────────────────────────────────────────────────────────────────
+DEFAULT_AIRCRAFT="${FLOWPLAN_AIRCRAFT:-northlander}"
+DEFAULT_VARIANT="${FLOWPLAN_VARIANT:-floats}"
+DEFAULT_PROFILE="release"
+
+# Project root — script is at the root, so everything else is relative.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+# ───────────────────────────────────────────────────────────────────────
+# Logging helpers — colored if the terminal supports it.
+# ───────────────────────────────────────────────────────────────────────
+if [[ -t 1 ]] && [[ "${NO_COLOR:-}" == "" ]]; then
+    BOLD=$'\e[1m'; DIM=$'\e[2m'; RED=$'\e[31m'; GREEN=$'\e[32m'
+    YELLOW=$'\e[33m'; BLUE=$'\e[34m'; CYAN=$'\e[36m'; RESET=$'\e[0m'
+else
+    BOLD=""; DIM=""; RED=""; GREEN=""; YELLOW=""; BLUE=""; CYAN=""; RESET=""
+fi
+
+step() { echo "${CYAN}▸${RESET} ${BOLD}$*${RESET}"; }
+ok()   { echo "${GREEN}✓${RESET} $*"; }
+warn() { echo "${YELLOW}⚠${RESET} $*" >&2; }
+err()  { echo "${RED}✗${RESET} $*" >&2; }
+
+# ───────────────────────────────────────────────────────────────────────
+# Subcommand: help
+# ───────────────────────────────────────────────────────────────────────
+cmd_help() {
+    cat <<EOF
+${BOLD}flowPlan${RESET} dev entry point. Run from project root.
+
+${BOLD}USAGE${RESET}
+  ./flowplan <subcommand> [options]
+
+${BOLD}GAME${RESET}
+  run [--aircraft ID] [--variant ID] [--instances] [--debug] [--scenario PATH]
+                       Launch the game. Default: ${DEFAULT_AIRCRAFT}/${DEFAULT_VARIANT}, release profile.
+                       --instances sets FLOWPLAN_FEATURE_INSTANCES=1 (full bake).
+                       --debug uses the dev profile (faster compile, slower run).
+                       --scenario PATH plays a scenario instead of free flight.
+
+${BOLD}GATES${RESET}
+  gate                 Local pre-push gate: fmt + clippy + test.
+  fmt                  cargo fmt --all
+  fmt-check            cargo fmt --all -- --check (CI-style)
+  clippy               cargo clippy --workspace --all-targets -- -D warnings
+  test                 cargo test --workspace
+  test-perf            Run perf-budget tests (incl. --ignored, ~3 min).
+
+${BOLD}CI (via act)${RESET}
+  ci                   Run the full quality-gate workflow locally via act.
+  ci-job <name>        Run a specific job: fmt | clippy | test | bench
+  ci-perf              Run the nightly perf-budget workflow.
+
+${BOLD}BUILD${RESET}
+  build [--debug]      cargo build --workspace --release (or --debug)
+  clean                cargo clean
+  clean-all            cargo clean + wipe target/world-bake-cache/
+
+${BOLD}BAKE CACHE${RESET}
+  cache-info           Show bake-cache status (file count, sizes, ages).
+  cache-clean          Wipe target/world-bake-cache/ — forces re-bake on next launch.
+
+${BOLD}VISUAL BENCHES${RESET}
+  bench-list           List all available visual-bench tests.
+  bench <name>         Run a visual-bench test (e.g. 'feature_groups',
+                       'feature_instances', 'ambient', 'sub_biome').
+                       Artifacts land in target/world-gen-plots/<name>/.
+
+${BOLD}FLIGHT BENCH${RESET}
+  flight-bench [--scenario ID]
+                       Run the sim flight-bench. Outputs CSV + plots to
+                       target/flight-bench/.
+
+${BOLD}EXAMPLES${RESET}
+  ./flowplan run                                # default — northlander/floats
+  ./flowplan run --aircraft catalina --variant wheels --instances
+  ./flowplan gate                               # before pushing
+  ./flowplan ci-job clippy                      # verify CI clippy step
+  ./flowplan bench feature_groups               # generate road-network artifacts
+  FLOWPLAN_AIRCRAFT=catalina ./flowplan run     # env-var override
+
+${DIM}# Configuration: see docs/CI.md for act setup.${RESET}
+EOF
+}
+
+# ───────────────────────────────────────────────────────────────────────
+# Subcommand: run
+# ───────────────────────────────────────────────────────────────────────
+cmd_run() {
+    local aircraft="$DEFAULT_AIRCRAFT"
+    local variant="$DEFAULT_VARIANT"
+    local instances=0
+    local profile="$DEFAULT_PROFILE"
+    local extra_args=()
+    local scenario=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --aircraft) aircraft="$2"; shift 2;;
+            --variant)  variant="$2";  shift 2;;
+            --instances) instances=1;  shift;;
+            --debug)    profile="debug"; shift;;
+            --scenario) scenario="$2"; shift 2;;
+            *) extra_args+=("$1"); shift;;
+        esac
+    done
+
+    local cargo_args=(run -p flowplan-app)
+    [[ "$profile" == "release" ]] && cargo_args+=(--release)
+    cargo_args+=(--)
+    cargo_args+=(--aircraft "$aircraft" --variant "$variant")
+    [[ -n "$scenario" ]] && cargo_args+=(--scenario "$scenario")
+    cargo_args+=("${extra_args[@]}")
+
+    step "launching flowPlan: aircraft=${aircraft} variant=${variant} profile=${profile}$([[ $instances -eq 1 ]] && echo ' (FEATURE_INSTANCES=1)')"
+    if [[ $instances -eq 1 ]]; then
+        FLOWPLAN_FEATURE_INSTANCES=1 cargo "${cargo_args[@]}"
+    else
+        cargo "${cargo_args[@]}"
+    fi
+}
+
+# ───────────────────────────────────────────────────────────────────────
+# Subcommands: gate / fmt / clippy / test
+# ───────────────────────────────────────────────────────────────────────
+cmd_gate() {
+    step "fmt --check"
+    cargo fmt --all -- --check
+    ok "fmt clean"
+
+    step "clippy -D warnings"
+    cargo clippy --workspace --all-targets -- -D warnings
+    ok "clippy clean"
+
+    step "test --workspace"
+    cargo test --workspace
+    ok "all tests pass"
+
+    echo ""
+    ok "${BOLD}gate clean — ready to push${RESET}"
+}
+
+cmd_fmt()       { cargo fmt --all; }
+cmd_fmt-check() { cargo fmt --all -- --check; }
+cmd_clippy()    { cargo clippy --workspace --all-targets -- -D warnings; }
+cmd_test()      { cargo test --workspace; }
+
+cmd_test-perf() {
+    step "perf-budget tests (incl. --ignored, ~3 min bake)"
+    cargo test -p flowplan-world --release --test perf_budgets -- --ignored --nocapture
+}
+
+# ───────────────────────────────────────────────────────────────────────
+# Subcommands: build / clean
+# ───────────────────────────────────────────────────────────────────────
+cmd_build() {
+    local profile="release"
+    [[ "${1:-}" == "--debug" ]] && profile="debug"
+    if [[ "$profile" == "release" ]]; then
+        step "cargo build --workspace --release"
+        cargo build --workspace --release
+    else
+        step "cargo build --workspace"
+        cargo build --workspace
+    fi
+}
+
+cmd_clean()     { step "cargo clean"; cargo clean; }
+cmd_clean-all() {
+    step "cargo clean + bake-cache wipe"
+    cargo clean
+    rm -rf target/world-bake-cache 2>/dev/null || true
+    ok "clean"
+}
+
+# ───────────────────────────────────────────────────────────────────────
+# Subcommands: bake cache
+# ───────────────────────────────────────────────────────────────────────
+cmd_cache-info() {
+    local dir="target/world-bake-cache"
+    if [[ ! -d "$dir" ]]; then
+        echo "${DIM}no cache directory ($dir)${RESET}"
+        return 0
+    fi
+    step "bake cache @ $dir"
+    if [[ -z "$(ls -A "$dir" 2>/dev/null)" ]]; then
+        echo "${DIM}empty${RESET}"
+    else
+        ls -lhAt "$dir" | tail -n +2
+    fi
+}
+
+cmd_cache-clean() {
+    step "wiping target/world-bake-cache/"
+    rm -rf target/world-bake-cache
+    ok "next launch will re-bake"
+}
+
+# ───────────────────────────────────────────────────────────────────────
+# Subcommands: CI via act
+# ───────────────────────────────────────────────────────────────────────
+require_act() {
+    if ! command -v act >/dev/null 2>&1; then
+        err "act not installed. See docs/CI.md § Install."
+        exit 1
+    fi
+}
+
+cmd_ci() {
+    require_act
+    step "act push -W .github/workflows/quality-gate.yml"
+    act push -W .github/workflows/quality-gate.yml
+}
+
+cmd_ci-job() {
+    require_act
+    local job="${1:-}"
+    if [[ -z "$job" ]]; then
+        err "ci-job needs a job name (fmt | clippy | test | bench)"
+        exit 1
+    fi
+    step "act push -j $job"
+    act push -W .github/workflows/quality-gate.yml -j "$job"
+}
+
+cmd_ci-perf() {
+    require_act
+    step "act workflow_dispatch -W .github/workflows/perf-budgets.yml"
+    act workflow_dispatch -W .github/workflows/perf-budgets.yml
+}
+
+# ───────────────────────────────────────────────────────────────────────
+# Subcommands: visual-bench tests
+# ───────────────────────────────────────────────────────────────────────
+cmd_bench-list() {
+    step "available visual-bench tests"
+    find crates/world/tests -name '*_visual_bench.rs' -o -name 'feature_*_bench.rs' \
+        | sed 's|crates/world/tests/||; s|\.rs||' \
+        | sort
+    echo ""
+    echo "${DIM}Run with: ./flowplan bench <name>${RESET}"
+}
+
+cmd_bench() {
+    local name="${1:-}"
+    if [[ -z "$name" ]]; then
+        err "bench needs a test target name. Run './flowplan bench-list'."
+        exit 1
+    fi
+    step "bench $name (release, --ignored, --nocapture)"
+    cargo test -p flowplan-world --release --test "$name" -- --ignored --nocapture
+    echo ""
+    ok "artifacts: target/world-gen-plots/"
+}
+
+# ───────────────────────────────────────────────────────────────────────
+# Subcommand: flight-bench
+# ───────────────────────────────────────────────────────────────────────
+cmd_flight-bench() {
+    local scenario_filter=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --scenario) scenario_filter="$2"; shift 2;;
+            *) shift;;
+        esac
+    done
+    if [[ -n "$scenario_filter" ]]; then
+        step "flight-bench: $scenario_filter"
+        cargo test -p flowplan-sim --release --test flight_bench -- "$scenario_filter" --nocapture
+    else
+        step "flight-bench: all scenarios"
+        cargo test -p flowplan-sim --release --test flight_bench -- --nocapture
+    fi
+    echo ""
+    ok "outputs: target/flight-bench/"
+}
+
+# ───────────────────────────────────────────────────────────────────────
+# Dispatch
+# ───────────────────────────────────────────────────────────────────────
+main() {
+    local cmd="${1:-help}"
+    [[ $# -gt 0 ]] && shift
+
+    # Map dashed names to function names. Bash function names allow `-`
+    # but require quoting; `cmd_test-perf` is valid as a function name
+    # but invoking it requires `command` or function-call syntax. Use
+    # case dispatch instead — clearer.
+    case "$cmd" in
+        help|-h|--help)   cmd_help ;;
+        run)              cmd_run "$@" ;;
+        gate)             cmd_gate ;;
+        fmt)              cmd_fmt ;;
+        fmt-check)        cmd_fmt-check ;;
+        clippy)           cmd_clippy ;;
+        test)             cmd_test ;;
+        test-perf)        cmd_test-perf ;;
+        build)            cmd_build "$@" ;;
+        clean)            cmd_clean ;;
+        clean-all)        cmd_clean-all ;;
+        cache-info)       cmd_cache-info ;;
+        cache-clean)      cmd_cache-clean ;;
+        ci)               cmd_ci ;;
+        ci-job)           cmd_ci-job "$@" ;;
+        ci-perf)          cmd_ci-perf ;;
+        bench-list)       cmd_bench-list ;;
+        bench)            cmd_bench "$@" ;;
+        flight-bench)     cmd_flight-bench "$@" ;;
+        *)
+            err "unknown subcommand: $cmd"
+            echo ""
+            cmd_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

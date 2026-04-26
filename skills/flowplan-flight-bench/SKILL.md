@@ -92,7 +92,7 @@ See [references/assertion-matrix.md](references/assertion-matrix.md) for per-sce
 
 This is the loop. Do not skip steps:
 
-1. **Run the bench** (`tools/run_flight_bench.sh` or `cargo test -p flowplan-sim --test flight_bench --release`). Writes CSVs to `target/flight-bench/<aircraft>/<variant>/<scenario>.csv` — one per (scenario × variant) combo. Shared-flight scenarios produce multiple CSVs (one per variant); contact-physics scenarios produce one.
+1. **Run the bench** (`./flowplan flight-bench` or `tools/run_flight_bench.sh` or `cargo test -p flowplan-sim --test flight_bench --release`; the `./flowplan` script is the modern entry point — see project CLAUDE.md). Writes CSVs to `target/flight-bench/<aircraft>/<variant>/<scenario>.csv` — one per (scenario × variant) combo. Shared-flight scenarios produce multiple CSVs (one per variant); contact-physics scenarios produce one. Filter to a specific scenario via `./flowplan flight-bench --scenario <name>` (passes through to cargo test as a name filter).
 2. **Read the plot for the scenario that's furthest off target.** Altitude trending one direction? Airspeed oscillating? FPA not converging? Identify the *symptom* before the fix.
 3. **Map symptom to coefficient.** See [references/symptom-map.md](references/symptom-map.md). Examples:
    - Altitude drifts down in cruise → Cm_α or throttle-to-thrust curve too weak.

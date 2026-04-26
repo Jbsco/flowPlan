@@ -1,0 +1,54 @@
+# Perf-budget regression tests (Phase 3.6.3c.4 perf discipline).
+#
+# Runs the `#[ignore]` perf-budget tests in `crates/world/tests/perf_budgets.rs`.
+# These need a 30-60 s world-bake per test, so we don't run them on every
+# push (would burn Actions minutes on a private repo). Nightly schedule +
+# manual workflow_dispatch covers regression-detection without per-push cost.
+#
+# The non-ignored budget (`perf_budget_terrain_height_l1`) already runs in
+# the main `quality-gate.yml::test` job — no need to duplicate.
+#
+# Discipline when a budget fails: see TEST_PLAN.md § Tier 4b.
+
+name: Perf-budget regression tests
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Nightly at 04:00 UTC. Adjust if the team prefers a different cadence.
+    - cron: "0 4 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-budgets-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  perf:
+    name: cargo test -- --ignored
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (1.93)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93"
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: perf-budgets
+
+      # Release profile so the budget numbers match production. Debug
+      # profile would inflate timings 5-10× and the budgets would fail
+      # falsely on otherwise-acceptable code.
+      - name: cargo test perf_budgets (release, ignored)
+        run: |
+          cargo test -p flowplan-world \
+            --release \
+            --test perf_budgets \
+            -- --ignored --nocapture
