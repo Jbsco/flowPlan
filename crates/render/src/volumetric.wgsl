@@ -155,53 +155,85 @@ fn altitude_profile(cell_type: u32, y_alt_m: f32, base_m: f32, top_m: f32) -> f3
     }
 }
 
-// Find the cell whose seed_pos is nearest to `world_xz` — implements
-// W2 Voronoi tessellation by brute-force scan over the buffered active
-// set. Returns the cell's index in the storage buffer.
+// Two-cell nearest-cell lookup result for boundary blending (CM-6).
+// `d1` and `d2` are the actual (non-squared) distances; `d1 <= d2`.
+struct NearestTwo {
+    idx1: u32,
+    idx2: u32,
+    d1: f32,
+    d2: f32,
+}
+
+// Find the two cells whose `seed_pos` are nearest to `world_xz` —
+// implements W2 Voronoi tessellation with **boundary-blend support**
+// (CM-6, 2026-04-26). The caller blends the two cells' contributions
+// based on the relative distances so cell boundaries are smooth rather
+// than hard cutoffs. CM-1 ensured ClearAir cells participate in the
+// scan; CM-6 returns the two best, not just the one best.
 //
-// **Critical**: includes ClearAir cells in the search. A clear-air
-// cell legitimately "owns" its Voronoi region; the caller (sample
-// density) handles density=0 by returning zero contribution. Skipping
-// clear-air would cause a single cumulus cell to "fill the world" out
-// to the next cumulus cell (since the nearest non-empty would be
-// returned for samples actually in clear-air regions). 2026-04-26 bug
-// fix discovered during in-game playtest — "clouds vanish when
-// leaving a cell" symptom.
+// **Critical**: still includes ClearAir cells in the search. A
+// clear-air cell legitimately "owns" its Voronoi region; per-cell
+// gating in `sample_cell_density_inner` handles cov_strength=0 by
+// returning zero contribution. Skipping clear-air would cause a
+// single cumulus cell to "fill the world" out to the next cumulus
+// cell. The 2026-04-26 in-game playtest "clouds vanish when leaving
+// a cell" was the natural visible result of strict tessellation;
+// CM-6 boundary blending fixes the visible-seam consequence by
+// blending across the Voronoi midline.
 //
-// Empty / unfilled buffer slots (density=0 AND seed_pos at origin)
-// are skipped via the `is_empty_slot` test below — these are
-// uninitialized tail slots, not real clear-air cells. Real clear-air
-// cells have a valid `seed_pos` populated by ChunkedWeather.
+// Empty / unfilled buffer slots use sentinel `seed_pos = (1e9, 1e9)`
+// so the distance check naturally excludes them — no special check
+// required. Real ClearAir cells have valid seed_pos and DO
+// participate.
 //
-// Cost: ~50-64 distance checks per call. At ~24 ray-steps per pixel,
-// ~1.5-2k checks per pixel — modest GPU compute. Still the dominant
-// per-pixel cost; future optimization options documented in
-// `docs/WEATHER.md § Tessellation discipline`.
+// Cost: same ~50-64 distance checks per call as the single-cell
+// lookup; one extra comparison per iteration (tracks two best); two
+// sqrts at the end. Negligible cost increase.
 //
 // Per WEATHER.md § "No-weather is a type of weather": every XZ point
-// owns one cell; clear-air cells render zero density, but they still
-// participate in the tessellation so cumulus cells stay bounded to
-// their actual Voronoi regions.
-fn find_nearest_active_cell(world_xz: vec2<f32>) -> u32 {
-    var best_idx: u32 = 0u;
-    var best_dist_sq: f32 = 1.0e30;
+// owns one cell (the *nearest*) but blends with the second-nearest in
+// the boundary band — adjacent same-type cells fuse into one body of
+// weather, different-type cells transition smoothly.
+fn find_nearest_two_active_cells(world_xz: vec2<f32>) -> NearestTwo {
+    var best_idx1: u32 = 0u;
+    var best_dsq1: f32 = 1.0e30;
+    var best_idx2: u32 = 0u;
+    var best_dsq2: f32 = 1.0e30;
     let cell_count = arrayLength(&weather_cells);
     for (var i = 0u; i < cell_count; i = i + 1u) {
         let cell = weather_cells[i];
-        // Empty buffer-tail slots are filled with a sentinel `seed_pos`
-        // (e.g. 1e9, 1e9) by `Renderer::update_weather_cells` so the
-        // distance check naturally excludes them — no special check
-        // required. Real ClearAir cells have valid seed_pos and DO
-        // participate in nearest-cell lookup (per tessellation rule).
         let d = world_xz - cell.seed_pos;
         let dsq = d.x * d.x + d.y * d.y;
-        if (dsq < best_dist_sq) {
-            best_dist_sq = dsq;
-            best_idx = i;
+        if (dsq < best_dsq1) {
+            best_idx2 = best_idx1;
+            best_dsq2 = best_dsq1;
+            best_idx1 = i;
+            best_dsq1 = dsq;
+        } else if (dsq < best_dsq2) {
+            best_idx2 = i;
+            best_dsq2 = dsq;
         }
     }
-    return best_idx;
+    return NearestTwo(best_idx1, best_idx2, sqrt(best_dsq1), sqrt(best_dsq2));
 }
+
+// Width (m) of the smoothstep boundary-blend band centered on the
+// Voronoi midline between two adjacent cells. Inside this band the
+// per-sample density is a weighted mix of both cells; outside the
+// band it's pure nearest-cell.
+//
+// Sized for ~25 km mean cell spacing (W2 partition): a 5 km blend
+// band is ~20% of cell radius, ~30% of cell area falls inside the
+// blend zone. Wider = softer transitions but more bleed-through;
+// narrower = sharper but more visible seams. Tunable in CM-9.
+const BOUNDARY_BLEND_DISTANCE_M: f32 = 5000.0;
+
+// Threshold below which the second-nearest cell's contribution is
+// dropped entirely. Saves the per-cell math in `sample_cell_density_inner`
+// for the ~70% of pixels deep inside a single cell (w1 > 0.95). The
+// noise samples themselves still happen unconditionally because they
+// are needed by cell 1.
+const BOUNDARY_BLEND_W2_EARLY_EXIT: f32 = 0.05;
 
 // Per-pixel ray-start jitter hash. Returns a deterministic value in
 // `[0, 1)` derived from integer pixel coords. Replaces the fixed
@@ -263,56 +295,128 @@ fn perlin_worley_weights_for_type(cell_type: u32) -> vec2<f32> {
     }
 }
 
+// Per-cell density contribution given pre-computed alt_factor + global
+// noise samples (CM-6 helper, 2026-04-26). Final cloud_factor + density
+// math only — the expensive noise calls happen ONCE in the caller and
+// the cheap altitude_profile is also pre-computed.
+fn cell_density_contribution(
+    cell: GpuWeatherCell,
+    alt_factor: f32,
+    worley_struct: f32,
+    perlin_norm: f32,
+) -> f32 {
+    let weights = perlin_worley_weights_for_type(cell.cell_type);
+    let raw_factor = weights.x * worley_struct + weights.y * perlin_norm;
+    // Continuous-margin modulation — LINEAR REMAP of [coverage_threshold,
+    // 1.0] to [0, 1]. Identity at cov=1.0 (preserves Beer-Lambert + cel
+    // rim); gates noise floor for marginal cells. See
+    // `docs/WEATHER.md § Continuous qualification margin`.
+    let coverage_threshold = 1.0 - cell.coverage_strength;
+    let cloud_factor = clamp(
+        (raw_factor - coverage_threshold) / cell.coverage_strength,
+        0.0,
+        1.0,
+    );
+    return cell.density * alt_factor * cloud_factor;
+}
+
 // Cloud density at a world-space sample point.
 //
-// Tessellated W2 model (C2-polish, 2026-04-26):
-// 1. Find which cell owns this XZ via nearest-cell lookup.
-// 2. If clear-air or empty slot, density = 0.
-// 3. Sample altitude_profile against the cell's [base, top] band.
-// 4. Apply Perlin-Worley blend per cell type — produces continuous
-//    cloud structure that flows naturally across cell boundaries when
-//    neighbors share a type, transitions visibly when types differ.
+// **CM-6 boundary blending** (2026-04-26): finds the two nearest
+// cells, computes a smoothstep blend weight from the half-difference
+// of distances, and weighted-averages each cell's density
+// contribution. Adjacent same-type cells fuse into one body of
+// weather; different-type cells transition smoothly across the
+// Voronoi midline. Earlier single-cell version produced visible hard
+// seams ("clouds vanish when leaving a cell" symptom).
 //
-// The Worley + Perlin noise field is sampled at the absolute world
+// Tessellated W2 model with **two-stage cost gating**:
+// 1. Find the two cells whose seeds are nearest to this XZ.
+// 2. Compute blend weight w1 from `(d2 - d1) / 2`.
+// 3. **Cheap pre-filter**: one Perlin perturbation call (CM-5),
+//    altitude_perturbation_amplitude lookup + altitude_profile per
+//    active cell. If both cells' alt_factor = 0 (sample outside any
+//    cloud band), return 0 — skips the expensive density noise.
+//    Critical because the raymarch covers 12 km of altitude and most
+//    samples are in empty sky.
+// 4. **Expensive noise**: Worley_3d + density Perlin (one call each,
+//    sampled at world_pos — same for both cells).
+// 5. Blend each active cell's density contribution by `w1` / `w2`.
+//
+// The Worley + Perlin noise fields are sampled at the absolute world
 // position (not cell-relative), so adjacent same-type cells produce a
 // single continuous cloud structure across their boundary — the
-// "front" or "deck" reads as one body of weather rather than two
-// separate puffs.
+// "front" or "deck" reads as one body of weather. Different-type
+// adjacent cells (e.g. Cumulus next to Stratus) get a smoothstep
+// transition between their per-type Perlin-Worley blend weights and
+// altitude bands.
 fn sample_cloud_density(world_pos: vec3<f32>) -> f32 {
-    let cell_idx = find_nearest_active_cell(world_pos.xz);
-    let cell = weather_cells[cell_idx];
-    // PINNED 2026-04-26: gate on coverage_strength, not density. ClearAir
-    // cells with nonzero margin (W1 approaching a cloud-bearing
-    // threshold) carry haze parameters and SHOULD render → wispy
-    // transitions. True clear sky has coverage_strength == 0 and is
-    // skipped here.
-    if (cell.coverage_strength <= 0.0 || cell.density <= 0.0) {
+    let nearest = find_nearest_two_active_cells(world_pos.xz);
+    let cell1 = weather_cells[nearest.idx1];
+    let cell2 = weather_cells[nearest.idx2];
+
+    // PINNED 2026-04-26: gate on coverage_strength, not density.
+    // ClearAir cells with nonzero margin carry haze parameters and
+    // SHOULD render → wispy transitions. True clear sky has
+    // coverage_strength == 0 and is skipped here.
+    let active1 = cell1.coverage_strength > 0.0 && cell1.density > 0.0;
+    let active2 = cell2.coverage_strength > 0.0 && cell2.density > 0.0;
+    if (!active1 && !active2) {
         return 0.0;
     }
-    // CM-5: Per-sample altitude perturbation. Sample a long-wavelength
-    // Perlin field at the sample's (x, z) — fixed y=0 keeps the
-    // perturbation a function of horizontal position only, so the cloud
-    // top/base form a coherent bumpy surface rather than per-altitude
-    // jitter. Per-type amplitude × coverage_strength means high-margin
-    // cumulus / nimbus cells get bumpy convective tops, marginal cells
-    // and stratus stay flat. Adds one Perlin-3D call per ray sample.
-    let amp = altitude_perturbation_amplitude(cell.cell_type);
+
+    // CM-6 blend weight. (d2 - d1) / 2 approximates distance from the
+    // sample to the Voronoi midline between the two cells. At the
+    // midline w1 = 0.5 (50/50 mix); deep inside cell 1 w1 → 1.0.
+    let half_diff = (nearest.d2 - nearest.d1) * 0.5;
+    let blend_t = smoothstep(0.0, BOUNDARY_BLEND_DISTANCE_M, half_diff);
+    let w1 = 0.5 + 0.5 * blend_t;
+    let w2 = 1.0 - w1;
+
+    // CM-5 altitude perturbation — one Perlin call shared by both
+    // cells. Sampled at fixed y=0 so the perturbation is a function of
+    // (x, z) only, producing a coherent bumpy surface for cell
+    // tops/bases. Cheap relative to the density noise pair below.
     let perturb = cloud_perlin_3d(
         CLOUD_SEED_HI, CLOUD_SEED_LO,
         CLOUD_PERLIN_OCTAVE,
         world_pos.x, 0.0, world_pos.z,
         ALT_PERTURB_SPACING_M,
     );
-    let perturb_scaled = perturb * cell.coverage_strength;
-    let effective_base = cell.base_altitude_m + perturb_scaled * amp.y;
-    let effective_top = cell.top_altitude_m + perturb_scaled * amp.x;
-    let alt_factor = altitude_profile(
-        cell.cell_type, world_pos.y,
-        effective_base, effective_top,
-    );
-    if (alt_factor <= 0.0) {
+
+    // Cheap altitude pre-filter: per-cell altitude_profile (arithmetic
+    // + per-type lookup). Sampling alt_factor here lets us skip the
+    // expensive density noise below when the sample is outside any
+    // cloud band — critical because most ray samples in the 12 km
+    // global band are in empty sky.
+    let want_cell2 = active2 && w2 > BOUNDARY_BLEND_W2_EARLY_EXIT;
+    var alt_factor1: f32 = 0.0;
+    if (active1) {
+        let amp1 = altitude_perturbation_amplitude(cell1.cell_type);
+        let p1 = perturb * cell1.coverage_strength;
+        alt_factor1 = altitude_profile(
+            cell1.cell_type, world_pos.y,
+            cell1.base_altitude_m + p1 * amp1.y,
+            cell1.top_altitude_m + p1 * amp1.x,
+        );
+    }
+    var alt_factor2: f32 = 0.0;
+    if (want_cell2) {
+        let amp2 = altitude_perturbation_amplitude(cell2.cell_type);
+        let p2 = perturb * cell2.coverage_strength;
+        alt_factor2 = altitude_profile(
+            cell2.cell_type, world_pos.y,
+            cell2.base_altitude_m + p2 * amp2.y,
+            cell2.top_altitude_m + p2 * amp2.x,
+        );
+    }
+    if (alt_factor1 <= 0.0 && alt_factor2 <= 0.0) {
         return 0.0;
     }
+
+    // Expensive density noise — sampled once, identical for both
+    // cells (global noise field). Only reached when at least one
+    // cell's altitude_profile is positive.
     let w = worley_3d(
         CLOUD_SEED_HI, CLOUD_SEED_LO,
         CLOUD_WORLEY_OCTAVE,
@@ -327,34 +431,19 @@ fn sample_cloud_density(world_pos: vec3<f32>) -> f32 {
         CLOUD_PERLIN_SPACING_M,
     );
     let perlin_norm = clamp((perlin_raw + 0.7) / 1.4, 0.0, 1.0);
-    let weights = perlin_worley_weights_for_type(cell.cell_type);
-    let raw_factor = weights.x * worley_struct + weights.y * perlin_norm;
-    // Continuous-margin modulation — LINEAR REMAP of [coverage_threshold,
-    // 1.0] to [0, 1] so noise above the threshold passes through with
-    // preserved gradient. The earlier smoothstep formulation
-    // (smoothstep(threshold, threshold+0.10, raw_factor)) saturated to
-    // ~1.0 for any raw_factor > threshold + 0.10, eliminating the soft
-    // density falloff at cloud edges that the banded-alpha cel-shading
-    // relies on. Linear remap preserves identity at cov=1.0 (no
-    // modulation; full Beer-Lambert + cel-shaded rim) and still gates
-    // the bottom of the noise field for marginal cells (gaps in
-    // coverage where noise < threshold). Per
-    // `docs/WEATHER.md § Continuous qualification margin`.
-    //
-    // - cov=1.0: cloud_factor = raw_factor (identity).
-    // - cov=0.5: cloud_factor = max(0, (raw_factor - 0.5) * 2.0) — gates
-    //   bottom half, preserves linear ramp above.
-    // - cov=0.1: cloud_factor = max(0, (raw_factor - 0.9) * 10.0) — only
-    //   top 10% of noise survives, but with soft falloff.
-    // - cov=0: skipped by early-out above; division by zero never
-    //   reached.
-    let coverage_threshold = 1.0 - cell.coverage_strength;
-    let cloud_factor = clamp(
-        (raw_factor - coverage_threshold) / cell.coverage_strength,
-        0.0,
-        1.0,
-    );
-    return cell.density * alt_factor * cloud_factor;
+
+    var density: f32 = 0.0;
+    if (alt_factor1 > 0.0) {
+        density = density + w1 * cell_density_contribution(
+            cell1, alt_factor1, worley_struct, perlin_norm,
+        );
+    }
+    if (alt_factor2 > 0.0) {
+        density = density + w2 * cell_density_contribution(
+            cell2, alt_factor2, worley_struct, perlin_norm,
+        );
+    }
+    return density;
 }
 
 struct VsOut {

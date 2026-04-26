@@ -140,10 +140,13 @@ fn volumetric_wgsl_cost_constants_within_budget() {
     // Tessellation: shader uses nearest-cell lookup (not per-cell
     // cylinder iteration). C2-polish 2026-04-26 — circular footprints
     // were a wrong-feeling shortcut; tessellation is the locked design.
+    // CM-6 (2026-04-26) replaced the single-cell `find_nearest_active_cell`
+    // with `find_nearest_two_active_cells` for boundary blending.
     assert!(
-        VOLUMETRIC_WGSL_SOURCE.contains("find_nearest_active_cell("),
+        VOLUMETRIC_WGSL_SOURCE.contains("find_nearest_two_active_cells("),
         "volumetric.wgsl missing tessellation lookup — must use \
-         find_nearest_active_cell, not per-cell circular footprint"
+         find_nearest_two_active_cells (CM-6 boundary blending), not \
+         per-cell circular footprint and not single-nearest"
     );
 }
 
@@ -192,15 +195,18 @@ fn volumetric_wgsl_density_model_present() {
     for name in [
         "fn altitude_profile(",
         "fn altitude_perturbation_amplitude(",
-        "fn find_nearest_active_cell(",
+        "fn find_nearest_two_active_cells(",
         "fn perlin_worley_weights_for_type(",
         "fn sample_cloud_density(",
+        "fn cell_density_contribution(",
         "fn ray_altitude_band(",
         "struct GpuWeatherCell",
+        "struct NearestTwo",
         "weather_cells",
         "GLOBAL_CLOUD_BASE_M",
         "GLOBAL_CLOUD_TOP_M",
         "ALT_PERTURB_SPACING_M",
+        "BOUNDARY_BLEND_DISTANCE_M",
         "coverage_strength",
     ] {
         assert!(

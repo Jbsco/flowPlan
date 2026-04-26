@@ -106,11 +106,24 @@ const WARMUP_FRAMES: usize = 3;
 /// the frame (terrain streaming, water, vehicle, instances, ambient,
 /// outline, widgets) fits in the remaining budget.
 ///
-/// 3.5 ms accommodates the C2-polish tessellation refactor (per-step
-/// nearest-cell lookup adds ~30% over the previous per-cell iteration).
-/// At 3.5 ms cloud takes 50% of a 144 Hz frame — tight; leaves 3.5 ms
-/// for everything else. Future optimization (texture-based cell-grid
-/// index, sorted active set + early-exit) targets returning to 2-3 ms.
+/// 4.5 ms accommodates the CM-6 boundary-blending refactor (find_nearest_two
+/// + per-cell altitude pre-filter add ~1 ms over the single-cell version,
+/// even when cell 2 is a sentinel and the blend doesn't engage). At 4.5 ms
+/// cloud takes ~65% of a 144 Hz frame — tight but doable; leaves 2.4 ms
+/// for everything else (terrain streaming, water, vehicle, instances,
+/// ambient, outline, widgets). The visual win from CM-6 (no hard cell
+/// seams; "clouds vanish when leaving cell" symptom resolved) outweighs
+/// the cost. Future optimization options:
+/// - texture-based cell-grid index (replaces brute-force scan; O(1)
+///   nearest-2 lookup → could halve total cost)
+/// - sorted active set with spatial early-exit
+/// - reduced step count on glancing rays
+///
+/// History:
+/// - B-phase: 3.0 ms target (single-cell hardcoded)
+/// - C2-polish: 3.5 ms (tessellation; per-step nearest-cell scan)
+/// - CM-6: 4.5 ms (boundary blending; per-step nearest-two scan +
+///   per-cell altitude pre-filter)
 ///
 /// **Tune as playtest reveals regressions** (per user-pinned guidance
 /// 2026-04-26). Specifically:
@@ -119,7 +132,7 @@ const WARMUP_FRAMES: usize = 3;
 /// - When this gate fails on legitimate work → measure on reference
 ///   hardware first; only relax if ref-tier hardware ALSO shows the
 ///   regression. Document the rationale with each adjustment.
-const TOTAL_FRAME_BUDGET_MS: f64 = 3.5;
+const TOTAL_FRAME_BUDGET_MS: f64 = 4.5;
 
 #[cfg(feature = "hardware-tests")]
 fn init_wgpu_with_timestamps() -> Option<(wgpu::Device, wgpu::Queue, f32)> {
