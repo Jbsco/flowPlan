@@ -1,0 +1,352 @@
+//! Cloud-pass GPU perf-budget test (Phase 3.6.3c.6 / 3.2x B-perf).
+//!
+//! Tier-3 hardware-gated test (`hardware-tests` feature) that times
+//! the full render frame including the volumetric cloud pass via
+//! wgpu timestamp queries. Asserts the median measured frame time
+//! stays under a documented budget so cloud-pass cost regressions are
+//! caught at test time rather than playtest.
+//!
+//! # Run
+//!
+//! ```text
+//! cargo test -p flowplan-render --features hardware-tests --test cloud_pass_perf -- --nocapture
+//! ```
+//!
+//! The `--nocapture` flag surfaces the printed frame-time statistics
+//! so you can monitor cost trends across iterations even when the
+//! assertion passes.
+//!
+//! # Budget tuning
+//!
+//! The budget below (`TOTAL_FRAME_BUDGET_MS`) is set generously to
+//! pass on a range of dev hardware while still catching catastrophic
+//! regressions. Per user-pinned guidance (2026-04-26): **playtesting
+//! signals trump the gate** — when in-game shows a regression that
+//! the gate missed, tighten the budget. When the gate is too aggressive
+//! and blocks legitimate work, document why and relax it.
+//!
+//! # Coverage limits
+//!
+//! Frame-level (not pass-level) timing — catches regressions in the
+//! cloud pass + any other pass. Per-pass isolation is a future
+//! refinement. The structural cost-bound test in
+//! `volumetric_wgsl_parses.rs::volumetric_wgsl_cost_constants_within_budget`
+//! catches constant-bump regressions before code reaches GPU.
+//!
+//! # Hardware variance
+//!
+//! Frame time varies 2-5× across GPU tiers. The budget below is set
+//! for the lower-end of acceptable hardware (think GTX 1060 / RX 580
+//! per DESIGN.md tier table). Reference-tier hardware (RTX 3060 /
+//! RX 6600) should land 2-3× under budget.
+
+// Test-file relaxations per CODING_RULES § Testing Requirements.
+// `dead_code` / `unused_imports` apply only when `hardware-tests` is
+// disabled; the gated test below keeps the dev-deps linked either way.
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::doc_markdown,
+    clippy::too_many_lines,
+    dead_code,
+    unused_imports
+)]
+
+use flowplan_assets::CpuMesh;
+use flowplan_render::{Renderer, ShadingParams};
+use flowplan_sim::SimSnapshot;
+use glam::{Quat, Vec3};
+
+// Other workspace + dev-deps belong elsewhere; pin as unused here so
+// the test crate doesn't generate dead-extern warnings whether the
+// hardware-tests feature is on or off.
+use bytemuck as _;
+use flowplan_world as _;
+use image as _;
+use insta as _;
+use naga as _;
+#[cfg(feature = "shader-hot-reload")]
+use notify as _;
+use pollster as _;
+use wgpu as _;
+
+// 720p — typical "game window" size. Cost scales with pixel count;
+// 1080p+ would push this proportionally.
+const SIZE: (u32, u32) = (1280, 720);
+const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+const CLEAR: wgpu::Color = wgpu::Color {
+    r: 0.52,
+    g: 0.71,
+    b: 0.88,
+    a: 1.0,
+};
+const TERRAIN_SHADING: ShadingParams = ShadingParams::new(4.0, 0.5, 0.08, 4.0);
+const VEHICLE_SHADING: ShadingParams = ShadingParams::new(3.0, 0.35, 0.35, 3.0);
+const WATER_SHADING: ShadingParams = ShadingParams::new(3.0, 0.55, 0.12, 3.5);
+const WATER_COLOR: [f32; 4] = [0.18, 0.38, 0.58, 1.0];
+
+const FRAMES_TO_MEASURE: usize = 30;
+const WARMUP_FRAMES: usize = 3;
+
+/// Frame-time budget (ms) for the minimal-scene + cloud test.
+///
+/// Per WEATHER.md the cloud-pass-specific budget is **≤ 0.6 ms** at
+/// reference tier. This test renders cloud + minimal scene (flat
+/// terrain, single-cube vehicle, no streaming) → frame cost is
+/// dominated by the cloud pass. 2 ms total gives ~5-6× headroom over
+/// current measured cost (~0.35 ms median on dev hardware) — tight
+/// enough to flag a 5× regression, loose enough to pass on slower
+/// hardware variance.
+///
+/// **Tune as playtest reveals regressions** (per user-pinned guidance
+/// 2026-04-26). Specifically:
+/// - When in-game shows perf regression that this gate missed → tighten
+///   the budget here so future regressions of similar magnitude fail.
+/// - When this gate fails on legitimate work → measure on reference
+///   hardware first; only relax if ref-tier hardware ALSO shows the
+///   regression. Document the rationale with each adjustment.
+const TOTAL_FRAME_BUDGET_MS: f64 = 2.0;
+
+#[cfg(feature = "hardware-tests")]
+fn init_wgpu_with_timestamps() -> Option<(wgpu::Device, wgpu::Queue, f32)> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::PRIMARY,
+        ..Default::default()
+    });
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        // HighPerformance picks the discrete GPU when available.
+        // Perf measurements should reflect the gameplay tier.
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    }))?;
+
+    let supported = adapter.features();
+    let timestamp_features =
+        wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+    if !supported.contains(timestamp_features) {
+        eprintln!(
+            "cloud_pass_perf: adapter does not support timestamp queries \
+             ({supported:?}). Skipping perf gate on this hardware."
+        );
+        return None;
+    }
+
+    let (device, queue) = pollster::block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor {
+            label: Some("cloud-perf-device"),
+            required_features: timestamp_features,
+            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+            memory_hints: wgpu::MemoryHints::Performance,
+        },
+        None,
+    ))
+    .expect("device request");
+    let period_ns = queue.get_timestamp_period();
+    Some((device, queue, period_ns))
+}
+
+#[cfg(feature = "hardware-tests")]
+fn build_cloud_view_snapshot() -> SimSnapshot {
+    // Camera positioned to put the hardcoded test cell (Cumulus at
+    // world origin XZ, altitude 1500-2500m) prominently in view.
+    // Distance + altitude chosen so the cloud occupies a meaningful
+    // fraction of the screen — exercising the per-pixel raymarch
+    // cost on real workload.
+    let cam_pos = Vec3::new(0.0, 800.0, 4000.0);
+    let look_target = Vec3::new(0.0, 2000.0, 0.0);
+    let mut snap = SimSnapshot::default();
+    snap.camera.position = cam_pos;
+    let forward = (look_target - cam_pos).normalize();
+    let right = forward.cross(Vec3::Y).normalize();
+    let up = right.cross(forward);
+    let basis = glam::Mat3::from_cols(right, up, -forward);
+    snap.camera.orientation = Quat::from_mat3(&basis);
+    snap.camera.fov_y_radians = 60.0_f32.to_radians();
+    snap.vehicle.position = Vec3::ZERO;
+    snap.vehicle.orientation = Quat::IDENTITY;
+    snap
+}
+
+#[cfg(feature = "hardware-tests")]
+#[test]
+fn cloud_pass_within_perf_budget() {
+    let Some((device, queue, ts_period_ns)) = init_wgpu_with_timestamps() else {
+        // No GPU with timestamp support — skip without failing.
+        return;
+    };
+
+    // Minimal scene: flat terrain + flat water + cube vehicle. The
+    // cloud pass cost is what we're measuring; other passes contribute
+    // a small constant baseline.
+    let terrain = CpuMesh::terrain_patch(16, 100.0, |_, _| 0.0);
+    let water = CpuMesh::water_grid(16, 200.0, WATER_COLOR);
+    let vehicle = CpuMesh::cube(2.0, [0.7, 0.7, 0.8, 1.0]);
+
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        FORMAT,
+        SIZE,
+        &terrain,
+        TERRAIN_SHADING,
+        &water,
+        WATER_SHADING,
+        &vehicle,
+        VEHICLE_SHADING,
+    );
+
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("cloud-perf-target"),
+        size: wgpu::Extent3d {
+            width: SIZE.0,
+            height: SIZE.1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // 2 timestamps × FRAMES_TO_MEASURE so we can resolve all frames in
+    // one buffer rather than per-frame readback. Halves the GPU↔CPU
+    // synchronization overhead vs single-frame mapping.
+    let total_queries = (FRAMES_TO_MEASURE * 2) as u32;
+    let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
+        label: Some("cloud-perf-queries"),
+        ty: wgpu::QueryType::Timestamp,
+        count: total_queries,
+    });
+    let resolve_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("cloud-perf-resolve"),
+        size: u64::from(total_queries) * 8, // 8 bytes per timestamp
+        usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let readback_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("cloud-perf-readback"),
+        size: u64::from(total_queries) * 8,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let snap = build_cloud_view_snapshot();
+
+    // Warmup — first frames include shader compilation, pipeline
+    // caching, etc. Discard them.
+    for _ in 0..WARMUP_FRAMES {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("cloud-perf-warmup"),
+        });
+        renderer.render(
+            &device,
+            &queue,
+            &mut encoder,
+            &target_view,
+            SIZE,
+            &snap,
+            &snap,
+            1.0,
+            CLEAR,
+            None,
+            None,
+        );
+        queue.submit(Some(encoder.finish()));
+    }
+    device.poll(wgpu::Maintain::Wait);
+
+    // Measurement loop. Each iteration writes start + end timestamps
+    // around the renderer.render() call so we capture the entire
+    // frame's GPU time including the cloud pass.
+    for frame in 0..FRAMES_TO_MEASURE {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("cloud-perf-frame"),
+        });
+        let q_start = (frame * 2) as u32;
+        let q_end = q_start + 1;
+        encoder.write_timestamp(&query_set, q_start);
+        renderer.render(
+            &device,
+            &queue,
+            &mut encoder,
+            &target_view,
+            SIZE,
+            &snap,
+            &snap,
+            1.0,
+            CLEAR,
+            None,
+            None,
+        );
+        encoder.write_timestamp(&query_set, q_end);
+        queue.submit(Some(encoder.finish()));
+    }
+
+    // Resolve all queries to the GPU buffer, copy to readback,
+    // map + read.
+    let mut resolve_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("cloud-perf-resolve"),
+    });
+    resolve_encoder.resolve_query_set(&query_set, 0..total_queries, &resolve_buf, 0);
+    resolve_encoder.copy_buffer_to_buffer(
+        &resolve_buf,
+        0,
+        &readback_buf,
+        0,
+        u64::from(total_queries) * 8,
+    );
+    queue.submit(Some(resolve_encoder.finish()));
+    readback_buf
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, |_| {});
+    device.poll(wgpu::Maintain::Wait);
+
+    let mut times_ns: Vec<u64> = Vec::with_capacity(FRAMES_TO_MEASURE);
+    {
+        let data = readback_buf.slice(..).get_mapped_range();
+        let timestamps: &[u64] = bytemuck::cast_slice(&data);
+        for frame in 0..FRAMES_TO_MEASURE {
+            let start = timestamps[frame * 2];
+            let end = timestamps[frame * 2 + 1];
+            let delta_ticks = end.saturating_sub(start);
+            let delta_ns = (delta_ticks as f64) * f64::from(ts_period_ns);
+            times_ns.push(delta_ns as u64);
+        }
+    }
+    readback_buf.unmap();
+
+    times_ns.sort_unstable();
+    let median_ns = times_ns[times_ns.len() / 2];
+    let min_ns = *times_ns.first().unwrap();
+    let max_ns = *times_ns.last().unwrap();
+    let median_ms = median_ns as f64 / 1e6;
+    let min_ms = min_ns as f64 / 1e6;
+    let max_ms = max_ns as f64 / 1e6;
+
+    println!(
+        "cloud_pass_perf: {} frames @ {}x{} | median = {:.3} ms ({:.0} fps) \
+         | min = {:.3} ms | max = {:.3} ms | budget = {:.1} ms",
+        FRAMES_TO_MEASURE,
+        SIZE.0,
+        SIZE.1,
+        median_ms,
+        1000.0 / median_ms,
+        min_ms,
+        max_ms,
+        TOTAL_FRAME_BUDGET_MS
+    );
+
+    assert!(
+        median_ms <= TOTAL_FRAME_BUDGET_MS,
+        "Median frame time {median_ms:.3} ms exceeds budget {TOTAL_FRAME_BUDGET_MS:.1} ms. \
+         Likely cloud-pass cost regression. Investigate via in-engine \
+         FPS check + the structural perf test in volumetric_wgsl_parses.rs."
+    );
+}

@@ -64,6 +64,7 @@ ${BOLD}GATES${RESET}
   clippy               cargo clippy --workspace --all-targets -- -D warnings
   test                 cargo test --workspace
   test-perf            Run perf-budget tests (incl. --ignored, ~3 min).
+  test-cloud-perf      Run GPU cloud-pass perf gate (hardware-tests, ~30 sec).
 
 ${BOLD}CI (via act)${RESET}
   ci                   Run the full quality-gate workflow locally via act.
@@ -167,6 +168,12 @@ cmd_test()      { cargo test --workspace; }
 cmd_test-perf() {
     step "perf-budget tests (incl. --ignored, ~3 min bake)"
     cargo test -p flowplan-world --release --test perf_budgets -- --ignored --nocapture
+}
+
+cmd_test-cloud-perf() {
+    step "cloud-pass GPU perf gate (hardware-tests, ~30 sec)"
+    cargo test -p flowplan-render --features hardware-tests \
+        --release --test cloud_pass_perf -- --nocapture
 }
 
 # ───────────────────────────────────────────────────────────────────────
@@ -314,6 +321,7 @@ main() {
         clippy)           cmd_clippy ;;
         test)             cmd_test ;;
         test-perf)        cmd_test-perf ;;
+        test-cloud-perf)  cmd_test-cloud-perf ;;
         build)            cmd_build "$@" ;;
         clean)            cmd_clean ;;
         clean-all)        cmd_clean-all ;;

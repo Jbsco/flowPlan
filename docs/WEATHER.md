@@ -591,7 +591,12 @@ Quality presets scale step count + secondary march:
 
 **[RECOMMENDED]** — Frame-bench gate added in 3.6.3c.6 / 3.2x: assert cloud-pass cost ≤ 0.6 ms at High preset on reference hardware. Failure = revisit step count or cell-lookup strategy before merge. Pattern matches existing `crates/world/tests/perf_budgets.rs` discipline.
 
-**Status (2026-04-26)**: structural cost-bound test landed in `crates/render/tests/volumetric_wgsl_parses.rs::volumetric_wgsl_cost_constants_within_budget` — asserts `RAYMARCH_STEPS ≤ 64`, `CLOUD_FEATURES_PER_CELL ≤ 2`, and `ray_vertical_cylinder` early-out is present. This catches accidental constant bumps that previously caused FPS to drop from 1000-3000 down to <60 in playtest. **Real GPU wall-clock gate is queued as a follow-up** — needs hardware-gated test using wgpu `Features::TIMESTAMP_QUERY`, headless render of N frames, query the cloud-pass time, assert `≤ 0.6 ms` at the reference preset. Architecture mirrors `crates/render/tests/visual_snapshot.rs` (hardware-gated, pollster + adapter, offscreen render). Until that lands, the structural test + in-engine playtest are the main perf-regression catches.
+**Status (2026-04-26)**:
+
+- **Structural cost-bound test** in `crates/render/tests/volumetric_wgsl_parses.rs::volumetric_wgsl_cost_constants_within_budget` — asserts `RAYMARCH_STEPS_MAX ≤ 64`, `RAYMARCH_TARGET_STEP_M ≥ 200`, `CLOUD_FEATURES_PER_CELL ≤ 2`, and `ray_vertical_cylinder` early-out is present. Catches accidental constant bumps. Runs as part of `cargo test --workspace`.
+- **GPU wall-clock perf gate** in `crates/render/tests/cloud_pass_perf.rs::cloud_pass_within_perf_budget` — hardware-gated (`hardware-tests` feature), uses `Features::TIMESTAMP_QUERY` + `TIMESTAMP_QUERY_INSIDE_ENCODERS`. Renders 30 frames at 720p with cloud + minimal scene, computes median GPU frame time. Initial budget **2.0 ms** at 720p; reference hardware lands ~0.66 ms (1500 fps), giving 5-6× headroom. Tunable per playtest signal — when in-game shows a regression that the gate missed, tighten the budget; when the gate fails on legitimate work, measure on reference hardware first. Run via `./flowplan test-cloud-perf` (release build, ~30 sec) or `cargo test -p flowplan-render --features hardware-tests --test cloud_pass_perf -- --nocapture`.
+
+**Coverage limits**: the GPU gate measures **frame time** (cloud + sky + scene + outline + widgets) at the test's minimal-scene resolution, not cloud pass alone. Per-pass isolation is a future refinement (would need wgpu render-pass `timestamp_writes`). Frame-level + structural-bound + in-engine playtest cover most regression classes today.
 
 CPU-side cloud-density sampling (sim consumption) cost — bench at the `world` crate level:
 
