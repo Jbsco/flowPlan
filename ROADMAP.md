@@ -988,18 +988,52 @@ Split (pinned 2026-04-23 per user direction, detail in [MAPGEN.md § Layer 3 pha
 - [x] **`STREAM_RADIUS_M` cushion** (Task #261, .12k closure) — 20 → 22 km; covers cells whose Voronoi polygon extends inward into the visible terrain disc.
 - [ ] **Infrastructure deltas** (`road_segment`, `dirt_road_segment`, `highway_intersection`, `rail_corridor_segment`) — blocked on 3.6.3c.3 `FeatureGroup`; need group-aware continuous-polyline deltas, not per-cell.
 
-**3.6.3c.3 — `FeatureGroup` multi-cell engine: pending.**
+**3.6.3c.3 — `FeatureGroup` multi-cell engine: SHIPPED 2026-04-25 (Task #274 + #275).**
 
-- [ ] **`FeatureGroup` concept** in `voronoi_cells`: cells can belong to a group ID. Groups span multiple cells for connected features. Graph construction at bake time (road polylines via adjacency; dwelling clusters via k-nearest-cells).
-- [ ] **Group-aware deltas**: road depression runs continuous across group-member cells via shared centerline polyline. Similar for residential clusters.
-- [ ] Implement 3.6.3b-authored infrastructure features (`road_segment`, `dirt_road_segment`, `highway_intersection`, `rail_corridor_segment`).
-- [ ] Activate `requires_road_adjacency` rule evaluation (depends on this phase).
-- [ ] Spillover placement-queue mechanism — anchors pull supporting features via queued placement. First anchor features authored (candidate list in FEATURES.md § Emergent-hub anchor features).
-- [ ] Flora placement hooks tied to feature type (billboards for remote, instanced for hub-proximate — LOD work in 3.6.4).
-- [ ] Tier-1 / tier-2 **authored hub chunk** seam-blending infrastructure (authored content lands in Phase 4.1).
-- [ ] **Deterministic / telemetric validation:** final heightfield byte-identical across platforms; boundary-falloff continuity between neighboring cells; hydrology-graph-violation rejection; `surface_at` returns coherent classes along sample transects.
+Shipped in three sub-milestones:
 
-**3.6.3c.4 — Palette-adaptation render integration: pending.**
+**3.6.3c.3a — `FeatureGroup` engine + hub-trunk roads (Task #274 part 1)**
+
+- [x] **`FeatureGroup` concept** in new `crates/world/src/feature_groups.rs`: cells belong to a group via `(GroupId, seg_idx)` membership entries. Polylines stored in literal world coords, wrap-aware via single-frame alignment.
+- [x] **Hub-trunk road network**: `FeatureGroupBundle::build_road_network` connects each Major/Regional/Local hub to its k-nearest neighbors via straight polylines (Steiner-tree-lite). Wrap-aware polyline construction handles toroidal-seam-crossing.
+- [x] **Group-aware deltas**: `compute_group_delta_at` reads per-cell `(GroupId, seg_idx)` membership, evaluates perpendicular distance to ≤3 nearby polyline segments. Smoothstep-falloff depression to 0 at half-width band edge.
+- [x] Visual-bench (`crates/world/tests/feature_groups_visual_bench.rs`): continental + spawn-50km artifacts, color-by-kind.
+
+**3.6.3c.3b — 4-then-5-tier road kinds + `requires_road_adjacency` activation (Task #275)**
+
+- [x] **Tiered `FeatureGroupKind`**: `RoughDirt < Dirt < Gravel < Paved < Highway` (`Ord`-comparable via `road_tier()`); `Rail` separate ladder. Per-kind `half_width_m` / `depth_m` / `max_length_m`. Rename `Road→Paved`, `DirtRoad→Dirt` propagated.
+- [x] **Per-kind connection rules** in `build_road_network`: Highway connects Major (k=2, 250 km cap), Paved Major+Regional (k=2, 120 km), Dirt Local (k=2, 60 km), Rail Major (k=1, 200 km).
+- [x] **`requires_road_adjacency` activated** at bake time. `PlacementRulesContext` gains `road_adjacent_cells: Option<&HashSet<CellId>>` + `sub_biome: Option<&SubBiomeCellCatalog>`; bake passes both, populated from `FeatureGroupBundle::road_adjacent_cells()`. `gas_station` etc. now snap to the trunk network.
+
+**3.6.3c.3c — Feature-emit roads with A* pathfinding + 5-tier ladder (Task #274 part 2)**
+
+- [x] **`SubBiomeFeature.road_emit: Option<RoadEmitKind>`** RON-authored on 12 development features (RoughDirt for `homestead_clearing`/`abandoned_homestead`/`fishing_camp`; Dirt for `ranch`/`mining_camp`/`ghost_town`/`watchtower`; Gravel for `farmland_parcel`/`mountain_lodge`/`dwelling_cluster`/`remote_compound`; Paved for `adobe_village`/`coastal_village`/`olive_grove`).
+- [x] **Pass-2 builder**: `FeatureGroupBundle::extend_with_feature_emit_roads` runs after `BakedAssignments`. Per-tier multi-source Dijkstra over Voronoi-cell graph (priority queue, length-capped, slope penalty 5×@>25° / 2×@>15°, water = unreachable). Per-feature path reconstruction walks successor chain in O(path_length).
+- [x] **Polyline-distance perf fix (3.6.3c.3c.1)**: drop 9-shift wrap loop + per-cell `seg_idx` hint. ~300× speedup on the per-vertex L3-road-delta evaluator.
+- [x] **`BakedAssignments`-aware `compute_delta_at` (3.6.3c.3c.3)**: thread `Option<&BakedAssignments>` through `WorldRefs/WorldRefsArc`. O(1) `feature_at_cell` lookup instead of recomputing `assign_feature` per query — closes the 140 s rebuild regression.
+- [x] **Network growth**: 809 hub-trunk segments → 30 536 total (Pass 1 + 2). 54K → 813K km total length. ~9 % of hubs participate (was 1.2 %).
+- [x] Spillover deferred to **3.6.3c.3d** (future).
+
+**3.6.3c.4 — Voronoi-cell chunked terrain streaming: SHIPPED 2026-04-25 (Task #279 + #280).**
+
+Architectural pivot. Replaces the v1 monolithic `StreamingTerrain` (one big 20 km disc-mesh, rebuild = re-sample 1.4 M verts as a unit) with **per-Voronoi-cell mesh chunks**. Universal pattern — water (3.6.3c.5), volumetric weather (3.6.3c.6) follow the same shape. Pinned in memory `chunked_voronoi_layers_universal`.
+
+- [x] **Per-cell async build** via 4-worker pool, shared priority queue (nearest-first by camera distance), `mpsc` result channel. Cell-enter → enqueue; cell-exit → drop GPU mesh. Per-camera-step cost = O(entered cells), not O(whole mesh).
+- [x] **`CpuMesh::terrain_voronoi_chunk`** (`crates/assets/src/mesh.rs`): centroid-owned grid algorithm — each grid quad goes to whichever Voronoi cell contains its centroid. Owning chunk includes all 4 corners (even if some are nearest-to-neighbor). World-aligned grid origin at world (0,0) → adjacent chunks share exact vertex positions, no z-fight, no T-junctions, no gaps. Vertex compression (only included verts in the VBO).
+- [x] **`ChunkedTerrain`** manager (`crates/app/src/chunked_terrain.rs`): worker pool + queue + result drain + per-frame `update(active_cells, ...)` integration with `StreamingCellSet`.
+- [x] **Renderer integration**: `terrain_chunks: HashMap<u32, GpuMesh>` field, `update_terrain_chunk` / `evict_terrain_chunk` API, render-pass branch (chunked iteration when present, single-mesh fallback for scenarios / fast-iteration).
+- [x] **3.6.3c.4.1 fixes**: centroid-ownership (closes water-line cell-boundary gap bug); detached worker shutdown (no `join()` so ESC closes promptly even mid-build).
+- [x] **Bake cache** (3.6.3c.3c.2 / 3.7-precursor): `BakedAssignments` + `FeatureGroupBundle` serialized to `target/world-bake-cache/<seed>-vN.bin` via bincode. Subsequent launches load in seconds instead of re-running the 6-min bake.
+
+**3.6.3c.5 — Chunked water + FFT integration: pending.**
+
+Following the chunked-Voronoi pattern from 3.6.3c.4. Each cell = its own water-quad mesh (flat for v1, FFT-displaced later per Phase 3.5b).
+
+**3.6.3c.6 — Volumetric weather chunks: pending.**
+
+Volumetric-cloud sampling per W2 weather Voronoi cell (~20-50 km cells). Shader-side cloud-density texture. Builds on the chunked-Voronoi pattern.
+
+**3.6.3c.7 — Palette-adaptation render integration: pending.** *(Was 3.6.3c.4 in earlier roadmap; renumbered when chunked terrain claimed the 4 slot.)*
 
 - [ ] `composed::WorldRefs` computes `source_weight` + `blend_factor = smoothstep(0.1, 0.9, source_weight)`; shader-side palette lerp. Visual-bench `palette_bleed_over_{crop}.png`. Makes the winter-ranch / desert-fjord effects actually visible.
 

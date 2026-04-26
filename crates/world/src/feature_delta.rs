@@ -231,17 +231,16 @@ pub fn compute_delta_at(
 
     // Hub foundation takes priority over natural feature.
     let raw_delta = if let Some(tier) = foundations.tier_for(cell_id) {
-        // Look up the hub at this cell to get the target runway
-        // elevation (we use approx_world_pos altitude sampled on L1
-        // base terrain as the runway datum).
-        let runway_datum = hubs
-            .hubs()
-            .iter()
-            .find(|h| {
-                let h_cell = sub_biome.nearest_cell(h.approx_world_pos.0, h.approx_world_pos.1);
-                h_cell == cell_id
-            })
-            .map_or(ctx.base_altitude_m, |_h| ctx.base_altitude_m);
+        // Use the query-point base altitude as the runway datum. The
+        // earlier implementation iterated all ~55 K hubs to find the
+        // one at this cell, but both arms of its `map_or` returned
+        // `ctx.base_altitude_m` — pure dead compute (Phase 3.6.3c.4
+        // perf-budget regression caught it: ~83 ms / hub-cell query).
+        // The proper "hub-position runway-end altitude" lookup wants
+        // a `cell_id → hub_idx` map (queued for hub-foundation polish);
+        // for now base_altitude_m is what we actually use.
+        let _ = hubs; // reserved for future hub-position lookup
+        let runway_datum = ctx.base_altitude_m;
         feature_delta_impls::hub_foundation_delta(tier, &ctx, runway_datum)
     } else {
         // Natural feature: prefer the pre-baked assignment when

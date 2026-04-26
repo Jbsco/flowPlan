@@ -730,15 +730,20 @@ impl CpuMesh {
     /// per chunk: ~1100 vertices × 32 bytes ≈ 36 KB. At 440 active
     /// chunks ≈ 16 MB total — well within budget.
     ///
-    /// **Triangle emission**: only when ALL FOUR corner vertices of a
-    /// grid cell are in-cell. Mixed corners (cell-boundary cases) get
-    /// dropped — neighbor chunks pick them up from their side. The
-    /// Voronoi-edge stitching is implicit via shared world-grid vertex
-    /// positions.
+    /// **Triangle ownership** (centroid-owned algorithm): each grid
+    /// cell (the 4-corner quad) is owned by whichever Voronoi cell
+    /// contains its centroid. The owning chunk emits triangles for it
+    /// — even if 1-3 corners are nearest to a neighbor cell. The
+    /// owning chunk includes those border vertices in its VBO too.
+    /// Adjacent chunks own DIFFERENT grid cells (no overlap) and
+    /// share VERTEX POSITIONS at the boundary (no z-fight, no gap).
+    /// This is what closes the visible-cell-line bug from the prior
+    /// "in-cell vertex only" approach.
     #[allow(clippy::cast_possible_wrap)]
     #[allow(clippy::cast_sign_loss)]
     #[allow(clippy::cast_precision_loss)]
     #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::expect_used)] // owned-grid-cell invariant — corner remap entries are guaranteed by Pass 2
     pub fn terrain_voronoi_chunk(
         bbox_min: (f32, f32),
         bbox_max: (f32, f32),
@@ -764,18 +769,61 @@ impl CpuMesh {
         let nz = (iz_hi - iz_lo + 1).max(0) as usize;
         let total = nx * nz;
 
-        // Phase 1 (parallel): per-grid-vertex eval → Option<Vertex>.
-        // None = out-of-cell, drop. Some = sampled vertex with normal.
+        // Pass 1: per grid-cell, determine ownership via centroid test.
+        // A grid cell is "owned" by this Voronoi cell iff its centroid
+        // is closest to this cell. Each grid cell has exactly one
+        // owner across all chunks → no gaps, no overlaps, no T-junctions.
+        let n_grid_cells_x = nx.saturating_sub(1);
+        let n_grid_cells_z = nz.saturating_sub(1);
+        let n_grid_cells = n_grid_cells_x * n_grid_cells_z;
+        let owned: Vec<bool> = (0..n_grid_cells)
+            .into_par_iter()
+            .map(|gi| {
+                let ix_off = gi % n_grid_cells_x;
+                let iz_off = gi / n_grid_cells_x;
+                let ix = ix_lo + ix_off as i64;
+                let iz = iz_lo + iz_off as i64;
+                let cx = ix as f32 * cell_size_m + cell_size_m * 0.5;
+                let cz = iz as f32 * cell_size_m + cell_size_m * 0.5;
+                in_cell(cx, cz)
+            })
+            .collect();
+
+        // Pass 2: per vertex, mark for inclusion if ANY adjacent grid
+        // cell is owned. Vertices on the boundary between owned/un-
+        // owned grid cells get included — they're corners of owned
+        // cells; the owning chunk needs them in its VBO to emit the
+        // triangle.
+        let mut include_vertex: Vec<bool> = vec![false; total];
+        for iz_off in 0..n_grid_cells_z {
+            for ix_off in 0..n_grid_cells_x {
+                if !owned[iz_off * n_grid_cells_x + ix_off] {
+                    continue;
+                }
+                let tl = iz_off * nx + ix_off;
+                let tr = iz_off * nx + ix_off + 1;
+                let bl = (iz_off + 1) * nx + ix_off;
+                let br = (iz_off + 1) * nx + ix_off + 1;
+                include_vertex[tl] = true;
+                include_vertex[tr] = true;
+                include_vertex[bl] = true;
+                include_vertex[br] = true;
+            }
+        }
+
+        // Pass 3 (parallel): per included vertex, sample height +
+        // gradient. Excluded vertices skip the expensive height eval
+        // entirely (saves 75% of bbox sample cost).
         let raw: Vec<Option<Vertex>> = (0..total)
             .into_par_iter()
             .map(|i| {
+                if !include_vertex[i] {
+                    return None;
+                }
                 let ix = ix_lo + (i % nx) as i64;
                 let iz = iz_lo + (i / nx) as i64;
                 let x = ix as f32 * cell_size_m;
                 let z = iz as f32 * cell_size_m;
-                if !in_cell(x, z) {
-                    return None;
-                }
                 let y = sample_height(x, z);
                 let eps = cell_size_m * 0.5;
                 let dy_dx = (sample_height(x + eps, z) - sample_height(x - eps, z)) / (2.0 * eps);
@@ -794,7 +842,7 @@ impl CpuMesh {
             })
             .collect();
 
-        // Phase 2 (serial): compress to dense VBO + remap table.
+        // Pass 4 (serial): compress to dense VBO + remap table.
         let mut remap: HashMap<usize, u32> = HashMap::with_capacity(total / 4);
         for (i, v) in raw.iter().enumerate() {
             if let Some(v) = v {
@@ -803,24 +851,25 @@ impl CpuMesh {
             }
         }
 
-        // Phase 3 (serial): emit triangles where all 4 corners are
-        // in-cell. Cells with mixed corners are dropped — neighbor
-        // chunks own them.
-        mesh.indices.reserve(remap.len() * 6);
-        for iz_off in 0..(nz - 1) {
-            for ix_off in 0..(nx - 1) {
+        // Pass 5 (serial): emit triangles for owned grid cells. By
+        // construction every corner of an owned grid cell has a
+        // remap entry (Pass 2 guaranteed inclusion).
+        mesh.indices
+            .reserve(owned.iter().filter(|b| **b).count() * 6);
+        for iz_off in 0..n_grid_cells_z {
+            for ix_off in 0..n_grid_cells_x {
+                if !owned[iz_off * n_grid_cells_x + ix_off] {
+                    continue;
+                }
                 let tl = iz_off * nx + ix_off;
                 let tr = iz_off * nx + ix_off + 1;
                 let bl = (iz_off + 1) * nx + ix_off;
                 let br = (iz_off + 1) * nx + ix_off + 1;
-                if let (Some(&t), Some(&r), Some(&b), Some(&q)) = (
-                    remap.get(&tl),
-                    remap.get(&tr),
-                    remap.get(&bl),
-                    remap.get(&br),
-                ) {
-                    mesh.indices.extend_from_slice(&[t, b, r, r, b, q]);
-                }
+                let &t = remap.get(&tl).expect("owned grid-cell tl missing");
+                let &r = remap.get(&tr).expect("owned grid-cell tr missing");
+                let &b = remap.get(&bl).expect("owned grid-cell bl missing");
+                let &q = remap.get(&br).expect("owned grid-cell br missing");
+                mesh.indices.extend_from_slice(&[t, b, r, r, b, q]);
             }
         }
         mesh

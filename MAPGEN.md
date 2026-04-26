@@ -549,7 +549,39 @@ Placement rules authored alongside:
 - Biome compatibility (`farmland_parcel` → arable biomes; `ranch` → HighDesert/RockyAlpine foothills; `hot_springs` → subarctic + RockyAlpine).
 - Scenery "earned reward" placement (`scenic_overlook` at high-prominence cells; `river_bend_viewpoint` on outside-bend of high-accumulation rivers — uses L1 hydrology).
 
-**3.6.3c — multi-cell group engine + development/scenery deltas** (code). Extends `voronoi_cells` with `FeatureGroup` — cells that belong to a group ID. Groups span multiple cells for connected features (roads, residential clusters). Group-aware deltas: road depression runs continuous across group-member cells via shared centerline polyline. Implements all 3.6.3b-authored features.
+**3.6.3c — multi-cell group engine + development/scenery deltas** (code, SHIPPED 2026-04-25). Extends `voronoi_cells` with `FeatureGroup` — cells that belong to a group ID. Groups span multiple cells for connected features (roads, residential clusters). Group-aware deltas: road depression runs continuous across group-member cells via shared centerline polyline. Implements all 3.6.3b-authored features.
+
+#### Road tier ladder (PINNED 2026-04-25)
+
+Five road-tier `FeatureGroupKind` variants (`Ord`-comparable via `road_tier()`) plus `Rail` (separate ladder, not road-comparable):
+
+| Tier | Kind | Half-width | Depth | Max length | Eligibility |
+| ---: | --- | ---: | ---: | ---: | --- |
+| 0 | `RoughDirt` | 8 m | -0.4 m | 30 km | feature-emit only (`homestead_clearing`, `abandoned_homestead`, `fishing_camp`) |
+| 1 | `Dirt` | 15 m | -0.6 m | 60 km | hub-trunk Local-Local + feature-emit (`ranch`, `mining_camp`, `ghost_town`, `watchtower`) |
+| 2 | `Gravel` | 18 m | -1.0 m | 80 km | feature-emit only (`farmland_parcel`, `mountain_lodge`, `dwelling_cluster`, `remote_compound`) |
+| 3 | `Paved` | 25 m | -1.5 m | 120 km | hub-trunk Major-Regional + feature-emit (`adobe_village`, `coastal_village`, `olive_grove`) |
+| 4 | `Highway` | 40 m | -3.0 m | 250 km | hub-trunk Major-Major only |
+| — | `Rail` | 20 m | +1.5 m berm | 200 km | hub-trunk Major-Major only |
+
+**Two-pass network construction**:
+
+1. **Pass 1 (hub trunks)** — `FeatureGroupBundle::build_road_network`: each Major/Regional/Local hub connects to its k-nearest higher-or-equal-tier neighbor via straight-line wrap-aware polylines. Steiner-tree-lite. Trunk types: `Highway` / `Paved` / `Dirt` / `Rail`.
+2. **Pass 2 (feature-emit access roads)** — `FeatureGroupBundle::extend_with_feature_emit_roads`: each placed feature with authored `road_emit: Some(kind)` paths to the nearest cell of compatible-or-higher tier via multi-source Dijkstra over the Voronoi-cell graph. Per-tier processing in DESCENDING tier order so higher tiers exist as targets when lower tiers evaluate. Length-capped, slope-penalized (5×@>25°, 2×@>15°), water-blocked (no road crosses open water).
+
+**Per-cell membership** stored as `Vec<GroupMembership { group_id, seg_idx: u16 }>` — `seg_idx` lets the L3 evaluator only check `[seg_idx-1, seg_idx, seg_idx+1]` polyline segments per query instead of iterating the full polyline (~300× speedup vs naive on long highways).
+
+**Tradeoffs accepted**:
+
+- Pass 2 multi-source Dijkstra runs 5 times (one per kind). Canonical-seed wall-clock ~270 s — slow but one-time at world-bake, never per-frame. Bake cache (3.7-precursor) saves the result so subsequent launches load in seconds.
+- Network density at canonical seed: 9 % of hubs participate (was 1.2 % pre-Pass-2). 30 K total segments / 813 K km network length. Some sparse regions remain — by design (Remote/Isolated tier is intentionally off-grid).
+
+**Future polish queued**:
+
+- Path fade-out when length cap exhausted before reaching network (currently dropped silently).
+- Smooth tier transitions at junctions (currently hard tier-shift).
+- Bridge primitives for narrow water crossings (currently water = hard reject).
+- Switchback geometry for steep terrain.
 
 #### Priority when a cell has multiple delta candidates
 
@@ -783,9 +815,30 @@ Measured at canonical seed: **275 s serial → 33 s parallel = 8.3× speedup** o
 
 **Scan-order — master-seed-keyed permutation (3.6.3c.1c PINNED)**: cell processing order is a deterministic permutation `splitmix64(master_seed, cell_id)` rather than naive `0..n_cells` ascending. Bridson's depth-first spatial walk produces cell IDs that are spatially correlated (cells near initial seed get low IDs, far cells get high IDs); naive ascending order would give the low-ID region "first pick" on contested high-spacing features (e.g. `hot_springs` with 50 km min_km). The permutation removes geographic bias while preserving full bit-identical determinism per master_seed. Same seed → same permutation → same bake output across all platforms.
 
-### Render streaming — uniform terrain mesh + Voronoi-cell active set (PINNED 2026-04-23)
+### Render streaming — universal chunked-Voronoi (PINNED 2026-04-25, supersedes the v1 hybrid)
 
-The 5000 km × 5000 km world cannot fit a single rendered mesh; rendering must stream content relative to the active camera position. The architecture is a **hybrid two-layer split**: continuous data (heightfield) gets a uniform mesh; cell-aligned content (features, hubs, overlays) gets a Voronoi-cell active set. Honors the PINNED `voronoi_subbiome_architecture` cell-as-unit-of-streaming direction at the render layer.
+**Direction**: every streaming layer (terrain, water, ambient, feature instances, volumetric weather) chunks per Voronoi cell. Each layer gets its own streaming radius, its own async worker pool, its own priority queue. Cells enter/exit their layer's radius → layer enqueues build / drops resource. Per-frame main-thread cost = O(entered+exited cells), not O(whole world). Memory pin: `chunked_voronoi_layers_universal`.
+
+**Why the pivot**: the v1 monolithic-mesh `StreamingTerrain` (one big 20 km × 20 km mesh, rebuild = re-sample 1.4 M verts as a unit) didn't scale. Even with all per-vertex cost optimizations, every camera move > 5 km re-bakes the whole disc. Outflies the player at debug-cam top tier; noticeable hitches at cruise. Chunking makes per-camera-step cost proportional to new content, not total content.
+
+**Universal pattern parts** (terrain is the reference; water / weather / ambient follow):
+
+- **Per-cell async build**: 4-worker pool, shared `Mutex<BinaryHeap>` queue + `Condvar` wake, `mpsc` result channel. Worker pulls one cell at a time, builds its mesh / resource, sends back. Main thread drains results per frame, uploads to GPU / inserts into cache.
+- **World-aligned grid for boundary continuity**: chunks sample positions on a global grid origin at world (0, 0). Adjacent cells' chunks share exact vertex positions at their boundary → heights match (pure function of `(x, z)`) → no z-fights, no T-junctions, no gaps.
+- **Centroid-owned grid quads** (for tessellated layers): each grid quad goes to whichever Voronoi cell owns its centroid. The owning chunk includes ALL FOUR corners (even if some are nearest-to-neighbor). Adjacent chunks own DIFFERENT quads → no overlap. Closes the boundary-line bug from "in-cell-vertex only" v0 algorithm.
+- **Vertex/data compression**: only included payload enters the buffer. Use a remap table for indices.
+- **Per-layer streaming radius**: terrain ~22 km (visible horizon), water shorter (~15 km), volumetric weather longer (~50 km, atmospheric). Layers scale independently.
+- **Worker shutdown discipline**: `Drop::drop()` signals shutdown + `notify_all()` the condvar; does NOT `join()` (workers may be mid-build, would block ESC). Detach via dropping `JoinHandle`s; OS reclaims threads on process exit.
+
+**Reference implementation** (terrain): `crates/world/src/feature_groups.rs::CpuMesh::terrain_voronoi_chunk` (per-cell mesh builder), `crates/app/src/chunked_terrain.rs::ChunkedTerrain` (manager + worker pool). ~390 LOC, the template for the rest.
+
+**Bake-cache (3.7-precursor)**: `BakedAssignments` + `FeatureGroupBundle` are deterministic per master_seed → safe to serialize. Cache file at `target/world-bake-cache/<seed>-vN.bin` via bincode. Subsequent launches load in seconds instead of re-running the 6-min bake. `BAKE_VERSION` const bumped manually when bake logic changes (cache invalidates).
+
+**Perf-budget regression tests**: `crates/world/tests/perf_budgets.rs` — timing-assertion tests for hot paths. Each test runs a representative workload, asserts elapsed < documented budget. Failures = regressions; investigate, don't relax.
+
+### v1 reference: hybrid uniform-mesh + cell-active-set (Phase 3.6.3c.5b, superseded 2026-04-25)
+
+The original v1 simplification — kept here as historical context. The cell-active-set tracking (`StreamingCellSet`) survives in the codebase as Layer-2 content streaming infrastructure (feature instances, ambient); only the monolithic `StreamingTerrain` was replaced.
 
 #### Layer 1 — Uniform terrain mesh (recenter on camera)
 

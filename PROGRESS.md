@@ -39,6 +39,35 @@ Post-tune calibration: `scenic_overlook` 37 → **12** placements (a viewpoint a
 
 `hot_springs` left at `temp_range_c: (-50, 5)` — climate window is conceptually correct (rare = cold). Calibration shows it stays near zero on canonical seed; revisit if visual-bench at 3.6.3c.4 confirms zero appearances.
 
+### Perf-budget regression tests + dead-code hub-iter cleanup (Task #281)
+
+User direction (sustaining): "any tests we can introduce for frame rate or compute budget? we need a way to stay on top of this aspect of performance".
+
+Added `crates/world/tests/perf_budgets.rs` — timing-assertion tests for the hot paths. Each test runs a representative workload, measures wall-clock, asserts elapsed-time stays under a documented budget. Failures = regressions; investigate, don't relax.
+
+**Tests shipped (4)**:
+
+| Test | Workload | Budget | Catches |
+| --- | --- | --- | --- |
+| `perf_budget_terrain_height_l1` | 100 K samples of `Terrain::height` | <1 s (10 µs/call) | Noise-primitive regressions (e.g. removed perlin pre-wrap, fbm slowdown) |
+| `perf_budget_composed_height_with_baked` (`#[ignore]`) | 100 K samples of `WorldRefsArc::height_at` post-bake | <5 s (50 µs/call) | `BakedAssignments` not threaded; per-query `assign_feature` recompute regressions |
+| `perf_budget_cells_within_radius` (`#[ignore]`) | 100 calls @ 22 km | <10 ms/call | Streaming-cell-set query regressions |
+| `perf_budget_chunk_mesh_build` (`#[ignore]`) — placeholder, queued for app-crate refactor | per-chunk build | <500 ms/chunk | Chunked terrain mesh-builder regressions |
+
+The `#[ignore]` ones need a 30-60 s world-bake and run only via `cargo test -- --ignored` (CI gate or local sanity).
+
+**The first regression caught**: composed-height was **157 µs/call** vs budget 50 µs. Investigated → `compute_delta_at` hub-foundation branch iterated all ~55 K hubs (`hubs.hubs().iter().find(...)`) calling `nearest_cell` per hub, but **both `map_or` arms returned `ctx.base_altitude_m`** — the find result was unused. Pure dead compute, ~83 ms / hub-cell query. Removed the dead `iter().find()` → **157 µs → 3 µs** (52× speedup). Reserved `let _ = hubs;` for the eventual proper "cell_id → hub_idx map" lookup that runway-end altitude would need (queued for hub-foundation polish).
+
+**Discipline written into the test file's module doc**:
+
+When a budget fails:
+1. Reproduce locally on the same hardware (timings are hardware-dependent — CI machines may need different budgets).
+2. Profile (`cargo flamegraph` or `perf record`).
+3. Find the recent change that pushed cost over budget; revert / optimize / re-architect.
+4. ONLY relax the budget if the new cost is genuinely irreducible AND acceptable. Document in PROGRESS.md.
+
+**Why integration tests, not criterion microbenches**: criterion is excellent for tuning sessions but requires explicit running + result interpretation. Integration tests with timing-assertions catch regressions automatically on every `cargo test` run. Keep both modes available; use these as the always-on regression net.
+
 ### Phase 3.6.3c.4 — Voronoi-cell chunked terrain streaming (Task #279)
 
 User direction (architectural pivot, design-doc-aligned): "I figure everything we can chunk should be chunked - different circular ranges if necessary, but we do most layers on voronoi layers, so I think we should be able to leverage that architecture, even for ambient objects, weather, and yes water and terrain."

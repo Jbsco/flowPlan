@@ -107,6 +107,35 @@ Agents are fast and capable but accumulate subtle bugs and technical debt across
 
 A phase gate fails if a regression breaches the budget without an explicit, time-boxed exception.
 
+### Tier 4b: Perf-budget integration tests (PINNED 2026-04-25)
+
+**Location:** `crates/<crate>/tests/perf_budgets.rs` (currently `crates/world/tests/perf_budgets.rs`).
+
+**Scope:** Hot-path timing assertions. Each test runs a representative workload, measures wall-clock, asserts elapsed-time stays under a documented budget. Failures = regressions.
+
+**Runs:** Every `cargo test` run for the cheap tests; `--ignored` opt-in for the bake-dependent ones (~30-60 s setup).
+
+**Difference from Tier 4 criterion benches:**
+
+- Criterion is excellent for tuning sessions but requires explicit running + result interpretation.
+- Perf-budget tests catch regressions automatically on every test run — the always-on regression net.
+- Use both: criterion for fine-grained tuning, perf-budget tests for "is the hot path fast enough?"
+
+**Discipline when a budget fails:**
+
+1. Reproduce locally on the same hardware (timings are hardware-dependent — adjust if running on much weaker / stronger hardware).
+2. Profile (`cargo flamegraph` or `perf record`).
+3. Find the recent change that pushed cost over budget; revert / optimize / re-architect.
+4. ONLY relax the budget if the new cost is genuinely irreducible AND acceptable to the project. Document in PROGRESS.md.
+
+**Currently shipped budgets:**
+
+- `Terrain::height` L1 — 100 K samples in <1 s (10 µs/call)
+- `WorldRefs::height_at` L1+L3-with-baked — 100 K samples in <5 s (50 µs/call). Catches `BakedAssignments`-not-threaded regression that previously left compute_delta_at re-running `assign_feature` per query.
+- `cells_within_radius` — 100 calls @ 22 km radius in <10 ms/call. Catches streaming-cell-set query regressions.
+
+**First win caught**: hub-foundation branch in `compute_delta_at` had a dead `iter().find()` over ~55 K hubs; both `map_or` arms returned `ctx.base_altitude_m` regardless. ~83 ms / hub-cell query of pure waste. Removed → 157 µs/call → 3 µs/call (52× speedup). Without the perf test this would have shipped silent into playtest.
+
 ---
 
 ## Architectural Enforcement Tests

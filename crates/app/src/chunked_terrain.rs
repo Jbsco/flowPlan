@@ -318,16 +318,21 @@ impl ChunkedTerrain {
 
 impl Drop for ChunkedTerrain {
     fn drop(&mut self) {
-        // Signal shutdown + wake all workers so they exit promptly.
+        // Signal shutdown + wake all workers so they exit on next
+        // iteration. We do NOT join — workers may be mid-`build_chunk`
+        // (~50-200 ms of mesh sampling) and joining would block ESC /
+        // app close until the build finishes. Worker threads hold
+        // `Arc<WorldRefsArc>`; OS reclaims them when the process
+        // exits. For mid-process drops (replacing a `ChunkedTerrain`
+        // without process exit), this would leak threads — not a
+        // current concern, queued for follow-up if it lands as a real
+        // pattern.
         if let Ok(mut shutdown) = self.shared.shutdown.lock() {
             *shutdown = true;
         }
         self.shared.queue_signal.notify_all();
-        for h in self.workers.drain(..) {
-            // Best-effort join; if a worker panicked we don't want to
-            // crash the main thread on app shutdown.
-            drop(h.join());
-        }
+        // Drain handles without joining — they exit on their own.
+        self.workers.clear();
     }
 }
 
