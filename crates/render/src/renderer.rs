@@ -201,16 +201,25 @@ pub const WATER_WGSL_SOURCE: &str = include_str!("water.wgsl");
 /// in the bit-identity gate (Phase B4).
 pub const CLOUD_NOISE_WGSL_SOURCE: &str = include_str!("cloud_noise.wgsl");
 
-/// Volumetric cloud raymarcher WGSL source (Phase 3.6.3c.6 / 3.2x B2).
+/// Volumetric cloud raymarcher WGSL source (Phase 3.6.3c.6 / 3.2x).
 ///
-/// Empty raymarch skeleton — full-screen triangle pass that runs after
-/// outline + before widgets, returns transparent in B2. B3 adds the
-/// W2 weather-cell sampling + Perlin-Worley sub-cell detail. B4 adds
-/// CPU-GPU bit-identity gate.
+/// Composed with [`CLOUD_NOISE_WGSL_SOURCE`] at shader-module creation
+/// time; the noise primitives must be declared first. B3 ships
+/// density sampling + W2 cell lookup; B3b adds depth termination;
+/// B3c adds Perlin-Worley blend.
 ///
 /// See `docs/WEATHER.md` § Cloud rendering technique for technique
 /// decisions (pass placement, density storage, lighting model).
 pub const VOLUMETRIC_WGSL_SOURCE: &str = include_str!("volumetric.wgsl");
+
+/// Compute shader source for the CPU-GPU bit-identity gate (B4).
+///
+/// Composed with [`CLOUD_NOISE_WGSL_SOURCE`]; the test compute shader
+/// calls `worley_3d` + `cloud_perlin_3d` from the noise module.
+/// Consumed by `crates/render/tests/cloud_noise_bit_identity.rs`
+/// (hardware-gated). Failure of that test indicates the WGSL math
+/// has diverged from Rust — fix the divergence.
+pub const CLOUD_NOISE_TEST_WGSL_SOURCE: &str = include_str!("cloud_noise_test.wgsl");
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]

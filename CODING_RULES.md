@@ -12,6 +12,7 @@ The rules exist because flowPlan has strict architectural constraints (see [DESI
 - [Code Style](#code-style)
 - [Real-Time Discipline](#real-time-discipline)
 - [Determinism Discipline](#determinism-discipline)
+- [Precision Discipline at World Scale](#precision-discipline-at-world-scale)
 - [Unsafe and FFI](#unsafe-and-ffi)
 - [Error Handling](#error-handling)
 - [Logging and Tracing](#logging-and-tracing)
@@ -263,6 +264,62 @@ Phase 6.1 plan: patch glam's scalar-math paths to force libm, via `[patch.crates
 - Non-deterministic render timing (frame interpolation alpha from a wall-clock accumulator is expected).
 
 These must not feed back into sim state. If a presentation smoother's output is ever fed back into `SimState.tick()`, you've created a determinism violation — redirect it through a deterministic intermediary first.
+
+---
+
+## Precision Discipline at World Scale
+
+flowPlan's world is 5,000,000 m on a side (toroidal). At this magnitude, naïve f32 arithmetic loses precision: at world edge, f32 ULP is ~0.6 m, and a careless `x / spacing` chain pulls that imprecision into the noise output. The result is **inconsistent behavior across the world** — finer noise at the origin than at the edges. Players don't have stable expectations of how a system behaves; the world ceases to feel uniform.
+
+The rule: **any sampler that operates on absolute world coordinates and produces fine-grained output must use precision-preserving arithmetic so behavior is consistent everywhere.** This applies to noise primitives, hash-grid lookups, density samplers, and any future system whose output depends on sub-meter input precision at world coordinates.
+
+### The fractional-cell math pattern (PINNED 2026-04-26)
+
+When converting a world coordinate `x` into a discrete cell index `i` plus a fractional offset `q`:
+
+**Wrong (precision lost at world edge):**
+```rust
+let xs = x / spacing;       // high-magnitude divide; limited f32 ULPs
+let i = floor(xs);          // exact integer
+let q = xs - i;             // fractional inherits the imprecision of xs
+```
+
+**Right (cancels high-magnitude bits):**
+```rust
+let i = floor(x / spacing); // exact integer (no precision in fractional needed yet)
+let q = (x - i * spacing) / spacing;
+//      ^^^^^^^^^^^^^^^^^ subtraction of integer-aligned magnitude leaves
+//                         a small residual at full f32 precision
+```
+
+The `i * spacing` reproduces the integer-aligned portion of `x`. Subtracting cancels the high bits, leaving a residual `< spacing` at full f32 precision. Final divide gives a precise fractional. **Sub-millimeter resolution at world-extent magnitudes (5 Mm)** instead of ~0.6 m. Same mathematics, different operation order.
+
+### Where this discipline applies
+
+- **Cloud noise** (Phase 3.6.3c.6, shipped) — `worley_2d`, `worley_3d`, `cloud_perlin_3d` all use the precision-preserving form. Verified by `crates/world/src/noise.rs::tests::*_precision_at_world_edge`.
+- **Future FFT water** (Phase 3.5b) — same wavelength-vs-position math; same discipline.
+- **Future hydrology samplers / per-position queries** — any system reading `world::*_at(x, y, z)` needs to consider precision behavior at world edge.
+- **Audio source spatialization** — sub-meter positional accuracy at world edge matters for stereo imaging.
+
+### Where it doesn't (current scope)
+
+- Pure integer arithmetic (cell indices, hash inputs) — exact at any magnitude.
+- Camera-relative GPU vertex transformation (Phase 3.6.3c.5d) — already in the small-magnitude regime by construction.
+- Sim-side aircraft position (`DVec3` per `render_precision_at_world_scale` memory) — f64 is wide enough to not hit this issue.
+
+### Verification
+
+- Unit tests in the relevant noise module, including `*_precision_at_world_edge` and `*_continuity_across_wrap`.
+- Integration: `crates/render/tests/cloud_noise_bit_identity.rs` test points include wrap-edge positions (`4_999_800` through `4_999_950`) — verifies CPU-GPU agreement at the precision-critical zone.
+
+### CPU-GPU agreement vs strict bit-identity (revised 2026-04-26)
+
+The original cloud-noise spec called for **bit-identity** between CPU and GPU implementations. After implementing in Phase 3.6.3c.6:
+
+- HASH outputs match exactly.
+- ARITHMETIC chains diverge at 1-100 ULPs because GPU drivers fuse multiply-add into FMA instructions (single rounding instead of two). naga / wgpu does not currently expose a way to disable this.
+
+**Practical gate**: per-component absolute-difference tolerance of 5e-3 in the agreement test. Catches algorithm bugs (wrong constants, broken hash, wrong loop bounds → produce 0.1-1.0 magnitude divergence) while tolerating FMA-level driver math (observed max ~1e-3 with precision-preserving fractional). Strict bit-identity becomes a Phase 6.1 cross-platform-determinism-hardening goal alongside soft-float WGSL math.
 
 ---
 

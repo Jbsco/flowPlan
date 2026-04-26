@@ -65,6 +65,7 @@ ${BOLD}GATES${RESET}
   test                 cargo test --workspace
   test-perf            Run perf-budget tests (incl. --ignored, ~3 min).
   test-cloud-perf      Run GPU cloud-pass perf gate (hardware-tests, ~30 sec).
+  test-cloud-bit-identity Run cloud-noise CPU-GPU agreement gate (hardware-tests, ~10 sec).
 
 ${BOLD}CI (via act)${RESET}
   ci                   Run the full quality-gate workflow locally via act.
@@ -174,6 +175,12 @@ cmd_test-cloud-perf() {
     step "cloud-pass GPU perf gate (hardware-tests, ~30 sec)"
     cargo test -p flowplan-render --features hardware-tests \
         --release --test cloud_pass_perf -- --nocapture
+}
+
+cmd_test-cloud-bit-identity() {
+    step "cloud-noise CPU-GPU agreement gate (hardware-tests, ~10 sec)"
+    cargo test -p flowplan-render --features hardware-tests \
+        --release --test cloud_noise_bit_identity -- --nocapture
 }
 
 # ───────────────────────────────────────────────────────────────────────
@@ -322,6 +329,7 @@ main() {
         test)             cmd_test ;;
         test-perf)        cmd_test-perf ;;
         test-cloud-perf)  cmd_test-cloud-perf ;;
+        test-cloud-bit-identity) cmd_test-cloud-bit-identity ;;
         build)            cmd_build "$@" ;;
         clean)            cmd_clean ;;
         clean-all)        cmd_clean-all ;;

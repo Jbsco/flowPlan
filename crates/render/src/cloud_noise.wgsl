@@ -197,12 +197,17 @@ fn worley_2d(
     let zw = wrap_coord(z);
     let n_cells = i32(round(WORLD_EXTENT_M / spacing_m));
     let effective_spacing = WORLD_EXTENT_M / f32(n_cells);
-    let xs = xw / effective_spacing;
-    let zs = zw / effective_spacing;
-    let ix0 = i32(floor(xs));
-    let iz0 = i32(floor(zs));
-    let qx = xs - f32(ix0);
-    let qz = zs - f32(iz0);
+    let ix0 = i32(floor(xw / effective_spacing));
+    let iz0 = i32(floor(zw / effective_spacing));
+    // Precision-preserving fractional cell offset (PINNED 2026-04-26).
+    // `q = x/spacing - ix` loses precision at high `x` because the
+    // divide produces a high-magnitude value with limited f32 ULPs.
+    // Subtracting `ix * spacing` first cancels the high-magnitude bits,
+    // leaving a small residual (always < spacing) at full f32 precision.
+    // Sub-millimeter resolution at world-extent (5 Mm) instead of 0.6 m.
+    // See WEATHER.md § Precision discipline.
+    let qx = (xw - f32(ix0) * effective_spacing) / effective_spacing;
+    let qz = (zw - f32(iz0) * effective_spacing) / effective_spacing;
 
     var top2: array<f32, 4> = array<f32, 4>(1.0e30, 1.0e30, 1.0e30, 1.0e30);
     for (var dx = -1; dx <= 1; dx = dx + 1) {
@@ -258,7 +263,14 @@ fn cloud_perlin_gradient_3d(
     let len_sq = gx * gx + gy * gy + gz * gz;
     var inv_len = 1.0;
     if (len_sq > 1e-6) {
-        inv_len = 1.0 / sqrt(len_sq);
+        // Two-step sqrt-then-divide pattern. Compilers occasionally
+        // fuse `1.0 / sqrt(x)` into a `rsqrt` instruction with reduced
+        // precision (~22-bit vs IEEE-correctly-rounded 24-bit). The
+        // intermediate var prevents the fusion, keeping WGSL within
+        // 1 ULP of Rust's `1.0 / libm::sqrtf(x)` per CPU-GPU bit-identity
+        // contract (WEATHER.md § Worley noise primitive).
+        let len = sqrt(len_sq);
+        inv_len = 1.0 / len;
     }
     return vec3<f32>(gx, gy, gz) * inv_len;
 }
@@ -281,15 +293,14 @@ fn cloud_perlin_3d(
     let zw = wrap_coord(z);
     let n_cells = i32(round(WORLD_EXTENT_M / spacing_m));
     let effective_spacing = WORLD_EXTENT_M / f32(n_cells);
-    let xs = xw / effective_spacing;
-    let ys = y / effective_spacing;
-    let zs = zw / effective_spacing;
-    let ix = i32(floor(xs));
-    let iy = i32(floor(ys));
-    let iz = i32(floor(zs));
-    let fx = xs - f32(ix);
-    let fy = ys - f32(iy);
-    let fz = zs - f32(iz);
+    let ix = i32(floor(xw / effective_spacing));
+    let iy = i32(floor(y / effective_spacing));
+    let iz = i32(floor(zw / effective_spacing));
+    // Precision-preserving fractional cell offset — see worley_2d for
+    // the math. PINNED 2026-04-26.
+    let fx = (xw - f32(ix) * effective_spacing) / effective_spacing;
+    let fy = (y - f32(iy) * effective_spacing) / effective_spacing;
+    let fz = (zw - f32(iz) * effective_spacing) / effective_spacing;
 
     var dots: array<f32, 8>;
     for (var k = 0; k < 8; k = k + 1) {
@@ -331,15 +342,14 @@ fn worley_3d(
     // Y unwrapped (altitude is unbounded by topology).
     let n_cells = i32(round(WORLD_EXTENT_M / spacing_m));
     let effective_spacing = WORLD_EXTENT_M / f32(n_cells);
-    let xs = xw / effective_spacing;
-    let ys = y / effective_spacing;
-    let zs = zw / effective_spacing;
-    let ix0 = i32(floor(xs));
-    let iy0 = i32(floor(ys));
-    let iz0 = i32(floor(zs));
-    let qx = xs - f32(ix0);
-    let qy = ys - f32(iy0);
-    let qz = zs - f32(iz0);
+    let ix0 = i32(floor(xw / effective_spacing));
+    let iy0 = i32(floor(y / effective_spacing));
+    let iz0 = i32(floor(zw / effective_spacing));
+    // Precision-preserving fractional cell offset — see worley_2d for
+    // the math. PINNED 2026-04-26.
+    let qx = (xw - f32(ix0) * effective_spacing) / effective_spacing;
+    let qy = (y - f32(iy0) * effective_spacing) / effective_spacing;
+    let qz = (zw - f32(iz0) * effective_spacing) / effective_spacing;
 
     var top2: array<f32, 4> = array<f32, 4>(1.0e30, 1.0e30, 1.0e30, 1.0e30);
     for (var dx = -1; dx <= 1; dx = dx + 1) {

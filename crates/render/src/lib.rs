@@ -27,8 +27,8 @@ pub mod hot_reload;
 pub use debug_lines::{DebugLineBatch, DebugLineVertex, DebugLinesRenderer};
 pub use instances::{InstanceGpuData, InstanceRenderer};
 pub use renderer::{
-    Renderer, SceneParams, ShadingParams, CLOUD_NOISE_WGSL_SOURCE, VOLUMETRIC_WGSL_SOURCE,
-    WATER_WGSL_SOURCE,
+    Renderer, SceneParams, ShadingParams, CLOUD_NOISE_TEST_WGSL_SOURCE, CLOUD_NOISE_WGSL_SOURCE,
+    VOLUMETRIC_WGSL_SOURCE, WATER_WGSL_SOURCE,
 };
 pub use telemetry::Telemetry;
 

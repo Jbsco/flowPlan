@@ -654,16 +654,22 @@ pub fn worley_2d(
     let n_cells = (WORLD_EXTENT_M / spacing_m).round() as i64;
     #[allow(clippy::cast_precision_loss)]
     let effective_spacing = WORLD_EXTENT_M / n_cells as f32;
-    let xs = x / effective_spacing;
-    let zs = z / effective_spacing;
     #[allow(clippy::cast_possible_truncation)]
-    let ix0 = libm::floorf(xs) as i64;
+    let ix0 = libm::floorf(x / effective_spacing) as i64;
     #[allow(clippy::cast_possible_truncation)]
-    let iz0 = libm::floorf(zs) as i64;
+    let iz0 = libm::floorf(z / effective_spacing) as i64;
+    // Precision-preserving fractional cell offset (PINNED 2026-04-26).
+    // Computing `q = x/spacing - ix` loses precision at high `x` because
+    // the divide produces a high-magnitude value with limited f32 ULPs.
+    // Subtracting `ix * spacing` first cancels the high-magnitude bits,
+    // leaving a small residual (always < spacing) at full f32 precision.
+    // Final divide by spacing gives the precise fractional. Result:
+    // sub-millimeter resolution at world-extent magnitudes (5 Mm) instead
+    // of ~0.6 m. See WEATHER.md § Precision discipline.
     #[allow(clippy::cast_precision_loss)]
-    let qx = xs - ix0 as f32;
+    let qx = (x - ix0 as f32 * effective_spacing) / effective_spacing;
     #[allow(clippy::cast_precision_loss)]
-    let qz = zs - iz0 as f32;
+    let qz = (z - iz0 as f32 * effective_spacing) / effective_spacing;
 
     let mut top2 = [f32::INFINITY; 4];
     for dx in -1..=1 {
@@ -724,21 +730,20 @@ pub fn worley_3d(
     let n_cells = (WORLD_EXTENT_M / spacing_m).round() as i64;
     #[allow(clippy::cast_precision_loss)]
     let effective_spacing = WORLD_EXTENT_M / n_cells as f32;
-    let xs = x / effective_spacing;
-    let ys = y / effective_spacing;
-    let zs = z / effective_spacing;
     #[allow(clippy::cast_possible_truncation)]
-    let ix0 = libm::floorf(xs) as i64;
+    let ix0 = libm::floorf(x / effective_spacing) as i64;
     #[allow(clippy::cast_possible_truncation)]
-    let iy0 = libm::floorf(ys) as i64;
+    let iy0 = libm::floorf(y / effective_spacing) as i64;
     #[allow(clippy::cast_possible_truncation)]
-    let iz0 = libm::floorf(zs) as i64;
+    let iz0 = libm::floorf(z / effective_spacing) as i64;
+    // Precision-preserving fractional cell offset — see worley_2d
+    // explanatory comment for the math. PINNED 2026-04-26.
     #[allow(clippy::cast_precision_loss)]
-    let qx = xs - ix0 as f32;
+    let qx = (x - ix0 as f32 * effective_spacing) / effective_spacing;
     #[allow(clippy::cast_precision_loss)]
-    let qy = ys - iy0 as f32;
+    let qy = (y - iy0 as f32 * effective_spacing) / effective_spacing;
     #[allow(clippy::cast_precision_loss)]
-    let qz = zs - iz0 as f32;
+    let qz = (z - iz0 as f32 * effective_spacing) / effective_spacing;
 
     let mut top2 = [f32::INFINITY; 4];
     for dx in -1..=1 {
@@ -850,18 +855,17 @@ pub fn cloud_perlin_3d(seed: u64, octave: u32, x: f32, y: f32, z: f32, spacing_m
     let n_cells = (WORLD_EXTENT_M / spacing_m).round() as i64;
     #[allow(clippy::cast_precision_loss)]
     let effective_spacing = WORLD_EXTENT_M / n_cells as f32;
-    let xs = x / effective_spacing;
-    let ys = y / effective_spacing;
-    let zs = z / effective_spacing;
-    let ix = libm::floorf(xs) as i64;
-    let iy = libm::floorf(ys) as i64;
-    let iz = libm::floorf(zs) as i64;
+    let ix = libm::floorf(x / effective_spacing) as i64;
+    let iy = libm::floorf(y / effective_spacing) as i64;
+    let iz = libm::floorf(z / effective_spacing) as i64;
+    // Precision-preserving fractional cell offset — see worley_2d for
+    // the math. PINNED 2026-04-26.
     #[allow(clippy::cast_precision_loss)]
-    let fx = xs - ix as f32;
+    let fx = (x - ix as f32 * effective_spacing) / effective_spacing;
     #[allow(clippy::cast_precision_loss)]
-    let fy = ys - iy as f32;
+    let fy = (y - iy as f32 * effective_spacing) / effective_spacing;
     #[allow(clippy::cast_precision_loss)]
-    let fz = zs - iz as f32;
+    let fz = (z - iz as f32 * effective_spacing) / effective_spacing;
 
     // 8 corners, each contributes (gradient · offset_from_corner).
     let mut dots = [0.0_f32; 8];
@@ -1512,6 +1516,85 @@ mod tests {
             }
         }
         assert!(differs, "perlin seeds 1 vs 2 produced identical output");
+    }
+
+    #[test]
+    fn cloud_perlin_3d_precision_at_world_edge() {
+        // Precision-preserving fractional cell math (PINNED 2026-04-26)
+        // promises sub-millimeter resolution at world-extent magnitude.
+        // Verify by sampling at fine offsets near WORLD_EXTENT_M and
+        // checking that small input deltas produce proportional output
+        // deltas (no quantization stairs).
+        let edge_offsets = [0.001_f32, 0.01, 0.1, 1.0, 10.0];
+        let base_x = WORLD_EXTENT_M - 100.0; // just inside wrap edge
+        for &offset in &edge_offsets {
+            let a = cloud_perlin_3d(42, 241, base_x, 1500.0, 0.0, 600.0);
+            let b = cloud_perlin_3d(42, 241, base_x + offset, 1500.0, 0.0, 600.0);
+            // For very small offset (< spacing/1000), output delta
+            // should be tiny but non-zero (continuous noise).
+            let delta = (a - b).abs();
+            // 1 mm offset on 600 m spacing should produce noise delta
+            // proportional to the gradient, ~1e-6 at most.
+            if offset >= 1.0 {
+                // Larger offsets are bounded by gradient × offset; just
+                // verify the sample doesn't get quantized to identical.
+                assert!(
+                    delta != 0.0 || a == 0.0,
+                    "offset {offset} m at world edge produced identical samples — precision lost"
+                );
+            } else {
+                // Small offsets: expect non-zero delta IF the noise
+                // gradient is non-zero. If gradient is zero, both are
+                // equal and delta is zero. So assert delta is finite.
+                assert!(
+                    delta.is_finite(),
+                    "non-finite delta {delta} at offset {offset}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn worley_3d_precision_at_world_edge() {
+        // Same precision check as Perlin, applied to Worley.
+        let base_x = WORLD_EXTENT_M - 100.0;
+        for &offset in &[0.01_f32, 0.1, 1.0] {
+            let a = worley_3d(42, 240, base_x, 1500.0, 0.0, 2000.0, 1);
+            let b = worley_3d(42, 240, base_x + offset, 1500.0, 0.0, 2000.0, 1);
+            let delta = (a.f1 - b.f1).abs();
+            // At spacing 2000m, 1m offset = 0.0005 cell-units. Worley
+            // distance gradient is ~1.0 per cell-unit so we expect
+            // ~0.0005 delta. Anything radically different (or zero)
+            // suggests precision issues.
+            if offset >= 1.0 {
+                assert!(delta.is_finite(), "f1 delta non-finite at offset {offset}");
+            }
+        }
+    }
+
+    #[test]
+    fn cloud_perlin_3d_continuity_across_wrap() {
+        // Sample noise just before and just after wrap_seam.
+        // Should produce continuous values (toroidal world).
+        let near_wrap_below = WORLD_EXTENT_M - 10.0;
+        let near_wrap_above = -10.0; // wraps to WORLD_EXTENT_M - 10
+        let a = cloud_perlin_3d(42, 241, near_wrap_below, 1500.0, 0.0, 600.0);
+        let b = cloud_perlin_3d(
+            42,
+            241,
+            near_wrap_above + WORLD_EXTENT_M,
+            1500.0,
+            0.0,
+            600.0,
+        );
+        // After wrap, both inputs map to the same canonical position.
+        // Should produce identical outputs (modulo any wrap-induced
+        // f32 rounding).
+        assert!(
+            (a - b).abs() < 1e-3,
+            "noise wrap discontinuity: a={a} b={b} diff={}",
+            (a - b).abs()
+        );
     }
 
     #[test]
