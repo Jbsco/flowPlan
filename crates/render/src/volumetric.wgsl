@@ -86,11 +86,14 @@ const CLOUD_WORLEY_OCTAVE: u32 = 240u;
 // calibrated; F1+F2 blend reserved for Ultra preset.
 const CLOUD_FEATURES_PER_CELL: u32 = 1u;
 
-// Perlin sub-cell detail (B3c). Spacing slightly smaller than Worley
-// so Perlin adds within-puff density variation rather than duplicating
-// Worley's cell shape. Octave 241 (Worley = 240) per WEATHER.md
-// octave-offset convention `[240, 280)` reserved for cloud noise.
-const CLOUD_PERLIN_SPACING_M: f32 = 1500.0;
+// Perlin sub-cell detail (B3c). Spacing tuned so the Perlin
+// contribution is visibly distinct from the Worley structure: at
+// 600 m the cloud spans ~5 Perlin "wavelengths" → fine cauliflower
+// texture inside puffs. Larger spacings (1500+) duplicate Worley's
+// scale and make the contribution invisible. Smaller (<300 m)
+// produce salt-and-pepper noise. Octave 241 (Worley = 240) per
+// WEATHER.md octave-offset convention `[240, 280)`.
+const CLOUD_PERLIN_SPACING_M: f32 = 600.0;
 const CLOUD_PERLIN_OCTAVE: u32 = 241u;
 
 // Perlin-Worley blend weights per cell type (WEATHER.md § Sub-cell
@@ -171,14 +174,20 @@ fn sample_cloud_density(world_pos: vec3<f32>, t: f32) -> f32 {
     );
     let worley_struct = clamp(1.0 - w.f_blended, 0.0, 1.0);
 
-    // Perlin variation: native [-1, 1] → normalize to [0, 1].
+    // Perlin variation. Theoretical bound is [-1, 1] but typical 3D
+    // Perlin samples land in [-0.7, 0.7] (the trilinear interpolation
+    // of unit-vector dot-products rarely reaches the corners). Map
+    // typical-range to [0, 1] so the Perlin contribution actually
+    // saturates the contribution range — without this, most samples
+    // cluster near 0.5 and the variation is invisible against the
+    // Worley structure.
     let perlin_raw = cloud_perlin_3d(
         CLOUD_SEED_HI, CLOUD_SEED_LO,
         CLOUD_PERLIN_OCTAVE,
         world_pos.x, world_pos.y, world_pos.z,
         CLOUD_PERLIN_SPACING_M,
     );
-    let perlin_norm = clamp((perlin_raw + 1.0) * 0.5, 0.0, 1.0);
+    let perlin_norm = clamp((perlin_raw + 0.7) / 1.4, 0.0, 1.0);
 
     // Cumulus blend: 70% Worley structure + 30% Perlin variation.
     let cloud_factor =

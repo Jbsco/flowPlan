@@ -73,9 +73,12 @@ use notify as _;
 use pollster as _;
 use wgpu as _;
 
-// 720p — typical "game window" size. Cost scales with pixel count;
-// 1080p+ would push this proportionally.
-const SIZE: (u32, u32) = (1280, 720);
+// 1080p — locked as the perf-gate basis (per user direction
+// 2026-04-26). Most desktop dev machines run 1080p; gate measurements
+// here are directly comparable to in-game framerates at typical play
+// resolution. Cost scales ~linearly with pixel count → for 4K, multiply
+// by 4×; for 720p, divide by 2.25×.
+const SIZE: (u32, u32) = (1920, 1080);
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const CLEAR: wgpu::Color = wgpu::Color {
     r: 0.52,
@@ -91,15 +94,23 @@ const WATER_COLOR: [f32; 4] = [0.18, 0.38, 0.58, 1.0];
 const FRAMES_TO_MEASURE: usize = 30;
 const WARMUP_FRAMES: usize = 3;
 
-/// Frame-time budget (ms) for the minimal-scene + cloud test.
+/// Frame-time budget (ms) for the minimal-scene + cloud test at 1080p.
 ///
 /// Per WEATHER.md the cloud-pass-specific budget is **≤ 0.6 ms** at
-/// reference tier. This test renders cloud + minimal scene (flat
-/// terrain, single-cube vehicle, no streaming) → frame cost is
-/// dominated by the cloud pass. 2 ms total gives ~5-6× headroom over
-/// current measured cost (~0.35 ms median on dev hardware) — tight
-/// enough to flag a 5× regression, loose enough to pass on slower
-/// hardware variance.
+/// reference tier (resolution-independent). This test renders cloud +
+/// minimal scene (flat terrain, single-cube vehicle, no streaming)
+/// → frame cost is dominated by the cloud pass.
+///
+/// **Target: 144 Hz at 1080p** (per user direction 2026-04-26). 144 Hz
+/// = 6.94 ms per frame. Cloud must stay small enough that the rest of
+/// the frame (terrain streaming, water, vehicle, instances, ambient,
+/// outline, widgets) fits in the remaining budget.
+///
+/// 3 ms gives ~2× headroom over current 1.5 ms median (post-B3c). At
+/// 3 ms, cloud takes 43% of a 144 Hz frame — still tight but leaves
+/// 4 ms for everything else. Tightening further forces optimization;
+/// loosening risks dropping below 144 Hz once chunked weather streams
+/// real cells (C1 / C2).
 ///
 /// **Tune as playtest reveals regressions** (per user-pinned guidance
 /// 2026-04-26). Specifically:
@@ -108,7 +119,7 @@ const WARMUP_FRAMES: usize = 3;
 /// - When this gate fails on legitimate work → measure on reference
 ///   hardware first; only relax if ref-tier hardware ALSO shows the
 ///   regression. Document the rationale with each adjustment.
-const TOTAL_FRAME_BUDGET_MS: f64 = 2.0;
+const TOTAL_FRAME_BUDGET_MS: f64 = 3.0;
 
 #[cfg(feature = "hardware-tests")]
 fn init_wgpu_with_timestamps() -> Option<(wgpu::Device, wgpu::Queue, f32)> {
