@@ -8,7 +8,7 @@
 //! pipeline expects. Doesn't need a GPU device — runs naga's WGSL
 //! frontend + validator directly.
 
-use flowplan_render::VOLUMETRIC_WGSL_SOURCE;
+use flowplan_render::{CLOUD_NOISE_WGSL_SOURCE, VOLUMETRIC_WGSL_SOURCE};
 
 // Other workspace + dev-deps belong to the lib + visual-snapshot test.
 use bytemuck as _;
@@ -23,16 +23,22 @@ use wgpu as _;
 
 #[test]
 fn volumetric_wgsl_parses_cleanly() {
-    let module = naga::front::wgsl::parse_str(VOLUMETRIC_WGSL_SOURCE)
-        .expect("volumetric.wgsl failed to parse — fix syntax errors");
+    // Cloud raymarcher composes cloud_noise.wgsl (noise primitives)
+    // before volumetric.wgsl (cloud-density model + raymarch). The
+    // renderer composes them the same way at shader-module creation.
+    // Volumetric depends on Worley symbols from cloud_noise; standalone
+    // it would fail to parse, which is intentional.
+    let composed = format!("{CLOUD_NOISE_WGSL_SOURCE}\n{VOLUMETRIC_WGSL_SOURCE}");
+    let module = naga::front::wgsl::parse_str(&composed)
+        .expect("composed cloud shader failed to parse — fix syntax errors");
 
     let validator_caps = naga::valid::Capabilities::all();
     let mut validator =
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), validator_caps);
     if let Err(e) = validator.validate(&module) {
         panic!(
-            "volumetric.wgsl failed naga validation: {e:?}\n\
-             B3+ will only build on a parseable skeleton; fix syntax/type \
+            "composed cloud shader failed naga validation: {e:?}\n\
+             B3+ will only build on a parseable composition; fix syntax/type \
              errors here first."
         );
     }
@@ -69,15 +75,27 @@ fn volumetric_wgsl_uses_expected_bind_groups() {
 }
 
 #[test]
-fn volumetric_wgsl_skeleton_returns_transparent() {
-    // The B2 skeleton must return alpha = 0 (or near-zero) so it's a
-    // visual no-op until B3 wires real density. Catch accidental
-    // baked-in opacity that would cover the scene.
-    //
-    // Heuristic: the placeholder `sample_density_at` should return 0.0
-    // and the early-out threshold should still be a hard alpha cap.
+fn volumetric_wgsl_b3_density_model_present() {
+    // B3 ships altitude_profile + footprint_falloff + sample_cloud_density
+    // + a hardcoded test-cell so clouds become visible. Catches
+    // accidental rollback to the B2 transparent stub.
+    for name in [
+        "fn altitude_profile(",
+        "fn footprint_falloff(",
+        "fn sample_cloud_density(",
+        "TEST_CELL_TYPE",
+        "TEST_CELL_BASE_M",
+        "TEST_CELL_TOP_M",
+    ] {
+        assert!(
+            VOLUMETRIC_WGSL_SOURCE.contains(name),
+            "volumetric.wgsl missing B3 density-model symbol `{name}`"
+        );
+    }
+    // B3 calls Worley directly — make sure the function name reference
+    // matches what cloud_noise.wgsl exports.
     assert!(
-        VOLUMETRIC_WGSL_SOURCE.contains("return 0.0;"),
-        "volumetric.wgsl placeholder density sampler must return 0.0 in B2"
+        VOLUMETRIC_WGSL_SOURCE.contains("worley_3d("),
+        "volumetric.wgsl B3 must call worley_3d"
     );
 }

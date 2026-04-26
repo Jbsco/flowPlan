@@ -362,11 +362,20 @@ impl Renderer {
             label: Some("flowplan-sky-shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("sky.wgsl").into()),
         });
-        // Cloud raymarcher (3.6.3c.6 / 3.2x B2). Empty in skeleton form;
-        // bound to render-pass slot for B3+ to fill in.
+        // Cloud raymarcher (3.6.3c.6 / 3.2x). Composed at shader-creation
+        // time from cloud_noise.wgsl (Worley + PCG + helpers — also used
+        // standalone for CPU-GPU bit-identity testing) followed by
+        // volumetric.wgsl (cloud-density model + raymarch + entry points).
+        // Naming: the noise primitives must be declared BEFORE the
+        // volumetric module that calls them.
+        let volumetric_source = format!(
+            "{}\n{}",
+            include_str!("cloud_noise.wgsl"),
+            include_str!("volumetric.wgsl")
+        );
         let volumetric_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("flowplan-volumetric-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("volumetric.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(volumetric_source.into()),
         });
         let water_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("flowplan-water-shader"),
