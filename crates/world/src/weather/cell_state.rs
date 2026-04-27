@@ -563,7 +563,16 @@ fn initial_state_from_humidity(master_seed: u64, cell: CellId, time_s: f32, rh: 
     let wind_mag = libm::sqrtf(w.x * w.x + w.z * w.z);
     let grad_mag = pressure_gradient_magnitude(master_seed, seed_pos.x, seed_pos.y, time_s);
 
-    let cell_type = select_cell_type(master_seed, cell, p_hpa, t_k, rh, wind_mag, grad_mag);
+    let cell_type = select_cell_type_with_adjacency(
+        master_seed,
+        cell,
+        time_s,
+        p_hpa,
+        t_k,
+        rh,
+        wind_mag,
+        grad_mag,
+    );
     let coverage_strength =
         compute_coverage_strength(cell_type, rh, t_k, p_hpa, wind_mag, grad_mag);
     let mut state = parameterize(cell_type, rh, t_k);
@@ -761,17 +770,9 @@ fn compute_coverage_strength(
 ///   reads as wispy clouds rather than essentially clear).
 pub const CLEAR_AIR_MARGIN_CAP: f32 = 0.25;
 
-/// Select cell type via weighted-random based on W1 eligibility.
-#[allow(clippy::too_many_arguments)] // W1 state is wide by design.
-fn select_cell_type(
-    master_seed: u64,
-    cell: CellId,
-    p_hpa: f32,
-    t_k: f32,
-    rh: f32,
-    wind_mag: f32,
-    grad_mag: f32,
-) -> CellType {
+/// W1-derived eligibility weights, indexed by `CellType` discriminant
+/// (`[ClearAir, Cumulus, Nimbus, Stratus, Squall, Frontal, Cirrus]`).
+fn eligibility_weights(p_hpa: f32, t_k: f32, rh: f32, wind_mag: f32, grad_mag: f32) -> [f32; 7] {
     let elig_cumulus = if rh >= CLOUD_MIN_HUMIDITY && t_k >= CONVECTIVE_MIN_TEMP_K {
         1.0
     } else {
@@ -803,16 +804,13 @@ fn select_cell_type(
     // Cirrus eligibility: stable conditions in upper troposphere.
     // Independent of surface RH — cirrus forms aloft from upper-air
     // moisture, not surface mixing. Favored when low-mid weather
-    // signals are quiet (low gradient, moderate winds). Higher base
-    // weight than other types because real-world cirrus coverage is
-    // very common (often 25-50% of sky).
+    // signals are quiet (low gradient, moderate winds).
     let elig_cirrus = if grad_mag < FRONTAL_GRAD_THRESHOLD && wind_mag < SQUALL_MIN_WIND_MPS {
         1.5
     } else {
         0.5
     };
-
-    let weights = [
+    [
         CLEAR_AIR_PRIOR,
         elig_cumulus,
         elig_nimbus,
@@ -820,12 +818,14 @@ fn select_cell_type(
         elig_squall,
         elig_frontal,
         elig_cirrus,
-    ];
+    ]
+}
+
+fn cell_type_from_weights(master_seed: u64, cell: CellId, weights: &[f32; 7]) -> CellType {
     let total: f32 = weights.iter().sum();
     if total <= 0.0 {
         return CellType::ClearAir;
     }
-
     let roll = cell_roll(master_seed, cell) * total;
     let mut acc = 0.0;
     for (i, &w) in weights.iter().enumerate() {
@@ -843,6 +843,114 @@ fn select_cell_type(
         }
     }
     CellType::ClearAir
+}
+
+/// Select cell type via weighted-random based on W1 eligibility.
+///
+/// Independent classification — does NOT consult neighbors. Used as
+/// the bottom of the recursion in `select_cell_type_with_adjacency`,
+/// so neighbors-of-neighbors don't infinitely recurse.
+#[allow(clippy::too_many_arguments)] // W1 state is wide by design.
+fn select_cell_type(
+    master_seed: u64,
+    cell: CellId,
+    p_hpa: f32,
+    t_k: f32,
+    rh: f32,
+    wind_mag: f32,
+    grad_mag: f32,
+) -> CellType {
+    let weights = eligibility_weights(p_hpa, t_k, rh, wind_mag, grad_mag);
+    cell_type_from_weights(master_seed, cell, &weights)
+}
+
+/// Adjacency-bias factor (Post-CM-10 Phase D). Each W1-eligible type's
+/// weight is multiplied by `(1 + ADJACENCY_BOOST × neighbor_count)`
+/// where `neighbor_count` is the number of 8-neighbors that classified
+/// (independently) as that type. Types with zero W1 eligibility stay
+/// at zero — adjacency cannot override the W1 gate, only reinforce
+/// among already-eligible types.
+///
+/// At 0.30, 4 same-type neighbors boost weight by 2.2× (= 1 + 4×0.30).
+/// At 8 same-type neighbors, weight is boosted 3.4×. This produces
+/// visible clustering of same-type cells without making the bias
+/// absolute (single-cell anomalies still possible at boundaries).
+const ADJACENCY_BOOST: f32 = 0.30;
+
+/// Select cell type with 1-step adjacency relaxation toward neighbor
+/// types (Post-CM-10 Phase D, 2026-04-27).
+///
+/// At classification time, classify the 8 grid-neighbors INDEPENDENTLY
+/// (via `select_cell_type` — no further adjacency lookup, prevents
+/// recursion). Tally their type counts, multiply current cell's W1
+/// eligibility weights by `(1 + ADJACENCY_BOOST × neighbor_count[i])`,
+/// then roll. Produces sprawling weather: fronts cluster into bands,
+/// storms organize into lines, clear regions stay clear.
+///
+/// Neighbor classifications use `humidity::sea_level_humidity` (without
+/// terrain adjustment) for performance — neighbors are bias inputs, not
+/// the cell's own classification, so the small approximation vs the
+/// terrain-aware path is acceptable.
+///
+/// Cost: 8 neighbor classifications × ~6 W1 lookups each = ~50 W1
+/// samples per cell-bake. Each sample is a Perlin call (~100 ns); total
+/// ~5 µs per cell. With ~80 active cells, ~400 µs per chunk update.
+/// Bake runs on a worker thread; no main-thread impact.
+#[allow(clippy::too_many_arguments)] // W1 state is wide by design.
+fn select_cell_type_with_adjacency(
+    master_seed: u64,
+    cell: CellId,
+    time_s: f32,
+    p_hpa: f32,
+    t_k: f32,
+    rh: f32,
+    wind_mag: f32,
+    grad_mag: f32,
+) -> CellType {
+    // Tally neighbor types via independent classification.
+    let mut counts = [0u32; 7];
+    for di in -1i32..=1 {
+        for dj in -1i32..=1 {
+            if di == 0 && dj == 0 {
+                continue;
+            }
+            let neighbor = CellId {
+                ix: cell.ix + di,
+                iz: cell.iz + dj,
+            };
+            let n_seed = voronoi::seed_position(master_seed, neighbor);
+            let n_p = pressure::sea_level_pressure(master_seed, n_seed.x, n_seed.y, time_s);
+            let n_t = temperature::sea_level_temperature(master_seed, n_seed.x, n_seed.y, time_s);
+            let n_rh = humidity::sea_level_humidity(master_seed, n_seed.x, n_seed.y, time_s);
+            let n_w = wind::wind_at(
+                master_seed,
+                n_seed.x,
+                WIND_SAMPLE_ALTITUDE_M,
+                n_seed.y,
+                time_s,
+            );
+            let n_wind_mag = libm::sqrtf(n_w.x * n_w.x + n_w.z * n_w.z);
+            let n_grad = pressure_gradient_magnitude(master_seed, n_seed.x, n_seed.y, time_s);
+            let n_type =
+                select_cell_type(master_seed, neighbor, n_p, n_t, n_rh, n_wind_mag, n_grad);
+            counts[n_type as usize] += 1;
+        }
+    }
+    // Compute self's W1 weights and apply adjacency boost. ClearAir
+    // (index 0) is intentionally EXCLUDED from the boost — it already
+    // has a high CLEAR_AIR_PRIOR (2.5), and most neighbors are clear in
+    // a typical mid-latitude scene. Boosting clear-on-clear created a
+    // self-reinforcing imbalance that squeezed out cloudy regions
+    // (`ADJACENCY_BOOST = 0.30 + clear-boost` produced "significantly
+    // less clouds" in playtest 2026-04-27). Boosting only cloud-bearing
+    // types lets clouds cluster (Cumulus around Cumulus, Frontal along
+    // bands) while ClearAir stays at its natural W1-derived rate.
+    let mut weights = eligibility_weights(p_hpa, t_k, rh, wind_mag, grad_mag);
+    #[allow(clippy::cast_precision_loss)]
+    for (i, w) in weights.iter_mut().enumerate().skip(1) {
+        *w *= 1.0 + ADJACENCY_BOOST * counts[i] as f32;
+    }
+    cell_type_from_weights(master_seed, cell, &weights)
 }
 
 /// Per-type altitude / density / precip parameters, tuned to plausible
