@@ -816,19 +816,80 @@ prefix disambiguates from overall ROADMAP phase numbering.
 
 Each sub-phase ships as its own update to PROGRESS.md + memory pin, given proximity to compaction. Sub-phases land in order — each builds on the previous. **CM-6..CM-10 were re-ordered 2026-04-26 to front-load structural work (boundary blending) and bump Beer-Lambert ahead of refinement passes (highest-visual-impact item should land before tuning calibrates against suboptimal lighting).**
 
-### Post-CM-9: additional W1/W2/W3 couplings (PINNED 2026-04-26)
+### Post-CM-10: additional W1/W2/W3 couplings (PINNED 2026-04-26 — Phase A.1 SHIPPED, Phase B IN PROGRESS)
 
-User direction: "we have a lot of weather layers/hooks that we can use to distribute clouds realistically." These hooks already exist in `crates/world/src/weather/` but the cloud-rendering shader doesn't fully leverage them yet. Pinned for post-CM-9 expansion (some may motivate restructuring CM-N if playtest surfaces them as gating):
+User direction: "we have a lot of weather layers/hooks that we can use to distribute clouds realistically." These hooks already exist in `crates/world/src/weather/` but the cloud-rendering shader doesn't fully leverage them yet. Sequenced A → B → C → D → E with stage-wise visual check-ins.
 
-| Hook (existing in `weather/`) | How clouds could leverage it | Plumbing required |
+**Phase A.1 — Wind-shear cumulus tilt (scene-level)** — *shipped 2026-04-26*
+
+`SceneParams.wind_dir_horiz: Vec2` sampled CPU-side from `wind::wind_at(camera_xz, 2000m, time_of_day)` once per frame. Shader applies `tilt_offset = wind_dir × WIND_TILT_AMPLITUDE_M (400m) × normalized_altitude` to the warped (x, z) before density-noise lookup. Cumulus tops lean downwind, breaking the X/Z axis-aligned Worley grid character. Uniform across cells in current view region (correct for windy day — all clouds lean with prevailing wind). Per-cell variant (A.2) deferred — A.1 sufficient at current cell density. Perf: 4.48 ms median.
+
+**Phase B — Vertical structure variety (REVISED 2026-04-26 user direction)** — *shipped 2026-04-26*
+
+User pinned design concern post-CM-10 visual review: cumulus reads as "uniform pancake / thin layer", lacks anvil clouds, no spotty fields, no navigable 3D voids in marginal cells. Diagnosis: existing model has `density = cell.density × alt_factor(y) × cloud_factor(noise)` with alt_factor multiplicatively dominating the y-axis — alt_factor's bell shape is the same for every non-stratus cell, so cumulus thickness is fixed. CM-5 perturbs (base, top) together but band stays same thickness.
+
+**Three components shipped together** to deliver the design vision:
+
+1. **`vertical_amp_factor: f32` per cell** (CPU-derived from cell_type baseline × coverage_strength). Multiplied into CM-5's altitude-perturbation amplitudes:
+
+   | Cell type | base_factor | At cov=0.95 | At cov=0.30 |
+   |---|---:|---:|---:|
+   | Cumulus | 1.0 | 1.93× | 0.95× |
+   | Nimbus | 2.5 | 4.81× (towering) | 2.38× |
+   | Stratus | 0.3 | 0.58× (always thin) | 0.29× |
+   | Squall | 1.5 | 2.89× | 1.43× |
+   | Frontal | 1.2 | 2.31× | 1.14× |
+   | ClearAir/haze | 0.5 | — | 0.48× (sparse) |
+
+   Strong nimbus → 4.8× amplitude → effective_top extension up to +7200m above the nominal top → towering cumulonimbus reaching 9km+.
+
+2. **`profile_kind: u32` enum** selecting `altitude_profile` shape:
+
+   | profile_kind | Shape | Used for |
+   |---|---|---|
+   | BELL (0) | Symmetric parabolic peak (current) | Fair-weather cumulus, squall |
+   | TOWER (1) | Peak at 70% altitude, narrow base | Towering cumulus (cumulus+strong updraft+high cov) |
+   | ANVIL (2) | T-shape, narrow base, broad top spread above 80% | Cumulonimbus / nimbus |
+   | DECK (3) | Uniform 70% middle, soft 15% fades (current stratus) | Stratus |
+   | LAYERED (4) | Double-peak at 30% + 70% | Frontal cells |
+
+   CPU-side classifier: `nimbus → ANVIL`; `cumulus + (cov > 0.7) → TOWER`; `cumulus + (cov ≤ 0.7) → BELL`; `stratus → DECK`; `frontal → LAYERED`; `squall → BELL`. Profile_kind also drives `vertical_amp_factor` slightly — TOWER/ANVIL get +30% bonus.
+
+3. **Vertical-carve via `perlin_norm` reuse** (cost-saving variant 2026-04-26): `carve_signal = 1 - perlin_norm`; `carve = clamp(1 - (1-cov) × VERTICAL_CARVE_AMP × carve_signal, 0, 1); alt_factor *= carve`. The original design called for a dedicated 3D Perlin call — but profiling showed +0.1 ms cost, and reusing the existing `perlin_norm` (which has 3D structure via CM-8's y-stretch) is free. Trade-off: carve aligns with density features rather than being independent — amplifies noise contrast (high-perlin gets denser, low-perlin carves out). Marginal cells still get 3D voids. Pinned `VERTICAL_CARVE_AMP = 0.6`. If we need fully-independent carve later (e.g. for explicit "anvil top voids"), add a dedicated Perlin then.
+
+**GpuWeatherCell layout**: 32 → 40 bytes (add `vertical_amp_factor: f32` + `profile_kind: u32`, std430-aligned).
+**Perf actual**: 4.55 ms median post-Phase-B (was 4.48 ms post-A.1). +0.07 ms net. Budget bumped 4.5 → 4.7 ms with explicit documentation linking to GPU 3D noise textures as the next cost-recovery option (would reclaim ~1-2 ms if needed for FFT water budget pressure).
+
+**Visual delivery**:
+- Anvil cumulonimbus (broad top spread at altitude) — THE distinctive storm-cloud shape
+- Towering cumulus columns (narrow base, peak shifted high)
+- Fair-weather cumulus puffy bell distributions
+- Stratus thin uniform deck
+- Frontal cells with double-deck banded character
+- Marginal cells: discrete sky-gaps at varying altitudes (3D voids), aircraft-navigable
+- Same cell type with different cov shows dramatically different vertical extent
+
+**Phase C — Frontal-graph banded structure** — *pending*
+
+Along frontal-graph segments, cloud structure becomes banded (oriented perpendicular to graph tangent). Per-cell tangent + banded flag in `GpuWeatherCell`. Shader overrides Worley sampling axes accordingly.
+
+**Phase D — Cross-cell adjacency-biased evolution** — *pending*
+
+Priority ladder #13. Cells bias next-cycle re-roll toward neighbor cell types so weather sprawls naturally — fronts move as bands, storms organize into lines. CPU-side: at re-roll time consult neighbors and weight the W2 partition outcome.
+
+**Phase E — Precipitation particle systems** — *pending, largest scope*
+
+Priority ladder #10-11. Rain/snow particle systems consuming W3 `precipitation_rate_at`. Standalone subsystem, can land independently.
+
+| Hook (existing in `weather/`) | How clouds could leverage it | Status |
 |---|---|---|
-| `wind::wind_at(x, y, z, time)` direction | **Cumulus tilt** — tops lean downwind by amount proportional to vertical shear. effective_top.xz shifted by `tilt_vec × (y - base) / depth`. | Add `wind_dir_at_alt: vec2<f32>` to `GpuWeatherCell` (8 bytes). |
-| `frontal::nearest_segment` graph | **Banded structure** along frontal-graph segments, oriented perpendicular to graph tangent. | Per-cell flag + tangent direction in `GpuWeatherCell`; in shader, override Perlin/Worley axes. |
-| `weather::deltas::updraft_at(...)` | **Tall narrow features** in strong-updraft regions — couples with CM-7's vertical carving (more carving + more vertical extent). | Already in W3 deltas; could ride coverage_strength's altitude amplitude in CM-5 or pair with CM-7. |
-| `weather::deltas::precipitation_rate_at(...)` | **Per-cell precipitation visualization** (rain/snow particle systems). Not cloud-density; see priority ladder #10-11. | Particle pool design pending. |
-| Cross-cell adjacency-biased evolution (priority ladder #13) | Cells bias their next re-roll toward neighbor cell types so weather sprawls (fronts move as bands, storms organize into lines). | Requires cycle-time decision to consult neighbor states. Pinned design; not in this CM-N pass. |
-| `humidity::sea_level_humidity_with_terrain` | **Already exercised** at cell-state-compute time → `coverage_strength`. Free. | Done. |
-| Orographic / rain-shadow modifiers | **Already exercised** through humidity. Free. | Done. |
+| `wind::wind_at(x, y, z, time)` direction | Cumulus tilt | **Phase A.1 shipped 2026-04-26** |
+| Per-type updraft baselines (in deltas.rs) + cov | Vertical amp factor + profile_kind | **Phase B shipped 2026-04-26** |
+| `frontal::nearest_segment` graph | Banded structure | Phase C pending |
+| Cross-cell type bias | Sprawl evolution | Phase D pending |
+| `weather::deltas::precipitation_rate_at(...)` | Particle systems | Phase E pending |
+| `humidity::sea_level_humidity_with_terrain` | Already exercised → coverage_strength. Free. | Done. |
+| Orographic / rain-shadow modifiers | Already exercised through humidity. Free. | Done. |
 
 **Smoothstep edge bounds (CM-2 calibration, 2026-04-26)** — final values centered so each axis returns ~0.5 at the binary threshold:
 

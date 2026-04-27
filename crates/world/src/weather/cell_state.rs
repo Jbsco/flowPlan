@@ -51,6 +51,101 @@ pub enum CellType {
     Frontal,
 }
 
+/// Altitude-profile shape (Post-CM-10 Phase B, 2026-04-26). Selects the
+/// `altitude_profile` shader branch — the same `cell_type` can render
+/// different shapes depending on `coverage_strength` + W3 hooks.
+///
+/// CPU-side classifier `derive_profile_kind` picks one of these
+/// from `(cell_type, coverage_strength)`. The shader's
+/// `altitude_profile(profile_kind, ...)` then dispatches to the
+/// appropriate shape.
+///
+/// Discriminant matches `volumetric.wgsl::PROFILE_*` constants.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ProfileKind {
+    /// Symmetric parabolic peak — fair-weather cumulus, squall.
+    Bell = 0,
+    /// Peak at 70% altitude, narrow base — towering cumulus
+    /// (cumulus + strong updraft + high coverage).
+    Tower = 1,
+    /// T-shape, narrow column up to 80% then broad top spread —
+    /// cumulonimbus / nimbus (the iconic anvil).
+    Anvil = 2,
+    /// Uniform middle 70% with smooth fades — stratus deck.
+    Deck = 3,
+    /// Double-peak at 30% and 70% altitude — frontal cells with
+    /// stratified upper + lower bands.
+    Layered = 4,
+}
+
+/// Classify a cell's altitude profile from `cell_type` + `coverage_strength`.
+///
+/// Pinned 2026-04-26 — Post-CM-10 Phase B.
+#[must_use]
+pub fn derive_profile_kind(cell_type: CellType, coverage_strength: f32) -> ProfileKind {
+    match cell_type {
+        CellType::Stratus => ProfileKind::Deck,
+        CellType::Frontal => ProfileKind::Layered,
+        CellType::Nimbus => ProfileKind::Anvil,
+        CellType::Cumulus => {
+            // Cumulus with high coverage_strength → towering;
+            // otherwise fair-weather bell.
+            if coverage_strength > 0.7 {
+                ProfileKind::Tower
+            } else {
+                ProfileKind::Bell
+            }
+        },
+        // Squall: textured bell. ClearAir: unused (density = 0).
+        // Both fall through to BELL — same body for clarity.
+        CellType::Squall | CellType::ClearAir => ProfileKind::Bell,
+    }
+}
+
+/// Per-cell-type baseline `vertical_amp_factor` (Post-CM-10 Phase B).
+///
+/// Multiplied by `(0.5 + 1.5 × coverage_strength)` to produce the
+/// per-cell amplification factor that scales CM-5 altitude perturbation
+/// amplitudes. Per-type baselines reflect the cell's typical vertical
+/// extent character:
+/// - `Cumulus` 1.0 — medium puffs at baseline
+/// - `Nimbus` 2.5 — towering cumulonimbus capable of reaching ~9km+
+/// - `Stratus` 0.3 — always thin, never towering
+/// - `Squall` 1.5 — moderate vertical extent
+/// - `Frontal` 1.2 — mid-range
+/// - `ClearAir` 0.5 — sparse haze, subtle structure
+#[must_use]
+pub fn vertical_amp_baseline(cell_type: CellType) -> f32 {
+    match cell_type {
+        CellType::Cumulus => 1.0,
+        CellType::Nimbus => 2.5,
+        CellType::Stratus => 0.3,
+        CellType::Squall => 1.5,
+        CellType::Frontal => 1.2,
+        CellType::ClearAir => 0.5,
+    }
+}
+
+/// Compute `vertical_amp_factor` from `cell_type` + `coverage_strength`.
+///
+/// Strong cells get up to ~5× nominal amplitude; marginal cells stay
+/// near baseline. `Tower` / `Anvil` profiles get a +30% bonus.
+#[must_use]
+pub fn derive_vertical_amp_factor(
+    cell_type: CellType,
+    coverage_strength: f32,
+    profile_kind: ProfileKind,
+) -> f32 {
+    let baseline = vertical_amp_baseline(cell_type);
+    let cov_scale = 0.5 + 1.5 * coverage_strength;
+    let profile_bonus = match profile_kind {
+        ProfileKind::Tower | ProfileKind::Anvil => 1.30,
+        _ => 1.0,
+    };
+    baseline * cov_scale * profile_bonus
+}
+
 /// Per-cell state snapshot at a query time.
 #[derive(Copy, Clone, Debug)]
 pub struct CellState {

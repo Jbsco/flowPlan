@@ -1576,12 +1576,29 @@ impl Runtime {
         // sunrise. At session start the aircraft is near origin, so the effect
         // only kicks in after traversal.
         let local_tod = local_time_of_day(curr.time_of_day, curr.vehicle.position.x);
+        // Post-CM-10 Phase A.1: sample horizontal wind at typical cumulus
+        // altitude (mid-band, ~2 km) at the camera's XZ for use as the
+        // shader's per-frame wind-tilt direction. One W1 sample per frame
+        // — cheap. As the aircraft traverses regions with different wind
+        // patterns, cloud tilt direction follows.
+        let wind_sample = flowplan_world::weather::wind::wind_at(
+            WORLD_SEED,
+            curr.vehicle.position.x,
+            2_000.0,
+            curr.vehicle.position.z,
+            curr.time_of_day,
+        );
+        let wind_horiz = glam::Vec2::new(wind_sample.x, wind_sample.z);
+        let wind_dir_horiz = wind_horiz
+            .try_normalize()
+            .unwrap_or(glam::Vec2::new(1.0, 0.0));
         let scene_params = SceneParams {
             sun_dir: sun_direction(local_tod),
             time_seconds: self.start_time.elapsed().as_secs_f32(),
             // Mirror sim-side chop on the visual waves so buoyancy response
             // and rendered surface amplitude stay aligned.
             chop_intensity: curr.chop_intensity,
+            wind_dir_horiz,
             ..SceneParams::default()
         };
         self.renderer.set_scene(&self.queue, &scene_params);
@@ -1673,14 +1690,32 @@ impl Runtime {
             let mut gpu_cells: Vec<flowplan_render::GpuWeatherCell> = chunked
                 .iter_resident()
                 .take(flowplan_render::MAX_WEATHER_CELLS)
-                .map(|snap| flowplan_render::GpuWeatherCell {
-                    seed_pos: [snap.seed_pos.x, snap.seed_pos.y],
-                    base_altitude_m: snap.state.base_altitude_m,
-                    top_altitude_m: snap.state.top_altitude_m,
-                    density: snap.state.density,
-                    storm_phase: snap.state.storm_phase,
-                    cell_type: snap.state.cell_type as u32,
-                    coverage_strength: snap.state.coverage_strength,
+                .map(|snap| {
+                    // Post-CM-10 Phase B: derive profile_kind +
+                    // vertical_amp_factor CPU-side from cell_type +
+                    // coverage_strength. Drives shader altitude_profile
+                    // dispatch + CM-5 amplitude scaling.
+                    let profile_kind = flowplan_world::weather::cell_state::derive_profile_kind(
+                        snap.state.cell_type,
+                        snap.state.coverage_strength,
+                    );
+                    let vertical_amp_factor =
+                        flowplan_world::weather::cell_state::derive_vertical_amp_factor(
+                            snap.state.cell_type,
+                            snap.state.coverage_strength,
+                            profile_kind,
+                        );
+                    flowplan_render::GpuWeatherCell {
+                        seed_pos: [snap.seed_pos.x, snap.seed_pos.y],
+                        base_altitude_m: snap.state.base_altitude_m,
+                        top_altitude_m: snap.state.top_altitude_m,
+                        density: snap.state.density,
+                        storm_phase: snap.state.storm_phase,
+                        cell_type: snap.state.cell_type as u32,
+                        coverage_strength: snap.state.coverage_strength,
+                        vertical_amp_factor,
+                        profile_kind: profile_kind as u32,
+                    }
                 })
                 .collect();
             // Pad the tail with sentinel-positioned cells so the
@@ -1701,6 +1736,8 @@ impl Runtime {
                     storm_phase: 0.0,
                     cell_type: 0,
                     coverage_strength: 0.0,
+                    vertical_amp_factor: 0.0,
+                    profile_kind: 0, // PROFILE_BELL — unused for sentinel
                 });
             }
             self.renderer.update_weather_cells(&self.queue, &gpu_cells);

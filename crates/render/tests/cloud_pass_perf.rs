@@ -135,6 +135,15 @@ const WARMUP_FRAMES: usize = 3;
 /// - CM-6: 4.5 ms (boundary blending; per-step nearest-two scan +
 ///   per-cell altitude pre-filter; Option 2 one-sqrt linearization
 ///   shipped but the actual bottleneck is the scan, not the sqrt)
+/// - Post-CM-10 Phase B: 4.7 ms (vertical structure variety —
+///   profile_kind dispatch in altitude_profile + vertical_amp_factor
+///   multiplications + perlin_norm-reuse vertical-carve. Carve uses
+///   existing Perlin sample to keep cost bounded, but the profile
+///   dispatch + per-cell amp scale add ~0.1 ms net. Phase B delivers
+///   anvil cumulonimbus / towering cumulus / fair-weather variants /
+///   stratus deck / frontal layered + 3D voids in marginal cells.
+///   **GPU 3D noise textures (queued post-CM-10 cost recovery)** is
+///   now the next perf-recovery option to claw back to ~3.5 ms.
 ///
 /// **Tune as playtest reveals regressions** (per user-pinned guidance
 /// 2026-04-26). Specifically:
@@ -143,7 +152,7 @@ const WARMUP_FRAMES: usize = 3;
 /// - When this gate fails on legitimate work → measure on reference
 ///   hardware first; only relax if ref-tier hardware ALSO shows the
 ///   regression. Document the rationale with each adjustment.
-const TOTAL_FRAME_BUDGET_MS: f64 = 4.5;
+const TOTAL_FRAME_BUDGET_MS: f64 = 4.7;
 
 #[cfg(feature = "hardware-tests")]
 fn init_wgpu_with_timestamps() -> Option<(wgpu::Device, wgpu::Queue, f32)> {
@@ -287,6 +296,8 @@ fn cloud_pass_within_perf_budget() {
         storm_phase: 0.0,
         cell_type: 0,
         coverage_strength: 0.0,
+        vertical_amp_factor: 0.0,
+        profile_kind: 0,
     };
     let mut test_cells = [empty_slot; MAX_WEATHER_CELLS];
     test_cells[0] = GpuWeatherCell {
@@ -301,6 +312,11 @@ fn cloud_pass_within_perf_budget() {
         // continuous-margin refactor) — not the trivial
         // coverage=1 path that bypasses modulation.
         coverage_strength: 0.7,
+        // Post-CM-10 Phase B: cumulus + cov=0.7 → TOWER profile
+        // (boundary case; just at the threshold). Use BELL here for
+        // a stable test scenario. amp_factor = 1.0 × (0.5 + 1.05) = 1.55.
+        vertical_amp_factor: 1.55,
+        profile_kind: 0, // PROFILE_BELL
     };
     renderer.update_weather_cells(&queue, &test_cells);
 

@@ -133,6 +133,14 @@ pub struct SceneParams {
     /// heavy chop. App sets this to mirror `SimState.chop_intensity` so
     /// visual waves track physics chop (closes the 3.2.3c wiring gap).
     pub chop_intensity: f32,
+    /// Horizontal wind direction at typical cloud altitude, sampled at
+    /// camera position once per frame (Post-CM-10 Phase A.1, 2026-04-26).
+    /// Drives volumetric cumulus tilt — cloud density-noise lookup is
+    /// shifted by `wind_dir × tilt_amplitude × normalized_altitude` so
+    /// upper portions of cumulus lean downwind. Breaks the X/Z-aligned
+    /// Worley grid character that has been producing visible angular
+    /// artifacts. Unit vector in the world XZ plane.
+    pub wind_dir_horiz: glam::Vec2,
 }
 
 impl SceneParams {
@@ -148,7 +156,13 @@ impl SceneParams {
                 self.fog_color.z,
                 self.fog_density,
             ],
-            time: [self.time_seconds, self.chop_intensity, 0.0, 0.0],
+            // time.x = seconds, time.y = chop_intensity, time.zw = wind_dir_horiz.
+            time: [
+                self.time_seconds,
+                self.chop_intensity,
+                self.wind_dir_horiz.x,
+                self.wind_dir_horiz.y,
+            ],
         }
     }
 }
@@ -174,6 +188,9 @@ impl Default for SceneParams {
             // Default matches the prior Phase 2 baseline where SimState's
             // chop_intensity sat at 1.0 unconditionally.
             chop_intensity: 1.0,
+            // Default wind blowing toward +X (east). App overrides per
+            // frame from W1 wind_at(camera_xz, mid_altitude, time).
+            wind_dir_horiz: glam::Vec2::new(1.0, 0.0),
         }
     }
 }
@@ -222,8 +239,8 @@ pub const VOLUMETRIC_WGSL_SOURCE: &str = include_str!("volumetric.wgsl");
 pub const MAX_WEATHER_CELLS: usize = 64;
 
 /// GPU layout for one W2 weather cell. Matches `GpuWeatherCell` in
-/// `volumetric.wgsl`. std430-friendly: 32 bytes per cell, 16-byte
-/// natural alignment via the `seed_pos: vec2<f32>` lead.
+/// `volumetric.wgsl`. std430-friendly: 40 bytes per cell, 8-byte
+/// alignment.
 ///
 /// Populated by `Renderer::update_weather_cells` from the
 /// `WeatherCellSnapshot` records produced by `ChunkedWeather`. Unused
@@ -253,6 +270,21 @@ pub struct GpuWeatherCell {
     /// thresholds get a small nonzero margin (capped 0.15) → wispy
     /// haze in transition zones.
     pub coverage_strength: f32,
+    /// Vertical-extent amplification factor (Post-CM-10 Phase B,
+    /// 2026-04-26). Multiplied into CM-5 altitude perturbation
+    /// amplitudes. Per-type baseline × `(0.5 + 1.5 × coverage_strength)`
+    /// — strong nimbus reaches ~5× nominal amplitude (towering
+    /// cumulonimbus to ~9km), weak cumulus stays ~1× (small puffs).
+    /// See `docs/WEATHER.md § Post-CM-10 Phase B`.
+    pub vertical_amp_factor: f32,
+    /// Altitude-profile shape selector (Post-CM-10 Phase B,
+    /// 2026-04-26). Discriminant: 0=BELL (parabolic peak),
+    /// 1=TOWER (peak at 70%, narrow base), 2=ANVIL (T-shape, broad
+    /// top), 3=DECK (uniform middle), 4=LAYERED (double-peak).
+    /// Matches the `PROFILE_*` consts in `volumetric.wgsl`. CPU-side
+    /// classifier in `weather::cell_state` derives this from
+    /// `cell_type` + `coverage_strength`.
+    pub profile_kind: u32,
 }
 
 /// Compute shader source for the CPU-GPU bit-identity gate (B4).

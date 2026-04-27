@@ -39,6 +39,9 @@ struct SceneUniform {
     sun_color: vec4<f32>,
     ambient:   vec4<f32>,
     fog:       vec4<f32>,
+    // time.x = seconds since app start
+    // time.y = chop_intensity (water shading)
+    // time.zw = wind_dir_horiz (Post-CM-10 Phase A.1 cloud tilt)
     time:      vec4<f32>,
 };
 @group(1) @binding(0) var<uniform> scene: SceneUniform;
@@ -70,6 +73,13 @@ struct GpuWeatherCell {
                                 // gets 0..0.15 → wispy haze.
                                 // PINNED 2026-04-26 (`docs/WEATHER.md
                                 // § Continuous qualification margin`).
+    vertical_amp_factor: f32,   // Post-CM-10 Phase B: scales CM-5
+                                // altitude perturbation amplitudes
+                                // per cell. Strong nimbus → ~5×;
+                                // marginal cumulus → ~1×; stratus → ~0.3×.
+    profile_kind: u32,          // Post-CM-10 Phase B: PROFILE_* enum
+                                // (BELL/TOWER/ANVIL/DECK/LAYERED).
+                                // Selects altitude_profile shape.
 }
 @group(3) @binding(0) var<storage, read> weather_cells: array<GpuWeatherCell>;
 
@@ -84,6 +94,14 @@ const CELL_NIMBUS: u32    = 2u;
 const CELL_STRATUS: u32   = 3u;
 const CELL_SQUALL: u32    = 4u;
 const CELL_FRONTAL: u32   = 5u;
+
+// Profile kinds (Post-CM-10 Phase B). Selects altitude_profile shape.
+// Match `weather::cell_state::ProfileKind` discriminant on Rust side.
+const PROFILE_BELL: u32    = 0u;  // parabolic peak (fair-weather)
+const PROFILE_TOWER: u32   = 1u;  // peak at 70%, narrow base
+const PROFILE_ANVIL: u32   = 2u;  // T-shape, broad top above 80%
+const PROFILE_DECK: u32    = 3u;  // uniform middle 70%, smooth fades
+const PROFILE_LAYERED: u32 = 4u;  // double-peak at 30% and 70%
 
 // Global cloud altitude band (m). Wide enough to cover all cell types:
 // cumulus (1200-4000), nimbus (900-12000), stratus (300-1400), squall
@@ -134,7 +152,15 @@ const CLOUD_SEED_LO: u32 = 0xB0A75EAFu;
 // Altitude profile within a cell's [base, top] band. Returns scalar
 // in [0, 1] that scales peak density to local density at altitude `y`.
 // Mirrors Rust `weather::deltas::altitude_profile`.
-fn altitude_profile(cell_type: u32, y_alt_m: f32, base_m: f32, top_m: f32) -> f32 {
+// Altitude profile dispatcher. Post-CM-10 Phase B (2026-04-26): now
+// branches on `profile_kind` rather than `cell_type` so the same cell
+// type can render different shapes (e.g. cumulus + high-cov + strong
+// updraft → TOWER profile; cumulus + low-cov → BELL).
+//
+// Returns alt_factor in [0, 1] for altitude `y_alt_m` within the
+// cell's [base_m, top_m] band. The CPU-side classifier picks the
+// profile_kind from cell_type + coverage_strength.
+fn altitude_profile(profile_kind: u32, y_alt_m: f32, base_m: f32, top_m: f32) -> f32 {
     if (y_alt_m < base_m || y_alt_m > top_m) {
         return 0.0;
     }
@@ -143,24 +169,42 @@ fn altitude_profile(cell_type: u32, y_alt_m: f32, base_m: f32, top_m: f32) -> f3
         return 0.0;
     }
     let t = (y_alt_m - base_m) / depth;
-    if (cell_type == CELL_CLEAR_AIR) {
-        return 0.0;
-    } else if (cell_type == CELL_STRATUS) {
-        // Stratus — uniform layer with soft edges (CM-10 fix
-        // 2026-04-26: was strict 1.0 across band; created visible
-        // hard top/bottom edges. Now smoothstep-trapezoid: flat at 1.0
-        // through middle 70%, smooth fade across 15% at each edge).
+    if (profile_kind == PROFILE_DECK) {
+        // Stratus deck — uniform middle 70% with smoothstep fades over
+        // the bottom and top 15%. Visually a flat-topped trapezoid;
+        // matches the "thin stratus layer" mental model.
         let bottom_fade = smoothstep(0.0, 0.15, t);
         let top_fade = smoothstep(1.0, 0.85, t);
         return bottom_fade * top_fade;
+    } else if (profile_kind == PROFILE_TOWER) {
+        // Towering cumulus — peak shifted to 70% altitude. Narrow base
+        // (sharp smoothstep at 30%), broad upper portion. Models
+        // strong-updraft cumulus that punches up through the
+        // boundary layer.
+        let bottom_fade = smoothstep(0.0, 0.6, t);
+        // Top fade starts at 90% — cloud peaks high in the band.
+        let top_fade = smoothstep(1.0, 0.9, t);
+        return bottom_fade * top_fade;
+    } else if (profile_kind == PROFILE_ANVIL) {
+        // Anvil cumulonimbus — narrow base/column up to 80% altitude,
+        // broad spread above (the iconic "anvil top" formed when
+        // convection hits the tropopause and spreads laterally).
+        // Modeled as a smooth column gating union'd with a top
+        // plateau so the upper region has wide alt_factor support.
+        let column = smoothstep(0.0, 0.3, t) * smoothstep(0.85, 0.6, t);
+        let top_plateau = smoothstep(0.7, 0.85, t) * smoothstep(1.05, 0.95, t);
+        return max(column, top_plateau);
+    } else if (profile_kind == PROFILE_LAYERED) {
+        // Frontal double-peak — two altitude bands within the cell,
+        // each producing density. Models stratified frontal cloud
+        // (e.g. nimbostratus + altostratus layers).
+        let lower = smoothstep(0.05, 0.3, t) * smoothstep(0.55, 0.3, t);
+        let upper = smoothstep(0.55, 0.75, t) * smoothstep(0.95, 0.75, t);
+        return max(lower, upper);
     } else {
-        // Convective / frontal — bell curve with zero gradient at edges
-        // (CM-10 fix 2026-04-26: was parabolic `1 - (2t-1)²` with
-        // linear slope=4 at edges, producing visible "block" shape from
-        // hard fast linear ramps near base/top — see
-        // `vertical_layer_block_shape.png`. Smoothstep × smoothstep
-        // gives same peak character but with C1-continuous fades
-        // matching real cumulus's soft tops/bottoms).
+        // PROFILE_BELL (default) — symmetric smoothstep × smoothstep
+        // bell curve. Same peak character as parabolic but with
+        // C1-continuous fades at edges. (CM-10 iter-3 fix.)
         let bottom_fade = smoothstep(0.0, 0.5, t);
         let top_fade = smoothstep(1.0, 0.5, t);
         return bottom_fade * top_fade;
@@ -353,6 +397,29 @@ const VERTICAL_NOISE_STRETCH: f32 = 3.0;
 const NOISE_WARP_AMPLITUDE_M: f32 = 150.0;
 const NOISE_WARP_SPACING_M: f32 = 4000.0;
 
+// **Post-CM-10 Phase B vertical-carve amplitude** (2026-04-26).
+// Margin-coupled amplitude that modulates `alt_factor` by the
+// existing `perlin_norm` — high-cov cells barely carve, marginal
+// cells carve sky-gaps within the altitude band (3D voids).
+// Reuses `perlin_norm` (with its 3D structure from CM-8's y-stretch)
+// as the carve signal — saves a dedicated Perlin call (~0.1 ms).
+// Lazily aligns carve with density features (carves where Perlin is
+// low) — has the side effect of amplifying the noise contrast.
+const VERTICAL_CARVE_AMP: f32 = 0.6;
+
+// **Post-CM-10 Phase A.1: wind-shear cumulus tilt** (2026-04-26).
+// Lateral offset (m) applied to the density-noise lookup per unit of
+// normalized altitude (`(y - GLOBAL_BASE) / (GLOBAL_TOP - GLOBAL_BASE)`).
+// Direction comes from `scene.time.zw` (wind_dir_horiz, sampled at
+// camera position once per frame). Tilts cloud features downwind so
+// the sample at altitude y maps to lookup-position
+// `(x + wind_x × tilt × t, y, z + wind_z × tilt × t)` where t is the
+// normalized altitude. Real cumulus tilt 10-30% of cell height —
+// 1500m thick cell → 150-450m top shift. We use 400m for a
+// noticeable lean. Breaks the X/Z-aligned Worley grid character that
+// has produced angular-line / V-cut artifacts in playtest.
+const WIND_TILT_AMPLITUDE_M: f32 = 400.0;
+
 // Per-cell-type Worley feature spacing (CM-9, 2026-04-26 — formerly
 // priority ladder #4b). Different cloud types have characteristic
 // feature scales:
@@ -487,7 +554,7 @@ fn cloud_density_cheap_in_cell(world_pos: vec3<f32>, cell: GpuWeatherCell) -> f3
         return 0.0;
     }
     let alt_factor = altitude_profile(
-        cell.cell_type, world_pos.y,
+        cell.profile_kind, world_pos.y,
         cell.base_altitude_m, cell.top_altitude_m,
     );
     return cell.density * alt_factor * cell.coverage_strength;
@@ -663,22 +730,28 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
     // early-exit eliminates the discontinuity at trivial cost (~0.03 ms
     // for the unconditional altitude_profile + per-type-amp lookup
     // when deep inside cell 1).
+    // Post-CM-10 Phase B: per-cell vertical_amp_factor multiplies into
+    // CM-5 altitude perturbation amplitudes. Strong nimbus (~5×)
+    // produces dramatic ±1500m+ top shifts → towering cumulonimbus
+    // reaching ~9km. Marginal cumulus (~1×) stays near nominal.
     var alt_factor1: f32 = 0.0;
     if (active1) {
-        let amp1 = altitude_perturbation_amplitude(cell1.cell_type);
+        let amp1 = altitude_perturbation_amplitude(cell1.cell_type)
+            * cell1.vertical_amp_factor;
         let p1 = perturb * cell1.coverage_strength;
         alt_factor1 = altitude_profile(
-            cell1.cell_type, world_pos.y,
+            cell1.profile_kind, world_pos.y,
             cell1.base_altitude_m + p1 * amp1.y,
             cell1.top_altitude_m + p1 * amp1.x,
         );
     }
     var alt_factor2: f32 = 0.0;
     if (active2) {
-        let amp2 = altitude_perturbation_amplitude(cell2.cell_type);
+        let amp2 = altitude_perturbation_amplitude(cell2.cell_type)
+            * cell2.vertical_amp_factor;
         let p2 = perturb * cell2.coverage_strength;
         alt_factor2 = altitude_profile(
-            cell2.cell_type, world_pos.y,
+            cell2.profile_kind, world_pos.y,
             cell2.base_altitude_m + p2 * amp2.y,
             cell2.top_altitude_m + p2 * amp2.x,
         );
@@ -727,8 +800,22 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
         world_pos.x + 7919.0, 0.0, world_pos.z + 6133.0,
         NOISE_WARP_SPACING_M,
     );
-    let warped_x = world_pos.x + perturb * NOISE_WARP_AMPLITUDE_M;
-    let warped_z = world_pos.z + warp_z_perlin * NOISE_WARP_AMPLITUDE_M;
+    // **Post-CM-10 Phase A.1 wind tilt**: shift density-noise lookup
+    // downwind by `wind_dir × WIND_TILT_AMPLITUDE_M × normalized_altitude`.
+    // Higher samples shift more → cloud features lean downwind.
+    // wind_dir in scene.time.zw is sampled CPU-side once per frame
+    // from W1 wind_at(camera_xz, mid_altitude, time).
+    let alt_normalized = clamp(
+        (world_pos.y - GLOBAL_CLOUD_BASE_M)
+            / (GLOBAL_CLOUD_TOP_M - GLOBAL_CLOUD_BASE_M),
+        0.0,
+        1.0,
+    );
+    let wind_dir = scene.time.zw;
+    let tilt_offset_x = wind_dir.x * WIND_TILT_AMPLITUDE_M * alt_normalized;
+    let tilt_offset_z = wind_dir.y * WIND_TILT_AMPLITUDE_M * alt_normalized;
+    let warped_x = world_pos.x + perturb * NOISE_WARP_AMPLITUDE_M + tilt_offset_x;
+    let warped_z = world_pos.z + warp_z_perlin * NOISE_WARP_AMPLITUDE_M + tilt_offset_z;
 
     let perlin_raw = cloud_perlin_3d(
         CLOUD_SEED_HI, CLOUD_SEED_LO,
@@ -765,6 +852,28 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
         mixed_spacing, CLOUD_FEATURES_PER_CELL,
     );
     let worley_struct = clamp(1.0 - worley_v.f_blended, 0.0, 1.0);
+
+    // **Post-CM-10 Phase B vertical-carve via perlin_norm reuse**
+    // (cost-saving variant 2026-04-26): instead of an extra dedicated
+    // Perlin call at full (x, y, z), we reuse the already-computed
+    // `perlin_norm` (which has 3D structure via CM-8's y-stretch) as
+    // the carve noise. `(1 - perlin_norm)` carves where Perlin is low
+    // → reinforces existing density contrast (high-perlin gets even
+    // denser; low-perlin gets carved out). Margin-coupled amplitude
+    // means strong-cov cells barely carve (continuous mass), marginal
+    // cells carve aggressively (3D voids). Saves ~0.1 ms vs the
+    // dedicated-Perlin variant.
+    let carve_signal = 1.0 - perlin_norm;
+    if (alt_factor1 > 0.0) {
+        let carve_amp1 = (1.0 - cell1.coverage_strength) * VERTICAL_CARVE_AMP;
+        let carve1 = clamp(1.0 - carve_amp1 * carve_signal, 0.0, 1.0);
+        alt_factor1 = alt_factor1 * carve1;
+    }
+    if (alt_factor2 > 0.0) {
+        let carve_amp2 = (1.0 - cell2.coverage_strength) * VERTICAL_CARVE_AMP;
+        let carve2 = clamp(1.0 - carve_amp2 * carve_signal, 0.0, 1.0);
+        alt_factor2 = alt_factor2 * carve2;
+    }
 
     var density: f32 = 0.0;
     if (alt_factor1 > 0.0) {
