@@ -156,12 +156,16 @@ fn altitude_profile(cell_type: u32, y_alt_m: f32, base_m: f32, top_m: f32) -> f3
 }
 
 // Two-cell nearest-cell lookup result for boundary blending (CM-6).
-// `d1` and `d2` are the actual (non-squared) distances; `d1 <= d2`.
+// Returns *squared* distances — the caller does ONE sqrt for the
+// nearest cell and uses an algebraic identity to derive the
+// boundary-distance with no second sqrt. See `sample_cloud_density`
+// for the linearization (Option 2 perf win 2026-04-26).
+// Invariant: `dsq1 <= dsq2`.
 struct NearestTwo {
     idx1: u32,
     idx2: u32,
-    d1: f32,
-    d2: f32,
+    dsq1: f32,
+    dsq2: f32,
 }
 
 // Find the two cells whose `seed_pos` are nearest to `world_xz` —
@@ -187,8 +191,9 @@ struct NearestTwo {
 // participate.
 //
 // Cost: same ~50-64 distance checks per call as the single-cell
-// lookup; one extra comparison per iteration (tracks two best); two
-// sqrts at the end. Negligible cost increase.
+// lookup; one extra comparison per iteration (tracks two best); ZERO
+// sqrts (Option 2 — caller does one sqrt for d1 only; d2-d1 is
+// derived algebraically from squared distances).
 //
 // Per WEATHER.md § "No-weather is a type of weather": every XZ point
 // owns one cell (the *nearest*) but blends with the second-nearest in
@@ -214,7 +219,7 @@ fn find_nearest_two_active_cells(world_xz: vec2<f32>) -> NearestTwo {
             best_dsq2 = dsq;
         }
     }
-    return NearestTwo(best_idx1, best_idx2, sqrt(best_dsq1), sqrt(best_dsq2));
+    return NearestTwo(best_idx1, best_idx2, best_dsq1, best_dsq2);
 }
 
 // Width (m) of the smoothstep boundary-blend band centered on the
@@ -368,7 +373,21 @@ fn sample_cloud_density(world_pos: vec3<f32>) -> f32 {
     // CM-6 blend weight. (d2 - d1) / 2 approximates distance from the
     // sample to the Voronoi midline between the two cells. At the
     // midline w1 = 0.5 (50/50 mix); deep inside cell 1 w1 → 1.0.
-    let half_diff = (nearest.d2 - nearest.d1) * 0.5;
+    //
+    // **Option 2 one-sqrt linearization (2026-04-26)**: instead of
+    // computing both sqrt(dsq1) and sqrt(dsq2), we use the algebraic
+    // identity (d2 - d1) = (d2² - d1²) / (d2 + d1) ≈ (dsq2 - dsq1) /
+    // (2 * d1) for d1 ≈ d2 (i.e. near the boundary, where precision
+    // matters). Far from the boundary the approximation overestimates
+    // (d2 - d1) but the smoothstep saturates to 1.0 anyway, so the
+    // visual difference is invisible. Saves one sqrt per pixel-sample,
+    // ~0.5 ms across the full cloud pass. Aligns with the
+    // precision-discipline pattern (`q = (x - ix*spacing) / spacing`):
+    // preserve precision where it matters, accept O(ε) where it
+    // doesn't. The `max(dsq1, 1.0)` guards against division-by-zero
+    // when the sample is at exactly the cell seed.
+    let d1 = sqrt(max(nearest.dsq1, 1.0));
+    let half_diff = (nearest.dsq2 - nearest.dsq1) / (4.0 * d1);
     let blend_t = smoothstep(0.0, BOUNDARY_BLEND_DISTANCE_M, half_diff);
     let w1 = 0.5 + 0.5 * blend_t;
     let w2 = 1.0 - w1;

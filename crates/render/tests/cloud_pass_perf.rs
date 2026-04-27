@@ -106,24 +106,35 @@ const WARMUP_FRAMES: usize = 3;
 /// the frame (terrain streaming, water, vehicle, instances, ambient,
 /// outline, widgets) fits in the remaining budget.
 ///
-/// 4.5 ms accommodates the CM-6 boundary-blending refactor (find_nearest_two
-/// + per-cell altitude pre-filter add ~1 ms over the single-cell version,
-/// even when cell 2 is a sentinel and the blend doesn't engage). At 4.5 ms
-/// cloud takes ~65% of a 144 Hz frame — tight but doable; leaves 2.4 ms
-/// for everything else (terrain streaming, water, vehicle, instances,
-/// ambient, outline, widgets). The visual win from CM-6 (no hard cell
-/// seams; "clouds vanish when leaving cell" symptom resolved) outweighs
-/// the cost. Future optimization options:
-/// - texture-based cell-grid index (replaces brute-force scan; O(1)
-///   nearest-2 lookup → could halve total cost)
-/// - sorted active set with spatial early-exit
-/// - reduced step count on glancing rays
+/// 4.5 ms accommodates the CM-6 boundary-blending refactor
+/// (find_nearest_two + per-cell altitude pre-filter add ~1 ms over the
+/// single-cell version, even when cell 2 is a sentinel and the blend
+/// doesn't engage). At 4.5 ms cloud takes ~65% of a 144 Hz frame —
+/// tight but doable; leaves 2.4 ms for everything else (terrain
+/// streaming, water, vehicle, instances, ambient, outline, widgets).
+/// The visual win from CM-6 (no hard cell seams; "clouds vanish when
+/// leaving cell" symptom resolved) outweighs the cost.
+///
+/// **Hard limit at 4.5 ms** — FFT water (Phase 3.5b) is expected to
+/// add ~1-2 ms to the rest of the frame. Any further cloud-pass cost
+/// growth needs to come from a clear visual win that justifies eating
+/// into the water/atmosphere budget. Future cloud-pass cost recovery
+/// options (queued post-CM-N tuning):
+/// 1. **GPU 3D noise textures** (AAA volumetric pattern, RDR2 / Horizon).
+///    Bake Worley/Perlin into a tileable 3D texture; sample via
+///    texture fetch. Saves 1-2 ms. Same baked data on CPU side
+///    preserves bit-identity discipline.
+/// 2. **BVH / spatial grid for nearest-cell lookup**. Replaces O(N)
+///    scan with O(1). Saves ~0.6 ms.
+/// 3. **Half-resolution cloud pass + TAA upsample**. Standard AAA
+///    technique; cuts per-pixel cost ~4×. Big architecture change.
 ///
 /// History:
 /// - B-phase: 3.0 ms target (single-cell hardcoded)
 /// - C2-polish: 3.5 ms (tessellation; per-step nearest-cell scan)
 /// - CM-6: 4.5 ms (boundary blending; per-step nearest-two scan +
-///   per-cell altitude pre-filter)
+///   per-cell altitude pre-filter; Option 2 one-sqrt linearization
+///   shipped but the actual bottleneck is the scan, not the sqrt)
 ///
 /// **Tune as playtest reveals regressions** (per user-pinned guidance
 /// 2026-04-26). Specifically:
