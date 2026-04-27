@@ -461,7 +461,14 @@ fn worley_spacing_for_type(cell_type: u32) -> f32 {
         case 3u: { return 2000.0; }  // Stratus — smooth large layers
         case 4u: { return 500.0; }   // Squall — small textured features
         case 5u: { return 1000.0; }  // Frontal — mid-scale bands
-        default: { return 1500.0; }  // ClearAir / haze — soft low-contrast
+        // ClearAir / haze — bumped 1500 → 4000 on 2026-04-26
+        // (Phase B follow-up 2). User in-game observation: clear-air
+        // dot clouds appeared too small and too uniform; bumping to
+        // 4000m gives features ~2.7× larger (proportional to
+        // user-requested 3-4× max). Multi-octave variation deferred —
+        // costs ~1.5 ms (Worley is expensive in real-game rendering
+        // contexts; ALU estimates underestimate the cost).
+        default: { return 4000.0; }
     }
 }
 
@@ -716,7 +723,7 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
     // CM-5 altitude perturbation — one Perlin call shared by both
     // cells. Sampled at fixed y=0 so the perturbation is a function of
     // (x, z) only, producing a coherent bumpy surface for cell
-    // tops/bases. Cheap relative to the density noise pair below.
+    // tops/bases.
     let perturb = cloud_perlin_3d(
         CLOUD_SEED_HI, CLOUD_SEED_LO,
         CLOUD_PERLIN_OCTAVE,
@@ -814,9 +821,7 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
     // lookup to break axis-aligned Worley grid regularity. `perturb`
     // (computed earlier for CM-5 altitude perturbation) is reused as
     // warp_x; warp_z samples Perlin at an offset spatial origin so
-    // the two displacement components are decorrelated. Without this,
-    // the Worley grid produces visible bands along world X and Z axes
-    // (in-game observation 2026-04-26).
+    // the two displacement components are decorrelated.
     let warp_z_perlin = cloud_perlin_3d(
         CLOUD_SEED_HI, CLOUD_SEED_LO,
         CLOUD_PERLIN_OCTAVE,
@@ -868,6 +873,14 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
     let spacing1 = worley_spacing_for_type(cell1.cell_type);
     let spacing2 = worley_spacing_for_type(cell2.cell_type);
     let mixed_spacing = mix(spacing1, spacing2, w2);
+    // **Single Worley call** (Phase B follow-up tuning 2 reverted
+    // multi-octave 2026-04-26): a multi-octave variant cost +1.5 ms,
+    // not the +0.06 ms that simple back-of-envelope ALU math
+    // suggested. Worley's full-cost is GPU-context-dependent
+    // (register pressure / divergence / memory pipeline interactions),
+    // which doesn't reduce to simple ALU counts. Stayed at one
+    // Worley call per sample. ClearAir feature-size variation
+    // achieved via larger `worley_spacing_for_type` instead.
     let worley_v = worley_3d(
         CLOUD_SEED_HI, CLOUD_SEED_LO,
         CLOUD_WORLEY_OCTAVE,

@@ -543,11 +543,20 @@ fn initial_state_from_humidity(master_seed: u64, cell: CellId, time_s: f32, rh: 
 /// design 2026-04-26.
 pub const HAZE_BASE_ALTITUDE_M: f32 = 1_500.0;
 pub const HAZE_TOP_ALTITUDE_M: f32 = 2_500.0;
-/// Light density for haze cells.
+/// Density for haze cells.
 ///
 /// The shader multiplies by `coverage_strength`-modulated `cloud_factor`,
-/// which (with margin capped at 0.15) keeps the visual contribution sparse.
-pub const HAZE_DENSITY: f32 = 0.20;
+/// which (with margin capped at `CLEAR_AIR_MARGIN_CAP`) keeps the visual
+/// contribution sparse but visible.
+///
+/// **Tuning history**:
+/// - Initial: 0.20 (CM-2 design)
+/// - 2026-04-26: 0.20 → 0.40 (Phase B follow-up tuning round 2 —
+///   in-game observation showed haze rendered as transparent grey
+///   instead of small white clouds; user requested whiter haze).
+///   At `HAZE_DENSITY = 0.40` ≈ cumulus baseline 0.35, haze cells now
+///   register as low-density-but-distinct white clouds.
+pub const HAZE_DENSITY: f32 = 0.40;
 
 /// Smoothstep helper: 0 below `lo`, 1 above `hi`, smooth in between.
 /// Used by the continuous-margin computation so qualification thresholds

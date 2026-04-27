@@ -163,12 +163,18 @@ Pinned for post-CM-10 work, addressing the substrate-level fixes for visible art
   **GpuWeatherCell layout**: 32 → 40 bytes (add `vertical_amp_factor: f32` + `profile_kind: u32`, std430-aligned).
   **Perf**: 4.55 ms median post-Phase-B (was 4.48 ms post-A.1). +0.07 ms net. Budget bumped 4.5 → 4.7 ms with documentation linking to GPU 3D noise textures as the next cost-recovery option (would reclaim ~1-2 ms if needed for FFT water budget pressure).
 
-- **Phase B follow-up tuning (shipped 2026-04-26)** — three calibration changes after in-game observation showed (a) horizontal "stack of layers" artifact (`layers.png`); (b) clouds still reading as flat; (c) diagonal rows persisting:
+- **Phase B follow-up tuning round 1 (shipped 2026-04-26)** — three calibration changes after in-game observation showed (a) horizontal "stack of layers" artifact (`layers.png`); (b) clouds still reading as flat; (c) diagonal rows persisting:
   1. **Variable y-stretch**: `local_stretch = VERTICAL_NOISE_STRETCH × (1 + 0.3 × perturb)`. Reuses existing `perturb` sample (3km wavelength) so adjacent (x,z) regions have slightly different vertical wavelengths (range ~2.4×–~3.6×). Layers dither across pixels instead of forming uniform horizontal bands. Free.
   2. **Carve amplitude reduced** 0.6 → 0.4. The previous amplitude amplified the y-stretch's regular wavelength into discrete contrast bands. 0.4 still produces 3D voids in marginal cells but with softer transitions.
   3. **Cumulus altitude perturbation amplitude bumped** 500/200 → 800/300 (+60%). Squall and Frontal also bumped. Combined with vertical_amp_factor scaling, well-qualified cumulus now perturb top by ±1500m (was ±965m) — visibly more vertical character. Tower/Anvil profile bonus also bumped 30% → 50%.
-  
-  Perf unchanged (4.55 ms median; reuses existing samples). Diagonal rows + clear-air dot grid noted as residual; substrate-level fixes (Phase C frontal banding, Phase D adjacency-biased evolution) and increased cell streaming density are the architectural addresses for those.
+
+- **Phase B follow-up tuning round 2 (shipped 2026-04-26)** — additional calibration after user feedback (vanishing structure, regular mounds, grey clear-air clouds, want size variation):
+  1. **`HAZE_DENSITY` 0.20 → 0.40** — clear-air haze cells now register as low-density-but-distinct white clouds instead of transparent grey.
+  2. **ClearAir Worley spacing 1500 → 4000m** — features ~2.7× larger (proportional to user-requested 3-4× max). User accepted "fairly regular but improving" so single-octave at larger spacing is sufficient for now; multi-octave variation deferred (Worley call costs ~1.5 ms in real rendering context, not the ~0.06 ms simple ALU math suggested — Worley is expensive in GPU-context-dependent ways).
+  3. **Multi-octave perturb_mound experiment reverted** — combined `perturb` (3km) + `warp_z_perlin` (4km) for irregular mound spacing caused +0.7 ms perf regression even though the combination was just arithmetic. Suspect GPU register-pressure interactions when the live-variable set crosses some threshold. Mound regularity will improve naturally with substrate-level work (Phase C/D).
+  4. **Vanishing-structure observation** noted — likely cell-streaming or 5-second snapshot-refresh transition with abrupt parameter change. Architectural fix (smooth cell-entry/lifecycle ramping) pinned in task #324.
+
+  Perf 4.55 ms median (under 4.7 ms budget). Remaining residuals (clear-air grid pattern, diagonal rows) are substrate-level → Phase C frontal banding + Phase D adjacency-biased evolution + cell streaming density tuning.
   **Visual delivery**: anvil cumulus signatures, towering cumulus columns, fair-weather puffy fields, spotty marginal-cell coverage with 3D sky-gaps. **Addresses the user-stated vision** of cell-type variety + navigable 3D structure + margin-driven density distribution.
 
 - **Phase C (pending)** — Frontal-graph banded structure (W1 hook): along frontal-graph segments, cloud structure becomes banded (oriented perpendicular to graph's tangent). Per-cell tangent + banded flag in GpuWeatherCell.
