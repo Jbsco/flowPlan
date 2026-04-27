@@ -227,18 +227,31 @@ fn find_nearest_two_active_cells(world_xz: vec2<f32>) -> NearestTwo {
 // per-sample density is a weighted mix of both cells; outside the
 // band it's pure nearest-cell.
 //
-// Sized for ~25 km mean cell spacing (W2 partition): a 5 km blend
-// band is ~20% of cell radius, ~30% of cell area falls inside the
-// blend zone. Wider = softer transitions but more bleed-through;
-// narrower = sharper but more visible seams. Tunable in CM-9.
+// Sized for ~25 km mean cell spacing (W2 partition). 5 km is the
+// initial value. **Bisect 2026-04-26 found a surprising perf impact
+// at this knob**: setting to 10 km dropped median perf from 4.22 ms
+// → 4.77 ms (+13%, blew the budget) even though active2 was false in
+// the perf-test scenario and smoothstep saturated either way. The
+// regression is reproducible across multiple runs and not GPU thermal
+// variance — likely a WGSL compiler / GPU scheduler quirk where
+// constant value affects instruction encoding or register pressure.
+// Stay at 5 km until the GPU 3D noise textures land or the perf
+// regression is understood.
+//
+// Tunable in CM-10 once budget headroom recovered. If seams are still
+// visible after CM-7 + multi-scatter + lower ambient land, revisit.
 const BOUNDARY_BLEND_DISTANCE_M: f32 = 5000.0;
 
-// Threshold below which the second-nearest cell's contribution is
-// dropped entirely. Saves the per-cell math in `sample_cell_density_inner`
-// for the ~70% of pixels deep inside a single cell (w1 > 0.95). The
-// noise samples themselves still happen unconditionally because they
-// are needed by cell 1.
-const BOUNDARY_BLEND_W2_EARLY_EXIT: f32 = 0.05;
+// Note (2026-04-26): A `BOUNDARY_BLEND_W2_EARLY_EXIT = 0.05` constant
+// previously gated cell 2's pre-filter when w2 was small (deep inside
+// cell 1). It was removed because the gate produced a *visible
+// discontinuity* — at the contour `w2 = 0.05`, cell 2's contribution
+// switched on/off abruptly. In world space, that contour is a
+// hyperbola whose asymptotes form a V-wedge between two cells (the
+// "pie_cut" artifact). The cel-banded alpha amplified the small step
+// into a hard line. The math `density += w2 * cell_2_contribution`
+// self-attenuates correctly without the gate, at the cost of one
+// extra altitude_profile + per-type-amp lookup per sample (~0.03 ms).
 
 // Per-pixel ray-start jitter hash. Returns a deterministic value in
 // `[0, 1)` derived from integer pixel coords. Replaces the fixed
@@ -285,6 +298,27 @@ fn altitude_perturbation_amplitude(cell_type: u32) -> vec2<f32> {
 // drives sub-cell density-noise structure at ~800 m).
 const ALT_PERTURB_SPACING_M: f32 = 3000.0;
 
+// CM-8 vertical-distribution: anisotropic y-stretching for density
+// noise (Worley + density Perlin). Multiplies world_pos.y by this
+// factor before passing to the noise primitives, compressing features
+// vertically — within a 1500 m cumulus band, the effective noise
+// wavelength becomes ~267 m instead of 800 m, producing 5-6 vertical
+// waves per cell instead of 1-2. **Combined with CM-4's linear-remap
+// gating**, this gives the design intent of CM-8 directly: marginal
+// cells (low coverage_strength) gate the lower noise values → discrete
+// vertical lobes with sky-gaps; well-qualified cells let through the
+// full noise field → continuous mass with vertical detail.
+//
+// Breaks up the regular Worley grid pattern visible from above as
+// "rows" and from below as "globules" (in-game observation 2026-04-26
+// from `banding_from_above.png` + `up_from_under.png`).
+//
+// **Applied to density-noise calls only**, NOT the CM-5 altitude
+// perturbation call (which is sampled at fixed y=0 by design — its
+// 2D-surface character is intentional for the "convective top"
+// concept). PINNED 2026-04-26.
+const VERTICAL_NOISE_STRETCH: f32 = 3.0;
+
 // Per-cell-type Perlin-Worley blend weights (WEATHER.md § Sub-cell
 // detail noise). Cumulus = puffy distinct cells. Nimbus = bulky
 // detailed. Stratus = smooth layered. Squall = textured edges. Frontal
@@ -298,6 +332,125 @@ fn perlin_worley_weights_for_type(cell_type: u32) -> vec2<f32> {
         case 5u: { return vec2<f32>(0.4, 0.6); }  // Frontal
         default: { return vec2<f32>(0.7, 0.3); }  // Cumulus default
     }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// CM-7 Beer-Lambert sun-direction shading (2026-04-26)
+// ──────────────────────────────────────────────────────────────────
+//
+// Replaces the placeholder altitude-gradient lighting with proper
+// physically-motivated shading: each cloud sample's color is the sum
+// of (sun light attenuated by the cloud column between sample and
+// sun) plus (ambient skylight). Beer-Lambert: light reaching a cloud
+// sample = `sun_color * exp(-optical_depth_to_sun * extinction)`.
+// Optical depth comes from a short secondary ray toward the sun.
+//
+// The Henyey-Greenstein phase function adds the characteristic
+// forward-scattering halo (sun appears brighter through cloud edges
+// when the camera is looking near the sun direction).
+//
+// Direct enabler of the eyecatch character: morning mist (low stratus
+// undersides dim + sun-lit tops), sunset cumulus illumination
+// (orange/pink tops via warm sun_color × full transmittance; cool
+// undersides via ambient), dramatic storm signature (dark nimbus
+// through deep optical depth).
+
+const SUN_RAY_STEPS: i32 = 5;
+const SUN_RAY_STEP_M: f32 = 200.0;
+// Total secondary ray length: 5 × 200 = 1 km — enough to cover most
+// of a typical cumulus column without wasting cost on samples in
+// empty sky beyond the cloud top.
+const SUN_EXTINCTION_SCALE: f32 = 0.005;
+// Tuning parameter. Higher = darker shadow side; lower = bright
+// throughout. CM-10 will refine via in-game observation.
+
+const SUN_INTENSITY: f32 = 1.8;
+// Brightness multiplier on sun-lit color. Bumped from 1.4 → 1.8 on
+// 2026-04-26 after in-game observation showed CM-7 effect was too
+// subtle at noon-from-below view (front-to-back compositing makes
+// dim cloud-bottom samples obscure bright cloud-top samples). Higher
+// SUN_INTENSITY combined with multi-scatter baseline (see below)
+// makes the lit side more visible.
+
+const MULTISCATTER_INTENSITY: f32 = 0.4;
+// Multi-scatter approximation intensity (CM-7 revision 2026-04-26).
+// Single-scattering Beer-Lambert produces dim cloud undersides at
+// high-sun + view-from-below because the secondary ray traverses the
+// full vertical column. Real clouds brighten via multi-scattering
+// (light bouncing internally). Approximate by adding a baseline sun
+// term that doesn't depend on sun_transmittance — represents diffuse
+// sun light spreading through the cloud body.
+// AAA technique (Schneider GDC15, Hillaire 2020). Tunable in CM-10.
+
+const AMBIENT_INTENSITY: f32 = 0.55;
+// Brightness multiplier on ambient (skylight) color. Lowered from
+// 0.85 → 0.55 on 2026-04-26 to improve lit/shadow contrast — the
+// previous value made ambient dominate too much, drowning out the
+// CM-7 sun-direction signal.
+
+const PHASE_G: f32 = 0.6;
+// Henyey-Greenstein anisotropy. Positive = forward bias (sun appears
+// brighter when camera looks near sun direction — characteristic
+// "halo" through cloud edges). g=0.6 is the cumulus standard.
+
+const PI: f32 = 3.14159265;
+
+// Henyey-Greenstein single-scattering phase function. Returns the
+// directional weight for sun-light scattered through cloud at angle
+// `cos_theta = dot(view_dir, sun_dir)`. Computed once per pixel
+// (constant along a ray) — moved outside the raymarch loop.
+//
+// Cost: ~1 sqrt + ~5 ALU. Negligible per-pixel cost.
+fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
+    let g2 = g * g;
+    let denom_base = 1.0 + g2 - 2.0 * g * cos_theta;
+    let denom = denom_base * sqrt(denom_base);
+    return (1.0 - g2) / (4.0 * PI * denom);
+}
+
+// Cheap cloud density approximation for the secondary lighting ray.
+// Skips the high-frequency Worley + Perlin detail noise since the
+// optical-depth integral averages over a long path; only the
+// altitude band thickness × cell density × coverage_strength matters
+// for shadowing accuracy. Uses the cell parameters from the main
+// ray's lookup — the secondary ray (typically <1 km traversal) stays
+// within the same cell horizontally for typical sun angles.
+fn cloud_density_cheap_in_cell(world_pos: vec3<f32>, cell: GpuWeatherCell) -> f32 {
+    if (cell.coverage_strength <= 0.0 || cell.density <= 0.0) {
+        return 0.0;
+    }
+    let alt_factor = altitude_profile(
+        cell.cell_type, world_pos.y,
+        cell.base_altitude_m, cell.top_altitude_m,
+    );
+    return cell.density * alt_factor * cell.coverage_strength;
+}
+
+// Sun transmittance at a sample point: integrates cloud density along
+// a secondary ray toward the sun, returns `exp(-optical_depth × scale)`.
+// Cost: SUN_RAY_STEPS × cloud_density_cheap calls = ~5 × 30 ALU = ~150
+// extra cycles per main-ray sample (per-pixel: ~24 × 150 = 3600 ALU).
+fn sun_transmittance_through_cell(
+    sample_pos: vec3<f32>,
+    cell: GpuWeatherCell,
+    sun_dir: vec3<f32>,
+) -> f32 {
+    var optical_depth: f32 = 0.0;
+    for (var i: i32 = 0; i < SUN_RAY_STEPS; i = i + 1) {
+        let t = SUN_RAY_STEP_M * (f32(i) + 0.5);
+        let s = sample_pos + sun_dir * t;
+        optical_depth = optical_depth + cloud_density_cheap_in_cell(s, cell) * SUN_RAY_STEP_M;
+    }
+    return exp(-optical_depth * SUN_EXTINCTION_SCALE);
+}
+
+// Per-sample cloud-pass output: density (for absorption + alpha
+// accumulation along view ray) and sun_transmittance (for Beer-Lambert
+// lighting). Returned together so the shared find_nearest_two_active_cells
+// scan happens once per sample.
+struct CloudSample {
+    density: f32,
+    sun_transmittance: f32,
 }
 
 // Per-cell density contribution given pre-computed alt_factor + global
@@ -355,7 +508,7 @@ fn cell_density_contribution(
 // adjacent cells (e.g. Cumulus next to Stratus) get a smoothstep
 // transition between their per-type Perlin-Worley blend weights and
 // altitude bands.
-fn sample_cloud_density(world_pos: vec3<f32>) -> f32 {
+fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample {
     let nearest = find_nearest_two_active_cells(world_pos.xz);
     let cell1 = weather_cells[nearest.idx1];
     let cell2 = weather_cells[nearest.idx2];
@@ -367,7 +520,7 @@ fn sample_cloud_density(world_pos: vec3<f32>) -> f32 {
     let active1 = cell1.coverage_strength > 0.0 && cell1.density > 0.0;
     let active2 = cell2.coverage_strength > 0.0 && cell2.density > 0.0;
     if (!active1 && !active2) {
-        return 0.0;
+        return CloudSample(0.0, 1.0);
     }
 
     // CM-6 blend weight. (d2 - d1) / 2 approximates distance from the
@@ -408,7 +561,19 @@ fn sample_cloud_density(world_pos: vec3<f32>) -> f32 {
     // expensive density noise below when the sample is outside any
     // cloud band — critical because most ray samples in the 12 km
     // global band are in empty sky.
-    let want_cell2 = active2 && w2 > BOUNDARY_BLEND_W2_EARLY_EXIT;
+    //
+    // **No early-exit on `w2`** (revision 2026-04-26 — fixes pie_cut.png
+    // V-shape artifact): an earlier version skipped cell 2's pre-filter
+    // when `w2 < 0.05`, which produced a hard discontinuity at the
+    // contour `(d2 - d1) / 2 ≈ 3950 m` in world space — a hyperbola
+    // whose asymptotes form a V-wedge converging at the midpoint
+    // between cells. The cel-banded alpha amplified the small density
+    // step into a sharp band-jump rendered as a visible straight-line
+    // cut. The math `density += w2 * cell_2_contribution` already
+    // self-attenuates (small w2 → small contribution), so removing the
+    // early-exit eliminates the discontinuity at trivial cost (~0.03 ms
+    // for the unconditional altitude_profile + per-type-amp lookup
+    // when deep inside cell 1).
     var alt_factor1: f32 = 0.0;
     if (active1) {
         let amp1 = altitude_perturbation_amplitude(cell1.cell_type);
@@ -420,7 +585,7 @@ fn sample_cloud_density(world_pos: vec3<f32>) -> f32 {
         );
     }
     var alt_factor2: f32 = 0.0;
-    if (want_cell2) {
+    if (active2) {
         let amp2 = altitude_perturbation_amplitude(cell2.cell_type);
         let p2 = perturb * cell2.coverage_strength;
         alt_factor2 = altitude_profile(
@@ -430,23 +595,33 @@ fn sample_cloud_density(world_pos: vec3<f32>) -> f32 {
         );
     }
     if (alt_factor1 <= 0.0 && alt_factor2 <= 0.0) {
-        return 0.0;
+        return CloudSample(0.0, 1.0);
     }
 
     // Expensive density noise — sampled once, identical for both
     // cells (global noise field). Only reached when at least one
     // cell's altitude_profile is positive.
+    //
+    // **CM-8 anisotropic y-stretching** (2026-04-26): multiplies
+    // world_pos.y by VERTICAL_NOISE_STRETCH before sampling, giving
+    // ~5-6 vertical noise waves per cumulus altitude band instead
+    // of 1-2. Breaks up the regular Worley grid pattern visible
+    // from above as "rows" and from below as "globules". Combined
+    // with CM-4's linear-remap gating, marginal cells naturally
+    // produce vertical lobes with sky-gaps (the design intent of
+    // CM-8). Cost: free (one extra mul).
+    let y_stretched = world_pos.y * VERTICAL_NOISE_STRETCH;
     let w = worley_3d(
         CLOUD_SEED_HI, CLOUD_SEED_LO,
         CLOUD_WORLEY_OCTAVE,
-        world_pos.x, world_pos.y, world_pos.z,
+        world_pos.x, y_stretched, world_pos.z,
         CLOUD_WORLEY_SPACING_M, CLOUD_FEATURES_PER_CELL,
     );
     let worley_struct = clamp(1.0 - w.f_blended, 0.0, 1.0);
     let perlin_raw = cloud_perlin_3d(
         CLOUD_SEED_HI, CLOUD_SEED_LO,
         CLOUD_PERLIN_OCTAVE,
-        world_pos.x, world_pos.y, world_pos.z,
+        world_pos.x, y_stretched, world_pos.z,
         CLOUD_PERLIN_SPACING_M,
     );
     let perlin_norm = clamp((perlin_raw + 0.7) / 1.4, 0.0, 1.0);
@@ -462,7 +637,16 @@ fn sample_cloud_density(world_pos: vec3<f32>) -> f32 {
             cell2, alt_factor2, worley_struct, perlin_norm,
         );
     }
-    return density;
+    if (density <= 0.0) {
+        return CloudSample(0.0, 1.0);
+    }
+    // CM-7: secondary ray toward sun for Beer-Lambert shading.
+    // Uses cell1 only (the dominant cell at this sample) — secondary
+    // ray usually stays within cell1 horizontally for typical sun
+    // angles; blending cell2's contribution along the secondary ray
+    // would double the cost for marginal accuracy improvement.
+    let sun_t = sun_transmittance_through_cell(world_pos, cell1, sun_dir);
+    return CloudSample(density, sun_t);
 }
 
 struct VsOut {
@@ -646,35 +830,72 @@ fn fs_volumetric(in: VsOut) -> @location(0) vec4<f32> {
     // 2026-04-26).
     let jitter = pixel_hash_unit(frag_pixel);
 
+    // CM-7 Beer-Lambert lighting setup. Sun direction is constant
+    // along a single view ray.
+    let sun_dir = normalize(scene.sun_dir.xyz);
+    // Sun-height fade — drops sun contribution to zero when the sun
+    // is below the horizon, keeps it strong at sunset / sunrise.
+    let sun_height_factor = clamp(scene.sun_dir.y, 0.0, 1.0);
+    // Hoist per-pixel constants OUT of the per-sample loop. These
+    // depend only on uniforms (sun_color, ambient, sun_height_factor)
+    // → constant across all samples on this ray. Computing them in
+    // the loop wastes 5 ALU × 24 samples × 4M pixels × 60 fps ≈ 0.6 ms.
+    let multiscatter_per_pixel = scene.sun_color.rgb
+        * MULTISCATTER_INTENSITY
+        * sun_height_factor;
+    let ambient_per_pixel = scene.ambient.rgb * AMBIENT_INTENSITY;
+    // **Phase function NOT applied as a per-sample multiplier (CM-7
+    // revision 2026-04-26)**: the normalized Henyey-Greenstein
+    // function returns ~0.03 at perpendicular view angle, ~0.01 at
+    // back-scatter — those values × sun_color × sun_transmittance
+    // produce essentially zero sun contribution when looking at a
+    // cumulus from anywhere except directly toward the sun. Real
+    // clouds get their brightness from multi-scattering, which
+    // single-scatter HG doesn't model. Dropping the phase multiplier
+    // gives the correct cel-shaded look: cumulus sun-side bright,
+    // shadow-side dim, regardless of camera angle. The
+    // `henyey_greenstein` function is kept for possible CM-10
+    // re-introduction as an *additive halo* (only contributes
+    // strongly when looking near the sun direction) rather than a
+    // multiplier on the base sun-lit term.
+
     var accumulated_alpha: f32 = 0.0;
     var accumulated_color: vec3<f32> = vec3<f32>(0.0);
 
     for (var i: i32 = 0; i < actual_steps; i = i + 1) {
         let t = t_enter + step_dist * (f32(i) + jitter);
         let sample_pos = cam_pos + view_dir * t;
-        let density = sample_cloud_density(sample_pos);
-        if (density <= 0.0) {
+        let cloud = sample_cloud_density(sample_pos, sun_dir);
+        if (cloud.density <= 0.0) {
             continue;
         }
-        let absorption = 1.0 - exp(-density * step_dist * ABSORPTION_SCALE);
+        let absorption = 1.0 - exp(-cloud.density * step_dist * ABSORPTION_SCALE);
 
-        // Altitude-gradient lighting stand-in (WEATHER.md § Lighting
-        // model — proper shadow march reserved for E1 polish). Uses
-        // the global band rather than per-cell base/top so all cells
-        // share a consistent gradient — Stratus low + Cumulus high
-        // both read with the same overhead-sun behavior.
-        let altitude_t = clamp(
-            (sample_pos.y - GLOBAL_CLOUD_BASE_M)
-                / (GLOBAL_CLOUD_TOP_M - GLOBAL_CLOUD_BASE_M),
-            0.0,
-            1.0,
-        );
-        let sun_height = clamp(scene.sun_dir.y, 0.0, 1.0);
-        let lit_factor = mix(0.4, altitude_t, sun_height);
-
-        let sun_lit_color = scene.sun_color.rgb * 1.4;
-        let shadow_color = scene.ambient.rgb * 0.85;
-        let sample_color = mix(shadow_color, sun_lit_color, lit_factor);
+        // CM-7 Beer-Lambert lighting model (replaces the placeholder
+        // altitude-gradient stand-in). Per-sample color is the sum of:
+        //   1. Sun light reaching this sample, attenuated by the cloud
+        //      column toward the sun (`cloud.sun_transmittance`).
+        //      Multiplied by sun_height so contribution fades to zero
+        //      at night. PRIMARY visual differentiator — lit side of
+        //      cloud reads brighter than shadow side.
+        //   2. Multi-scatter approximation — baseline sun-tinted term
+        //      that doesn't depend on transmittance. Represents diffuse
+        //      sun light bouncing through the cloud body. Without this,
+        //      noon-from-below view shows uniformly dim cloud undersides
+        //      because front-to-back compositing puts low-transmittance
+        //      bottom samples first; bright top samples are obscured.
+        //   3. Ambient skylight (constant per-sample; represents
+        //      indirect lighting from the sky dome).
+        // Sunset character emerges naturally: scene.sun_color shifts
+        // warm; ambient stays cool from skylight; the contrast at
+        // cloud rim reads as orange/pink-lit tops over cool bases.
+        // sun_lit is the only per-sample term (depends on transmittance);
+        // multiscatter + ambient are pre-computed per-pixel.
+        let sun_lit = scene.sun_color.rgb
+            * cloud.sun_transmittance
+            * SUN_INTENSITY
+            * sun_height_factor;
+        let sample_color = sun_lit + multiscatter_per_pixel + ambient_per_pixel;
 
         accumulated_color = accumulated_color
             + sample_color * absorption * (1.0 - accumulated_alpha);
