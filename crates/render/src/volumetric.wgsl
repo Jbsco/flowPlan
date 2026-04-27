@@ -219,9 +219,17 @@ fn altitude_profile(
         //
         // **Per-cell gap phasing** (Post-Phase-B 2026-04-27): peak
         // positions shift by `phase ∈ [-0.12, +0.12]` so adjacent cells'
-        // gaps don't align. Some cells will have NO gap (when phase
-        // pushes the bands to overlap) → less rigid layered character
-        // across the scene.
+        // gaps don't align.
+        //
+        // **Soft bridge** (Post-Phase-B 2026-04-27 layer_dupe.png fix):
+        // a constant ~0.30 density bridge across the band fills the
+        // gap with hazy connective tissue between the two peaks. The
+        // peaks still stand out (lower/upper alt_factor reaches ~1.0
+        // while bridge is ~0.30), but the visible "uniform horizontal
+        // gap line" the user reported is replaced by a soft falloff
+        // between bands. This is meteorologically realistic — frontal
+        // systems rarely have a perfectly clear gap between altostratus
+        // and nimbostratus layers; the boundary is a hazy transition.
         let lower_peak = 0.30 + phase;
         let upper_peak = 0.75 + phase;
         let gap = 0.55 + phase * 0.5;
@@ -229,7 +237,11 @@ fn altitude_profile(
                   * smoothstep(gap, lower_peak, t);
         let upper = smoothstep(gap, upper_peak, t)
                   * smoothstep(0.95, upper_peak, t);
-        return max(lower, upper);
+        let separated = max(lower, upper);
+        let bridge = 0.30
+                   * smoothstep(0.0, 0.10, t)
+                   * smoothstep(1.0, 0.90, t);
+        return max(separated, bridge);
     } else {
         // PROFILE_BELL (default) — symmetric smoothstep × smoothstep
         // bell curve. Same peak character as parabolic but with
@@ -460,13 +472,17 @@ const VERTICAL_NOISE_STRETCH: f32 = 3.0;
 // a new Perlin sample at an offset spatial origin so warp_x and
 // warp_z are decorrelated).
 //
-// Amplitude tuned to ~30% of the smallest Worley spacing
-// (Squall = 500m → ~150m warp). At this magnitude, features get
-// shifted enough to break grid alignment visibly. Bumped 60 → 150
-// on 2026-04-26 after `pattern_from_above.png` showed residual
-// diagonal patterning at the lower 60m amplitude — Worley grid was
-// still partly visible.
-const NOISE_WARP_AMPLITUDE_M: f32 = 150.0;
+// Amplitude tuned to fraction of Worley spacing. Higher amplitude
+// breaks parallel/grid-aligned features more aggressively.
+// Tuning history:
+// - 60 m initial: visible diagonal grid patterns (`pattern_from_above.png`)
+// - 150 m (2026-04-26): grid breakup on top-down views
+// - 300 m (2026-04-27): user reported "waves seem too regular" in
+//   horizon view (`layer_dupe.png`) — parallel wave features visible
+//   across multi-cell layers. Doubled to break up lateral coherence.
+//   At 300 m, features get displaced ~38% of Squall's 500 m spacing →
+//   visible Worley cell positions decorrelate strongly across world_pos.
+const NOISE_WARP_AMPLITUDE_M: f32 = 300.0;
 const NOISE_WARP_SPACING_M: f32 = 4000.0;
 
 // **Post-CM-10 Phase B vertical-carve amplitude** (2026-04-26).
