@@ -3,6 +3,37 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
+## 2026-04-27 (iteration 22) — Phase 3.6.3c.6 / 3.2x post-CM-10 sub-phases A-E shipped + follow-on plan
+
+All five post-CM-10 sub-phases shipped over this iteration. Cloud + rain pass total **3.11 ms cloud-perf** (1.6 ms under the 4.7 ms budget).
+
+**Shipped:**
+- **A (wind tilt)** — cumulus density-noise lookup shifts downwind by `wind_dir × tilt × normalized_altitude`. Breaks X/Z-aligned Worley grid character. Single CPU wind sample per frame.
+- **B (vertical structure variety)** — `profile_kind` + `vertical_amp_factor`; introduces BELL/TOWER/ANVIL/DECK/LAYERED. Plus Cirrus added later as 6th type at 7-11 km altitude (wispy thin band, Perlin-dominant noise, `PROFILE_CIRRUS`). Distinct visible altitude tiers via non-overlapping cell altitude bands (cirrus 7-11 km, low/mid 0-6 km).
+- **C (frontal-graph banded structure)** — `frontal::band_tangent_at(seed, x, z, time)` + `CellState.band_tangent`; shader applies anisotropic stretch (3×) along band tangent for `Frontal` cells via 3-cell weighted-average tangent.
+- **D (cross-cell adjacency-biased evolution)** — 1-step relaxation: classify 8 neighbors independently, multiply per-type eligibility weights by `(1 + 0.30 × neighbor_count[type])`. ClearAir excluded from boost (would self-reinforce into all-clear). Cumulus clusters around Cumulus, Frontal along bands.
+- **E.1 (precip rate sample + plumbing)** — `precip_intensity` plumbed through `SceneParams.weather.x` from per-frame `precipitation_rate_at(camera, time)`.
+- **E.2 (visibility coupling)** — fog density bumps by `+0.0001 × precip_intensity`. At 14 mm/hr → ~500m visibility, 8 mm/hr → ~800m, baseline → ~8.6 km. Pure CPU change.
+- **E.3 (rain vs snow type derivation)** — `snow_fraction` via `smoothstep(275, 271 K, t_at_camera)`. Lerps fall speed (rain 18 m/s ↔ snow 1.5 m/s) + shader streak shape (rain thin streak ↔ snow round flake) + brightness/opacity.
+- **E.4 (world-space particle pool)** — `RainParticleSystem` with 4096 fixed pool. Particles anchored in world coords with PCG hash + camera-relative billboard rendering. **Bug found + fixed**: engine uses camera-relative rendering — `view_proj` built with translation = 0; vertex shaders MUST subtract `camera.view_pos` before applying.
+
+**Follow-on plan (encoded as new tasks #332-#335; execution starting this iteration):**
+
+| Step | Description | Est. |
+|------|-------------|------|
+| 0 | **Tuning knobs** — CLEAR_AIR_PRIOR 2.5→2.0, NIMBUS_MIN_HUMIDITY 0.70→0.65, SQUALL_MIN_WIND_MPS 14→12, elig_frontal 2.0→3.0. Currently P(rain) ≈ 17% in typical conditions, mostly drizzle. Knobs raise heavy-rain probability without breaking gating discipline. | 10 min |
+| 1 | **E.5a temporal smoothing** — low-pass filter (~1s) on `precip_intensity` + derived `fog_density` so transitions fade instead of snap on cell-entry/exit. CPU-side state in app. | 30 min |
+| 2 | **E.5b multi-sample distance fog** — sample weather at camera+0/2/5/10 km along view direction; take max() for fog density. Approaching a storm thickens visibility *before* entering the cell. ~5 CPU samples per frame. | 45 min |
+| 3 | **E.6 volumetric mist (Mist cell type)** — new `CellType::Mist` with low altitude band (0-300m), conditions: T - dewpoint < 2 K + low altitude + over-water boost. Renders via existing volumetric raymarcher (no new pipeline). Dewpoint derived from RH + T. Visibility hazard + visual impactor. Morning mist eyecatch falls out from existing diurnal temperature cycle (cold dawn, warm afternoon). | 90 min |
+| 4 | **E.7 test coverage backfill** — unit tests for C/D/E sub-phases: cirrus parameterization, adjacency clustering, fog-density linearity, snow-fraction transition, frontal band-tangent perpendicularity, particle pool recycle/lerp. ~10 tests. | 45 min |
+
+**Deferred:**
+- Per-pixel terrain-aware mist (proper basin-filling) — bigger scope; revisit if E.6 cell-band approximation doesn't read right
+- Rain-availability re-tuning post-test if knobs aren't enough
+- Phase 6 replay determinism: rain particle pool uses ad-hoc xorshift, not deterministic across replays. Not needed for v1.
+
+**Memory pin** for the execution plan: `weather_phase_e_followon_plan.md`.
+
 ## 2026-04-26 (iteration 20) — Phase 3.6.3c.6 / 3.2x C2-polish: tessellation correction + cell evolution
 
 C2 v1 shipped multi-cell streaming via circular footprints (each W2 cell rendered as a 6 km circle around its seed), but this produced "scattered identical puffs with gaps" — wrong per the locked WEATHER.md design. Corrected at user direction:

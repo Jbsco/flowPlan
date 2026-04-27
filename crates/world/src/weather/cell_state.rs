@@ -56,6 +56,16 @@ pub enum CellType {
     /// low / mid / high layering instead of all cells stacking in
     /// the 1-6 km range.
     Cirrus,
+    /// Ground-hugging mist / fog. Low altitude band (0-300 m).
+    /// Forms when temperature approaches dewpoint and relative
+    /// humidity is high — a meteorologically real condition that
+    /// emerges naturally over water, in basins at dawn (cold
+    /// pre-noon temperatures), and in stable humid regions.
+    /// Renders via the existing volumetric raymarcher with a flat
+    /// ground-hugging profile. Severe visibility hazard for
+    /// low-altitude flight; visual eyecatch from altitude (the
+    /// "morning mist over the bay" scenario).
+    Mist,
 }
 
 /// Altitude-profile shape (Post-CM-10 Phase B, 2026-04-26). Selects the
@@ -87,6 +97,9 @@ pub enum ProfileKind {
     /// Wispy thin band — cirrus. Gradual smoothstep fades from base
     /// to top, low peak `alt_factor` (~0.5) for thin transparency.
     Cirrus = 5,
+    /// Ground-hugging fog. Solid near base, rapid fade above; no
+    /// bottom fade (mist actually touches the ground).
+    Fog = 6,
 }
 
 /// Classify a cell's altitude profile from `cell_type` + `coverage_strength`.
@@ -99,6 +112,7 @@ pub fn derive_profile_kind(cell_type: CellType, coverage_strength: f32) -> Profi
         CellType::Frontal => ProfileKind::Layered,
         CellType::Nimbus => ProfileKind::Anvil,
         CellType::Cirrus => ProfileKind::Cirrus,
+        CellType::Mist => ProfileKind::Fog,
         CellType::Cumulus => {
             // Cumulus with high coverage_strength → towering;
             // otherwise fair-weather bell.
@@ -131,12 +145,11 @@ pub fn vertical_amp_baseline(cell_type: CellType) -> f32 {
     match cell_type {
         CellType::Cumulus => 1.0,
         CellType::Nimbus => 2.5,
-        // Stratus + Cirrus both share the flat-layer 0.3 baseline —
-        // both render as wispy/uniform layers without much vertical
-        // perturbation. Stratus is low-altitude boundary-layer fog;
-        // cirrus is high-altitude ice. Same shader behavior, different
-        // altitudes.
-        CellType::Stratus | CellType::Cirrus => 0.3,
+        // Stratus + Cirrus + Mist all share the flat-layer 0.2 baseline —
+        // all three render as wispy/uniform layers without much
+        // vertical perturbation. Stratus is low-altitude boundary-layer;
+        // cirrus is high-altitude ice; mist is ground-hugging fog.
+        CellType::Stratus | CellType::Cirrus | CellType::Mist => 0.2,
         CellType::Squall => 1.5,
         CellType::Frontal => 1.2,
         CellType::ClearAir => 0.5,
@@ -230,7 +243,14 @@ pub struct CellState {
 pub const CLOUD_MIN_HUMIDITY: f32 = 0.40;
 
 /// Minimum humidity for nimbus (deep convection).
-pub const NIMBUS_MIN_HUMIDITY: f32 = 0.70;
+///
+/// **Tuning history**:
+/// - 0.70 initial: too gated; in typical 0.5 RH conditions Nimbus
+///   essentially never appeared. Heavy rain availability ~0%.
+/// - 2026-04-27: 0.70 → 0.65. User direction post Phase E ship —
+///   wanted "more findable storms" without breaking the gating
+///   discipline. Now Nimbus eligible in ~1.5× the regional area.
+pub const NIMBUS_MIN_HUMIDITY: f32 = 0.65;
 
 /// Minimum temperature for convective cells (K). Below this, clouds stratify.
 pub const CONVECTIVE_MIN_TEMP_K: f32 = 280.0;
@@ -239,7 +259,13 @@ pub const CONVECTIVE_MIN_TEMP_K: f32 = 280.0;
 pub const STRATUS_MAX_TEMP_K: f32 = 285.0;
 
 /// Minimum surface-wind magnitude for squall (m/s).
-pub const SQUALL_MIN_WIND_MPS: f32 = 14.0;
+///
+/// **Tuning history**:
+/// - 14.0 initial: matched US gale-force threshold; rare in typical
+///   wind fields. Squalls almost never appeared.
+/// - 2026-04-27: 14.0 → 12.0. User direction — moderately strong wind
+///   conditions should support squalls without requiring full gale.
+pub const SQUALL_MIN_WIND_MPS: f32 = 12.0;
 
 /// Pressure-gradient magnitude (hPa/m) above which a cell is a frontal candidate.
 pub const FRONTAL_GRAD_THRESHOLD: f32 = frontal::FRONTAL_THRESHOLD_HPA_PER_M;
@@ -249,7 +275,13 @@ pub const FRONTAL_GRAD_THRESHOLD: f32 = frontal::FRONTAL_THRESHOLD_HPA_PER_M;
 /// Biases the statistical distribution toward `ClearAir` so clear skies are
 /// the dominant cell type — matches real-world observation that most of the
 /// sky, most of the time, is clear.
-pub const CLEAR_AIR_PRIOR: f32 = 2.5;
+///
+/// **Tuning history**:
+/// - 2.5 initial: P(any precip) ≈ 17% in typical mid-latitude conditions,
+///   mostly drizzle. User found cells were too rare to support gameplay.
+/// - 2026-04-27: 2.5 → 2.0. Raises cloud-cell fraction by ~20% across
+///   all conditions while keeping ClearAir as the plurality.
+pub const CLEAR_AIR_PRIOR: f32 = 2.0;
 
 /// Altitude at which wind is sampled for squall wind-shear classification (m).
 const WIND_SAMPLE_ALTITUDE_M: f32 = 2_000.0;
@@ -269,7 +301,9 @@ const CELL_OFFSET_TAG: u64 = u64::from_le_bytes(*b"celloff_");
 ///   for hours; we use 12 hr as a representative midpoint.
 ///
 /// `ClearAir` is unused (cleared cells have no life cycle).
-const DEFAULT_TYPE_CYCLE_S: [f32; 7] = [
+/// Mist persists 2-4 hr typically (morning fog burns off by mid-morning);
+/// 3 hr midpoint.
+const DEFAULT_TYPE_CYCLE_S: [f32; 8] = [
     0.0,            // ClearAir
     1.5 * 3_600.0,  // Cumulus
     2.5 * 3_600.0,  // Nimbus
@@ -277,6 +311,7 @@ const DEFAULT_TYPE_CYCLE_S: [f32; 7] = [
     1.5 * 3_600.0,  // Squall
     8.0 * 3_600.0,  // Frontal
     12.0 * 3_600.0, // Cirrus
+    3.0 * 3_600.0,  // Mist
 ];
 
 /// Player-tunable weather-pacing configuration.
@@ -796,8 +831,13 @@ fn eligibility_weights(p_hpa: f32, t_k: f32, rh: f32, wind_mag: f32, grad_mag: f
     } else {
         0.0
     };
+    // Frontal eligibility raised 2.0 → 3.0 on 2026-04-27 — frontal
+    // cells should DOMINATE storm zones (where the gradient is high)
+    // because that's the meteorologically correct outcome (a front IS
+    // a high-gradient region by definition). Higher weight ensures
+    // frontal banding is the visible character of stormy regions.
     let elig_frontal = if grad_mag >= FRONTAL_GRAD_THRESHOLD {
-        2.0
+        3.0
     } else {
         0.0
     };

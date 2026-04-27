@@ -869,26 +869,38 @@ User pinned design concern post-CM-10 visual review: cumulus reads as "uniform p
 - Marginal cells: discrete sky-gaps at varying altitudes (3D voids), aircraft-navigable
 - Same cell type with different cov shows dramatically different vertical extent
 
-**Phase C — Frontal-graph banded structure** — *pending*
+**Phase C — Frontal-graph banded structure** — *shipped 2026-04-27*
 
-Along frontal-graph segments, cloud structure becomes banded (oriented perpendicular to graph tangent). Per-cell tangent + banded flag in `GpuWeatherCell`. Shader overrides Worley sampling axes accordingly.
+`frontal::band_tangent_at(seed, x, z, time)` returns unit perpendicular-to-gradient direction at any world point. `CellState.band_tangent` populated at parameterize-time for `Frontal` cells. Shader applies anisotropic 3× stretch along the 3-cell weighted-average tangent before Worley/Perlin lookup → cloud features streak along front lines instead of isotropic puffs. Fallback `Vec2::X` for non-frontal cells.
 
-**Phase D — Cross-cell adjacency-biased evolution** — *pending*
+**Phase D — Cross-cell adjacency-biased evolution** — *shipped 2026-04-27*
 
-Priority ladder #13. Cells bias next-cycle re-roll toward neighbor cell types so weather sprawls naturally — fronts move as bands, storms organize into lines. CPU-side: at re-roll time consult neighbors and weight the W2 partition outcome.
+1-step relaxation: classify 8 grid-neighbors INDEPENDENTLY (no recursion), tally per-type counts, multiply current cell's W1 eligibility weights by `(1 + 0.30 × neighbor_count[type])`. **ClearAir excluded from boost** — its 2.5 prior would self-reinforce into all-clear if boosted. Cumulus clusters around Cumulus, Frontal reinforces along bands, ClearAir stays at natural rate.
 
-**Phase E — Precipitation particle systems** — *pending, largest scope*
+**Phase E — Precipitation particle systems** — *E.1-E.4 shipped 2026-04-27, E.5+ in progress*
 
-Priority ladder #10-11. Rain/snow particle systems consuming W3 `precipitation_rate_at`. Standalone subsystem, can land independently.
+| Sub-phase | Description | Status |
+|---|---|---|
+| E.1 | precip_intensity sampling at camera + plumbed via `SceneParams.weather.x` | shipped |
+| E.2 | visibility coupling — fog density bumps `+0.0001 × precip_intensity` | shipped |
+| E.3 | snow_fraction via `smoothstep(275, 271 K, t)`; lerp fall speed + shape | shipped |
+| E.4 | world-space `RainParticleSystem` (4096 pool, world-anchored, camera-relative billboards) | shipped |
+| E.5a | **temporal smoothing** of precip + fog (~1s low-pass) — fades instead of snaps | in progress |
+| E.5b | **multi-sample distance fog** — sample weather along view ray, take max → "approaching the storm" effect | in progress |
+| E.6 | **volumetric mist** as `CellType::Mist`, low altitude band (0-300m), conditions: T-dewpoint < 2 K + low altitude + over-water boost. Renders via existing volumetric raymarcher. Morning-mist eyecatch falls out from diurnal temperature cycle. | pending |
+| E.7 | **test coverage backfill** for C/D/E sub-phases | pending |
 
-| Hook (existing in `weather/`) | How clouds could leverage it | Status |
+**Tuning knobs (applied 2026-04-27)**: rain availability raised — `CLEAR_AIR_PRIOR: 2.5 → 2.0`, `NIMBUS_MIN_HUMIDITY: 0.70 → 0.65`, `SQUALL_MIN_WIND_MPS: 14.0 → 12.0`, `elig_frontal: 2.0 → 3.0`. Pre-tune P(any precip) ≈ 17% in typical mid-latitude conditions, mostly drizzle. Post-tune raises heavy-rain probability without breaking gating.
+
+| Hook (existing in `weather/`) | How clouds leverage it | Status |
 |---|---|---|
 | `wind::wind_at(x, y, z, time)` direction | Cumulus tilt | **Phase A.1 shipped 2026-04-26** |
 | Per-type updraft baselines (in deltas.rs) + cov | Vertical amp factor + profile_kind | **Phase B shipped 2026-04-26** |
-| `frontal::nearest_segment` graph | Banded structure | Phase C pending |
-| Cross-cell type bias | Sprawl evolution | Phase D pending |
-| `weather::deltas::precipitation_rate_at(...)` | Particle systems | Phase E pending |
+| `frontal::band_tangent_at` (added Phase C) | Banded structure | **Phase C shipped 2026-04-27** |
+| Cross-cell type bias | Sprawl evolution | **Phase D shipped 2026-04-27** |
+| `weather::deltas::precipitation_rate_at(...)` | Particle systems | **Phase E.1-E.4 shipped 2026-04-27** |
 | `humidity::sea_level_humidity_with_terrain` | Already exercised → coverage_strength. Free. | Done. |
+| `temperature::sea_level_temperature` (diurnal) | Snow/rain split + morning mist | **Phase E.3 shipped; E.6 mist pending** |
 | Orographic / rain-shadow modifiers | Already exercised through humidity. Free. | Done. |
 
 **Smoothstep edge bounds (CM-2 calibration, 2026-04-26)** — final values centered so each axis returns ~0.5 at the binary threshold:

@@ -298,6 +298,17 @@ struct Runtime {
         flowplan_world::SubBiomeCellId,
         Vec<flowplan_world::feature_instances::FeatureInstance>,
     >,
+    /// Phase E.5a: low-pass-smoothed precipitation intensity (mm/hr) at
+    /// the camera. Updated per frame from raw
+    /// `precipitation_rate_at(camera)` with a ~1-s time constant so
+    /// rain particle ramp-up + fade-out are visible. Drives
+    /// `SceneParams.precip_intensity` + the rain particle pool count.
+    smoothed_precip_intensity: f32,
+    /// Phase E.5b: low-pass-smoothed MAX precipitation found along the
+    /// view direction (samples camera + 2 / 5 / 10 km ahead). Drives
+    /// fog density independently from at-camera rain — approaching a
+    /// storm thickens visibility before the camera enters the cell.
+    smoothed_look_ahead_precip: f32,
     /// Most-recent terrain mesh-rebuild CPU time (milliseconds). Includes
     /// `CpuMesh::terrain_patch_at` — the parallel height-sampling pass.
     /// Persists between rebuilds so the debug HUD can display stale-but-
@@ -1147,6 +1158,8 @@ impl Runtime {
             world_refs,
             ambient_worker,
             ambient_cache: std::collections::HashMap::new(),
+            smoothed_precip_intensity: 0.0,
+            smoothed_look_ahead_precip: 0.0,
             last_terrain_rebuild_cpu_ms: 0.0,
             last_terrain_rebuild_gpu_ms: 0.0,
             last_water_rebuild_cpu_ms: 0.0,
@@ -1595,7 +1608,7 @@ impl Runtime {
         // Phase E: sample W2 precipitation rate at camera position. Drives
         // the screen-space rain streak overlay. One W2 cell-state lookup
         // per frame; cheap.
-        let precip_intensity = flowplan_world::weather::deltas::precipitation_rate_at(
+        let raw_precip_intensity = flowplan_world::weather::deltas::precipitation_rate_at(
             WORLD_SEED,
             &self.terrain,
             curr.vehicle.position.x,
@@ -1603,6 +1616,40 @@ impl Runtime {
             curr.vehicle.position.z,
             curr.time_of_day,
         );
+        // Phase E.5b: also sample precipitation along the view
+        // direction, multiple distances ahead. Take the maximum →
+        // approaching a storm thickens fog before the camera enters
+        // the cell. Cheap (~5 W2 cell-state lookups per frame).
+        let view_forward = (curr.camera.orientation * glam::Vec3::NEG_Z).normalize_or_zero();
+        let look_ahead_distances_m = [2_000.0_f32, 5_000.0, 10_000.0];
+        let mut raw_look_ahead_precip = raw_precip_intensity;
+        for d in look_ahead_distances_m {
+            let p = curr.vehicle.position + view_forward * d;
+            let r = flowplan_world::weather::deltas::precipitation_rate_at(
+                WORLD_SEED,
+                &self.terrain,
+                p.x,
+                p.y,
+                p.z,
+                curr.time_of_day,
+            );
+            if r > raw_look_ahead_precip {
+                raw_look_ahead_precip = r;
+            }
+        }
+        // Phase E.5a: temporal smoothing on both the at-camera precip
+        // (drives rain particle count + at-camera shader effect) and
+        // the look-ahead max (drives fog density). Same ~1 s time
+        // constant — `alpha = 1 - exp(-dt/tau)` is the exact discrete
+        // exponential filter.
+        const PRECIP_SMOOTHING_TAU_S: f32 = 1.0;
+        let alpha = 1.0 - (-elapsed / PRECIP_SMOOTHING_TAU_S).exp();
+        self.smoothed_precip_intensity +=
+            (raw_precip_intensity - self.smoothed_precip_intensity) * alpha;
+        self.smoothed_look_ahead_precip +=
+            (raw_look_ahead_precip - self.smoothed_look_ahead_precip) * alpha;
+        let precip_intensity = self.smoothed_precip_intensity;
+        let look_ahead_precip = self.smoothed_look_ahead_precip;
         // Phase E.3: sample temperature at camera altitude → derive
         // snow_fraction. Smoothstep around freezing: above +2°C is
         // rain, below -2°C is snow, smooth blend in between. Drives
@@ -1628,11 +1675,14 @@ impl Runtime {
         // tightens to ~800 m, at 14 mm/hr (squall) ~500 m. Real-world
         // ratios: density = ln(2) / visibility-distance, so
         // visibility ≈ 700 / density_per_meter (m). Composes with
-        // baseline 0.00008 (clear-sky open visibility ~8.6 km) so
-        // light drizzle barely tints, heavy rain gates terrain into
-        // a haze wall.
+        // baseline 0.00008 (clear-sky open visibility ~8.6 km).
+        //
+        // Phase E.5b: driven by the LOOK-AHEAD smoothed precip (max
+        // along view ray) rather than at-camera precip. Approaching a
+        // storm thickens distance fog *before* the camera enters the
+        // cell — the player sees the storm wall on the horizon.
         let baseline_fog_density = SceneParams::default().fog_density;
-        let precip_fog_density = 0.000_1 * precip_intensity;
+        let precip_fog_density = 0.000_1 * look_ahead_precip;
         let fog_density = baseline_fog_density + precip_fog_density;
         let scene_params = SceneParams {
             sun_dir: sun_direction(local_tod),
