@@ -1741,6 +1741,7 @@ impl Runtime {
                         coverage_strength: snap.state.coverage_strength,
                         vertical_amp_factor,
                         profile_kind: profile_kind as u32,
+                        band_tangent: [snap.state.band_tangent.x, snap.state.band_tangent.y],
                     }
                 })
                 .collect();
@@ -1763,7 +1764,8 @@ impl Runtime {
                     cell_type: 0,
                     coverage_strength: 0.0,
                     vertical_amp_factor: 0.0,
-                    profile_kind: 0, // PROFILE_BELL — unused for sentinel
+                    profile_kind: 0,          // PROFILE_BELL — unused for sentinel
+                    band_tangent: [1.0, 0.0], // unused for sentinel
                 });
             }
             self.renderer.update_weather_cells(&self.queue, &gpu_cells);

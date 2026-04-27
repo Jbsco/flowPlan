@@ -290,11 +290,21 @@ pub struct GpuWeatherCell {
     /// Altitude-profile shape selector (Post-CM-10 Phase B,
     /// 2026-04-26). Discriminant: 0=BELL (parabolic peak),
     /// 1=TOWER (peak at 70%, narrow base), 2=ANVIL (T-shape, broad
-    /// top), 3=DECK (uniform middle), 4=LAYERED (double-peak).
+    /// top), 3=DECK (uniform middle), 4=LAYERED (double-peak),
+    /// 5=CIRRUS (wispy thin band).
     /// Matches the `PROFILE_*` consts in `volumetric.wgsl`. CPU-side
     /// classifier in `weather::cell_state` derives this from
     /// `cell_type` + `coverage_strength`.
     pub profile_kind: u32,
+    /// Unit-vector tangent of the local frontal band (Post-CM-10 Phase
+    /// C, 2026-04-27). For `Frontal` cells, populated from
+    /// `frontal::band_tangent_at(seed_pos)` — points along the front
+    /// line, perpendicular to the pressure gradient. The shader's
+    /// anisotropic-stretch dispatch uses this only when
+    /// `cell_type == Frontal (5)`; for other cells the value is
+    /// `(1, 0)` and unused. Total struct size: 48 bytes (10 × f32 +
+    /// vec2), 8-byte aligned per std430.
+    pub band_tangent: [f32; 2],
 }
 
 /// Compute shader source for the CPU-GPU bit-identity gate (B4).

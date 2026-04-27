@@ -78,8 +78,13 @@ struct GpuWeatherCell {
                                 // per cell. Strong nimbus → ~5×;
                                 // marginal cumulus → ~1×; stratus → ~0.3×.
     profile_kind: u32,          // Post-CM-10 Phase B: PROFILE_* enum
-                                // (BELL/TOWER/ANVIL/DECK/LAYERED).
+                                // (BELL/TOWER/ANVIL/DECK/LAYERED/CIRRUS).
                                 // Selects altitude_profile shape.
+    band_tangent: vec2<f32>,    // Post-CM-10 Phase C: unit tangent of
+                                // local frontal band (perpendicular to
+                                // pressure gradient). Used by Frontal
+                                // cells only — others store (1, 0)
+                                // and skip the anisotropic transform.
 }
 @group(3) @binding(0) var<storage, read> weather_cells: array<GpuWeatherCell>;
 
@@ -94,6 +99,22 @@ const CELL_NIMBUS: u32    = 2u;
 const CELL_STRATUS: u32   = 3u;
 const CELL_SQUALL: u32    = 4u;
 const CELL_FRONTAL: u32   = 5u;
+const CELL_CIRRUS: u32    = 6u;
+
+// Phase C banded-structure stretch factor for Frontal cells. Features
+// stretch this much along the band tangent; perpendicular axis stays
+// at 1× → bands form as elongated streaks. 3× is a conservative
+// starting value: visible band character without making cells look
+// ribbon-thin. Non-Frontal cells use 1.0 (identity transform).
+const BAND_STRETCH_FRONTAL: f32 = 3.0;
+const BAND_STRETCH_DEFAULT: f32 = 1.0;
+
+fn band_stretch_for_type(cell_type: u32) -> f32 {
+    if (cell_type == CELL_FRONTAL) {
+        return BAND_STRETCH_FRONTAL;
+    }
+    return BAND_STRETCH_DEFAULT;
+}
 
 // Profile kinds (Post-CM-10 Phase B). Selects altitude_profile shape.
 // Match `weather::cell_state::ProfileKind` discriminant on Rust side.
@@ -1009,8 +1030,36 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
     let wind_dir = scene.time.zw;
     let tilt_offset_x = wind_dir.x * WIND_TILT_AMPLITUDE_M * alt_normalized;
     let tilt_offset_z = wind_dir.y * WIND_TILT_AMPLITUDE_M * alt_normalized;
-    let warped_x = world_pos.x + perturb * NOISE_WARP_AMPLITUDE_M + tilt_offset_x;
-    let warped_z = world_pos.z + warp_z_perlin * NOISE_WARP_AMPLITUDE_M + tilt_offset_z;
+    let warped_x_raw = world_pos.x + perturb * NOISE_WARP_AMPLITUDE_M + tilt_offset_x;
+    let warped_z_raw = world_pos.z + warp_z_perlin * NOISE_WARP_AMPLITUDE_M + tilt_offset_z;
+
+    // **Phase C banded structure** (Post-CM-10 2026-04-27): for Frontal
+    // cells, stretch noise lookup along the band tangent so cloud
+    // features form streaks along the front instead of isotropic puffs.
+    // 3-cell weighted average of band_tangent + per-type stretch
+    // factor → smooth blend at Frontal/non-Frontal boundaries.
+    // Identity transform (mixed_stretch ≈ 1) when no Frontal cells in
+    // the blend; gated to skip the cost in that common case.
+    let stretch1 = band_stretch_for_type(cell1.cell_type);
+    let stretch2 = band_stretch_for_type(cell2.cell_type);
+    let stretch3 = band_stretch_for_type(cell3.cell_type);
+    let mixed_stretch = w1 * stretch1 + w2 * stretch2 + w3 * stretch3;
+    var warped_x = warped_x_raw;
+    var warped_z = warped_z_raw;
+    if (mixed_stretch > 1.05) {
+        let mixed_t = w1 * cell1.band_tangent
+                    + w2 * cell2.band_tangent
+                    + w3 * cell3.band_tangent;
+        let t_len_sq = dot(mixed_t, mixed_t);
+        if (t_len_sq > 0.25) {
+            let t_norm = mixed_t * inverseSqrt(t_len_sq);
+            let along  =  t_norm.x * warped_x_raw + t_norm.y * warped_z_raw;
+            let across = -t_norm.y * warped_x_raw + t_norm.x * warped_z_raw;
+            let along_in = along / mixed_stretch;
+            warped_x = t_norm.x * along_in - t_norm.y * across;
+            warped_z = t_norm.y * along_in + t_norm.x * across;
+        }
+    }
 
     let perlin_raw = cloud_perlin_3d(
         CLOUD_SEED_HI, CLOUD_SEED_LO,

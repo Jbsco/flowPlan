@@ -212,6 +212,16 @@ pub struct CellState {
     /// raw_factor)` so adjacent cells with smoothly-varying inputs
     /// produce continuous gradients across the world.
     pub coverage_strength: f32,
+    /// Unit-vector tangent of the local frontal band at the cell seed
+    /// (Post-CM-10 Phase C, 2026-04-27). For `Frontal` cells this is
+    /// the direction along the pressure-gradient-perpendicular front
+    /// line — clouds in the cell render as banded streaks along this
+    /// axis. For all other cell types this is `Vec2::X` (default
+    /// `(1, 0)`); the shader's anisotropic-stretch dispatch only
+    /// applies banding when `cell_type == Frontal`, so the value is
+    /// unused for other types but must be a valid (non-zero) unit
+    /// vector to avoid degenerate transforms in 3-cell blending zones.
+    pub band_tangent: glam::Vec2,
 }
 
 // Placement-constraint thresholds — chosen to match real atmospheric precedents.
@@ -495,6 +505,7 @@ fn evolve_initial(
             // their wispy traces fade out smoothly rather than
             // binary-disappear.
             coverage_strength: initial.coverage_strength * activity.max(0.0),
+            band_tangent: initial.band_tangent,
         };
     }
     CellState {
@@ -557,6 +568,14 @@ fn initial_state_from_humidity(master_seed: u64, cell: CellId, time_s: f32, rh: 
         compute_coverage_strength(cell_type, rh, t_k, p_hpa, wind_mag, grad_mag);
     let mut state = parameterize(cell_type, rh, t_k);
     state.coverage_strength = coverage_strength;
+    // Phase C: Frontal cells take their banded tangent from the local
+    // pressure-gradient direction at the seed. Other types keep the
+    // default Vec2::X from parameterize() — the shader's anisotropic
+    // stretch only fires for cell_type == Frontal so the tangent value
+    // for non-Frontal cells is unused.
+    if matches!(cell_type, CellType::Frontal) {
+        state.band_tangent = frontal::band_tangent_at(master_seed, seed_pos.x, seed_pos.y, time_s);
+    }
     // ClearAir cells with nonzero margin (W1 conditions approaching a
     // cloud-bearing threshold) need haze parameters so the shader can
     // render wispy clouds. Bare ClearAir leaves base/top/density at 0
@@ -831,6 +850,12 @@ fn select_cell_type(
 /// lowers with humidity, top lifts with warmth).
 fn parameterize(cell_type: CellType, rh: f32, t_k: f32) -> CellState {
     let storm_phase = 0.0;
+    // Default `band_tangent = (1, 0)` for all types. Frontal cells get
+    // their actual front-line tangent assigned later in
+    // `initial_state_from_humidity`, which has access to seed_pos +
+    // time_s for the gradient sample. Other types ignore band_tangent
+    // in the shader so the value doesn't matter visually.
+    let band_tangent = glam::Vec2::X;
     match cell_type {
         CellType::ClearAir => CellState {
             cell_type,
@@ -840,6 +865,7 @@ fn parameterize(cell_type: CellType, rh: f32, t_k: f32) -> CellState {
             precip_rate_mm_per_hr: 0.0,
             storm_phase,
             coverage_strength: 0.0,
+            band_tangent,
         },
         CellType::Cumulus => {
             // LCL approximation: base rises with aridity.
@@ -853,6 +879,7 @@ fn parameterize(cell_type: CellType, rh: f32, t_k: f32) -> CellState {
                 precip_rate_mm_per_hr: 0.0,
                 storm_phase,
                 coverage_strength: 0.0,
+                band_tangent,
             }
         },
         CellType::Nimbus => {
@@ -866,6 +893,7 @@ fn parameterize(cell_type: CellType, rh: f32, t_k: f32) -> CellState {
                 precip_rate_mm_per_hr: 6.0,
                 storm_phase,
                 coverage_strength: 0.0,
+                band_tangent,
             }
         },
         CellType::Stratus => {
@@ -879,6 +907,7 @@ fn parameterize(cell_type: CellType, rh: f32, t_k: f32) -> CellState {
                 precip_rate_mm_per_hr: 0.3,
                 storm_phase,
                 coverage_strength: 0.0,
+                band_tangent,
             }
         },
         CellType::Squall => CellState {
@@ -889,6 +918,7 @@ fn parameterize(cell_type: CellType, rh: f32, t_k: f32) -> CellState {
             precip_rate_mm_per_hr: 14.0,
             storm_phase,
             coverage_strength: 0.0,
+            band_tangent,
         },
         CellType::Frontal => CellState {
             cell_type,
@@ -898,6 +928,7 @@ fn parameterize(cell_type: CellType, rh: f32, t_k: f32) -> CellState {
             precip_rate_mm_per_hr: 8.0,
             storm_phase,
             coverage_strength: 0.0,
+            band_tangent,
         },
         CellType::Cirrus => {
             // Cirrus altitude rises modestly with warmer surface temp
@@ -916,6 +947,7 @@ fn parameterize(cell_type: CellType, rh: f32, t_k: f32) -> CellState {
                 precip_rate_mm_per_hr: 0.0,
                 storm_phase,
                 coverage_strength: 0.0,
+                band_tangent,
             }
         },
     }
@@ -1027,6 +1059,7 @@ mod tests {
             precip_rate_mm_per_hr: 0.0,
             storm_phase: 0.0,
             coverage_strength: 0.0,
+            band_tangent: glam::Vec2::X,
         };
         assert_eq!(s.density.to_bits(), 0.0_f32.to_bits());
     }

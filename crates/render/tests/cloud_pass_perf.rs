@@ -308,6 +308,7 @@ fn cloud_pass_within_perf_budget() {
         coverage_strength: 0.0,
         vertical_amp_factor: 0.0,
         profile_kind: 0,
+        band_tangent: [1.0, 0.0],
     };
     let mut test_cells = [empty_slot; MAX_WEATHER_CELLS];
     test_cells[0] = GpuWeatherCell {
@@ -327,6 +328,7 @@ fn cloud_pass_within_perf_budget() {
         // a stable test scenario. amp_factor = 1.0 × (0.5 + 1.05) = 1.55.
         vertical_amp_factor: 1.55,
         profile_kind: 0, // PROFILE_BELL
+        band_tangent: [1.0, 0.0],
     };
     renderer.update_weather_cells(&queue, &test_cells);
 

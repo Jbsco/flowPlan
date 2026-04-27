@@ -113,6 +113,29 @@ fn pressure_gradient(master_seed: u64, x_m: f32, z_m: f32, time_s: f32) -> (f32,
     (dp_dx, dp_dz)
 }
 
+/// Unit-vector tangent of the local frontal band at world `(x, z)`.
+///
+/// Perpendicular to the pressure gradient → aligned with the front line.
+/// Returns `Vec2::X` (default `(1, 0)`) for points where the gradient is
+/// weak (no meaningful frontal direction). Used by Phase C banded-cloud
+/// rendering: for `Frontal` weather cells, the cloud's noise sampling
+/// stretches along this tangent so cloud features form streaks along
+/// the front instead of isotropic puffs.
+///
+/// Cost: 4 pressure evaluations (same as gradient sampling). Called
+/// once per Frontal cell at chunk-bake time, not per-frame or per-pixel.
+#[must_use]
+pub fn band_tangent_at(master_seed: u64, x_m: f32, z_m: f32, time_s: f32) -> Vec2 {
+    let (dp_dx, dp_dz) = pressure_gradient(master_seed, x_m, z_m, time_s);
+    let mag_sq = dp_dx * dp_dx + dp_dz * dp_dz;
+    let weak_threshold = FRONTAL_THRESHOLD_HPA_PER_M * 0.5;
+    if mag_sq < weak_threshold * weak_threshold {
+        return Vec2::X;
+    }
+    let inv_mag = 1.0 / libm::sqrtf(mag_sq);
+    Vec2::new(-dp_dz * inv_mag, dp_dx * inv_mag)
+}
+
 #[cfg(test)]
 #[allow(clippy::cast_precision_loss)]
 #[allow(clippy::float_cmp)]
