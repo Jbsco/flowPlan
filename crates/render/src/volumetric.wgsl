@@ -316,6 +316,21 @@ fn find_nearest_three_active_cells(world_xz: vec2<f32>) -> NearestThree {
 //   haze is the fix being pursued.
 const BOUNDARY_BLEND_DISTANCE_M: f32 = 5000.0;
 
+// **Radius gate** for slot-2/slot-3 softmax weights (Post-Phase-B
+// 2026-04-27 fix for residual instant-alpha-snap). Below FADE_START
+// the gate factor is 1 (full softmax weight). Above FADE_END the gate
+// is 0 (cell drops out of blend). Smooth ramp in between. By the time
+// a cell would be replaced by a different-identity cell at the same
+// slot (slot-K → slot-K+1 swap at a Voronoi vertex), its gated weight
+// is already 0 → cell-identity swap is invisible.
+//
+// FADE_END at 9 km covers typical slot-3 distances within a 25 km mean-
+// spacing weather partition (slot-3 distances are ~12-18 km from the
+// query point in the centroid of cell 1, so 9 km offset from d1 is the
+// outer edge of slot-3 influence).
+const BLEND_RADIUS_FADE_START_M: f32 = 5000.0;
+const BLEND_RADIUS_FADE_END_M: f32 = 9000.0;
+
 // Note (2026-04-26): A `BOUNDARY_BLEND_W2_EARLY_EXIT = 0.05` constant
 // previously gated cell 2's pre-filter when w2 was small (deep inside
 // cell 1). It was removed because the gate produced a *visible
@@ -757,11 +772,35 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
     // (d1 << d2,d3): w1 → 1, others → 0. Smooth monotonic falloff
     // with distance. SCALE = BOUNDARY_BLEND_DISTANCE_M means at
     // distance offset = 5 km past closest, weight = 1/e ≈ 0.37.
+    //
+    // **Radius gate** (Post-Phase-B 2026-04-27): without a hard cap,
+    // when the slot-3 cell exits to slot-4 (replaced by a different
+    // cell at the same distance), softmax preserves the WEIGHT but
+    // the *cell identity* changes. If old-slot-3 had density X and
+    // new-slot-3 has density Y, the alpha contribution steps by
+    // w3 × (Y - X) at the swap instant — visible as a single-frame
+    // alpha jump (low → high or high → low). Gate forces w_i → 0
+    // before the swap by smoothstepping over `(d_i - d_1) >
+    // BLEND_RADIUS_FADE_END_M`. By the time slot-3 hands off to slot-4,
+    // both contributions are already zero → invisible swap. Same
+    // applies to w2 (slot-2 ↔ slot-3 swap involves cell-identity change
+    // when crossing into a new Voronoi region).
+    //
+    // Tuning: `FADE_END = 9 km` covers typical slot-3 cell distances
+    // within a 25 km mean-spacing partition. Beyond 9 km, blending
+    // truncates to single-cell rendering — the adjacent cells are too
+    // far to influence local cloud appearance regardless.
     let d1 = sqrt(max(nearest3.dsq1, 1.0));
     let d2 = sqrt(max(nearest3.dsq2, 1.0));
     let d3 = sqrt(max(nearest3.dsq3, 1.0));
-    let w2_raw = exp(-(d2 - d1) / BOUNDARY_BLEND_DISTANCE_M);
-    let w3_raw = exp(-(d3 - d1) / BOUNDARY_BLEND_DISTANCE_M);
+    let radius_gate2 = 1.0 - smoothstep(
+        BLEND_RADIUS_FADE_START_M, BLEND_RADIUS_FADE_END_M, d2 - d1,
+    );
+    let radius_gate3 = 1.0 - smoothstep(
+        BLEND_RADIUS_FADE_START_M, BLEND_RADIUS_FADE_END_M, d3 - d1,
+    );
+    let w2_raw = exp(-(d2 - d1) / BOUNDARY_BLEND_DISTANCE_M) * radius_gate2;
+    let w3_raw = exp(-(d3 - d1) / BOUNDARY_BLEND_DISTANCE_M) * radius_gate3;
     let total_w = 1.0 + w2_raw + w3_raw;
     let w1 = 1.0 / total_w;
     let w2 = w2_raw / total_w;
