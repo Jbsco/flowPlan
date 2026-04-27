@@ -160,7 +160,25 @@ const CLOUD_SEED_LO: u32 = 0xB0A75EAFu;
 // Returns alt_factor in [0, 1] for altitude `y_alt_m` within the
 // cell's [base_m, top_m] band. The CPU-side classifier picks the
 // profile_kind from cell_type + coverage_strength.
-fn altitude_profile(profile_kind: u32, y_alt_m: f32, base_m: f32, top_m: f32) -> f32 {
+// Per-cell hash for `phase` argument to `altitude_profile`. Returns a
+// deterministic value in [-0.12, +0.12], used by PROFILE_LAYERED to
+// shift the gap altitude per cell. Without this shift, every LAYERED
+// cell shares the same t=0.55 gap → adjacent cells with similar
+// (base, top) altitudes form a *coherent uniform horizontal gap line*
+// across the visible scene (`layer.png` artifact 2026-04-27). Per-cell
+// phase breaks the line.
+fn cell_layered_phase(seed_pos: vec2<f32>) -> f32 {
+    let h = fract(sin(dot(seed_pos, vec2<f32>(269.5, 183.3))) * 25347.93);
+    return (h - 0.5) * 0.24;
+}
+
+fn altitude_profile(
+    profile_kind: u32,
+    y_alt_m: f32,
+    base_m: f32,
+    top_m: f32,
+    phase: f32,
+) -> f32 {
     if (y_alt_m < base_m || y_alt_m > top_m) {
         return 0.0;
     }
@@ -198,8 +216,19 @@ fn altitude_profile(profile_kind: u32, y_alt_m: f32, base_m: f32, top_m: f32) ->
         // Frontal double-peak — two altitude bands within the cell,
         // each producing density. Models stratified frontal cloud
         // (e.g. nimbostratus + altostratus layers).
-        let lower = smoothstep(0.05, 0.3, t) * smoothstep(0.55, 0.3, t);
-        let upper = smoothstep(0.55, 0.75, t) * smoothstep(0.95, 0.75, t);
+        //
+        // **Per-cell gap phasing** (Post-Phase-B 2026-04-27): peak
+        // positions shift by `phase ∈ [-0.12, +0.12]` so adjacent cells'
+        // gaps don't align. Some cells will have NO gap (when phase
+        // pushes the bands to overlap) → less rigid layered character
+        // across the scene.
+        let lower_peak = 0.30 + phase;
+        let upper_peak = 0.75 + phase;
+        let gap = 0.55 + phase * 0.5;
+        let lower = smoothstep(0.05, lower_peak, t)
+                  * smoothstep(gap, lower_peak, t);
+        let upper = smoothstep(gap, upper_peak, t)
+                  * smoothstep(0.95, upper_peak, t);
         return max(lower, upper);
     } else {
         // PROFILE_BELL (default) — symmetric smoothstep × smoothstep
@@ -324,12 +353,15 @@ const BOUNDARY_BLEND_DISTANCE_M: f32 = 5000.0;
 // slot (slot-K → slot-K+1 swap at a Voronoi vertex), its gated weight
 // is already 0 → cell-identity swap is invisible.
 //
-// FADE_END at 9 km covers typical slot-3 distances within a 25 km mean-
-// spacing weather partition (slot-3 distances are ~12-18 km from the
-// query point in the centroid of cell 1, so 9 km offset from d1 is the
-// outer edge of slot-3 influence).
+// **Tuning history**:
+// - 5 → 9 km initial: too aggressive, user observed reduced cell
+//   overlap and sparser appearance.
+// - 5 → 13 km (2026-04-27 user split-the-difference): preserves more
+//   cell blending in the 5-13 km offset range while still hitting 0 by
+//   the typical slot-3 swap distance (~12-15 km in a 25 km mean-spacing
+//   Voronoi partition). At d_offset=9 km, gate ≈ 0.5 (was 0).
 const BLEND_RADIUS_FADE_START_M: f32 = 5000.0;
-const BLEND_RADIUS_FADE_END_M: f32 = 9000.0;
+const BLEND_RADIUS_FADE_END_M: f32 = 13000.0;
 
 // Note (2026-04-26): A `BOUNDARY_BLEND_W2_EARLY_EXIT = 0.05` constant
 // previously gated cell 2's pre-filter when w2 was small (deep inside
@@ -615,9 +647,11 @@ fn cloud_density_cheap_in_cell(world_pos: vec3<f32>, cell: GpuWeatherCell) -> f3
     if (cell.coverage_strength <= 0.0 || cell.density <= 0.0) {
         return 0.0;
     }
+    let phase = cell_layered_phase(cell.seed_pos);
     let alt_factor = altitude_profile(
         cell.profile_kind, world_pos.y,
         cell.base_altitude_m, cell.top_altitude_m,
+        phase,
     );
     return cell.density * alt_factor * cell.coverage_strength;
 }
@@ -839,6 +873,9 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
     // CM-5 altitude perturbation amplitudes. Strong nimbus (~5×)
     // produces dramatic ±1500m+ top shifts → towering cumulonimbus
     // reaching ~9km. Marginal cumulus (~1×) stays near nominal.
+    let phase1 = cell_layered_phase(cell1.seed_pos);
+    let phase2 = cell_layered_phase(cell2.seed_pos);
+    let phase3 = cell_layered_phase(cell3.seed_pos);
     var alt_factor1: f32 = 0.0;
     if (active1) {
         let amp1 = altitude_perturbation_amplitude(cell1.cell_type)
@@ -848,6 +885,7 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
             cell1.profile_kind, world_pos.y,
             cell1.base_altitude_m + p1 * amp1.y,
             cell1.top_altitude_m + p1 * amp1.x,
+            phase1,
         );
     }
     var alt_factor2: f32 = 0.0;
@@ -859,6 +897,7 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
             cell2.profile_kind, world_pos.y,
             cell2.base_altitude_m + p2 * amp2.y,
             cell2.top_altitude_m + p2 * amp2.x,
+            phase2,
         );
     }
     var alt_factor3: f32 = 0.0;
@@ -870,6 +909,7 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
             cell3.profile_kind, world_pos.y,
             cell3.base_altitude_m + p3 * amp3.y,
             cell3.top_altitude_m + p3 * amp3.x,
+            phase3,
         );
     }
     if (alt_factor1 <= 0.0 && alt_factor2 <= 0.0 && alt_factor3 <= 0.0) {
