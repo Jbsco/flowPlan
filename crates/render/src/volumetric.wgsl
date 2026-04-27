@@ -104,6 +104,7 @@ const CELL_STRATUS: u32   = 3u;
 const CELL_SQUALL: u32    = 4u;
 const CELL_FRONTAL: u32   = 5u;
 const CELL_CIRRUS: u32    = 6u;
+const CELL_MIST: u32      = 7u;
 
 // Phase C banded-structure stretch factor for Frontal cells. Features
 // stretch this much along the band tangent; perpendicular axis stays
@@ -128,6 +129,7 @@ const PROFILE_ANVIL: u32   = 2u;  // T-shape, broad top above 80%
 const PROFILE_DECK: u32    = 3u;  // uniform middle 70%, smooth fades
 const PROFILE_LAYERED: u32 = 4u;  // double-peak at 30% and 70%
 const PROFILE_CIRRUS: u32  = 5u;  // wispy thin band, low max alt_factor
+const PROFILE_FOG: u32     = 6u;  // ground-hugging, solid base, fades up
 
 // Global cloud altitude band (m). Wide enough to cover all cell types:
 // cumulus (1200-4000), nimbus (900-12000), stratus (300-1400), squall
@@ -136,7 +138,11 @@ const PROFILE_CIRRUS: u32  = 5u;  // wispy thin band, low max alt_factor
 // for the ray-band early-out so a single ray traversal covers all
 // possible cloud altitudes; per-sample altitude_profile + cell type
 // then decides whether the sample is inside that cell's actual band.
-const GLOBAL_CLOUD_BASE_M: f32 = 200.0;
+// Phase E.6: lowered from 200 m → 0 m to support Mist cells whose
+// altitude band starts at the ground. Adds ~200 m of additional ray
+// march per pixel (~3% of the previous band height) — measured at
+// ~+0.05 ms cloud-perf, well within budget.
+const GLOBAL_CLOUD_BASE_M: f32 = 0.0;
 const GLOBAL_CLOUD_TOP_M: f32 = 12500.0;
 
 // Worley noise spacing for cumulus sub-cell detail (m).
@@ -248,6 +254,13 @@ fn altitude_profile(
         let bottom_fade = smoothstep(0.0, 0.4, t);
         let top_fade = smoothstep(1.0, 0.6, t);
         return bottom_fade * top_fade * 0.85;
+    } else if (profile_kind == PROFILE_FOG) {
+        // Mist / fog — solid near the base (no bottom fade — fog
+        // touches the ground), rapidly fading toward the top of its
+        // band. Rectangular bell with sharp lower cutoff, soft upper
+        // taper. Reads as a thick low layer obscuring distant terrain.
+        let top_fade = 1.0 - smoothstep(0.4, 1.0, t);
+        return top_fade;
     } else if (profile_kind == PROFILE_LAYERED) {
         // Frontal double-peak — two altitude bands within the cell,
         // each producing density. Models stratified frontal cloud
@@ -465,6 +478,7 @@ fn altitude_perturbation_amplitude(cell_type: u32) -> vec2<f32> {
         case 4u: { return vec2<f32>(900.0, 350.0); }   // Squall — textured
         case 5u: { return vec2<f32>(500.0, 200.0); }   // Frontal — moderate
         case 6u: { return vec2<f32>(80.0, 50.0); }     // Cirrus — flat wispy band
+        case 7u: { return vec2<f32>(40.0, 0.0); }      // Mist — flat blanket; base on ground
         default: { return vec2<f32>(80.0, 60.0); }     // ClearAir / haze — subtle
     }
 }
@@ -590,6 +604,7 @@ fn worley_spacing_for_type(cell_type: u32) -> f32 {
         case 4u: { return 500.0; }   // Squall — small textured features
         case 5u: { return 1000.0; }  // Frontal — mid-scale bands
         case 6u: { return 7000.0; }  // Cirrus — long broad wisps (real-cirrus streaks span km)
+        case 7u: { return 5000.0; }  // Mist — large smooth bodies, soft edges
         // ClearAir / haze — bumped 1500 → 4000 on 2026-04-26
         // (Phase B follow-up 2). User in-game observation: clear-air
         // dot clouds appeared too small and too uniform; bumping to
@@ -613,6 +628,7 @@ fn perlin_worley_weights_for_type(cell_type: u32) -> vec2<f32> {
         case 4u: { return vec2<f32>(0.6, 0.4); }  // Squall
         case 5u: { return vec2<f32>(0.4, 0.6); }  // Frontal
         case 6u: { return vec2<f32>(0.1, 0.9); }  // Cirrus — very Perlin-dominant for smooth wisps
+        case 7u: { return vec2<f32>(0.15, 0.85); } // Mist — Perlin-dominant for smooth blanket
         default: { return vec2<f32>(0.7, 0.3); }  // Cumulus default
     }
 }

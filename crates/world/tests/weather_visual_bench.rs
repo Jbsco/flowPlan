@@ -471,6 +471,7 @@ fn cell_type_color(t: cell_state::CellType) -> [u8; 3] {
         cell_state::CellType::Squall => [220, 180, 40],    // amber
         cell_state::CellType::Frontal => [200, 50, 80],    // magenta-red
         cell_state::CellType::Cirrus => [220, 230, 250],   // ice-blue / faint white
+        cell_state::CellType::Mist => [200, 210, 200],     // pale sage / fog
     }
 }
 

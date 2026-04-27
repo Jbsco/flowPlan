@@ -261,10 +261,12 @@ fn wind_delta(
         cell_state::CellType::Squall => UPDRAFT_SQUALL_MAX_MPS,
         cell_state::CellType::Frontal => UPDRAFT_CUMULUS_MAX_MPS * 0.5,
         // Cirrus has no significant updraft — formed from upper-air
-        // moisture, not surface-driven convection.
+        // moisture, not surface-driven convection. Mist is ground-
+        // hugging fog with no convective motion either.
         cell_state::CellType::Stratus
         | cell_state::CellType::ClearAir
-        | cell_state::CellType::Cirrus => 0.0,
+        | cell_state::CellType::Cirrus
+        | cell_state::CellType::Mist => 0.0,
     };
     // Density scales the updraft — a dissipating cell produces less lift.
     Vec3::new(0.0, updraft_peak * profile * density_scale, 0.0)
@@ -288,12 +290,12 @@ fn turbulence_delta(
         cell_state::CellType::Squall => TURBULENCE_DELTA_SQUALL,
         cell_state::CellType::Frontal => TURBULENCE_DELTA_FRONTAL,
         cell_state::CellType::Cumulus => TURBULENCE_DELTA_NIMBUS * 0.2,
-        // Cirrus has minor turbulence — pilots report it as "very light
-        // chop" at most. Set to zero in this delta layer; can be added
-        // later as a small ~0.05 g if playtest shows the lack is noticed.
+        // Cirrus + Mist have no significant turbulence: cirrus is
+        // wispy upper-air ice; mist is calm-air ground fog.
         cell_state::CellType::Stratus
         | cell_state::CellType::ClearAir
-        | cell_state::CellType::Cirrus => 0.0,
+        | cell_state::CellType::Cirrus
+        | cell_state::CellType::Mist => 0.0,
     };
     peak * profile * density_scale
 }

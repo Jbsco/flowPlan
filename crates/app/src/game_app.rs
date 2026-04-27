@@ -1640,14 +1640,14 @@ impl Runtime {
         // Phase E.5a: temporal smoothing on both the at-camera precip
         // (drives rain particle count + at-camera shader effect) and
         // the look-ahead max (drives fog density). Same ~1 s time
-        // constant — `alpha = 1 - exp(-dt/tau)` is the exact discrete
-        // exponential filter.
-        const PRECIP_SMOOTHING_TAU_S: f32 = 1.0;
-        let alpha = 1.0 - (-elapsed / PRECIP_SMOOTHING_TAU_S).exp();
+        // constant — `1 - exp(-dt/tau)` is the exact discrete
+        // exponential filter. Named `precip_smooth_alpha` to avoid
+        // shadowing the outer tick-interp `alpha` at function scope.
+        let precip_smooth_alpha = 1.0 - (-elapsed / 1.0_f32).exp();
         self.smoothed_precip_intensity +=
-            (raw_precip_intensity - self.smoothed_precip_intensity) * alpha;
+            (raw_precip_intensity - self.smoothed_precip_intensity) * precip_smooth_alpha;
         self.smoothed_look_ahead_precip +=
-            (raw_look_ahead_precip - self.smoothed_look_ahead_precip) * alpha;
+            (raw_look_ahead_precip - self.smoothed_look_ahead_precip) * precip_smooth_alpha;
         let precip_intensity = self.smoothed_precip_intensity;
         let look_ahead_precip = self.smoothed_look_ahead_precip;
         // Phase E.3: sample temperature at camera altitude → derive
@@ -2226,6 +2226,7 @@ impl Runtime {
                 flowplan_world::weather::cell_state::CellType::Squall => "Squall  ",
                 flowplan_world::weather::cell_state::CellType::Frontal => "Frontal ",
                 flowplan_world::weather::cell_state::CellType::Cirrus => "Cirrus  ",
+                flowplan_world::weather::cell_state::CellType::Mist => "Mist    ",
             };
             let precip_intensity = flowplan_world::weather::deltas::precipitation_rate_at(
                 WORLD_SEED,

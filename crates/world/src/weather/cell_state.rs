@@ -280,7 +280,7 @@ pub const FRONTAL_GRAD_THRESHOLD: f32 = frontal::FRONTAL_THRESHOLD_HPA_PER_M;
 /// - 2.5 initial: P(any precip) ≈ 17% in typical mid-latitude conditions,
 ///   mostly drizzle. User found cells were too rare to support gameplay.
 /// - 2026-04-27: 2.5 → 2.0. Raises cloud-cell fraction by ~20% across
-///   all conditions while keeping ClearAir as the plurality.
+///   all conditions while keeping `ClearAir` as the plurality.
 pub const CLEAR_AIR_PRIOR: f32 = 2.0;
 
 /// Altitude at which wind is sampled for squall wind-shear classification (m).
@@ -324,7 +324,7 @@ const DEFAULT_TYPE_CYCLE_S: [f32; 8] = [
 #[derive(Copy, Clone, Debug)]
 pub struct WeatherTuning {
     /// Life-cycle duration in seconds per `CellType` (indexed by enum tag).
-    pub type_cycle_s: [f32; 7],
+    pub type_cycle_s: [f32; 8],
 }
 
 impl WeatherTuning {
@@ -788,6 +788,25 @@ fn compute_coverage_strength(
             );
             stable_grad * stable_wind
         },
+        CellType::Mist => {
+            // Mist coverage scores on T-dewpoint proximity + RH +
+            // calm-wind. Each axis smoothsteps so the cell-margin
+            // gradient is continuous (Phase 4 of the continuous-margin
+            // refactor).
+            let dewpoint = magnus_dewpoint_k(t_k, rh);
+            let proximity = smoothstep(
+                MIST_DEWPOINT_PROXIMITY_K * 1.0,
+                MIST_DEWPOINT_PROXIMITY_K * 0.0,
+                t_k - dewpoint,
+            );
+            let rh_score = smoothstep(MIST_MIN_HUMIDITY - 0.05, MIST_MIN_HUMIDITY + 0.05, rh);
+            let calm = smoothstep(
+                SQUALL_MIN_WIND_MPS * 0.5,
+                SQUALL_MIN_WIND_MPS * 0.2,
+                wind_mag,
+            );
+            proximity * rh_score * calm
+        },
     }
 }
 
@@ -805,9 +824,37 @@ fn compute_coverage_strength(
 ///   reads as wispy clouds rather than essentially clear).
 pub const CLEAR_AIR_MARGIN_CAP: f32 = 0.25;
 
+/// Magnus formula approximation of dewpoint (K) given temperature and
+/// relative humidity. Standard meteorological formula; valid for the
+/// typical atmospheric range (-40 to +50 °C, RH 1-100%).
+///
+/// Used by mist eligibility (Phase E.6): mist forms when air
+/// temperature is within ~2 K of the dewpoint at high humidity.
+#[must_use]
+pub fn magnus_dewpoint_k(t_k: f32, rh: f32) -> f32 {
+    let t_c = t_k - 273.15;
+    let a = 17.27_f32;
+    let b = 237.7_f32;
+    let rh_safe = rh.max(0.001);
+    let alpha = (a * t_c / (b + t_c)) + rh_safe.ln();
+    let td_c = b * alpha / (a - alpha);
+    td_c + 273.15
+}
+
+/// Minimum humidity for mist (Phase E.6).
+///
+/// Mist requires near-saturation; 0.80 is a conservative threshold —
+/// real fog often forms at RH 90+% but our regional humidity field
+/// rarely reaches that without coupling.
+pub const MIST_MIN_HUMIDITY: f32 = 0.80;
+
+/// Maximum (T - dewpoint) for mist eligibility (K). Below 2 K is the
+/// real-world fog formation regime.
+pub const MIST_DEWPOINT_PROXIMITY_K: f32 = 2.0;
+
 /// W1-derived eligibility weights, indexed by `CellType` discriminant
-/// (`[ClearAir, Cumulus, Nimbus, Stratus, Squall, Frontal, Cirrus]`).
-fn eligibility_weights(p_hpa: f32, t_k: f32, rh: f32, wind_mag: f32, grad_mag: f32) -> [f32; 7] {
+/// (`[ClearAir, Cumulus, Nimbus, Stratus, Squall, Frontal, Cirrus, Mist]`).
+fn eligibility_weights(p_hpa: f32, t_k: f32, rh: f32, wind_mag: f32, grad_mag: f32) -> [f32; 8] {
     let elig_cumulus = if rh >= CLOUD_MIN_HUMIDITY && t_k >= CONVECTIVE_MIN_TEMP_K {
         1.0
     } else {
@@ -850,6 +897,19 @@ fn eligibility_weights(p_hpa: f32, t_k: f32, rh: f32, wind_mag: f32, grad_mag: f
     } else {
         0.5
     };
+    // Mist eligibility (Phase E.6): T near dewpoint + high RH + low
+    // wind (strong wind disperses mist). Strong weight (2.5) when
+    // conditions match because real fog dominates an area where it
+    // forms — adjacent cells should cluster mist via Phase D.
+    let dewpoint = magnus_dewpoint_k(t_k, rh);
+    let elig_mist = if rh >= MIST_MIN_HUMIDITY
+        && (t_k - dewpoint) < MIST_DEWPOINT_PROXIMITY_K
+        && wind_mag < SQUALL_MIN_WIND_MPS * 0.5
+    {
+        2.5
+    } else {
+        0.0
+    };
     [
         CLEAR_AIR_PRIOR,
         elig_cumulus,
@@ -858,10 +918,11 @@ fn eligibility_weights(p_hpa: f32, t_k: f32, rh: f32, wind_mag: f32, grad_mag: f
         elig_squall,
         elig_frontal,
         elig_cirrus,
+        elig_mist,
     ]
 }
 
-fn cell_type_from_weights(master_seed: u64, cell: CellId, weights: &[f32; 7]) -> CellType {
+fn cell_type_from_weights(master_seed: u64, cell: CellId, weights: &[f32; 8]) -> CellType {
     let total: f32 = weights.iter().sum();
     if total <= 0.0 {
         return CellType::ClearAir;
@@ -878,7 +939,8 @@ fn cell_type_from_weights(master_seed: u64, cell: CellId, weights: &[f32; 7]) ->
                 3 => CellType::Stratus,
                 4 => CellType::Squall,
                 5 => CellType::Frontal,
-                _ => CellType::Cirrus,
+                6 => CellType::Cirrus,
+                _ => CellType::Mist,
             };
         }
     }
@@ -948,7 +1010,7 @@ fn select_cell_type_with_adjacency(
     grad_mag: f32,
 ) -> CellType {
     // Tally neighbor types via independent classification.
-    let mut counts = [0u32; 7];
+    let mut counts = [0u32; 8];
     for di in -1i32..=1 {
         for dj in -1i32..=1 {
             if di == 0 && dj == 0 {
@@ -1098,6 +1160,21 @@ fn parameterize(cell_type: CellType, rh: f32, t_k: f32) -> CellState {
                 band_tangent,
             }
         },
+        CellType::Mist => CellState {
+            // Ground-hugging fog. Low altitude band (0-300 m). Dense
+            // (0.65) — fog is opaque enough to obscure terrain at
+            // visible distance. No precipitation. Adjacent Mist cells
+            // (Phase D adjacency clustering) form coherent fog bodies
+            // over basins / shorelines.
+            cell_type,
+            base_altitude_m: 0.0,
+            top_altitude_m: 300.0,
+            density: 0.65,
+            precip_rate_mm_per_hr: 0.0,
+            storm_phase,
+            coverage_strength: 0.0,
+            band_tangent,
+        },
     }
 }
 
@@ -1146,7 +1223,7 @@ mod tests {
     #[test]
     fn clear_air_dominates() {
         // Over a dense sample of cells, clear_air should be the plurality.
-        let mut counts = [0_u32; 7];
+        let mut counts = [0_u32; 8];
         for ix in -10..=10 {
             for iz in -10..=10 {
                 let s = initial_state(42, CellId { ix, iz }, 0.0);
@@ -1158,6 +1235,7 @@ mod tests {
                     CellType::Squall => 4,
                     CellType::Frontal => 5,
                     CellType::Cirrus => 6,
+                    CellType::Mist => 7,
                 };
                 counts[idx] += 1;
             }
