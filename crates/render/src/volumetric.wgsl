@@ -454,6 +454,16 @@ const WIND_TILT_AMPLITUDE_M: f32 = 400.0;
 // (with same-type cache reuse). Same-type cells share one call;
 // mixed-type cells pay 2 Worley calls. Average ~1.05× Worley cost
 // vs CM-8 baseline (~5%, ~0.02 ms).
+// Per-cell pseudo-random spacing scale factor. Hash-based, deterministic
+// per cell.seed_pos, range [0.7, 1.5]. Multiplied into the per-type
+// Worley spacing so cells of the same type still vary in feature size
+// across the world. Trig-based hash (`fract(sin(...) × C)`) is the
+// classic GPU PRNG — small input range gives ~uniform distribution.
+fn cell_spacing_factor(seed_pos: vec2<f32>) -> f32 {
+    let h = fract(sin(dot(seed_pos, vec2<f32>(127.1, 311.7))) * 43758.5453);
+    return 0.7 + 0.8 * h;
+}
+
 fn worley_spacing_for_type(cell_type: u32) -> f32 {
     switch cell_type {
         case 1u: { return 800.0; }   // Cumulus — medium puffs
@@ -870,17 +880,26 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
     //
     // Cost win: always 1 Worley call (was 1-2 with same-type cache
     // reuse). Net negative perf cost vs CM-9.
-    let spacing1 = worley_spacing_for_type(cell1.cell_type);
-    let spacing2 = worley_spacing_for_type(cell2.cell_type);
+    // **Per-cell hash-based spacing variation** (Phase B follow-up
+    // 2026-04-26): each cell's spacing is `base_spacing × (0.7 +
+    // 0.8 × hash)` where `hash ∈ [0, 1)` is derived from cell.seed_pos.
+    // Range 0.7-1.5× the per-type baseline → adjacent cells across
+    // boundaries get different feature sizes. Free (just hash + mul).
+    // The CM-9 mix(spacing1, spacing2, w2) blend handles smooth
+    // transition across boundaries; we just pre-jitter each cell's
+    // spacing before the mix.
+    let spacing1 = worley_spacing_for_type(cell1.cell_type)
+        * cell_spacing_factor(cell1.seed_pos);
+    let spacing2 = worley_spacing_for_type(cell2.cell_type)
+        * cell_spacing_factor(cell2.seed_pos);
     let mixed_spacing = mix(spacing1, spacing2, w2);
-    // **Single Worley call** (Phase B follow-up tuning 2 reverted
-    // multi-octave 2026-04-26): a multi-octave variant cost +1.5 ms,
+    // **Single Worley call**: a multi-octave variant cost +1.5 ms,
     // not the +0.06 ms that simple back-of-envelope ALU math
     // suggested. Worley's full-cost is GPU-context-dependent
     // (register pressure / divergence / memory pipeline interactions),
     // which doesn't reduce to simple ALU counts. Stayed at one
-    // Worley call per sample. ClearAir feature-size variation
-    // achieved via larger `worley_spacing_for_type` instead.
+    // Worley call per sample. Feature-size variation achieved via
+    // per-cell-hash spacing scaling above.
     let worley_v = worley_3d(
         CLOUD_SEED_HI, CLOUD_SEED_LO,
         CLOUD_WORLEY_OCTAVE,

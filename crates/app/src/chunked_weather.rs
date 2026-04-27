@@ -397,18 +397,27 @@ fn worker_loop(shared: &Arc<WorkerShared>) {
 }
 
 fn bake_chunk(shared: &Arc<WorkerShared>, job: WeatherJob) {
-    // Pop-time staleness check (3.6.3c.5.1): if camera has moved far
-    // enough that this cell is now well outside the streaming radius,
-    // discard without baking.
-    if let Ok(cam) = shared.camera_pos.read() {
-        let dx = job.seed_pos.x - cam.x;
-        let dz = job.seed_pos.y - cam.y;
-        let staleness_radius = shared.streaming_radius_m * 1.5;
-        if dx.hypot(dz) > staleness_radius {
-            return;
-        }
-    }
-
+    // **Always send a result** (revision 2026-04-26): the prior pop-time
+    // staleness check (skip baking + return early when camera has moved
+    // beyond 1.5× streaming radius) created a path where a cell could
+    // be stuck in `Loading` state forever:
+    // 1. Cell A queued, `states[A] = Loading`.
+    // 2. Camera moves far. Cell A still in active_set if camera moved
+    //    just enough but stayed in range.
+    // 3. Worker pops A's job. Camera position now further than at
+    //    enqueue time. Staleness check fired → return early WITHOUT
+    //    sending result.
+    // 4. update() loop never re-queues because `states.contains(A) ==
+    //    true` (Loading).
+    // 5. Cell stuck Loading forever → never visible.
+    //
+    // Manifested in user playtest as "clouds disappeared, weather
+    // cells dropped to 0, couldn't find clouds anywhere" (2026-04-26).
+    //
+    // Cell-state computation is microseconds; the staleness shortcut
+    // saved trivial CPU for a real correctness bug. Always bake; the
+    // result is discarded by `update()` if the cell is no longer in
+    // active_set (line ~291).
     let state = cell_state::state_at_time_with_terrain(
         shared.master_seed,
         shared.terrain.as_ref(),
