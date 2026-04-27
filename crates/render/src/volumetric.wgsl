@@ -493,20 +493,42 @@ fn cloud_density_cheap_in_cell(world_pos: vec3<f32>, cell: GpuWeatherCell) -> f3
     return cell.density * alt_factor * cell.coverage_strength;
 }
 
-// Sun transmittance at a sample point: integrates cloud density along
-// a secondary ray toward the sun, returns `exp(-optical_depth × scale)`.
-// Cost: SUN_RAY_STEPS × cloud_density_cheap calls = ~5 × 30 ALU = ~150
-// extra cycles per main-ray sample (per-pixel: ~24 × 150 = 3600 ALU).
-fn sun_transmittance_through_cell(
+// Sun transmittance at a sample point: integrates **blended** cloud
+// density along a secondary ray toward the sun, returns
+// `exp(-optical_depth × scale)`.
+//
+// **CM-10 revision 2026-04-26**: was previously cell1-only
+// (`sun_transmittance_through_cell`). At the Voronoi midline,
+// `find_nearest_two_active_cells` swaps idx1↔idx2 — so the cell1
+// parameters used for sun_transmittance suddenly switch to the
+// other cell's parameters → visible lighting discontinuity at the
+// boundary even though CM-6 blended *density* smoothly. See
+// `boundary_line.png`. Now we blend cell1+cell2 cheap-densities
+// along the secondary ray, weighted by the main sample's w1/w2.
+//
+// Approximation: w1/w2 captured at main sample's position is reused
+// for all secondary samples (which are within ~1 km of main → likely
+// same cell membership). Avoids re-running find_nearest_two per
+// secondary sample (would be 5x more expensive).
+//
+// Cost: SUN_RAY_STEPS × 2 cheap density calls = ~5 × 60 ALU = ~300
+// cycles per main sample (was ~150). Net ~+0.05 ms.
+fn sun_transmittance_blended(
     sample_pos: vec3<f32>,
-    cell: GpuWeatherCell,
+    cell1: GpuWeatherCell,
+    cell2: GpuWeatherCell,
+    w1: f32,
+    w2: f32,
     sun_dir: vec3<f32>,
 ) -> f32 {
     var optical_depth: f32 = 0.0;
     for (var i: i32 = 0; i < SUN_RAY_STEPS; i = i + 1) {
         let t = SUN_RAY_STEP_M * (f32(i) + 0.5);
         let s = sample_pos + sun_dir * t;
-        optical_depth = optical_depth + cloud_density_cheap_in_cell(s, cell) * SUN_RAY_STEP_M;
+        let d1 = cloud_density_cheap_in_cell(s, cell1);
+        let d2 = cloud_density_cheap_in_cell(s, cell2);
+        let blended = w1 * d1 + w2 * d2;
+        optical_depth = optical_depth + blended * SUN_RAY_STEP_M;
     }
     return exp(-optical_depth * SUN_EXTINCTION_SCALE);
 }
@@ -758,12 +780,15 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
     if (density <= 0.0) {
         return CloudSample(0.0, 1.0);
     }
-    // CM-7: secondary ray toward sun for Beer-Lambert shading.
-    // Uses cell1 only (the dominant cell at this sample) — secondary
-    // ray usually stays within cell1 horizontally for typical sun
-    // angles; blending cell2's contribution along the secondary ray
-    // would double the cost for marginal accuracy improvement.
-    let sun_t = sun_transmittance_through_cell(world_pos, cell1, sun_dir);
+    // CM-7 secondary ray toward sun for Beer-Lambert shading. **CM-10
+    // revision** blends cell1+cell2 cheap-densities along the
+    // secondary ray (was cell1-only, which produced a visible
+    // lighting discontinuity at the Voronoi midline because idx1↔idx2
+    // swap → CM-6 blended density correctly but CM-7 didn't blend
+    // lighting). Uses the main sample's w1/w2 for all secondary
+    // samples (approximation — secondary ray is within ~1 km of
+    // main, almost always same cell membership).
+    let sun_t = sun_transmittance_blended(world_pos, cell1, cell2, w1, w2, sun_dir);
     return CloudSample(density, sun_t);
 }
 

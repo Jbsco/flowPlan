@@ -203,7 +203,7 @@ fn volumetric_wgsl_density_model_present() {
         "fn ray_altitude_band(",
         "fn henyey_greenstein(",
         "fn cloud_density_cheap_in_cell(",
-        "fn sun_transmittance_through_cell(",
+        "fn sun_transmittance_blended(",
         "struct GpuWeatherCell",
         "struct NearestTwo",
         "struct CloudSample",
