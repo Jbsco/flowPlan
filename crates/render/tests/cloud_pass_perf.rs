@@ -142,8 +142,18 @@ const WARMUP_FRAMES: usize = 3;
 ///   dispatch + per-cell amp scale add ~0.1 ms net. Phase B delivers
 ///   anvil cumulonimbus / towering cumulus / fair-weather variants /
 ///   stratus deck / frontal layered + 3D voids in marginal cells.
-///   **GPU 3D noise textures (queued post-CM-10 cost recovery)** is
-///   now the next perf-recovery option to claw back to ~3.5 ms.
+/// - Post-Phase-B 2026-04-27 (3-cell V-cut fix + sentinel-break
+///   optimization): 3.2 ms in synthetic scene. The 3-cell scan
+///   (`find_nearest_three_active_cells`) replaces the 2-cell version
+///   to fix the **V-notch artifact** at Voronoi vertices and the
+///   **instant cloud snap** when an active cell drops from top-2 to
+///   top-3 as camera crosses a cell boundary. Scan loop now breaks
+///   on the first sentinel cell (CPU packs active cells contiguously),
+///   so the 64-cell loop runs only `active_count` iters instead of
+///   64. Synthetic test (n=1) recovers full ~3.2 ms; real game scenes
+///   scale linearly with active cells (~30 typical → expect ~3.5-4 ms).
+///   **GPU 3D noise textures (queued post-CM-10 cost recovery)** remains
+///   the next perf-recovery lever for further headroom.
 ///
 /// **Tune as playtest reveals regressions** (per user-pinned guidance
 /// 2026-04-26). Specifically:

@@ -261,6 +261,16 @@ struct NearestThree {
 // owns one cell (the *nearest*) but blends with the second-nearest in
 // the boundary band — adjacent same-type cells fuse into one body of
 // weather, different-type cells transition smoothly.
+// **Active-cell scan, sentinel-bounded** (Post-Phase-B 2026-04-27): CPU
+// packs active cells in slots [0..n), sentinels at (1e9, 1e9) in slots
+// [n..64). Break on first sentinel — the loop runs `n` times instead of
+// 64. Sentinel detection via seed_pos.x > 1e8 (real world coords are
+// bounded by WORLD_EXTENT_M ≈ 5e6, well below 1e8). All pixels in a
+// frame share the same `n` so the break is uniform across the warp —
+// no divergence.
+//
+// Recovers the perf cost of 3-cell vs 2-cell scan: in the synthetic
+// perf scene n=1, scan runs 1 iter instead of 64.
 fn find_nearest_three_active_cells(world_xz: vec2<f32>) -> NearestThree {
     var i1: u32 = 0u;
     var d1: f32 = 1.0e30;
@@ -271,6 +281,9 @@ fn find_nearest_three_active_cells(world_xz: vec2<f32>) -> NearestThree {
     let cell_count = arrayLength(&weather_cells);
     for (var i = 0u; i < cell_count; i = i + 1u) {
         let cell = weather_cells[i];
+        if (cell.seed_pos.x > 1.0e8) {
+            break;
+        }
         let d = world_xz - cell.seed_pos;
         let dsq = d.x * d.x + d.y * d.y;
         if (dsq < d1) {
@@ -598,37 +611,53 @@ fn cloud_density_cheap_in_cell(world_pos: vec3<f32>, cell: GpuWeatherCell) -> f3
 // density along a secondary ray toward the sun, returns
 // `exp(-optical_depth × scale)`.
 //
-// **CM-10 revision 2026-04-26**: was previously cell1-only
-// (`sun_transmittance_through_cell`). At the Voronoi midline,
-// `find_nearest_two_active_cells` swaps idx1↔idx2 — so the cell1
-// parameters used for sun_transmittance suddenly switch to the
-// other cell's parameters → visible lighting discontinuity at the
-// boundary even though CM-6 blended *density* smoothly. See
-// `boundary_line.png`. Now we blend cell1+cell2 cheap-densities
-// along the secondary ray, weighted by the main sample's w1/w2.
+// **CM-10 revision 2026-04-26 + Post-Phase-B 2026-04-27**: was
+// previously cell1-only (`sun_transmittance_through_cell`). At
+// Voronoi boundaries, `find_nearest_three_active_cells` reordering
+// would make cell1 parameters used for sun_transmittance suddenly
+// switch to another cell's parameters → visible lighting
+// discontinuity even though CM-6 blended *density* smoothly. See
+// `boundary_line.png`. Now we blend cell1+cell2+cell3 cheap-densities
+// along the secondary ray, weighted by the main sample's w1/w2/w3.
 //
-// Approximation: w1/w2 captured at main sample's position is reused
-// for all secondary samples (which are within ~1 km of main → likely
-// same cell membership). Avoids re-running find_nearest_two per
-// secondary sample (would be 5x more expensive).
+// Approximation: w1/w2/w3 captured at main sample's position is
+// reused for all secondary samples (within ~1 km of main → likely
+// same cell membership). Avoids re-running the nearest-cell scan
+// per secondary sample (would be 5x more expensive).
 //
-// Cost: SUN_RAY_STEPS × 2 cheap density calls = ~5 × 60 ALU = ~300
-// cycles per main sample (was ~150). Net ~+0.05 ms.
-fn sun_transmittance_blended(
+// Cost: SUN_RAY_STEPS × {2 or 3} cheap density calls per step. Most
+// pixels have w3 < eps (deep in cell-1 or cell-2 territory) → 2-cell
+// path. Vertex pixels (V-cut zone) use 3-cell path.
+//
+// **w3 gate is safe in sun_transmittance** (unlike density): the
+// secondary-ray output passes through `exp(-od * scale)` and then
+// modulates color — both smooth functions with no cel-band
+// quantization to amplify a sub-eps step into a visible band-jump.
+// The eps gate is a perf optimization, not a correctness change.
+const SUN_W3_EPS: f32 = 0.02;
+
+fn sun_transmittance_blended3(
     sample_pos: vec3<f32>,
     cell1: GpuWeatherCell,
     cell2: GpuWeatherCell,
+    cell3: GpuWeatherCell,
     w1: f32,
     w2: f32,
+    w3: f32,
     sun_dir: vec3<f32>,
 ) -> f32 {
     var optical_depth: f32 = 0.0;
+    let use_cell3 = w3 > SUN_W3_EPS;
     for (var i: i32 = 0; i < SUN_RAY_STEPS; i = i + 1) {
         let t = SUN_RAY_STEP_M * (f32(i) + 0.5);
         let s = sample_pos + sun_dir * t;
         let d1 = cloud_density_cheap_in_cell(s, cell1);
         let d2 = cloud_density_cheap_in_cell(s, cell2);
-        let blended = w1 * d1 + w2 * d2;
+        var blended = w1 * d1 + w2 * d2;
+        if (use_cell3) {
+            let d3 = cloud_density_cheap_in_cell(s, cell3);
+            blended = blended + w3 * d3;
+        }
         optical_depth = optical_depth + blended * SUN_RAY_STEP_M;
     }
     return exp(-optical_depth * SUN_EXTINCTION_SCALE);
@@ -636,7 +665,7 @@ fn sun_transmittance_blended(
 
 // Per-sample cloud-pass output: density (for absorption + alpha
 // accumulation along view ray) and sun_transmittance (for Beer-Lambert
-// lighting). Returned together so the shared find_nearest_two_active_cells
+// lighting). Returned together so the shared find_nearest_three_active_cells
 // scan happens once per sample.
 struct CloudSample {
     density: f32,
@@ -699,30 +728,44 @@ fn cell_density_contribution(
 // transition between their per-type Perlin-Worley blend weights and
 // altitude bands.
 fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample {
-    // 2-cell blend retained — find_nearest_three exists for future
-    // V-cut fix (task #328) but adds cost without addressing the
-    // primary user-observed "cloud disappears in clear region"
-    // symptom. Atmospheric haze is the address for that.
+    // **3-cell softmax blending** (Post-Phase-B 2026-04-27). User
+    // observed instantaneous "cloud snap" between adjacent positions
+    // — diagnosis: 2-cell early-out triggers when both top-2 cells
+    // are inactive (e.g. both ClearAir with cov=0). At Voronoi
+    // vertices and near sparse-cumulus regions, an active cumulus
+    // cell A can drop from top-2 in one frame as we cross to where
+    // cells B, C are both closer than A. With only 2-cell blend, A
+    // is dropped entirely → instant render-to-0. With 3-cell blend
+    // A stays at slot 3 with small weight, smoothly fading.
     let nearest3 = find_nearest_three_active_cells(world_pos.xz);
     let cell1 = weather_cells[nearest3.idx1];
     let cell2 = weather_cells[nearest3.idx2];
+    let cell3 = weather_cells[nearest3.idx3];
 
-    // PINNED 2026-04-26: gate on coverage_strength, not density.
-    // ClearAir cells with nonzero margin carry haze parameters and
-    // SHOULD render → wispy transitions. True clear sky has
-    // coverage_strength == 0 and is skipped here.
+    // Gate on coverage_strength, not density. ClearAir cells with
+    // nonzero margin carry haze parameters and SHOULD render. True
+    // clear sky has coverage_strength == 0 and is skipped here.
     let active1 = cell1.coverage_strength > 0.0 && cell1.density > 0.0;
     let active2 = cell2.coverage_strength > 0.0 && cell2.density > 0.0;
-    if (!active1 && !active2) {
+    let active3 = cell3.coverage_strength > 0.0 && cell3.density > 0.0;
+    if (!active1 && !active2 && !active3) {
         return CloudSample(0.0, 1.0);
     }
 
-    // CM-6 blend weight (2-cell). 3-cell blend pinned for V-cut fix.
+    // **Softmax weights** based on distance: `w_i = exp(-(d_i - d1)/SCALE) / Σ`.
+    // At Voronoi vertex (d1≈d2≈d3): all weights ≈ 1/3. Deep in cell 1
+    // (d1 << d2,d3): w1 → 1, others → 0. Smooth monotonic falloff
+    // with distance. SCALE = BOUNDARY_BLEND_DISTANCE_M means at
+    // distance offset = 5 km past closest, weight = 1/e ≈ 0.37.
     let d1 = sqrt(max(nearest3.dsq1, 1.0));
-    let half_diff = (nearest3.dsq2 - nearest3.dsq1) / (4.0 * d1);
-    let blend_t = smoothstep(0.0, BOUNDARY_BLEND_DISTANCE_M, half_diff);
-    let w1 = 0.5 + 0.5 * blend_t;
-    let w2 = 1.0 - w1;
+    let d2 = sqrt(max(nearest3.dsq2, 1.0));
+    let d3 = sqrt(max(nearest3.dsq3, 1.0));
+    let w2_raw = exp(-(d2 - d1) / BOUNDARY_BLEND_DISTANCE_M);
+    let w3_raw = exp(-(d3 - d1) / BOUNDARY_BLEND_DISTANCE_M);
+    let total_w = 1.0 + w2_raw + w3_raw;
+    let w1 = 1.0 / total_w;
+    let w2 = w2_raw / total_w;
+    let w3 = w3_raw / total_w;
 
     // CM-5 altitude perturbation — one Perlin call shared by both
     // cells. Sampled at fixed y=0 so the perturbation is a function of
@@ -779,7 +822,18 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
             cell2.top_altitude_m + p2 * amp2.x,
         );
     }
-    if (alt_factor1 <= 0.0 && alt_factor2 <= 0.0) {
+    var alt_factor3: f32 = 0.0;
+    if (active3) {
+        let amp3 = altitude_perturbation_amplitude(cell3.cell_type)
+            * cell3.vertical_amp_factor;
+        let p3 = perturb * cell3.coverage_strength;
+        alt_factor3 = altitude_profile(
+            cell3.profile_kind, world_pos.y,
+            cell3.base_altitude_m + p3 * amp3.y,
+            cell3.top_altitude_m + p3 * amp3.x,
+        );
+    }
+    if (alt_factor1 <= 0.0 && alt_factor2 <= 0.0 && alt_factor3 <= 0.0) {
         return CloudSample(0.0, 1.0);
     }
 
@@ -886,7 +940,10 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
         * cell_spacing_factor(cell1.seed_pos);
     let spacing2 = worley_spacing_for_type(cell2.cell_type)
         * cell_spacing_factor(cell2.seed_pos);
-    let mixed_spacing = mix(spacing1, spacing2, w2);
+    let spacing3 = worley_spacing_for_type(cell3.cell_type)
+        * cell_spacing_factor(cell3.seed_pos);
+    // 3-way weighted blend of spacings (extends CM-9 mixed-spacing).
+    let mixed_spacing = w1 * spacing1 + w2 * spacing2 + w3 * spacing3;
     // **Single Worley call**: a multi-octave variant cost +1.5 ms,
     // not the +0.06 ms that simple back-of-envelope ALU math
     // suggested. Worley's full-cost is GPU-context-dependent
@@ -923,6 +980,11 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
         let carve2 = clamp(1.0 - carve_amp2 * carve_signal, 0.0, 1.0);
         alt_factor2 = alt_factor2 * carve2;
     }
+    if (alt_factor3 > 0.0) {
+        let carve_amp3 = (1.0 - cell3.coverage_strength) * VERTICAL_CARVE_AMP;
+        let carve3 = clamp(1.0 - carve_amp3 * carve_signal, 0.0, 1.0);
+        alt_factor3 = alt_factor3 * carve3;
+    }
 
     var density: f32 = 0.0;
     if (alt_factor1 > 0.0) {
@@ -933,6 +995,11 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
     if (alt_factor2 > 0.0) {
         density = density + w2 * cell_density_contribution(
             cell2, alt_factor2, worley_struct, perlin_norm,
+        );
+    }
+    if (alt_factor3 > 0.0) {
+        density = density + w3 * cell_density_contribution(
+            cell3, alt_factor3, worley_struct, perlin_norm,
         );
     }
     if (density <= 0.0) {
@@ -946,7 +1013,9 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
     // lighting). Uses the main sample's w1/w2 for all secondary
     // samples (approximation — secondary ray is within ~1 km of
     // main, almost always same cell membership).
-    let sun_t = sun_transmittance_blended(world_pos, cell1, cell2, w1, w2, sun_dir);
+    let sun_t = sun_transmittance_blended3(
+        world_pos, cell1, cell2, cell3, w1, w2, w3, sun_dir,
+    );
     return CloudSample(density, sun_t);
 }
 

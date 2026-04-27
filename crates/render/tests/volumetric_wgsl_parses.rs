@@ -141,12 +141,14 @@ fn volumetric_wgsl_cost_constants_within_budget() {
     // cylinder iteration). C2-polish 2026-04-26 — circular footprints
     // were a wrong-feeling shortcut; tessellation is the locked design.
     // CM-6 (2026-04-26) replaced the single-cell `find_nearest_active_cell`
-    // with `find_nearest_two_active_cells` for boundary blending.
+    // with `find_nearest_three_active_cells` for 3-cell boundary
+    // blending (Post-Phase-B 2026-04-27 — fixes Voronoi-vertex V-cut
+    // and "instant cloud snap" when active cumulus drops out of top-2).
     assert!(
-        VOLUMETRIC_WGSL_SOURCE.contains("find_nearest_two_active_cells("),
+        VOLUMETRIC_WGSL_SOURCE.contains("find_nearest_three_active_cells("),
         "volumetric.wgsl missing tessellation lookup — must use \
-         find_nearest_two_active_cells (CM-6 boundary blending), not \
-         per-cell circular footprint and not single-nearest"
+         find_nearest_three_active_cells (3-cell blend), not 2-cell \
+         and not per-cell circular footprint"
     );
 }
 
@@ -195,7 +197,7 @@ fn volumetric_wgsl_density_model_present() {
     for name in [
         "fn altitude_profile(",
         "fn altitude_perturbation_amplitude(",
-        "fn find_nearest_two_active_cells(",
+        "fn find_nearest_three_active_cells(",
         "fn perlin_worley_weights_for_type(",
         "fn worley_spacing_for_type(",
         "fn cell_spacing_factor(",
@@ -204,9 +206,9 @@ fn volumetric_wgsl_density_model_present() {
         "fn ray_altitude_band(",
         "fn henyey_greenstein(",
         "fn cloud_density_cheap_in_cell(",
-        "fn sun_transmittance_blended(",
+        "fn sun_transmittance_blended3(",
         "struct GpuWeatherCell",
-        "struct NearestTwo",
+        "struct NearestThree",
         "struct CloudSample",
         "weather_cells",
         "GLOBAL_CLOUD_BASE_M",

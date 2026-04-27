@@ -285,15 +285,25 @@ fn wgsl_contains_cm4_linear_remap_formula() {
 }
 
 #[test]
-fn wgsl_contains_cm6_one_sqrt_linearization() {
-    // Look for the algebraic identity expression. Robust to formatting.
+fn wgsl_contains_softmax_3cell_blend() {
+    // Post-Phase-B 2026-04-27: the CM-6 one-sqrt linearization
+    // `(dsq2-dsq1)/(4*d1)` was replaced by 3-cell softmax blending
+    // (find_nearest_three + per-distance sqrt + exp-softmax) to fix
+    // V-notch + instant-snap artifacts at Voronoi vertices. Softmax
+    // weights need `d_i - d_j` directly per cell, so the
+    // linearization no longer applies. This regression guard catches
+    // accidental revert to the 2-cell scan.
     let normalized: String = VOLUMETRIC_WGSL_SOURCE
         .chars()
         .filter(|c| !c.is_whitespace())
         .collect();
     assert!(
-        normalized.contains("(nearest.dsq2-nearest.dsq1)/(4.0*d1)"),
-        "volumetric.wgsl missing CM-6 one-sqrt linearization formula"
+        normalized.contains("exp(-(d2-d1)/BOUNDARY_BLEND_DISTANCE_M)"),
+        "volumetric.wgsl missing 3-cell softmax weight for slot 2"
+    );
+    assert!(
+        normalized.contains("exp(-(d3-d1)/BOUNDARY_BLEND_DISTANCE_M)"),
+        "volumetric.wgsl missing 3-cell softmax weight for slot 3"
     );
 }
 
