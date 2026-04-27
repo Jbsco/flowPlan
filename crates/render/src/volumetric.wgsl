@@ -211,17 +211,23 @@ fn altitude_profile(profile_kind: u32, y_alt_m: f32, base_m: f32, top_m: f32) ->
     }
 }
 
-// Two-cell nearest-cell lookup result for boundary blending (CM-6).
-// Returns *squared* distances — the caller does ONE sqrt for the
-// nearest cell and uses an algebraic identity to derive the
-// boundary-distance with no second sqrt. See `sample_cloud_density`
-// for the linearization (Option 2 perf win 2026-04-26).
-// Invariant: `dsq1 <= dsq2`.
-struct NearestTwo {
+// Three-cell nearest-cell lookup result for V-vertex blending
+// (Post-Phase-B 2026-04-27). Original CM-6 used find_nearest_TWO
+// which produced visible artifacts at Voronoi vertices (where 3
+// cells meet equidistantly) and "instant cloud snap" when a new
+// closer cell loaded and displaced the previously-dominant cell
+// in the idx1 slot. Returning the top-3 by distance + softmax
+// weights gives smooth transitions: when a new cell C becomes
+// closest, the previously-dominant cell A doesn't drop out of the
+// blend entirely — it still contributes via the 2nd or 3rd slot.
+// Invariant: `dsq1 <= dsq2 <= dsq3`.
+struct NearestThree {
     idx1: u32,
     idx2: u32,
+    idx3: u32,
     dsq1: f32,
     dsq2: f32,
+    dsq3: f32,
 }
 
 // Find the two cells whose `seed_pos` are nearest to `world_xz` —
@@ -255,27 +261,30 @@ struct NearestTwo {
 // owns one cell (the *nearest*) but blends with the second-nearest in
 // the boundary band — adjacent same-type cells fuse into one body of
 // weather, different-type cells transition smoothly.
-fn find_nearest_two_active_cells(world_xz: vec2<f32>) -> NearestTwo {
-    var best_idx1: u32 = 0u;
-    var best_dsq1: f32 = 1.0e30;
-    var best_idx2: u32 = 0u;
-    var best_dsq2: f32 = 1.0e30;
+fn find_nearest_three_active_cells(world_xz: vec2<f32>) -> NearestThree {
+    var i1: u32 = 0u;
+    var d1: f32 = 1.0e30;
+    var i2: u32 = 0u;
+    var d2: f32 = 1.0e30;
+    var i3: u32 = 0u;
+    var d3: f32 = 1.0e30;
     let cell_count = arrayLength(&weather_cells);
     for (var i = 0u; i < cell_count; i = i + 1u) {
         let cell = weather_cells[i];
         let d = world_xz - cell.seed_pos;
         let dsq = d.x * d.x + d.y * d.y;
-        if (dsq < best_dsq1) {
-            best_idx2 = best_idx1;
-            best_dsq2 = best_dsq1;
-            best_idx1 = i;
-            best_dsq1 = dsq;
-        } else if (dsq < best_dsq2) {
-            best_idx2 = i;
-            best_dsq2 = dsq;
+        if (dsq < d1) {
+            i3 = i2; d3 = d2;
+            i2 = i1; d2 = d1;
+            i1 = i; d1 = dsq;
+        } else if (dsq < d2) {
+            i3 = i2; d3 = d2;
+            i2 = i; d2 = dsq;
+        } else if (dsq < d3) {
+            i3 = i; d3 = dsq;
         }
     }
-    return NearestTwo(best_idx1, best_idx2, best_dsq1, best_dsq2);
+    return NearestThree(i1, i2, i3, d1, d2, d3);
 }
 
 // Width (m) of the smoothstep boundary-blend band centered on the
@@ -283,19 +292,15 @@ fn find_nearest_two_active_cells(world_xz: vec2<f32>) -> NearestTwo {
 // per-sample density is a weighted mix of both cells; outside the
 // band it's pure nearest-cell.
 //
-// Sized for ~25 km mean cell spacing (W2 partition). 5 km is the
-// initial value. **Bisect 2026-04-26 found a surprising perf impact
-// at this knob**: setting to 10 km dropped median perf from 4.22 ms
-// → 4.77 ms (+13%, blew the budget) even though active2 was false in
-// the perf-test scenario and smoothstep saturated either way. The
-// regression is reproducible across multiple runs and not GPU thermal
-// variance — likely a WGSL compiler / GPU scheduler quirk where
-// constant value affects instruction encoding or register pressure.
-// Stay at 5 km until the GPU 3D noise textures land or the perf
-// regression is understood.
+// Sized for ~25 km mean cell spacing (W2 partition).
 //
-// Tunable in CM-10 once budget headroom recovered. If seams are still
-// visible after CM-7 + multi-scatter + lower ambient land, revisit.
+// **Tuning history**:
+// - 5 km initial: blend zone half-width.
+// - 2026-04-26 bisect: 5 km → 10 km caused +0.5 ms perf hit. Reverted.
+// - 2026-04-27 retry: bumped 10 km again, reverted again per user
+//   request — the issue was diagnosed as cell-state distribution
+//   (clear regions truly clear), not blend zone width. Atmospheric
+//   haze is the fix being pursued.
 const BOUNDARY_BLEND_DISTANCE_M: f32 = 5000.0;
 
 // Note (2026-04-26): A `BOUNDARY_BLEND_W2_EARLY_EXIT = 0.05` constant
@@ -694,9 +699,13 @@ fn cell_density_contribution(
 // transition between their per-type Perlin-Worley blend weights and
 // altitude bands.
 fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample {
-    let nearest = find_nearest_two_active_cells(world_pos.xz);
-    let cell1 = weather_cells[nearest.idx1];
-    let cell2 = weather_cells[nearest.idx2];
+    // 2-cell blend retained — find_nearest_three exists for future
+    // V-cut fix (task #328) but adds cost without addressing the
+    // primary user-observed "cloud disappears in clear region"
+    // symptom. Atmospheric haze is the address for that.
+    let nearest3 = find_nearest_three_active_cells(world_pos.xz);
+    let cell1 = weather_cells[nearest3.idx1];
+    let cell2 = weather_cells[nearest3.idx2];
 
     // PINNED 2026-04-26: gate on coverage_strength, not density.
     // ClearAir cells with nonzero margin carry haze parameters and
@@ -708,24 +717,9 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
         return CloudSample(0.0, 1.0);
     }
 
-    // CM-6 blend weight. (d2 - d1) / 2 approximates distance from the
-    // sample to the Voronoi midline between the two cells. At the
-    // midline w1 = 0.5 (50/50 mix); deep inside cell 1 w1 → 1.0.
-    //
-    // **Option 2 one-sqrt linearization (2026-04-26)**: instead of
-    // computing both sqrt(dsq1) and sqrt(dsq2), we use the algebraic
-    // identity (d2 - d1) = (d2² - d1²) / (d2 + d1) ≈ (dsq2 - dsq1) /
-    // (2 * d1) for d1 ≈ d2 (i.e. near the boundary, where precision
-    // matters). Far from the boundary the approximation overestimates
-    // (d2 - d1) but the smoothstep saturates to 1.0 anyway, so the
-    // visual difference is invisible. Saves one sqrt per pixel-sample,
-    // ~0.5 ms across the full cloud pass. Aligns with the
-    // precision-discipline pattern (`q = (x - ix*spacing) / spacing`):
-    // preserve precision where it matters, accept O(ε) where it
-    // doesn't. The `max(dsq1, 1.0)` guards against division-by-zero
-    // when the sample is at exactly the cell seed.
-    let d1 = sqrt(max(nearest.dsq1, 1.0));
-    let half_diff = (nearest.dsq2 - nearest.dsq1) / (4.0 * d1);
+    // CM-6 blend weight (2-cell). 3-cell blend pinned for V-cut fix.
+    let d1 = sqrt(max(nearest3.dsq1, 1.0));
+    let half_diff = (nearest3.dsq2 - nearest3.dsq1) / (4.0 * d1);
     let blend_t = smoothstep(0.0, BOUNDARY_BLEND_DISTANCE_M, half_diff);
     let w1 = 0.5 + 0.5 * blend_t;
     let w2 = 1.0 - w1;

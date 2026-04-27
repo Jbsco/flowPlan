@@ -1685,10 +1685,36 @@ impl Runtime {
             // Pack the resident set into GPU layout. C1+ polish: maintain
             // a stable buffer-slot mapping so we can do incremental
             // updates instead of full rebuilds. For now, full rebuild
-            // every frame is fine — active set is ~25-50 cells × 32 B =
-            // ~1.5 KB, queue.write_buffer is cheap.
-            let mut gpu_cells: Vec<flowplan_render::GpuWeatherCell> = chunked
-                .iter_resident()
+            // every frame is fine — active set is ~25-50 cells × 40 B =
+            // ~2 KB, queue.write_buffer is cheap.
+            //
+            // **Stable cell ordering** (2026-04-27): `iter_resident()`
+            // backs onto a `HashMap<CellId>` which has hash-randomized
+            // iteration order in Rust — cells appeared at different
+            // GPU buffer indices each frame. While
+            // `find_nearest_two_active_cells` should pick the same
+            // closest cell regardless of order, at near-tie dsq cases
+            // (Voronoi midlines) the strict-less-than comparison
+            // arbitrarily flipped which cell won → user-observed
+            // per-frame flicker between cell types. Sorting by
+            // seed_pos before upload gives each cell a stable buffer
+            // index across frames → deterministic tie-breaking.
+            let mut sorted_snapshots: Vec<&crate::chunked_weather::WeatherCellSnapshot> =
+                chunked.iter_resident().collect();
+            sorted_snapshots.sort_by(|a, b| {
+                a.seed_pos
+                    .x
+                    .partial_cmp(&b.seed_pos.x)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(
+                        a.seed_pos
+                            .y
+                            .partial_cmp(&b.seed_pos.y)
+                            .unwrap_or(std::cmp::Ordering::Equal),
+                    )
+            });
+            let mut gpu_cells: Vec<flowplan_render::GpuWeatherCell> = sorted_snapshots
+                .iter()
                 .take(flowplan_render::MAX_WEATHER_CELLS)
                 .map(|snap| {
                     // Post-CM-10 Phase B: derive profile_kind +

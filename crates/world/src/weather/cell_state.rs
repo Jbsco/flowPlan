@@ -130,10 +130,15 @@ pub fn vertical_amp_baseline(cell_type: CellType) -> f32 {
 /// Compute `vertical_amp_factor` from `cell_type` + `coverage_strength`.
 ///
 /// Strong cells get up to ~6.5× nominal amplitude; marginal cells stay
-/// near baseline. `Tower` / `Anvil` profiles get a +50% bonus
-/// (bumped from +30% on 2026-04-26 after in-game observation showed
-/// clouds were still reading as "flat layers" — towering cumulus
-/// needs dramatic vertical extent to register as towering).
+/// near baseline. `Tower` / `Anvil` profiles get up to +50% bonus,
+/// **smoothed via smoothstep across the cov=0.7 threshold** to avoid
+/// flickering when a cumulus cell's lifecycle phase tips
+/// `coverage_strength` across the BELL→TOWER threshold (revision
+/// 2026-04-26 — in-game observation showed visible step transitions at
+/// the discrete boundary). The `profile_kind` enum still flips
+/// discretely at 0.7 (used by shader `altitude_profile` shape
+/// selection); future work in task #325 will smooth that transition
+/// too via shader-side profile blending.
 #[must_use]
 pub fn derive_vertical_amp_factor(
     cell_type: CellType,
@@ -143,7 +148,18 @@ pub fn derive_vertical_amp_factor(
     let baseline = vertical_amp_baseline(cell_type);
     let cov_scale = 0.5 + 1.5 * coverage_strength;
     let profile_bonus = match profile_kind {
-        ProfileKind::Tower | ProfileKind::Anvil => 1.50,
+        // Cumulus's BELL→TOWER threshold is at cov=0.7. Smoothstep
+        // the bonus across [0.65, 0.75] so vertical_amp_factor
+        // transitions continuously instead of stepping at the
+        // discrete boundary.
+        ProfileKind::Tower => {
+            let t = ((coverage_strength - 0.65) / 0.10).clamp(0.0, 1.0);
+            let smooth = t * t * (3.0 - 2.0 * t);
+            1.0 + 0.5 * smooth
+        },
+        // Nimbus → Anvil is unconditional (no margin threshold);
+        // bonus is fixed.
+        ProfileKind::Anvil => 1.50,
         _ => 1.0,
     };
     baseline * cov_scale * profile_bonus
