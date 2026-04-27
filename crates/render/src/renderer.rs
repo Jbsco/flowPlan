@@ -232,11 +232,21 @@ pub const VOLUMETRIC_WGSL_SOURCE: &str = include_str!("volumetric.wgsl");
 /// Maximum W2 weather cells the volumetric raymarcher can hold (C2).
 ///
 /// Storage buffer is sized to this constant. The actual active cell
-/// count varies (typically ~25-50 in 50 km streaming radius); unused
-/// slots carry `density = 0` so the shader's per-cell early-out skips
-/// them. 64 gives 1.3-2× margin over typical active count, room for
-/// future denser weather (e.g. squall-line concentrations).
-pub const MAX_WEATHER_CELLS: usize = 64;
+/// count varies — at 50 km streaming radius with the variable-power-
+/// diagram metric, observed counts run up to ~85 cells; the upper bound
+/// is the 121-sample grid in `active_weather_cells` (worst-case 11×11
+/// unique cells). 128 covers that with headroom + room for denser
+/// weather (squall-line concentrations).
+///
+/// Tuning history:
+/// - Initial (C2): 64 — assumed ~25-50 cell typical count
+/// - Post-Phase-B 2026-04-27: 128 — user observed 84 active cells +
+///   instant cloud snap on tiny camera moves; root cause was
+///   `sorted_snapshots.iter().take(64)` silently dropping cells when
+///   active_count > 64. As camera moved, the sort by seed_pos.x shifted
+///   cells across the 64-cell cliff, evicting/restoring rendered cells
+///   per frame. Bump to 128 ensures all active cells fit in the buffer.
+pub const MAX_WEATHER_CELLS: usize = 128;
 
 /// GPU layout for one W2 weather cell. Matches `GpuWeatherCell` in
 /// `volumetric.wgsl`. std430-friendly: 40 bytes per cell, 8-byte
