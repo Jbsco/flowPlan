@@ -102,6 +102,7 @@ const PROFILE_TOWER: u32   = 1u;  // peak at 70%, narrow base
 const PROFILE_ANVIL: u32   = 2u;  // T-shape, broad top above 80%
 const PROFILE_DECK: u32    = 3u;  // uniform middle 70%, smooth fades
 const PROFILE_LAYERED: u32 = 4u;  // double-peak at 30% and 70%
+const PROFILE_CIRRUS: u32  = 5u;  // wispy thin band, low max alt_factor
 
 // Global cloud altitude band (m). Wide enough to cover all cell types:
 // cumulus (1200-4000), nimbus (900-12000), stratus (300-1400), squall
@@ -212,6 +213,16 @@ fn altitude_profile(
         let column = smoothstep(0.0, 0.3, t) * smoothstep(0.85, 0.6, t);
         let top_plateau = smoothstep(0.7, 0.85, t) * smoothstep(1.05, 0.95, t);
         return max(column, top_plateau);
+    } else if (profile_kind == PROFILE_CIRRUS) {
+        // Cirrus — thin, wispy ice-crystal cloud. Gradual smoothstep
+        // fades on both sides. Peak cap 0.85 so the wispy structure
+        // reads bright and white where dense, while overall transparency
+        // is preserved by the low cell density (0.30 vs cumulus 0.35).
+        // Gentler bottom fade than DECK so the lower edge feathers out
+        // softly.
+        let bottom_fade = smoothstep(0.0, 0.4, t);
+        let top_fade = smoothstep(1.0, 0.6, t);
+        return bottom_fade * top_fade * 0.85;
     } else if (profile_kind == PROFILE_LAYERED) {
         // Frontal double-peak — two altitude bands within the cell,
         // each producing density. Models stratified frontal cloud
@@ -428,6 +439,7 @@ fn altitude_perturbation_amplitude(cell_type: u32) -> vec2<f32> {
         case 3u: { return vec2<f32>(50.0, 30.0); }     // Stratus — flat layer
         case 4u: { return vec2<f32>(900.0, 350.0); }   // Squall — textured
         case 5u: { return vec2<f32>(500.0, 200.0); }   // Frontal — moderate
+        case 6u: { return vec2<f32>(80.0, 50.0); }     // Cirrus — flat wispy band
         default: { return vec2<f32>(80.0, 60.0); }     // ClearAir / haze — subtle
     }
 }
@@ -552,6 +564,7 @@ fn worley_spacing_for_type(cell_type: u32) -> f32 {
         case 3u: { return 2000.0; }  // Stratus — smooth large layers
         case 4u: { return 500.0; }   // Squall — small textured features
         case 5u: { return 1000.0; }  // Frontal — mid-scale bands
+        case 6u: { return 7000.0; }  // Cirrus — long broad wisps (real-cirrus streaks span km)
         // ClearAir / haze — bumped 1500 → 4000 on 2026-04-26
         // (Phase B follow-up 2). User in-game observation: clear-air
         // dot clouds appeared too small and too uniform; bumping to
@@ -574,6 +587,7 @@ fn perlin_worley_weights_for_type(cell_type: u32) -> vec2<f32> {
         case 3u: { return vec2<f32>(0.2, 0.8); }  // Stratus
         case 4u: { return vec2<f32>(0.6, 0.4); }  // Squall
         case 5u: { return vec2<f32>(0.4, 0.6); }  // Frontal
+        case 6u: { return vec2<f32>(0.1, 0.9); }  // Cirrus — very Perlin-dominant for smooth wisps
         default: { return vec2<f32>(0.7, 0.3); }  // Cumulus default
     }
 }

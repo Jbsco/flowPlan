@@ -243,9 +243,9 @@ pub const VOLUMETRIC_WGSL_SOURCE: &str = include_str!("volumetric.wgsl");
 /// - Post-Phase-B 2026-04-27: 128 — user observed 84 active cells +
 ///   instant cloud snap on tiny camera moves; root cause was
 ///   `sorted_snapshots.iter().take(64)` silently dropping cells when
-///   active_count > 64. As camera moved, the sort by seed_pos.x shifted
-///   cells across the 64-cell cliff, evicting/restoring rendered cells
-///   per frame. Bump to 128 ensures all active cells fit in the buffer.
+///   `active_count` > 64. As camera moved, the sort by `seed_pos.x`
+///   shifted cells across the 64-cell cliff, evicting/restoring rendered
+///   cells per frame. Bump to 128 ensures all active cells fit.
 pub const MAX_WEATHER_CELLS: usize = 128;
 
 /// GPU layout for one W2 weather cell. Matches `GpuWeatherCell` in

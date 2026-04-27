@@ -49,6 +49,13 @@ pub enum CellType {
     /// Along a W1 frontal-boundary line segment: banded structure,
     /// continuous precip, wind-shift across the line.
     Frontal,
+    /// High-altitude cirrus: wispy ice-crystal cloud at 7-11 km.
+    /// Low density, no precipitation, minor turbulence. Forms in
+    /// stable cool upper atmosphere; independent of surface RH.
+    /// Provides the high-altitude tier so the sky has visible
+    /// low / mid / high layering instead of all cells stacking in
+    /// the 1-6 km range.
+    Cirrus,
 }
 
 /// Altitude-profile shape (Post-CM-10 Phase B, 2026-04-26). Selects the
@@ -77,6 +84,9 @@ pub enum ProfileKind {
     /// Double-peak at 30% and 70% altitude — frontal cells with
     /// stratified upper + lower bands.
     Layered = 4,
+    /// Wispy thin band — cirrus. Gradual smoothstep fades from base
+    /// to top, low peak `alt_factor` (~0.5) for thin transparency.
+    Cirrus = 5,
 }
 
 /// Classify a cell's altitude profile from `cell_type` + `coverage_strength`.
@@ -88,6 +98,7 @@ pub fn derive_profile_kind(cell_type: CellType, coverage_strength: f32) -> Profi
         CellType::Stratus => ProfileKind::Deck,
         CellType::Frontal => ProfileKind::Layered,
         CellType::Nimbus => ProfileKind::Anvil,
+        CellType::Cirrus => ProfileKind::Cirrus,
         CellType::Cumulus => {
             // Cumulus with high coverage_strength → towering;
             // otherwise fair-weather bell.
@@ -120,7 +131,12 @@ pub fn vertical_amp_baseline(cell_type: CellType) -> f32 {
     match cell_type {
         CellType::Cumulus => 1.0,
         CellType::Nimbus => 2.5,
-        CellType::Stratus => 0.3,
+        // Stratus + Cirrus both share the flat-layer 0.3 baseline —
+        // both render as wispy/uniform layers without much vertical
+        // perturbation. Stratus is low-altitude boundary-layer fog;
+        // cirrus is high-altitude ice. Same shader behavior, different
+        // altitudes.
+        CellType::Stratus | CellType::Cirrus => 0.3,
         CellType::Squall => 1.5,
         CellType::Frontal => 1.2,
         CellType::ClearAir => 0.5,
@@ -239,15 +255,18 @@ const CELL_OFFSET_TAG: u64 = u64::from_le_bytes(*b"celloff_");
 /// - Stratus decks: 4–8 hr — persistent boundary-layer features.
 /// - Squall line: 30 min–2 hr — fast-moving gust-front pulse.
 /// - Frontal-passage cells: 6–10 hr — slow synoptic system crossing.
+/// - Cirrus: 8–24 hr — long-lived upper-troposphere ice patches drift
+///   for hours; we use 12 hr as a representative midpoint.
 ///
 /// `ClearAir` is unused (cleared cells have no life cycle).
-const DEFAULT_TYPE_CYCLE_S: [f32; 6] = [
-    0.0,           // ClearAir
-    1.5 * 3_600.0, // Cumulus
-    2.5 * 3_600.0, // Nimbus
-    6.0 * 3_600.0, // Stratus
-    1.5 * 3_600.0, // Squall
-    8.0 * 3_600.0, // Frontal
+const DEFAULT_TYPE_CYCLE_S: [f32; 7] = [
+    0.0,            // ClearAir
+    1.5 * 3_600.0,  // Cumulus
+    2.5 * 3_600.0,  // Nimbus
+    6.0 * 3_600.0,  // Stratus
+    1.5 * 3_600.0,  // Squall
+    8.0 * 3_600.0,  // Frontal
+    12.0 * 3_600.0, // Cirrus
 ];
 
 /// Player-tunable weather-pacing configuration.
@@ -260,7 +279,7 @@ const DEFAULT_TYPE_CYCLE_S: [f32; 6] = [
 #[derive(Copy, Clone, Debug)]
 pub struct WeatherTuning {
     /// Life-cycle duration in seconds per `CellType` (indexed by enum tag).
-    pub type_cycle_s: [f32; 6],
+    pub type_cycle_s: [f32; 7],
 }
 
 impl WeatherTuning {
@@ -690,6 +709,22 @@ fn compute_coverage_strength(
                 grad_mag,
             )
         },
+        CellType::Cirrus => {
+            // Cirrus is favored in stable conditions: low pressure
+            // gradient + moderate winds. Score peaks when both signals
+            // are quiet (no frontal activity, no strong wind shear).
+            let stable_grad = smoothstep(
+                FRONTAL_GRAD_THRESHOLD * 1.0,
+                FRONTAL_GRAD_THRESHOLD * 0.3,
+                grad_mag,
+            );
+            let stable_wind = smoothstep(
+                SQUALL_MIN_WIND_MPS * 1.0,
+                SQUALL_MIN_WIND_MPS * 0.5,
+                wind_mag,
+            );
+            stable_grad * stable_wind
+        },
     }
 }
 
@@ -746,6 +781,17 @@ fn select_cell_type(
     } else {
         0.0
     };
+    // Cirrus eligibility: stable conditions in upper troposphere.
+    // Independent of surface RH — cirrus forms aloft from upper-air
+    // moisture, not surface mixing. Favored when low-mid weather
+    // signals are quiet (low gradient, moderate winds). Higher base
+    // weight than other types because real-world cirrus coverage is
+    // very common (often 25-50% of sky).
+    let elig_cirrus = if grad_mag < FRONTAL_GRAD_THRESHOLD && wind_mag < SQUALL_MIN_WIND_MPS {
+        1.5
+    } else {
+        0.5
+    };
 
     let weights = [
         CLEAR_AIR_PRIOR,
@@ -754,6 +800,7 @@ fn select_cell_type(
         elig_stratus,
         elig_squall,
         elig_frontal,
+        elig_cirrus,
     ];
     let total: f32 = weights.iter().sum();
     if total <= 0.0 {
@@ -771,7 +818,8 @@ fn select_cell_type(
                 2 => CellType::Nimbus,
                 3 => CellType::Stratus,
                 4 => CellType::Squall,
-                _ => CellType::Frontal,
+                5 => CellType::Frontal,
+                _ => CellType::Cirrus,
             };
         }
     }
@@ -851,6 +899,25 @@ fn parameterize(cell_type: CellType, rh: f32, t_k: f32) -> CellState {
             storm_phase,
             coverage_strength: 0.0,
         },
+        CellType::Cirrus => {
+            // Cirrus altitude rises modestly with warmer surface temp
+            // (deeper troposphere → higher tropopause). Density 0.30
+            // gives bright wispy character while staying transparent
+            // (still less than cumulus 0.35; profile cap 0.85 keeps
+            // peak alpha modest). No precipitation reaches the ground
+            // from cirrus.
+            let base = 7_000.0 + (t_k - 283.0) * 100.0;
+            let top = base + 3_000.0;
+            CellState {
+                cell_type,
+                base_altitude_m: base,
+                top_altitude_m: top,
+                density: 0.30,
+                precip_rate_mm_per_hr: 0.0,
+                storm_phase,
+                coverage_strength: 0.0,
+            }
+        },
     }
 }
 
@@ -899,7 +966,7 @@ mod tests {
     #[test]
     fn clear_air_dominates() {
         // Over a dense sample of cells, clear_air should be the plurality.
-        let mut counts = [0_u32; 6];
+        let mut counts = [0_u32; 7];
         for ix in -10..=10 {
             for iz in -10..=10 {
                 let s = initial_state(42, CellId { ix, iz }, 0.0);
@@ -910,6 +977,7 @@ mod tests {
                     CellType::Stratus => 3,
                     CellType::Squall => 4,
                     CellType::Frontal => 5,
+                    CellType::Cirrus => 6,
                 };
                 counts[idx] += 1;
             }
@@ -924,8 +992,11 @@ mod tests {
     #[test]
     fn constraint_violation_never_selected() {
         // Check that across a grid, no cell with rh < CLOUD_MIN_HUMIDITY came
-        // back as cumulus/nimbus/stratus/squall/frontal — any cell with
-        // insufficient humidity must be ClearAir or Frontal (frontal ignores rh).
+        // back as a surface-RH-gated type. Allowed types under low surface RH:
+        // - ClearAir (the default)
+        // - Frontal (gated on pressure gradient, not surface RH)
+        // - Cirrus (high-altitude, independent of surface humidity — cirrus
+        //   forms from upper-air moisture and is not blocked by dry surface)
         for ix in -20..=20 {
             for iz in -20..=20 {
                 let cell = CellId { ix, iz };
@@ -933,10 +1004,11 @@ mod tests {
                 let rh = humidity::sea_level_humidity(42, seed_pos.x, seed_pos.y, 0.0);
                 let s = initial_state(42, cell, 0.0);
                 if rh < CLOUD_MIN_HUMIDITY {
-                    // Only ClearAir or Frontal are allowed — frontal has no RH
-                    // gate (it depends on pressure gradient instead).
                     assert!(
-                        matches!(s.cell_type, CellType::ClearAir | CellType::Frontal),
+                        matches!(
+                            s.cell_type,
+                            CellType::ClearAir | CellType::Frontal | CellType::Cirrus
+                        ),
                         "cell ({ix}, {iz}) with rh={rh} got {:?}",
                         s.cell_type
                     );
