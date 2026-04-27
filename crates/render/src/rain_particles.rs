@@ -57,15 +57,20 @@ const RECYCLE_BELOW_CAM_M: f32 = 10.0;
 /// movement).
 const MAX_PARTICLE_LIFETIME_S: f32 = 5.0;
 
-/// Visual fall speed for rain particles (m/s, downward).
+/// Visual fall speed for rain particles at `snow_fraction = 0` (m/s).
 ///
 /// Real raindrop terminal velocity is 4-9 m/s, but rendered drops at
 /// 5-30 m camera distance LOOK slow at that speed because we lack the
 /// near-eye motion blur of real rain. Bumped to 18 m/s for visual
-/// punch — the drops streak past the camera quickly enough to read as
-/// "moving rain" rather than "drifting particles." Not physically
-/// accurate, but the player feedback is what matters here.
-const TERMINAL_VELOCITY_M_PER_S: f32 = 18.0;
+/// punch — drops streak past the camera quickly enough to read as
+/// "moving rain" rather than "drifting particles."
+const RAIN_FALL_SPEED_M_PER_S: f32 = 18.0;
+
+/// Visual fall speed for rain particles at `snow_fraction = 1` (m/s).
+///
+/// Snowflakes drift down at ~0.5-1.5 m/s in real life. Pick the upper
+/// end so drift is visible without taking forever to fall.
+const SNOW_FALL_SPEED_M_PER_S: f32 = 1.5;
 
 /// Per-instance GPU layout. Just the world position — quad geometry
 /// is built per-vertex in the shader.
@@ -98,6 +103,7 @@ impl RainParticleSystem {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         camera_bind_group_layout: &wgpu::BindGroupLayout,
+        scene_bind_group_layout: &wgpu::BindGroupLayout,
         depth_format: wgpu::TextureFormat,
     ) -> Self {
         // Quad: two triangles forming a [-1, +1] × [-1, +1] square.
@@ -133,7 +139,7 @@ impl RainParticleSystem {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("rain-particles-pipeline-layout"),
-            bind_group_layouts: &[camera_bind_group_layout],
+            bind_group_layouts: &[camera_bind_group_layout, scene_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -247,6 +253,7 @@ impl RainParticleSystem {
         queue: &wgpu::Queue,
         camera_pos: Vec3,
         precip_intensity: f32,
+        snow_fraction: f32,
         current_time_s: f32,
     ) {
         // Active fraction of the pool — full at 14 mm/hr (squall), half
@@ -263,12 +270,19 @@ impl RainParticleSystem {
             return;
         }
 
+        // Phase E.3: lerp fall speed between rain (fast streaks) and
+        // snow (slow drift) by `snow_fraction`. Linear blend is fine
+        // here since both endpoints are tuned visually, not from
+        // physics.
+        let snow = snow_fraction.clamp(0.0, 1.0);
+        let fall_speed = RAIN_FALL_SPEED_M_PER_S * (1.0 - snow) + SNOW_FALL_SPEED_M_PER_S * snow;
+
         let mut instance_data: Vec<RainInstanceGpu> = Vec::with_capacity(active);
         for i in 0..active {
             let (mut current, mut elapsed, seed_pos, seed_time_s) = {
                 let p = &self.particles[i];
                 let e = current_time_s - p.seed_time_s;
-                let c = p.seed_pos + Vec3::new(0.0, -TERMINAL_VELOCITY_M_PER_S * e, 0.0);
+                let c = p.seed_pos + Vec3::new(0.0, -fall_speed * e, 0.0);
                 (c, e, p.seed_pos, p.seed_time_s)
             };
             let _ = (seed_pos, seed_time_s);
@@ -285,7 +299,7 @@ impl RainParticleSystem {
                 self.particles[i].seed_pos = new_seed_pos;
                 self.particles[i].seed_time_s = new_seed_time;
                 elapsed = current_time_s - new_seed_time;
-                current = new_seed_pos + Vec3::new(0.0, -TERMINAL_VELOCITY_M_PER_S * elapsed, 0.0);
+                current = new_seed_pos + Vec3::new(0.0, -fall_speed * elapsed, 0.0);
             }
             instance_data.push(RainInstanceGpu {
                 world_pos: [current.x, current.y, current.z],
@@ -300,14 +314,20 @@ impl RainParticleSystem {
         );
     }
 
-    /// Record draw call into an active render pass. Caller is
-    /// responsible for binding `camera_bg` at slot 0.
-    pub fn record<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, camera_bg: &'a wgpu::BindGroup) {
+    /// Record draw call into an active render pass. Caller binds
+    /// `camera_bg` at slot 0 + `scene_bg` at slot 1.
+    pub fn record<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        camera_bg: &'a wgpu::BindGroup,
+        scene_bg: &'a wgpu::BindGroup,
+    ) {
         if self.active_count == 0 {
             return;
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, camera_bg, &[]);
+        pass.set_bind_group(1, scene_bg, &[]);
         pass.set_vertex_buffer(0, self.quad_vertex_buffer.slice(..));
         pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
         pass.draw(0..6, 0..self.active_count);

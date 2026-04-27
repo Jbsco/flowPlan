@@ -1603,6 +1603,37 @@ impl Runtime {
             curr.vehicle.position.z,
             curr.time_of_day,
         );
+        // Phase E.3: sample temperature at camera altitude → derive
+        // snow_fraction. Smoothstep around freezing: above +2°C is
+        // rain, below -2°C is snow, smooth blend in between. Drives
+        // both the shader streak shape (lerp rain streak ↔ snow
+        // flake) and the CPU fall-speed (rain 18 m/s ↔ snow 1.5 m/s).
+        let temp_at_cam_k = flowplan_world::weather::temperature::temperature_at(
+            WORLD_SEED,
+            curr.vehicle.position.x,
+            curr.vehicle.position.y,
+            curr.vehicle.position.z,
+            curr.time_of_day,
+        );
+        let snow_fraction = {
+            // smoothstep(275, 271, t) — returns 1 when t < 271,
+            // 0 when t > 275, smooth Hermite in between.
+            let lo = 271.0_f32;
+            let hi = 275.0_f32;
+            let t = ((temp_at_cam_k - hi) / (lo - hi)).clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        };
+        // Phase E.2: visibility coupling. Raise fog density above the
+        // baseline by ~0.0001/mm-hr — at 8 mm/hr (frontal) visibility
+        // tightens to ~800 m, at 14 mm/hr (squall) ~500 m. Real-world
+        // ratios: density = ln(2) / visibility-distance, so
+        // visibility ≈ 700 / density_per_meter (m). Composes with
+        // baseline 0.00008 (clear-sky open visibility ~8.6 km) so
+        // light drizzle barely tints, heavy rain gates terrain into
+        // a haze wall.
+        let baseline_fog_density = SceneParams::default().fog_density;
+        let precip_fog_density = 0.000_1 * precip_intensity;
+        let fog_density = baseline_fog_density + precip_fog_density;
         let scene_params = SceneParams {
             sun_dir: sun_direction(local_tod),
             time_seconds: self.start_time.elapsed().as_secs_f32(),
@@ -1611,6 +1642,8 @@ impl Runtime {
             chop_intensity: curr.chop_intensity,
             wind_dir_horiz,
             precip_intensity,
+            fog_density,
+            snow_fraction,
             ..SceneParams::default()
         };
         self.renderer.set_scene(&self.queue, &scene_params);
@@ -1623,6 +1656,7 @@ impl Runtime {
             &self.queue,
             curr.vehicle.position,
             precip_intensity,
+            snow_fraction,
             scene_params.time_seconds,
         );
 

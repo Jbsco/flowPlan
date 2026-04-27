@@ -149,6 +149,15 @@ pub struct SceneParams {
     /// streaks past the canopy. Rate range 0 (clear) to ~14 (heavy
     /// squall). The shader maps this to streak intensity + density.
     pub precip_intensity: f32,
+    /// Rain-vs-snow fraction in `[0, 1]` (Post-CM-10 Phase E.3,
+    /// 2026-04-27). 0 = pure rain, 1 = pure snow. Smoothly transitions
+    /// around the freezing point as a function of camera-altitude
+    /// temperature: above +2°C is rain, below -2°C is snow, with a
+    /// 4°C blend band for sleet-like in-between conditions. Drives
+    /// the rain particle shader's streak shape (long thin rain →
+    /// small round flake) + CPU fall-speed (rain 18 m/s → snow
+    /// 1.5 m/s).
+    pub snow_fraction: f32,
 }
 
 impl SceneParams {
@@ -171,10 +180,10 @@ impl SceneParams {
                 self.wind_dir_horiz.x,
                 self.wind_dir_horiz.y,
             ],
-            // weather.x = precip_intensity (mm/hr); .y/.z/.w reserved
-            // for future Phase E channels (visibility coupling, snow
-            // fraction, particle scale).
-            weather: [self.precip_intensity, 0.0, 0.0, 0.0],
+            // weather.x = precip_intensity (mm/hr)
+            // weather.y = snow_fraction in [0, 1] — 0 rain, 1 snow
+            // weather.z/.w reserved for future Phase E channels.
+            weather: [self.precip_intensity, self.snow_fraction, 0.0, 0.0],
         }
     }
 }
@@ -206,6 +215,9 @@ impl Default for SceneParams {
             // No precipitation by default. App overrides per frame
             // from W2 precipitation_rate_at(camera_xz, camera_y, time).
             precip_intensity: 0.0,
+            // Default to rain (warm conditions). App overrides from
+            // sampled temperature at camera altitude.
+            snow_fraction: 0.0,
         }
     }
 }
@@ -838,6 +850,7 @@ impl Renderer {
             device,
             surface_format,
             &camera_bgl,
+            &scene_bgl,
             DEPTH_FORMAT,
         );
 
@@ -1101,19 +1114,27 @@ impl Renderer {
 
     /// Phase E.4: advance + upload the rain particle pool. Caller
     /// passes the camera world position (for spawn box centering),
-    /// `precip_intensity` (mm/hr — drives active count), and the
-    /// current wall-clock time in seconds (drives terminal-velocity
-    /// integration). Active count scales with intensity / 14 mm/hr;
-    /// at 0 the pool is dormant and the render pass is a no-op.
+    /// `precip_intensity` (mm/hr — drives active count),
+    /// `snow_fraction` in `[0, 1]` (lerps fall speed: rain 18 m/s →
+    /// snow 1.5 m/s), and the current wall-clock time in seconds
+    /// (drives velocity integration). Active count scales with
+    /// intensity / 14 mm/hr; at 0 the pool is dormant and the render
+    /// pass is a no-op.
     pub fn update_rain_particles(
         &mut self,
         queue: &wgpu::Queue,
         camera_pos: glam::Vec3,
         precip_intensity: f32,
+        snow_fraction: f32,
         current_time_s: f32,
     ) {
-        self.rain_particles
-            .update(queue, camera_pos, precip_intensity, current_time_s);
+        self.rain_particles.update(
+            queue,
+            camera_pos,
+            precip_intensity,
+            snow_fraction,
+            current_time_s,
+        );
     }
 
     /// Live rain-particle count for debug HUD readout.
@@ -1489,7 +1510,8 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            self.rain_particles.record(&mut pass, &self.camera_bg);
+            self.rain_particles
+                .record(&mut pass, &self.camera_bg, &self.scene_bg);
         }
 
         // Widget passes (Phase 2.4.2c orientation gizmo + 2.4.4e attitude indicator).

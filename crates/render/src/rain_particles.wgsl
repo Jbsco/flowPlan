@@ -19,12 +19,28 @@ struct CameraUniform {
 };
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 
-// Streak dimensions: 6 cm wide × 60 cm tall. Real raindrops are
-// of course much smaller; what we render is the motion-blur streak.
-// Tuned 2026-04-27: initial 20 cm × 1.5 m read too chunky for ambient
-// rain — looked like falling logs more than streaks.
-const STREAK_HALF_WIDTH_M: f32 = 0.03;
-const STREAK_HALF_HEIGHT_M: f32 = 0.30;
+struct SceneUniform {
+    sun_dir:   vec4<f32>,
+    sun_color: vec4<f32>,
+    ambient:   vec4<f32>,
+    fog:       vec4<f32>,
+    time:      vec4<f32>,
+    // weather.x = precip_intensity (mm/hr)
+    // weather.y = snow_fraction in [0, 1] — 0 rain, 1 snow
+    weather:   vec4<f32>,
+};
+@group(1) @binding(0) var<uniform> scene: SceneUniform;
+
+// Rain particle shape (snow_fraction = 0): tall thin streak, ~6 cm
+// wide × 60 cm tall. Reads as motion-blur raindrop.
+const RAIN_HALF_WIDTH_M: f32 = 0.03;
+const RAIN_HALF_HEIGHT_M: f32 = 0.30;
+
+// Snow particle shape (snow_fraction = 1): small round flake, equal
+// width + height. Smaller than rain because individual flakes drift
+// rather than streak.
+const SNOW_HALF_WIDTH_M: f32 = 0.06;
+const SNOW_HALF_HEIGHT_M: f32 = 0.06;
 
 struct VsIn {
     // Per-vertex quad corner offset, in [-1, +1]². Drives the local
@@ -57,8 +73,13 @@ fn vs_main(in: VsIn) -> VsOut {
     } else {
         right = right * inverseSqrt(right_len_sq);
     }
-    let offset = right * (in.quad.x * STREAK_HALF_WIDTH_M)
-               + world_up * (in.quad.y * STREAK_HALF_HEIGHT_M);
+    // Phase E.3: lerp particle dimensions between rain streak (tall +
+    // thin) and snow flake (small + round) by snow_fraction.
+    let snow = scene.weather.y;
+    let half_w = mix(RAIN_HALF_WIDTH_M, SNOW_HALF_WIDTH_M, snow);
+    let half_h = mix(RAIN_HALF_HEIGHT_M, SNOW_HALF_HEIGHT_M, snow);
+    let offset = right * (in.quad.x * half_w)
+               + world_up * (in.quad.y * half_h);
     let world = in.world_pos + offset;
     let camera_relative = world - camera.view_pos.xyz;
     var out: VsOut;
@@ -69,14 +90,28 @@ fn vs_main(in: VsIn) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // Soft vertical streak: bright center, fading horizontally fast and
-    // vertically gradually. Captures the "raindrop motion-blur streak"
-    // appearance.
+    // Phase E.3: lerp shape between vertical streak (rain) and round
+    // flake (snow) by `scene.weather.y`. Both shapes fade from a bright
+    // center toward transparent edges; rain is anisotropic in y, snow
+    // is isotropic.
+    let snow = scene.weather.y;
     let ax = abs(in.local_uv.x);
     let ay = abs(in.local_uv.y);
-    let x_shape = 1.0 - smoothstep(0.0, 0.7, ax);
-    let y_shape = 1.0 - smoothstep(0.0, 0.95, ay);
-    let intensity = x_shape * y_shape;
-    let alpha = intensity * 0.55;
-    return vec4<f32>(0.88, 0.91, 0.95, alpha);
+    // Rain streak: thin in x, long in y.
+    let rain_x = 1.0 - smoothstep(0.0, 0.7, ax);
+    let rain_y = 1.0 - smoothstep(0.0, 0.95, ay);
+    let rain_intensity = rain_x * rain_y;
+    // Snow flake: round radial falloff.
+    let radial = sqrt(in.local_uv.x * in.local_uv.x + in.local_uv.y * in.local_uv.y);
+    let snow_intensity = 1.0 - smoothstep(0.0, 0.85, radial);
+    let intensity = mix(rain_intensity, snow_intensity, snow);
+    // Snow reads slightly brighter — opaque white flakes. Rain stays
+    // slightly translucent so the cloud color reads through.
+    let alpha = intensity * mix(0.55, 0.80, snow);
+    let color = vec3<f32>(
+        mix(0.88, 0.96, snow),
+        mix(0.91, 0.98, snow),
+        mix(0.95, 1.00, snow),
+    );
+    return vec4<f32>(color, alpha);
 }
