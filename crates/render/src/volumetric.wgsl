@@ -146,12 +146,24 @@ fn altitude_profile(cell_type: u32, y_alt_m: f32, base_m: f32, top_m: f32) -> f3
     if (cell_type == CELL_CLEAR_AIR) {
         return 0.0;
     } else if (cell_type == CELL_STRATUS) {
-        // Flat horizontal layer — uniform density across thin span.
-        return 1.0;
+        // Stratus — uniform layer with soft edges (CM-10 fix
+        // 2026-04-26: was strict 1.0 across band; created visible
+        // hard top/bottom edges. Now smoothstep-trapezoid: flat at 1.0
+        // through middle 70%, smooth fade across 15% at each edge).
+        let bottom_fade = smoothstep(0.0, 0.15, t);
+        let top_fade = smoothstep(1.0, 0.85, t);
+        return bottom_fade * top_fade;
     } else {
-        // Convective / frontal — parabolic peak at mid-depth.
-        let centered = 1.0 - (2.0 * t - 1.0) * (2.0 * t - 1.0);
-        return max(centered, 0.0);
+        // Convective / frontal — bell curve with zero gradient at edges
+        // (CM-10 fix 2026-04-26: was parabolic `1 - (2t-1)²` with
+        // linear slope=4 at edges, producing visible "block" shape from
+        // hard fast linear ramps near base/top — see
+        // `vertical_layer_block_shape.png`. Smoothstep × smoothstep
+        // gives same peak character but with C1-continuous fades
+        // matching real cumulus's soft tops/bottoms).
+        let bottom_fade = smoothstep(0.0, 0.5, t);
+        let top_fade = smoothstep(1.0, 0.5, t);
+        return bottom_fade * top_fade;
     }
 }
 
@@ -332,11 +344,13 @@ const VERTICAL_NOISE_STRETCH: f32 = 3.0;
 // a new Perlin sample at an offset spatial origin so warp_x and
 // warp_z are decorrelated).
 //
-// Amplitude tuned to ~12.5% of the smallest Worley spacing
-// (Squall = 500m → ~60m warp). At this magnitude, features get
-// shifted enough to break grid alignment but not so much that
-// neighboring features overlap chaotically.
-const NOISE_WARP_AMPLITUDE_M: f32 = 60.0;
+// Amplitude tuned to ~30% of the smallest Worley spacing
+// (Squall = 500m → ~150m warp). At this magnitude, features get
+// shifted enough to break grid alignment visibly. Bumped 60 → 150
+// on 2026-04-26 after `pattern_from_above.png` showed residual
+// diagonal patterning at the lower 60m amplitude — Worley grid was
+// still partly visible.
+const NOISE_WARP_AMPLITUDE_M: f32 = 150.0;
 const NOISE_WARP_SPACING_M: f32 = 4000.0;
 
 // Per-cell-type Worley feature spacing (CM-9, 2026-04-26 — formerly
@@ -702,47 +716,43 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
     );
     let perlin_norm = clamp((perlin_raw + 0.7) / 1.4, 0.0, 1.0);
 
-    // Per-cell Worley with same-type cache reuse.
-    var worley_struct1: f32 = 0.0;
-    if (alt_factor1 > 0.0) {
-        let spacing1 = worley_spacing_for_type(cell1.cell_type);
-        let worley_v1 = worley_3d(
-            CLOUD_SEED_HI, CLOUD_SEED_LO,
-            CLOUD_WORLEY_OCTAVE,
-            warped_x, y_stretched, warped_z,
-            spacing1, CLOUD_FEATURES_PER_CELL,
-        );
-        worley_struct1 = clamp(1.0 - worley_v1.f_blended, 0.0, 1.0);
-    }
-    var worley_struct2: f32 = 0.0;
-    if (alt_factor2 > 0.0) {
-        if (alt_factor1 > 0.0 && cell1.cell_type == cell2.cell_type) {
-            // Same-type cache reuse: identical Worley spacing → identical
-            // result at the same world position. Saves a redundant call
-            // for adjacent same-type cells (which CM-1 tessellation
-            // expressly designed to render as "one body of weather").
-            worley_struct2 = worley_struct1;
-        } else {
-            let spacing2 = worley_spacing_for_type(cell2.cell_type);
-            let worley_v2 = worley_3d(
-                CLOUD_SEED_HI, CLOUD_SEED_LO,
-                CLOUD_WORLEY_OCTAVE,
-                warped_x, y_stretched, warped_z,
-                spacing2, CLOUD_FEATURES_PER_CELL,
-            );
-            worley_struct2 = clamp(1.0 - worley_v2.f_blended, 0.0, 1.0);
-        }
-    }
+    // **CM-10 mixed-spacing Worley** (revision 2026-04-26): instead
+    // of computing TWO Worley calls (one per cell) and blending
+    // results, mix the *spacings* and compute ONE Worley call. This
+    // produces a single coherent noise field whose feature scale
+    // smoothly transitions across cell boundaries — the texture
+    // CHARACTER changes gradually rather than two distinct textures
+    // interfering at the midline (visible as a sharp seam in
+    // `blend_line.png`). At deep-cell-1 (w2=0), mixed_spacing =
+    // spacing1; at midline (w2=0.5), spacing is halfway between;
+    // at deep-cell-2 (w2=1.0), mixed_spacing = spacing2.
+    //
+    // Per-cell character is preserved in the Perlin/Worley *blend
+    // weights* (per_type_for_cell) which still differ per cell —
+    // each cell weights worley_struct vs perlin_norm differently.
+    //
+    // Cost win: always 1 Worley call (was 1-2 with same-type cache
+    // reuse). Net negative perf cost vs CM-9.
+    let spacing1 = worley_spacing_for_type(cell1.cell_type);
+    let spacing2 = worley_spacing_for_type(cell2.cell_type);
+    let mixed_spacing = mix(spacing1, spacing2, w2);
+    let worley_v = worley_3d(
+        CLOUD_SEED_HI, CLOUD_SEED_LO,
+        CLOUD_WORLEY_OCTAVE,
+        warped_x, y_stretched, warped_z,
+        mixed_spacing, CLOUD_FEATURES_PER_CELL,
+    );
+    let worley_struct = clamp(1.0 - worley_v.f_blended, 0.0, 1.0);
 
     var density: f32 = 0.0;
     if (alt_factor1 > 0.0) {
         density = density + w1 * cell_density_contribution(
-            cell1, alt_factor1, worley_struct1, perlin_norm,
+            cell1, alt_factor1, worley_struct, perlin_norm,
         );
     }
     if (alt_factor2 > 0.0) {
         density = density + w2 * cell_density_contribution(
-            cell2, alt_factor2, worley_struct2, perlin_norm,
+            cell2, alt_factor2, worley_struct, perlin_norm,
         );
     }
     if (density <= 0.0) {

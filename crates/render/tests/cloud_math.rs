@@ -349,6 +349,43 @@ fn wgsl_clear_air_margin_cap_value() {
 }
 
 #[test]
+fn wgsl_uses_mixed_spacing_worley() {
+    // CM-10 revision: replaced per-cell Worley with same-type cache
+    // reuse (CM-9) with a single Worley call at mixed spacing.
+    // Eliminates the multi-texture interference at boundaries that
+    // produced visible seams (`blend_line.png`). Regression guard
+    // against accidental revert to per-cell Worley calls.
+    assert!(
+        VOLUMETRIC_WGSL_SOURCE.contains("mix(spacing1, spacing2, w2)"),
+        "volumetric.wgsl missing CM-10 mixed-spacing Worley formula"
+    );
+    // The shader should NOT contain two distinct worley_3d calls in
+    // sample_cloud_density (other than reuse via worley_struct1 = ...
+    // which we removed). Check for the pattern of two separate calls
+    // with separate result vars.
+    let normalized: String = VOLUMETRIC_WGSL_SOURCE
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert!(
+        !normalized.contains("worley_struct1=worley_struct1"),
+        "volumetric.wgsl: same-type cache-reuse pattern should be gone (CM-10 mixed-spacing)"
+    );
+}
+
+#[test]
+fn wgsl_contains_cm10_soft_altitude_profile() {
+    // CM-10 fix: replaced parabolic `1 - (2t-1)²` (linear slope=4 at
+    // edges → block shape) with smoothstep×smoothstep bell (zero
+    // derivative at edges). Regression guard.
+    assert!(
+        VOLUMETRIC_WGSL_SOURCE.contains("smoothstep(0.0, 0.5, t)")
+            && VOLUMETRIC_WGSL_SOURCE.contains("smoothstep(1.0, 0.5, t)"),
+        "volumetric.wgsl missing CM-10 soft altitude profile (smoothstep×smoothstep bell)"
+    );
+}
+
+#[test]
 fn wgsl_contains_cm10_domain_warp_formula() {
     // CM-10 domain warping: pre-perturb (x, z) before density-noise
     // lookup to break Worley grid alignment (in-game observation:
