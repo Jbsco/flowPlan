@@ -1849,6 +1849,8 @@ impl Runtime {
                         vertical_amp_factor,
                         profile_kind: profile_kind as u32,
                         band_tangent: [snap.state.band_tangent.x, snap.state.band_tangent.y],
+                        precip_rate_mm_per_hr: snap.state.precip_rate_mm_per_hr,
+                        padding: 0.0,
                     }
                 })
                 .collect();
@@ -1873,6 +1875,8 @@ impl Runtime {
                     vertical_amp_factor: 0.0,
                     profile_kind: 0,          // PROFILE_BELL — unused for sentinel
                     band_tangent: [1.0, 0.0], // unused for sentinel
+                    precip_rate_mm_per_hr: 0.0,
+                    padding: 0.0,
                 });
             }
             self.renderer.update_weather_cells(&self.queue, &gpu_cells);

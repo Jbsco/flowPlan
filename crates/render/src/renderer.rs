@@ -334,9 +334,23 @@ pub struct GpuWeatherCell {
     /// line, perpendicular to the pressure gradient. The shader's
     /// anisotropic-stretch dispatch uses this only when
     /// `cell_type == Frontal (5)`; for other cells the value is
-    /// `(1, 0)` and unused. Total struct size: 48 bytes (10 × f32 +
-    /// vec2), 8-byte aligned per std430.
+    /// `(1, 0)` and unused.
     pub band_tangent: [f32; 2],
+    /// Precipitation rate (mm/hr) for the cell — non-zero for Nimbus,
+    /// Stratus, Squall, Frontal (Phase E.8, 2026-04-27). The shader's
+    /// volumetric raymarcher uses this to render visible rain shafts
+    /// below the cloud base when the ray sample's altitude falls
+    /// between the terrain and the cell's base altitude. Lets a player
+    /// see the dark column under a thunderstorm from miles away — the
+    /// "approaching the storm" visual cue.
+    pub precip_rate_mm_per_hr: f32,
+    /// Padding to keep std430 alignment for arrays of `GpuWeatherCell`.
+    /// Largest member is vec2 (8-byte aligned), so the struct's stride
+    /// must be a multiple of 8. With `precip_rate_mm_per_hr` added we
+    /// have 56 bytes → already 8-byte aligned. Reserved for future
+    /// per-cell scalar.
+    #[allow(dead_code)]
+    pub padding: f32,
 }
 
 /// Compute shader source for the CPU-GPU bit-identity gate (B4).

@@ -89,6 +89,12 @@ struct GpuWeatherCell {
                                 // pressure gradient). Used by Frontal
                                 // cells only — others store (1, 0)
                                 // and skip the anisotropic transform.
+    precip_rate_mm_per_hr: f32, // Phase E.8: precipitation rate.
+                                // Used by rain-shaft rendering — when
+                                // a ray sample is below cell base and
+                                // precip > 0, accumulate a darker
+                                // semi-opaque tinted contribution.
+    _padding: f32,              // std430 stride alignment.
 }
 @group(3) @binding(0) var<storage, read> weather_cells: array<GpuWeatherCell>;
 
@@ -202,6 +208,34 @@ const CLOUD_SEED_LO: u32 = 0xB0A75EAFu;
 fn cell_layered_phase(seed_pos: vec2<f32>) -> f32 {
     let h = fract(sin(dot(seed_pos, vec2<f32>(269.5, 183.3))) * 25347.93);
     return (h - 0.5) * 0.24;
+}
+
+// Phase E.8 rain altitude factor (Post-shipping tune 2026-04-27).
+// `dy` is the sample's altitude relative to the cell's base
+// (`world_pos.y - base`). Returns a continuous `[0, 1]` factor that:
+//   - Below cloud (dy < 0): linear ramp from 0 at `-shaft_depth_m`
+//     up to 1 at the cloud base. This is the standard rain shaft —
+//     fading downward as droplets dissipate into drier air.
+//   - Inside cloud bottom (0 ≤ dy ≤ darken_band_m): smoothstep ramp
+//     from 1 at cloud base back down to 0 at `+darken_band_m`.
+//     This is the cloud-bottom darkening — the rain column inside
+//     the cloud absorbs sunlight, leaving the cloud's underside
+//     visibly darker than its sun-lit top.
+//   - Above cloud bottom (dy > darken_band_m): 0. Cloud top
+//     unaffected by precipitation.
+//
+// Continuous at dy=0 (both branches give 1.0) → no hard horizontal
+// line at the cloud-rain transition.
+fn rain_alt_factor(dy: f32, shaft_depth_m: f32, darken_band_m: f32) -> f32 {
+    if (dy < 0.0) {
+        // Below cloud — rain shaft.
+        return clamp(1.0 + dy / shaft_depth_m, 0.0, 1.0);
+    }
+    if (dy < darken_band_m) {
+        // Inside cloud, near bottom — darkening band.
+        return 1.0 - smoothstep(0.0, darken_band_m, dy);
+    }
+    return 0.0;
 }
 
 fn altitude_profile(
@@ -790,6 +824,12 @@ fn sun_transmittance_blended3(
 struct CloudSample {
     density: f32,
     sun_transmittance: f32,
+    // Phase E.8 rain shaft density. Non-zero when the sample point is
+    // below the base altitude of a precipitating cell. Composited
+    // separately in the raymarch loop with a darker tint so rain
+    // shafts read as the visible "dark column under the storm" rather
+    // than blending into the cloud body color.
+    rain_density: f32,
 }
 
 // Per-cell density contribution given pre-computed alt_factor + global
@@ -869,7 +909,11 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
     let active2 = cell2.coverage_strength > 0.0 && cell2.density > 0.0;
     let active3 = cell3.coverage_strength > 0.0 && cell3.density > 0.0;
     if (!active1 && !active2 && !active3) {
-        return CloudSample(0.0, 1.0);
+        // No cloud, no rain — three inactive cells means truly clear
+        // sky here. Phase E.8 rain shaft also requires active cells
+        // (precip_rate_mm_per_hr > 0 implies coverage_strength > 0
+        // by parameterize() invariants).
+        return CloudSample(0.0, 1.0, 0.0);
     }
 
     // **Softmax weights** based on distance: `w_i = exp(-(d_i - d1)/SCALE) / Σ`.
@@ -910,6 +954,52 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
     let w1 = 1.0 / total_w;
     let w2 = w2_raw / total_w;
     let w3 = w3_raw / total_w;
+
+    // Phase E.8: rain effect accumulation. For each active cell with
+    // precip > 0, compute a per-sample "rain factor" that:
+    //
+    // - At altitude `y < base - SHAFT_DEPTH_M` → 0 (rain dissipated)
+    // - At altitude in `[base - SHAFT_DEPTH_M, base]` → linear ramp 0..1
+    //   for the standard rain-shaft fade as it falls into drier air
+    // - At altitude in `[base, base + DARKEN_BAND_M]` → smoothstep
+    //   ramp 1..0 — the cloud's bottom interior is also darkened by
+    //   the precipitation (meteorologically correct: the rain column
+    //   absorbs light coming up from below, leaving the cloud bottom
+    //   visibly darker than its sun-lit top).
+    // - At altitude > base + DARKEN_BAND_M → 0 (cloud top unaffected)
+    //
+    // **Soft upper transition** (revision 2026-04-27 post first-ship
+    // playtest): the prior version had `rain_density` jump 0→full at
+    // y=cell.base, producing a visible hard horizontal line. The new
+    // smoothstep ramp eliminates the discontinuity → continuous
+    // transition between cloud bottom + rain shaft.
+    //
+    // Uses the same 3-cell softmax weights as cloud density for
+    // smooth blending across cell boundaries.
+    let shaft_depth_m = 1500.0;
+    let darken_band_m = 400.0;
+    var rain_density: f32 = 0.0;
+    if (cell1.precip_rate_mm_per_hr > 0.0) {
+        let dy = world_pos.y - cell1.base_altitude_m;
+        let factor = rain_alt_factor(dy, shaft_depth_m, darken_band_m);
+        let rain_factor = clamp(cell1.precip_rate_mm_per_hr / 14.0, 0.0, 1.0);
+        rain_density = rain_density
+            + w1 * rain_factor * factor * cell1.coverage_strength;
+    }
+    if (cell2.precip_rate_mm_per_hr > 0.0) {
+        let dy = world_pos.y - cell2.base_altitude_m;
+        let factor = rain_alt_factor(dy, shaft_depth_m, darken_band_m);
+        let rain_factor = clamp(cell2.precip_rate_mm_per_hr / 14.0, 0.0, 1.0);
+        rain_density = rain_density
+            + w2 * rain_factor * factor * cell2.coverage_strength;
+    }
+    if (cell3.precip_rate_mm_per_hr > 0.0) {
+        let dy = world_pos.y - cell3.base_altitude_m;
+        let factor = rain_alt_factor(dy, shaft_depth_m, darken_band_m);
+        let rain_factor = clamp(cell3.precip_rate_mm_per_hr / 14.0, 0.0, 1.0);
+        rain_density = rain_density
+            + w3 * rain_factor * factor * cell3.coverage_strength;
+    }
 
     // CM-5 altitude perturbation — one Perlin call shared by both
     // cells. Sampled at fixed y=0 so the perturbation is a function of
@@ -984,7 +1074,11 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
         );
     }
     if (alt_factor1 <= 0.0 && alt_factor2 <= 0.0 && alt_factor3 <= 0.0) {
-        return CloudSample(0.0, 1.0);
+        // Sample is outside any cell's cloud-body altitude band — skip
+        // expensive density noise. But Phase E.8 rain shaft can still
+        // contribute (sample below cell base for a precipitating cell);
+        // return the rain density we computed above.
+        return CloudSample(0.0, 1.0, rain_density);
     }
 
     // Density noise. Only reached when at least one cell's
@@ -1181,7 +1275,10 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
         );
     }
     if (density <= 0.0) {
-        return CloudSample(0.0, 1.0);
+        // Cloud body computed but density rounded to 0 (e.g. all
+        // alt_factors small + cloud_factor gated). Still return any
+        // rain-shaft contribution from Phase E.8.
+        return CloudSample(0.0, 1.0, rain_density);
     }
     // CM-7 secondary ray toward sun for Beer-Lambert shading. **CM-10
     // revision** blends cell1+cell2 cheap-densities along the
@@ -1194,7 +1291,7 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
     let sun_t = sun_transmittance_blended3(
         world_pos, cell1, cell2, cell3, w1, w2, w3, sun_dir,
     );
-    return CloudSample(density, sun_t);
+    return CloudSample(density, sun_t, rain_density);
 }
 
 struct VsOut {
@@ -1414,6 +1511,45 @@ fn fs_volumetric(in: VsOut) -> @location(0) vec4<f32> {
         let t = t_enter + step_dist * (f32(i) + jitter);
         let sample_pos = cam_pos + view_dir * t;
         let cloud = sample_cloud_density(sample_pos, sun_dir);
+
+        // Phase E.8 rain effect — visible rain shaft + cloud-bottom
+        // darkening (revised 2026-04-27 post-playtest).
+        //
+        // The `rain_alt_factor` function gives smooth altitude weight:
+        // 0..1 ramping in from -1500 m below cloud, 1 at cloud base,
+        // smoothstep back to 0 over 400 m INTO the cloud. Continuous
+        // at the cloud-base transition → no hard line.
+        //
+        // **Sun-shower coupling**: rain visibility scales with the
+        // local atmospheric content (cloud / mist density at this
+        // sample). Where there's NO mist nearby and the sample is
+        // below cloud base (cloud.density = 0 here), the rain shaft
+        // is barely visible — matches real-world "sun shower" where
+        // light rain falls without a visible wall. Where mist or
+        // cloud bottom IS present, the rain factor amplifies toward
+        // the visible "wall of rain" appearance.
+        //
+        // Final absorption is much subtler than the initial ship
+        // (0.45 → 0.10) because the cloud-body-darken term now does
+        // most of the visual work. Rain shaft is just a soft taper.
+        let rain_density_shaped =
+            smoothstep(0.08, 0.45, cloud.rain_density) * cloud.rain_density;
+        if (rain_density_shaped > 0.0) {
+            // Atmospheric haze coupling: sample's local cloud body
+            // density acts as a "background" the rain darkens against.
+            // Below 0 cloud density → 50% baseline (sun shower).
+            // High cloud density → 100% (full rain wall).
+            let haze_coupling = 0.50 + 0.50 * smoothstep(0.0, 0.30, cloud.density);
+            let rain_absorption = 1.0
+                - exp(-rain_density_shaped * step_dist * ABSORPTION_SCALE * 0.10
+                      * haze_coupling);
+            let rain_color = multiscatter_per_pixel * 0.70;
+            accumulated_color = accumulated_color
+                + rain_color * rain_absorption * (1.0 - accumulated_alpha);
+            accumulated_alpha = accumulated_alpha
+                + rain_absorption * (1.0 - accumulated_alpha);
+        }
+
         if (cloud.density <= 0.0) {
             continue;
         }
