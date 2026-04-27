@@ -18,6 +18,7 @@
 
 pub mod debug_lines;
 pub mod instances;
+pub mod rain_particles;
 pub mod renderer;
 pub mod telemetry;
 
@@ -26,9 +27,11 @@ pub mod hot_reload;
 
 pub use debug_lines::{DebugLineBatch, DebugLineVertex, DebugLinesRenderer};
 pub use instances::{InstanceGpuData, InstanceRenderer};
+pub use rain_particles::{RainParticleSystem, RAIN_PARTICLE_POOL_SIZE};
 pub use renderer::{
     GpuWeatherCell, Renderer, SceneParams, ShadingParams, CLOUD_NOISE_TEST_WGSL_SOURCE,
-    CLOUD_NOISE_WGSL_SOURCE, MAX_WEATHER_CELLS, VOLUMETRIC_WGSL_SOURCE, WATER_WGSL_SOURCE,
+    CLOUD_NOISE_WGSL_SOURCE, MAX_WEATHER_CELLS, RAIN_PARTICLES_WGSL_SOURCE, VOLUMETRIC_WGSL_SOURCE,
+    WATER_WGSL_SOURCE,
 };
 pub use telemetry::Telemetry;
 

@@ -141,6 +141,14 @@ pub struct SceneParams {
     /// Worley grid character that has been producing visible angular
     /// artifacts. Unit vector in the world XZ plane.
     pub wind_dir_horiz: glam::Vec2,
+    /// Precipitation rate (mm/hr) sampled at camera position
+    /// (Post-CM-10 Phase E, 2026-04-27). Drives the screen-space rain
+    /// streak overlay. Sampled once per frame from
+    /// `weather::deltas::precipitation_rate_at(camera_xz, camera_y, time)`
+    /// so the player flying through a precipitation cell sees rain
+    /// streaks past the canopy. Rate range 0 (clear) to ~14 (heavy
+    /// squall). The shader maps this to streak intensity + density.
+    pub precip_intensity: f32,
 }
 
 impl SceneParams {
@@ -163,6 +171,10 @@ impl SceneParams {
                 self.wind_dir_horiz.x,
                 self.wind_dir_horiz.y,
             ],
+            // weather.x = precip_intensity (mm/hr); .y/.z/.w reserved
+            // for future Phase E channels (visibility coupling, snow
+            // fraction, particle scale).
+            weather: [self.precip_intensity, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -191,6 +203,9 @@ impl Default for SceneParams {
             // Default wind blowing toward +X (east). App overrides per
             // frame from W1 wind_at(camera_xz, mid_altitude, time).
             wind_dir_horiz: glam::Vec2::new(1.0, 0.0),
+            // No precipitation by default. App overrides per frame
+            // from W2 precipitation_rate_at(camera_xz, camera_y, time).
+            precip_intensity: 0.0,
         }
     }
 }
@@ -228,6 +243,11 @@ pub const CLOUD_NOISE_WGSL_SOURCE: &str = include_str!("cloud_noise.wgsl");
 /// See `docs/WEATHER.md` § Cloud rendering technique for technique
 /// decisions (pass placement, density storage, lighting model).
 pub const VOLUMETRIC_WGSL_SOURCE: &str = include_str!("volumetric.wgsl");
+
+/// Embedded rain-particle billboard shader (Post-CM-10 Phase E.4).
+/// Loaded from `rain_particles.wgsl`. Renders the world-space rain
+/// particle pool as alpha-blended billboard streaks.
+pub const RAIN_PARTICLES_WGSL_SOURCE: &str = include_str!("rain_particles.wgsl");
 
 /// Maximum W2 weather cells the volumetric raymarcher can hold (C2).
 ///
@@ -323,8 +343,11 @@ struct SceneUniform {
     sun_color: [f32; 4],
     ambient: [f32; 4],
     fog: [f32; 4],
-    // x = seconds since app start; remaining lanes reserved.
+    // x = seconds since app start; y = chop_intensity; zw = wind_dir_horiz.
     time: [f32; 4],
+    // Phase E weather state (Post-CM-10 2026-04-27).
+    // x = precip_intensity (mm/hr at camera); y/z/w reserved.
+    weather: [f32; 4],
 }
 
 /// A wgpu-resident mesh: vertex buffer, index buffer, index count.
@@ -428,6 +451,9 @@ pub struct Renderer {
     /// `BakedAssignments::instances_at_cell` when the active cell set
     /// changes.
     instances: InstanceRenderer,
+    /// Phase E.4 world-space rain particle pool. Active count scales
+    /// with `precip_intensity` plumbed through `SceneParams`.
+    rain_particles: crate::rain_particles::RainParticleSystem,
     /// 2.4.2c: line-list pipeline used by the corner widgets and (later) HUD ladders
     /// and wireframe debug views.
     debug_lines: DebugLinesRenderer,
@@ -805,6 +831,16 @@ impl Renderer {
             &instance_mesh_refs,
         );
 
+        // Phase E.4 rain particle pool. Renders in its own pass after
+        // volumetric clouds. Empty pool until `update_rain_particles`
+        // is called per frame from the app.
+        let rain_particles = crate::rain_particles::RainParticleSystem::new(
+            device,
+            surface_format,
+            &camera_bgl,
+            DEPTH_FORMAT,
+        );
+
         // Two slots: slot 0 = bottom-right orientation gizmo, slot 1 = bottom-left
         // attitude indicator. Each has its own VBO pair so queue writes between
         // render passes in the same command buffer don't clobber each other.
@@ -870,6 +906,7 @@ impl Renderer {
             draw_vehicle: true,
             vehicle,
             instances,
+            rain_particles,
             debug_lines,
             widget_camera_buf_br,
             widget_camera_bg_br,
@@ -1060,6 +1097,29 @@ impl Renderer {
 
     pub fn set_scene(&self, queue: &wgpu::Queue, params: &SceneParams) {
         queue.write_buffer(&self.scene_buf, 0, bytemuck::bytes_of(&params.to_uniform()));
+    }
+
+    /// Phase E.4: advance + upload the rain particle pool. Caller
+    /// passes the camera world position (for spawn box centering),
+    /// `precip_intensity` (mm/hr — drives active count), and the
+    /// current wall-clock time in seconds (drives terminal-velocity
+    /// integration). Active count scales with intensity / 14 mm/hr;
+    /// at 0 the pool is dormant and the render pass is a no-op.
+    pub fn update_rain_particles(
+        &mut self,
+        queue: &wgpu::Queue,
+        camera_pos: glam::Vec3,
+        precip_intensity: f32,
+        current_time_s: f32,
+    ) {
+        self.rain_particles
+            .update(queue, camera_pos, precip_intensity, current_time_s);
+    }
+
+    /// Live rain-particle count for debug HUD readout.
+    #[must_use]
+    pub fn rain_particle_count(&self) -> u32 {
+        self.rain_particles.active_count()
     }
 
     /// Handle a window resize.
@@ -1402,6 +1462,34 @@ impl Renderer {
             pass.set_bind_group(2, &self.volumetric_depth_bg, &[]);
             pass.set_bind_group(3, &self.volumetric_cells_bg, &[]);
             pass.draw(0..3, 0..1);
+        }
+
+        // Phase E.4 rain particle pass. Alpha-blended billboards over
+        // the cloud result, depth-tested so drops occlude correctly
+        // behind terrain. No-op when active_count == 0.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("flowplan-rain-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            self.rain_particles.record(&mut pass, &self.camera_bg);
         }
 
         // Widget passes (Phase 2.4.2c orientation gizmo + 2.4.4e attitude indicator).

@@ -43,6 +43,10 @@ struct SceneUniform {
     // time.y = chop_intensity (water shading)
     // time.zw = wind_dir_horiz (Post-CM-10 Phase A.1 cloud tilt)
     time:      vec4<f32>,
+    // weather.x = precip_intensity (mm/hr at camera) — Post-CM-10
+    // Phase E rain streak overlay; remaining lanes reserved for
+    // visibility coupling, snow fraction, particle scale.
+    weather:   vec4<f32>,
 };
 @group(1) @binding(0) var<uniform> scene: SceneUniform;
 
@@ -1452,5 +1456,11 @@ fn fs_volumetric(in: VsOut) -> @location(0) vec4<f32> {
     let low_smooth = smoothstep(0.0, 1.0 / 6.0, accumulated_alpha) * (1.0 / 6.0);
     let final_alpha = max(banded_alpha, low_smooth);
 
+    // **Phase E.4 note**: the in-volumetric rain overlay was removed
+    // 2026-04-27 in favor of the dedicated `rain_particles` billboard
+    // pass. That pass renders world-anchored particle drops with real
+    // perspective parallax — something the shader-only sampling here
+    // could never give (sampling at fixed-distance walls scrolled the
+    // pattern with camera motion rather than streaking drops past).
     return vec4<f32>(accumulated_color, final_alpha);
 }

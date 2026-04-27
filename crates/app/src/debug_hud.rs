@@ -435,6 +435,23 @@ pub struct DebugCameraOverlay<'a> {
     /// 3.6.3c.6 / 3.2x C1). Reads `ChunkedWeather::resident_count()`.
     /// Zero in scenario playback (weather streaming disabled).
     pub weather_cell_count: usize,
+    /// Precipitation rate (mm/hr) at camera position (Post-CM-10 Phase
+    /// E). Sampled from W2 `precipitation_rate_at`. Zero if camera is
+    /// above cloud base or in a non-precipitating cell type.
+    pub precip_intensity: f32,
+    /// Cell type at camera XZ — diagnostic readout to confirm whether
+    /// the camera is in a Frontal/Squall/Nimbus/Stratus cell that
+    /// could produce visible rain.
+    pub cell_type_label: &'static str,
+    /// Cell base altitude (m) at camera XZ — confirms whether the
+    /// camera (`position.y`) is below or above the cloud base. Precip
+    /// only renders when below.
+    pub cell_base_m: f32,
+    /// Live rain particle count from `Renderer::rain_particle_count()`.
+    /// Confirms whether the GPU pool is active. Zero means the
+    /// `precip_intensity` plumbed into `update_rain_particles` was 0
+    /// (sample failed) or the pool wasn't ticked.
+    pub rain_particle_count: u32,
     /// Most recent terrain mesh-rebuild CPU cost (worker thread).
     pub last_terrain_cpu_ms: f32,
     /// Most recent terrain mesh-rebuild GPU upload cost.
@@ -498,6 +515,11 @@ fn build_debug_camera_ui(ctx: &Context, frame_ms: f32, o: &DebugCameraOverlay<'_
             ui.label(format!("active cells  {}", o.active_cell_count));
             ui.label(format!("instances     {}", o.instance_count));
             ui.label(format!("weather cells {}", o.weather_cell_count));
+            ui.label(format!(
+                "wx@cam   {} base {:>5.0}m  precip {:>4.1} mm/hr",
+                o.cell_type_label, o.cell_base_m, o.precip_intensity
+            ));
+            ui.label(format!("rain particles {}", o.rain_particle_count));
             ui.separator();
             let (status_color, status_text) = if o.rebuild_in_flight {
                 (

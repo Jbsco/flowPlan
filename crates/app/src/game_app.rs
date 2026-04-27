@@ -1592,6 +1592,17 @@ impl Runtime {
         let wind_dir_horiz = wind_horiz
             .try_normalize()
             .unwrap_or(glam::Vec2::new(1.0, 0.0));
+        // Phase E: sample W2 precipitation rate at camera position. Drives
+        // the screen-space rain streak overlay. One W2 cell-state lookup
+        // per frame; cheap.
+        let precip_intensity = flowplan_world::weather::deltas::precipitation_rate_at(
+            WORLD_SEED,
+            &self.terrain,
+            curr.vehicle.position.x,
+            curr.vehicle.position.y,
+            curr.vehicle.position.z,
+            curr.time_of_day,
+        );
         let scene_params = SceneParams {
             sun_dir: sun_direction(local_tod),
             time_seconds: self.start_time.elapsed().as_secs_f32(),
@@ -1599,9 +1610,21 @@ impl Runtime {
             // and rendered surface amplitude stay aligned.
             chop_intensity: curr.chop_intensity,
             wind_dir_horiz,
+            precip_intensity,
             ..SceneParams::default()
         };
         self.renderer.set_scene(&self.queue, &scene_params);
+        // Phase E.4: advance the rain particle pool. Centered on the
+        // vehicle position; same sample point as the `precip_intensity`
+        // query above. When debug-camera is active, drops still cluster
+        // around the vehicle — matches sim semantics (rain is what's
+        // happening at the aircraft, not at the free-camera position).
+        self.renderer.update_rain_particles(
+            &self.queue,
+            curr.vehicle.position,
+            precip_intensity,
+            scene_params.time_seconds,
+        );
 
         // Derive telemetry once per frame from the current snapshot. Both the 3D gizmo
         // and the debug HUD read from this; later phases add the hand-rolled HUD and
@@ -2099,8 +2122,37 @@ impl Runtime {
         // In debug-camera mode we substitute the aircraft-HUD panels with
         // the debug-camera overlay per 3.6.3c.5a.
         let debug_overlay = if self.key_state.debug_active {
+            // Phase E diagnostic: sample cell type + base + precip rate
+            // at camera so the user can confirm whether they're under a
+            // precipitating cell (vs above cloud base, in clear, etc).
+            let cam_pos = self.debug_camera.position.as_vec3();
+            let lookup =
+                flowplan_world::weather::voronoi::cell_at(WORLD_SEED, cam_pos.x, cam_pos.z);
+            let cam_state = flowplan_world::weather::cell_state::state_at_time_with_terrain(
+                WORLD_SEED,
+                &self.terrain,
+                lookup.cell_id,
+                curr.time_of_day,
+            );
+            let cell_type_label = match cam_state.cell_type {
+                flowplan_world::weather::cell_state::CellType::ClearAir => "ClearAir",
+                flowplan_world::weather::cell_state::CellType::Cumulus => "Cumulus ",
+                flowplan_world::weather::cell_state::CellType::Nimbus => "Nimbus  ",
+                flowplan_world::weather::cell_state::CellType::Stratus => "Stratus ",
+                flowplan_world::weather::cell_state::CellType::Squall => "Squall  ",
+                flowplan_world::weather::cell_state::CellType::Frontal => "Frontal ",
+                flowplan_world::weather::cell_state::CellType::Cirrus => "Cirrus  ",
+            };
+            let precip_intensity = flowplan_world::weather::deltas::precipitation_rate_at(
+                WORLD_SEED,
+                &self.terrain,
+                cam_pos.x,
+                cam_pos.y,
+                cam_pos.z,
+                curr.time_of_day,
+            );
             Some(crate::debug_hud::DebugCameraOverlay {
-                position: self.debug_camera.position.as_vec3(),
+                position: cam_pos,
                 heading_deg: self.debug_camera.heading_deg(),
                 pitch_deg: self.debug_camera.pitch * 180.0 / core::f32::consts::PI,
                 speed_mps: self.debug_camera.current_speed_mps(),
@@ -2113,6 +2165,10 @@ impl Runtime {
                     .chunked_weather
                     .as_ref()
                     .map_or(0, crate::chunked_weather::ChunkedWeather::resident_count),
+                precip_intensity,
+                cell_type_label,
+                cell_base_m: cam_state.base_altitude_m,
+                rain_particle_count: self.renderer.rain_particle_count(),
                 last_terrain_cpu_ms: self.last_terrain_rebuild_cpu_ms,
                 last_terrain_gpu_ms: self.last_terrain_rebuild_gpu_ms,
                 rebuild_in_flight: self
