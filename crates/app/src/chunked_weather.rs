@@ -345,28 +345,47 @@ pub struct WeatherChunkUpdate {
 }
 
 /// Compute the set of W2 cell IDs whose seed positions fall within
-/// `radius_m` of `cam`. Uses a finer-than-grid sampling pattern
-/// (every GRID_SPACING_M / 2) so cells smaller than the average get
-/// captured even with the variable-size power-diagram metric.
-#[allow(clippy::cast_possible_truncation)] // small grid count (~32 max)
-#[allow(clippy::cast_precision_loss)] // small i32 (≤ ~32) → f32 is exact
+/// `radius_m` of `cam`. Iterates Voronoi grid cells in a bounding box
+/// and tests each seed's distance directly.
+///
+/// **Direct-seed iteration** (Post-Phase-B 2026-04-27): replaces a
+/// camera-relative sample grid that picked up cells via
+/// `voronoi::cell_at(sample_x, sample_z)`. The sample-grid approach
+/// jittered the active set on tiny camera moves: with variable-size
+/// power-diagram cells, a small cell's territory could be hit by only
+/// 0-1 sample points, so a sub-grid-step camera shift would move the
+/// sample point out of the small cell → cell drops from active_set
+/// → instant disappear in render. Deterministic seed-distance test
+/// fixes this — cells exit cleanly only when their seeds are past
+/// `radius_m` from the camera.
+///
+/// Bbox sizing: streaming `radius_m` + max-jitter buffer. Per
+/// `voronoi.rs`, seeds are jittered up to `JITTER_FRACTION × GRID_SPACING_M`
+/// from grid centers. Conservative bbox = `radius_m + max_jitter` ensures
+/// no seed is missed at the boundary.
+#[allow(clippy::cast_possible_truncation)] // small grid count (~5 max)
+#[allow(clippy::cast_precision_loss)] // small i32 → f32 is exact
 fn active_weather_cells(seed: u64, cam: Vec2, radius_m: f32) -> HashSet<CellId> {
     let mut active = HashSet::new();
-    // Step at half grid spacing for safety against variable cell sizes.
-    let step_m = GRID_SPACING_M * 0.5;
-    let radius_steps = (radius_m / step_m).ceil() as i32 + 1;
     let radius_sq = radius_m * radius_m;
-    for dx in -radius_steps..=radius_steps {
-        for dz in -radius_steps..=radius_steps {
-            let x = cam.x + dx as f32 * step_m;
-            let z = cam.y + dz as f32 * step_m;
-            let dxx = x - cam.x;
-            let dzz = z - cam.y;
-            if dxx * dxx + dzz * dzz > radius_sq {
-                continue;
+    // Max possible jitter from grid center per-axis (matches voronoi.rs).
+    let max_jitter_m = voronoi::JITTER_FRACTION * GRID_SPACING_M;
+    let bbox_radius_m = radius_m + max_jitter_m + GRID_SPACING_M; // extra cell-spacing buffer
+    let cell_radius = (bbox_radius_m / GRID_SPACING_M).ceil() as i32;
+    let cam_ix = (cam.x / GRID_SPACING_M).floor() as i32;
+    let cam_iz = (cam.y / GRID_SPACING_M).floor() as i32;
+    for di in -cell_radius..=cell_radius {
+        for dj in -cell_radius..=cell_radius {
+            let cell_id = voronoi::CellId {
+                ix: cam_ix + di,
+                iz: cam_iz + dj,
+            };
+            let seed_pos = voronoi::seed_position(seed, cell_id);
+            let dx = seed_pos.x - cam.x;
+            let dz = seed_pos.y - cam.y;
+            if dx * dx + dz * dz <= radius_sq {
+                active.insert(cell_id);
             }
-            let lookup = voronoi::cell_at(seed, x, z);
-            active.insert(lookup.cell_id);
         }
     }
     active
