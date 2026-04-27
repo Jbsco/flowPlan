@@ -104,15 +104,24 @@ In-game observation 2026-04-26 surfaced two render-quality issues that aren't co
   - Files: `volumetric.wgsl`, `volumetric_wgsl_parses.rs`.
 - **CM-8 (shipped 2026-04-26)** — **Anisotropic y-stretching for density noise** (canonical "vertical-distribution carving" via the cheapest implementation candidate). Multiplies `world_pos.y` by `VERTICAL_NOISE_STRETCH = 3.0` before passing to `worley_3d` + `cloud_perlin_3d` density calls. Effective vertical noise wavelength becomes ~267 m (was 800 m), giving 5-6 vertical waves per cumulus altitude band instead of 1-2. **Combined with CM-4's linear-remap gating, this delivers the design intent directly**: marginal cells (low coverage_strength) gate the lower noise values → discrete vertical lobes with sky-gaps; well-qualified cells let through the full noise field → continuous mass with vertical detail. No explicit carve term needed. Applied to density-noise calls only — CM-5 altitude perturbation stays at fixed y=0 (its 2D-surface character is intentional). **Direct fix for**: in-game observed "regular ridge rows" from above (`banding_from_above.png`) and "globule structure" from below (`up_from_under.png`) — both are the same Worley grid pattern broken up by anisotropic stretching. **Perf**: 4.23 ms median (was 4.22 ms post-CM-7) — free, just one extra mul. Files: `volumetric.wgsl`, `volumetric_wgsl_parses.rs`.
 - **CM-9 (shipped 2026-04-26)** — **Per-cell-type Worley spacing variation** (formerly priority ladder #4b). New `worley_spacing_for_type(cell_type)` function returns per-type Worley feature scale: Cumulus 800m (medium puffs), Nimbus 600m (denser internal detail), Stratus 2000m (smooth large layers), Squall 500m (small textured), Frontal 1000m (mid-scale bands), ClearAir/haze 1500m (soft low-contrast). Density-noise refactored: Worley now computed per-cell with the cell's spacing; **same-type cache reuse** (`worley_struct2 = worley_struct1` when `cell1.cell_type == cell2.cell_type`) keeps cost down for the typical case (deep-cell-1 + same-type-blend pixels). Mixed-type blend zones pay 2 Worley calls — that's the visual win, where adjacent cell types read with distinct stylistic signatures. Perlin still uses the global spacing (per-type Perlin variation could land in CM-10 if needed). **Perf**: 4.42 ms median (was 4.23 ms post-CM-8) — +0.06 ms minimum (real cost), under 4.5 ms budget. Files: `volumetric.wgsl`, `volumetric_wgsl_parses.rs`.
-- **CM-10 (pending — was CM-9)** — Tuning pass + in-game observation. Final calibration after all visual structure + lighting is in place. Includes:
-  - `BOUNDARY_BLEND_DISTANCE_M` (5 km currently; bisect found 10 km regresses perf for unclear reasons — investigate before widening)
-  - `CLEAR_AIR_MARGIN_CAP` (0.15 currently; raise if transition haze too subtle)
-  - Per-type smoothstep edge bounds
-  - Altitude perturbation amplitudes
-  - Vertical carving amplitudes (CM-8)
-  - Per-type Worley spacings (CM-9)
-  - **Cel-banded alpha tuning** (added 2026-04-26 from `boundary_blend.png` observation): the `floor(α × 6) / 6` quantizer + `< 1/6 → 0` threshold creates sharp visible cutoffs at the α = 0.17 contour. CM-6 boundary blend produces smooth density transitions, but the cel-banding turns them into discrete jumps. Options: more bands (8/10), smoothstep transition near threshold, lower cutoff. Visual-bench pattern recommended for offline tuning.
-  - **CM-7 lighting constants** (`SUN_INTENSITY = 1.8`, `MULTISCATTER_INTENSITY = 0.4`, `AMBIENT_INTENSITY = 0.55`, `SUN_EXTINCTION_SCALE = 0.005`)
+- **CM-10 (in progress 2026-04-26 — multiple iterations)** — Tuning pass + in-game observation. Final calibration after all visual structure + lighting is in place.
+  - **Iteration 1** (initial batch): `CLEAR_AIR_MARGIN_CAP` 0.15 → 0.25 (more haze visibility); cel-banding low-end softening (smoothstep ramp from 0 to 1/6 instead of hard cutoff). Plus 17 new pure-Rust math tests in `crates/render/tests/cloud_math.rs` covering CM-4 linear remap, CM-6 boundary blend linearization, CM-10 cel-band, and WGSL drift guards.
+  - **Iteration 2** (domain warping): added `NOISE_WARP_AMPLITUDE_M = 60` + `NOISE_WARP_SPACING_M = 4000` constants. Density-noise lookup uses `warped_x = world_pos.x + perturb * AMP` and `warped_z = world_pos.z + warp_z_perlin * AMP` (1 extra Perlin call). Breaks the axis-aligned Worley grid regularity that was producing visible east-west bands. Cost: +0.15 ms (now 4.47 ms median, tight against 4.5 ms budget). Added test `wgsl_contains_cm10_domain_warp_formula` regression guard.
+  - **In-game observations 2026-04-26 post-CM-9** (user feedback at each visual checkpoint):
+    - **East-west banding still visible**: residual Worley grid pattern. CM-8 (anisotropic stretch) addressed Y direction; XZ-plane grid regularity persists. Mitigations: domain warping (perturb XZ lookup with low-frequency Perlin), multi-octave Worley (overlay scales for irregular pattern), or larger CLOUD_FEATURES_PER_CELL.
+    - **"Uniform pancake" + low variation**: single-cell scenes show flat thick layer, minimal vertical/horizontal variation. CM-5 perturbation amplitude could be bumped; or this resolves naturally with more adjacent cells via streaming density.
+    - **ClearAir margin not visibly distributing**: cells without active weather don't read as wispy haze even adjacent to active cumulus cells. Likely `CLEAR_AIR_MARGIN_CAP = 0.15` too low. Raise to 0.25 in initial batch.
+    - **Boundary blending still abrupt**: cel-banding's `< 1/6 → 0` threshold creates visible discrete cutoff. Smooth the lowest band with smoothstep.
+    - **"Texture is fluffy and decent"**: CM-8 + CM-9 confirmed working. The grid breakup + per-type spacing landed.
+    - **Streaming density**: only 5-7 active weather cells in typical region (`weather cells 5` HUD). Most cells boundary against sentinel buffer slots → no blend partner. Not a CM-N issue; stream-radius/cell-density tuning post-CM-10.
+  - **Tuning constants** (initial batch + ongoing):
+    - `BOUNDARY_BLEND_DISTANCE_M` (5 km; bisect found 10 km regresses perf for unclear reasons — investigate before widening)
+    - `CLEAR_AIR_MARGIN_CAP` (0.15 → 0.25 in initial batch — raise haze visibility)
+    - Cel-banding low-end softening (smoothstep ramp 0..1/6 instead of hard cutoff)
+    - Per-type smoothstep edge bounds
+    - Altitude perturbation amplitudes
+    - Per-type Worley spacings (CM-9 values: 800/600/2000/500/1000/1500)
+    - CM-7 lighting constants (`SUN_INTENSITY = 1.8`, `MULTISCATTER_INTENSITY = 0.4`, `AMBIENT_INTENSITY = 0.55`, `SUN_EXTINCTION_SCALE = 0.005`)
 
 #### Cloud-pass perf budget — strategic notes (PINNED 2026-04-26)
 

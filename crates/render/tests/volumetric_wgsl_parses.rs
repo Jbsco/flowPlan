@@ -213,6 +213,8 @@ fn volumetric_wgsl_density_model_present() {
         "ALT_PERTURB_SPACING_M",
         "BOUNDARY_BLEND_DISTANCE_M",
         "VERTICAL_NOISE_STRETCH",
+        "NOISE_WARP_AMPLITUDE_M",
+        "NOISE_WARP_SPACING_M",
         "SUN_RAY_STEPS",
         "SUN_EXTINCTION_SCALE",
         "SUN_INTENSITY",

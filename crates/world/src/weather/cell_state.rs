@@ -575,7 +575,14 @@ fn compute_coverage_strength(
 /// Applies when their W1 inputs approach a cloud-bearing type's
 /// threshold. Produces wispy haze instead of zero clouds at the
 /// transition zone, but doesn't fill truly-clear sky.
-pub const CLEAR_AIR_MARGIN_CAP: f32 = 0.15;
+///
+/// **Tuning history**:
+/// - Initial: 0.15 (CM-2 design)
+/// - 2026-04-26: 0.15 → 0.25 (CM-10 tuning batch — in-game playtest
+///   showed `ClearAir` margin too subtle to perceive even adjacent to
+///   active cumulus cells; raised cap so transition haze actually
+///   reads as wispy clouds rather than essentially clear).
+pub const CLEAR_AIR_MARGIN_CAP: f32 = 0.25;
 
 /// Select cell type via weighted-random based on W1 eligibility.
 #[allow(clippy::too_many_arguments)] // W1 state is wide by design.

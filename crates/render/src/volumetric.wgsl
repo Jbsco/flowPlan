@@ -319,6 +319,26 @@ const ALT_PERTURB_SPACING_M: f32 = 3000.0;
 // concept). PINNED 2026-04-26.
 const VERTICAL_NOISE_STRETCH: f32 = 3.0;
 
+// CM-10 domain warping: pre-perturbs the (x, z) coords for the density
+// noise lookup with a low-frequency Perlin field. Breaks the
+// axis-aligned regularity of the Worley feature grid that CM-8's
+// vertical anisotropy alone doesn't fix — visible as east-west
+// "bands" aligned with the X/Z world axes (in-game observation
+// 2026-04-26: bands followed sunrise/sunset axis, which happened to
+// coincide with the Worley grid's X axis).
+//
+// Cost: 1 extra Perlin call per sample (the X-axis warp reuses the
+// existing CM-5 `perturb` sample at fixed y=0; the Z-axis warp adds
+// a new Perlin sample at an offset spatial origin so warp_x and
+// warp_z are decorrelated).
+//
+// Amplitude tuned to ~12.5% of the smallest Worley spacing
+// (Squall = 500m → ~60m warp). At this magnitude, features get
+// shifted enough to break grid alignment but not so much that
+// neighboring features overlap chaotically.
+const NOISE_WARP_AMPLITUDE_M: f32 = 60.0;
+const NOISE_WARP_SPACING_M: f32 = 4000.0;
+
 // Per-cell-type Worley feature spacing (CM-9, 2026-04-26 — formerly
 // priority ladder #4b). Different cloud types have characteristic
 // feature scales:
@@ -657,10 +677,27 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
     // smooth-noise component is uniform so cell types differ only
     // in their Worley character + Perlin/Worley blend weights).
     let y_stretched = world_pos.y * VERTICAL_NOISE_STRETCH;
+
+    // **CM-10 domain warping** — perturb (x, z) before density-noise
+    // lookup to break axis-aligned Worley grid regularity. `perturb`
+    // (computed earlier for CM-5 altitude perturbation) is reused as
+    // warp_x; warp_z samples Perlin at an offset spatial origin so
+    // the two displacement components are decorrelated. Without this,
+    // the Worley grid produces visible bands along world X and Z axes
+    // (in-game observation 2026-04-26).
+    let warp_z_perlin = cloud_perlin_3d(
+        CLOUD_SEED_HI, CLOUD_SEED_LO,
+        CLOUD_PERLIN_OCTAVE,
+        world_pos.x + 7919.0, 0.0, world_pos.z + 6133.0,
+        NOISE_WARP_SPACING_M,
+    );
+    let warped_x = world_pos.x + perturb * NOISE_WARP_AMPLITUDE_M;
+    let warped_z = world_pos.z + warp_z_perlin * NOISE_WARP_AMPLITUDE_M;
+
     let perlin_raw = cloud_perlin_3d(
         CLOUD_SEED_HI, CLOUD_SEED_LO,
         CLOUD_PERLIN_OCTAVE,
-        world_pos.x, y_stretched, world_pos.z,
+        warped_x, y_stretched, warped_z,
         CLOUD_PERLIN_SPACING_M,
     );
     let perlin_norm = clamp((perlin_raw + 0.7) / 1.4, 0.0, 1.0);
@@ -672,7 +709,7 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
         let worley_v1 = worley_3d(
             CLOUD_SEED_HI, CLOUD_SEED_LO,
             CLOUD_WORLEY_OCTAVE,
-            world_pos.x, y_stretched, world_pos.z,
+            warped_x, y_stretched, warped_z,
             spacing1, CLOUD_FEATURES_PER_CELL,
         );
         worley_struct1 = clamp(1.0 - worley_v1.f_blended, 0.0, 1.0);
@@ -690,7 +727,7 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
             let worley_v2 = worley_3d(
                 CLOUD_SEED_HI, CLOUD_SEED_LO,
                 CLOUD_WORLEY_OCTAVE,
-                world_pos.x, y_stretched, world_pos.z,
+                warped_x, y_stretched, warped_z,
                 spacing2, CLOUD_FEATURES_PER_CELL,
             );
             worley_struct2 = clamp(1.0 - worley_v2.f_blended, 0.0, 1.0);
@@ -978,10 +1015,22 @@ fn fs_volumetric(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
-    // Banded-alpha cel-shading (LOCKED in WEATHER.md). 6 bands; hard
-    // edge at low alpha keeps silhouettes crisp.
+    // Banded-alpha cel-shading (LOCKED in WEATHER.md). 6 bands.
+    //
+    // **CM-10 tuning 2026-04-26**: previously the lowest band had a
+    // *hard cutoff* — values below 1/6 snapped to 0, producing a
+    // visible discrete contour line at α ≈ 0.166 wherever density
+    // smoothly faded out (boundary-blend zones, cell edges, ray
+    // glancing exits). The hard line was particularly distracting
+    // at CM-6 cell-blend transitions (`boundary_blend.png` artifact).
+    // Now the lowest band uses a smoothstep ramp from 0 to 1/6, so
+    // alpha fades softly to 0 instead of clipping. Higher bands keep
+    // the discrete cel character — silhouettes stay crisp at the
+    // visible cloud body, but feathery edges no longer terminate in
+    // a sharp line.
     let banded_alpha = floor(accumulated_alpha * 6.0) / 6.0;
-    let final_alpha = select(banded_alpha, 0.0, banded_alpha < (1.0 / 6.0));
+    let low_smooth = smoothstep(0.0, 1.0 / 6.0, accumulated_alpha) * (1.0 / 6.0);
+    let final_alpha = max(banded_alpha, low_smooth);
 
     return vec4<f32>(accumulated_color, final_alpha);
 }
