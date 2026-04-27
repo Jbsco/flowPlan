@@ -197,6 +197,7 @@ fn volumetric_wgsl_density_model_present() {
         "fn altitude_perturbation_amplitude(",
         "fn find_nearest_two_active_cells(",
         "fn perlin_worley_weights_for_type(",
+        "fn worley_spacing_for_type(",
         "fn sample_cloud_density(",
         "fn cell_density_contribution(",
         "fn ray_altitude_band(",

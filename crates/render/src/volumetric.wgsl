@@ -319,6 +319,39 @@ const ALT_PERTURB_SPACING_M: f32 = 3000.0;
 // concept). PINNED 2026-04-26.
 const VERTICAL_NOISE_STRETCH: f32 = 3.0;
 
+// Per-cell-type Worley feature spacing (CM-9, 2026-04-26 — formerly
+// priority ladder #4b). Different cloud types have characteristic
+// feature scales:
+// - Cumulus: medium puffs (current global value).
+// - Nimbus: denser internal structure (deep convection has fine detail).
+// - Stratus: smooth large-scale variation (low contrast layered look).
+// - Squall: small textured features (gust-front turbulent character).
+// - Frontal: mid-scale banded structure.
+// - ClearAir / haze: soft low-contrast (large spacing → smooth wisps).
+//
+// Combined with per-type Perlin/Worley blend weights and CM-8
+// anisotropic y-stretching, this gives each cell type a distinctive
+// visual signature instead of "all clouds same character with
+// different colors." Visible particularly when adjacent cells are
+// different types — boundary blend transitions across a stylistic
+// difference, not just a parameter difference.
+//
+// Cost: Worley primitive can no longer be hoisted as a single
+// shared call across both blend cells; instead computed per-cell
+// (with same-type cache reuse). Same-type cells share one call;
+// mixed-type cells pay 2 Worley calls. Average ~1.05× Worley cost
+// vs CM-8 baseline (~5%, ~0.02 ms).
+fn worley_spacing_for_type(cell_type: u32) -> f32 {
+    switch cell_type {
+        case 1u: { return 800.0; }   // Cumulus — medium puffs
+        case 2u: { return 600.0; }   // Nimbus — denser internal detail
+        case 3u: { return 2000.0; }  // Stratus — smooth large layers
+        case 4u: { return 500.0; }   // Squall — small textured features
+        case 5u: { return 1000.0; }  // Frontal — mid-scale bands
+        default: { return 1500.0; }  // ClearAir / haze — soft low-contrast
+    }
+}
+
 // Per-cell-type Perlin-Worley blend weights (WEATHER.md § Sub-cell
 // detail noise). Cumulus = puffy distinct cells. Nimbus = bulky
 // detailed. Stratus = smooth layered. Squall = textured edges. Frontal
@@ -598,9 +631,8 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
         return CloudSample(0.0, 1.0);
     }
 
-    // Expensive density noise — sampled once, identical for both
-    // cells (global noise field). Only reached when at least one
-    // cell's altitude_profile is positive.
+    // Density noise. Only reached when at least one cell's
+    // altitude_profile is positive.
     //
     // **CM-8 anisotropic y-stretching** (2026-04-26): multiplies
     // world_pos.y by VERTICAL_NOISE_STRETCH before sampling, giving
@@ -608,16 +640,23 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
     // of 1-2. Breaks up the regular Worley grid pattern visible
     // from above as "rows" and from below as "globules". Combined
     // with CM-4's linear-remap gating, marginal cells naturally
-    // produce vertical lobes with sky-gaps (the design intent of
-    // CM-8). Cost: free (one extra mul).
+    // produce vertical lobes with sky-gaps. Cost: free.
+    //
+    // **CM-9 per-cell-type Worley spacing** (2026-04-26): each cell
+    // type has its own Worley feature scale via
+    // `worley_spacing_for_type` — Stratus smooth (2 km), Squall
+    // textured (500 m), Cumulus puffy (800 m), etc. Worley computed
+    // per-cell instead of once globally, but **same-type cells
+    // share a single call** (the typical case for deep-cell-1
+    // pixels and same-type-blend pixels). Mixed-type blend zones
+    // pay 2 Worley calls; that's the visual win — different cell
+    // types read with distinct stylistic signatures.
+    //
+    // Perlin still uses the global CLOUD_PERLIN_SPACING_M (per-type
+    // Perlin variation could land in CM-10 if needed; for now the
+    // smooth-noise component is uniform so cell types differ only
+    // in their Worley character + Perlin/Worley blend weights).
     let y_stretched = world_pos.y * VERTICAL_NOISE_STRETCH;
-    let w = worley_3d(
-        CLOUD_SEED_HI, CLOUD_SEED_LO,
-        CLOUD_WORLEY_OCTAVE,
-        world_pos.x, y_stretched, world_pos.z,
-        CLOUD_WORLEY_SPACING_M, CLOUD_FEATURES_PER_CELL,
-    );
-    let worley_struct = clamp(1.0 - w.f_blended, 0.0, 1.0);
     let perlin_raw = cloud_perlin_3d(
         CLOUD_SEED_HI, CLOUD_SEED_LO,
         CLOUD_PERLIN_OCTAVE,
@@ -626,15 +665,47 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
     );
     let perlin_norm = clamp((perlin_raw + 0.7) / 1.4, 0.0, 1.0);
 
+    // Per-cell Worley with same-type cache reuse.
+    var worley_struct1: f32 = 0.0;
+    if (alt_factor1 > 0.0) {
+        let spacing1 = worley_spacing_for_type(cell1.cell_type);
+        let worley_v1 = worley_3d(
+            CLOUD_SEED_HI, CLOUD_SEED_LO,
+            CLOUD_WORLEY_OCTAVE,
+            world_pos.x, y_stretched, world_pos.z,
+            spacing1, CLOUD_FEATURES_PER_CELL,
+        );
+        worley_struct1 = clamp(1.0 - worley_v1.f_blended, 0.0, 1.0);
+    }
+    var worley_struct2: f32 = 0.0;
+    if (alt_factor2 > 0.0) {
+        if (alt_factor1 > 0.0 && cell1.cell_type == cell2.cell_type) {
+            // Same-type cache reuse: identical Worley spacing → identical
+            // result at the same world position. Saves a redundant call
+            // for adjacent same-type cells (which CM-1 tessellation
+            // expressly designed to render as "one body of weather").
+            worley_struct2 = worley_struct1;
+        } else {
+            let spacing2 = worley_spacing_for_type(cell2.cell_type);
+            let worley_v2 = worley_3d(
+                CLOUD_SEED_HI, CLOUD_SEED_LO,
+                CLOUD_WORLEY_OCTAVE,
+                world_pos.x, y_stretched, world_pos.z,
+                spacing2, CLOUD_FEATURES_PER_CELL,
+            );
+            worley_struct2 = clamp(1.0 - worley_v2.f_blended, 0.0, 1.0);
+        }
+    }
+
     var density: f32 = 0.0;
     if (alt_factor1 > 0.0) {
         density = density + w1 * cell_density_contribution(
-            cell1, alt_factor1, worley_struct, perlin_norm,
+            cell1, alt_factor1, worley_struct1, perlin_norm,
         );
     }
     if (alt_factor2 > 0.0) {
         density = density + w2 * cell_density_contribution(
-            cell2, alt_factor2, worley_struct, perlin_norm,
+            cell2, alt_factor2, worley_struct2, perlin_norm,
         );
     }
     if (density <= 0.0) {
