@@ -129,8 +129,11 @@ pub fn vertical_amp_baseline(cell_type: CellType) -> f32 {
 
 /// Compute `vertical_amp_factor` from `cell_type` + `coverage_strength`.
 ///
-/// Strong cells get up to ~5× nominal amplitude; marginal cells stay
-/// near baseline. `Tower` / `Anvil` profiles get a +30% bonus.
+/// Strong cells get up to ~6.5× nominal amplitude; marginal cells stay
+/// near baseline. `Tower` / `Anvil` profiles get a +50% bonus
+/// (bumped from +30% on 2026-04-26 after in-game observation showed
+/// clouds were still reading as "flat layers" — towering cumulus
+/// needs dramatic vertical extent to register as towering).
 #[must_use]
 pub fn derive_vertical_amp_factor(
     cell_type: CellType,
@@ -140,7 +143,7 @@ pub fn derive_vertical_amp_factor(
     let baseline = vertical_amp_baseline(cell_type);
     let cov_scale = 0.5 + 1.5 * coverage_strength;
     let profile_bonus = match profile_kind {
-        ProfileKind::Tower | ProfileKind::Anvil => 1.30,
+        ProfileKind::Tower | ProfileKind::Anvil => 1.50,
         _ => 1.0,
     };
     baseline * cov_scale * profile_bonus

@@ -338,13 +338,20 @@ fn pixel_hash_unit(p: vec2<i32>) -> f32 {
 // `weather_continuous_coverage_margin` memory pin
 // (continuous-margin sub-phase 5, inside project Phase 3.6.3c.6 / 3.2x).
 fn altitude_perturbation_amplitude(cell_type: u32) -> vec2<f32> {
+    // Tuned 2026-04-26 (Phase B follow-up): doubled cumulus baseline
+    // 500/200 → 800/300 because in-game observation showed clouds
+    // reading as "very flat layers" even after Phase B's
+    // `vertical_amp_factor` scaling. The factor multiplies these
+    // baselines, so a larger baseline gives more visible verticality
+    // at typical cov values (cov=0.5 → factor 1.25 → top shift
+    // ±1000m vs prior ±625m).
     switch cell_type {
-        case 1u: { return vec2<f32>(500.0, 200.0); }   // Cumulus — puffy
+        case 1u: { return vec2<f32>(800.0, 300.0); }   // Cumulus — puffy
         case 2u: { return vec2<f32>(1500.0, 400.0); }  // Nimbus — deep convection
         case 3u: { return vec2<f32>(50.0, 30.0); }     // Stratus — flat layer
-        case 4u: { return vec2<f32>(700.0, 250.0); }   // Squall — textured
-        case 5u: { return vec2<f32>(400.0, 150.0); }   // Frontal — moderate
-        default: { return vec2<f32>(50.0, 50.0); }     // ClearAir / haze — subtle
+        case 4u: { return vec2<f32>(900.0, 350.0); }   // Squall — textured
+        case 5u: { return vec2<f32>(500.0, 200.0); }   // Frontal — moderate
+        default: { return vec2<f32>(80.0, 60.0); }     // ClearAir / haze — subtle
     }
 }
 
@@ -405,7 +412,12 @@ const NOISE_WARP_SPACING_M: f32 = 4000.0;
 // as the carve signal — saves a dedicated Perlin call (~0.1 ms).
 // Lazily aligns carve with density features (carves where Perlin is
 // low) — has the side effect of amplifying the noise contrast.
-const VERTICAL_CARVE_AMP: f32 = 0.6;
+//
+// Tuned 0.6 → 0.4 on 2026-04-26 (Phase B follow-up). At 0.6 the
+// contrast amplification turned the y-stretched noise into visible
+// horizontal-stripe layers (`layers.png`). 0.4 still produces 3D
+// voids in marginal cells but with softer contrast.
+const VERTICAL_CARVE_AMP: f32 = 0.4;
 
 // **Post-CM-10 Phase A.1: wind-shear cumulus tilt** (2026-04-26).
 // Lateral offset (m) applied to the density-noise lookup per unit of
@@ -785,7 +797,18 @@ fn sample_cloud_density(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> CloudSample
     // Perlin variation could land in CM-10 if needed; for now the
     // smooth-noise component is uniform so cell types differ only
     // in their Worley character + Perlin/Worley blend weights).
-    let y_stretched = world_pos.y * VERTICAL_NOISE_STRETCH;
+    // **Variable y-stretch** (Phase B follow-up tuning 2026-04-26):
+    // fixed VERTICAL_NOISE_STRETCH produced a regular vertical
+    // wavelength → at fixed (x, z), Perlin/Worley peak/valley fall
+    // at predictable y intervals → CM-4 gating + carve amplified
+    // these into visible horizontal "stack of layers" stripes
+    // (`layers.png`). Modulating stretch by the existing `perturb`
+    // sample (3 km wavelength) makes adjacent (x, z) regions have
+    // slightly different vertical wavelengths — layers dither across
+    // pixels instead of forming uniform horizontal bands. Free
+    // (reuses existing Perlin sample). Stretch range: ~2.4× to ~3.6×.
+    let local_stretch = VERTICAL_NOISE_STRETCH * (1.0 + 0.3 * perturb);
+    let y_stretched = world_pos.y * local_stretch;
 
     // **CM-10 domain warping** — perturb (x, z) before density-noise
     // lookup to break axis-aligned Worley grid regularity. `perturb`
