@@ -1759,4 +1759,218 @@ mod tests {
         // No suitable cell — soft skip rather than panic. The coverage_strength
         // grid may yield no cell with strength > 0.1 in this 30×30 window.
     }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Phase E.7 backfill — coverage for C/D/E sub-phases
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cirrus_uses_cirrus_profile_kind() {
+        // Cirrus must dispatch to PROFILE_CIRRUS regardless of coverage
+        // strength (Phase B). Ensures the shader picks the wispy thin-band
+        // shape rather than falling back to BELL.
+        for cov in [0.0, 0.5, 1.0] {
+            assert_eq!(
+                derive_profile_kind(CellType::Cirrus, cov),
+                ProfileKind::Cirrus,
+                "cirrus must always use Cirrus profile (cov={cov})"
+            );
+        }
+    }
+
+    #[test]
+    fn mist_uses_fog_profile_kind() {
+        // Mist must dispatch to PROFILE_FOG. Ensures the ground-hugging
+        // profile renders rather than the symmetric BELL.
+        for cov in [0.0, 0.5, 1.0] {
+            assert_eq!(
+                derive_profile_kind(CellType::Mist, cov),
+                ProfileKind::Fog,
+                "mist must always use Fog profile (cov={cov})"
+            );
+        }
+    }
+
+    #[test]
+    fn cirrus_altitude_band_high() {
+        // Cirrus must sit in the 7-11+ km tier — the whole point of the
+        // type is to provide visible high-altitude layering above the
+        // 0-6 km low/mid weather. Tested across a range of surface temps.
+        for t_k in [275.0_f32, 285.0, 295.0] {
+            let s = parameterize(CellType::Cirrus, 0.5, t_k);
+            assert!(
+                s.base_altitude_m >= 6_000.0,
+                "cirrus base too low at t_k={t_k}: {}",
+                s.base_altitude_m
+            );
+            assert!(
+                s.top_altitude_m >= 9_000.0,
+                "cirrus top too low at t_k={t_k}: {}",
+                s.top_altitude_m
+            );
+        }
+    }
+
+    #[test]
+    fn mist_altitude_band_low() {
+        // Mist sits in the 0-300 m ground band. Critical for the ground-
+        // hugging fog character — too high and it stops reading as fog.
+        let s = parameterize(CellType::Mist, 0.85, 283.0);
+        assert_eq!(s.base_altitude_m.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(s.top_altitude_m.to_bits(), 300.0_f32.to_bits());
+        assert_eq!(s.precip_rate_mm_per_hr.to_bits(), 0.0_f32.to_bits());
+    }
+
+    #[test]
+    fn cirrus_no_precip() {
+        // Cirrus is ice crystals at 7+ km — no precipitation reaches the
+        // ground from cirrus regardless of cycle phase.
+        let s = parameterize(CellType::Cirrus, 0.5, 285.0);
+        assert_eq!(s.precip_rate_mm_per_hr.to_bits(), 0.0_f32.to_bits());
+    }
+
+    #[test]
+    fn magnus_dewpoint_at_full_saturation() {
+        // At RH = 1.0, dewpoint equals the air temperature (saturated).
+        for t_k in [263.0_f32, 273.15, 283.0, 293.0, 303.0] {
+            let td = magnus_dewpoint_k(t_k, 1.0);
+            assert!(
+                (td - t_k).abs() < 0.5,
+                "saturated dewpoint should ≈ T at t={t_k}, got td={td}"
+            );
+        }
+    }
+
+    #[test]
+    fn magnus_dewpoint_below_temperature() {
+        // For RH < 1.0, dewpoint is strictly below temperature. Verified
+        // monotonically: lower RH → lower dewpoint.
+        let t_k = 293.0;
+        let td_50 = magnus_dewpoint_k(t_k, 0.50);
+        let td_70 = magnus_dewpoint_k(t_k, 0.70);
+        let td_90 = magnus_dewpoint_k(t_k, 0.90);
+        assert!(td_50 < td_70, "td(50%) {td_50} should be < td(70%) {td_70}");
+        assert!(td_70 < td_90, "td(70%) {td_70} should be < td(90%) {td_90}");
+        assert!(
+            td_90 < t_k,
+            "td(90%) {td_90} should be < t {t_k} (sub-saturated)"
+        );
+    }
+
+    #[test]
+    fn mist_eligibility_humid_calm_cool() {
+        // Mist forms in humid (RH ≥ 0.80) + near-saturation (T ≈ Td) +
+        // calm (wind < 6 m/s) conditions. This is the canonical "morning
+        // mist over the bay" setup.
+        let t_k = 283.0; // ~10 °C
+        let rh = 0.95; // very humid
+                       // At RH=0.95, dewpoint ≈ 282 K so T - Td ≈ 1 K, well within
+                       // MIST_DEWPOINT_PROXIMITY_K = 2.
+        let weights = eligibility_weights(
+            pressure::BASELINE_HPA,
+            t_k,
+            rh,
+            2.0, // calm
+            FRONTAL_GRAD_THRESHOLD * 0.3,
+        );
+        // Index 7 = Mist
+        assert!(
+            weights[7] > 0.0,
+            "mist should be eligible in humid+calm+cool conditions: {weights:?}"
+        );
+    }
+
+    #[test]
+    fn mist_excluded_by_high_wind() {
+        // Strong wind disperses mist — eligibility must drop to zero
+        // even when temperature + humidity are right.
+        let weights = eligibility_weights(
+            pressure::BASELINE_HPA,
+            283.0,
+            0.95,
+            12.0, // strong wind — over the half-squall threshold
+            FRONTAL_GRAD_THRESHOLD * 0.3,
+        );
+        assert_eq!(
+            weights[7].to_bits(),
+            0.0_f32.to_bits(),
+            "mist should be excluded by high wind: {weights:?}"
+        );
+    }
+
+    #[test]
+    fn mist_excluded_by_low_humidity() {
+        // Without near-saturation humidity, mist cannot form.
+        let weights = eligibility_weights(
+            pressure::BASELINE_HPA,
+            283.0,
+            0.50, // moderate humidity
+            2.0,  // calm
+            FRONTAL_GRAD_THRESHOLD * 0.3,
+        );
+        assert_eq!(
+            weights[7].to_bits(),
+            0.0_f32.to_bits(),
+            "mist should be excluded by RH < MIST_MIN_HUMIDITY: {weights:?}"
+        );
+    }
+
+    #[test]
+    fn adjacency_boost_clusters_same_type() {
+        // Phase D: cells whose neighbors are mostly Cumulus should be
+        // more likely to roll Cumulus themselves vs an isolated baseline
+        // sample. Sample a 20×20 grid; count how often Cumulus selects
+        // when the local neighborhood already has many Cumulus cells.
+        // This is a statistical assertion — adjacency raises the rate.
+        let total = 20 * 20;
+        let mut cumulus_count = 0;
+        let mut neighbor_cumulus_concentrations = Vec::new();
+        for ix in 0..20 {
+            for iz in 0..20 {
+                let cell = CellId { ix, iz };
+                let s = initial_state(7777, cell, 0.0);
+                let mut neighbor_cumulus = 0;
+                for di in -1i32..=1 {
+                    for dj in -1i32..=1 {
+                        if di == 0 && dj == 0 {
+                            continue;
+                        }
+                        let n = CellId {
+                            ix: ix + di,
+                            iz: iz + dj,
+                        };
+                        let n_state = initial_state(7777, n, 0.0);
+                        if matches!(n_state.cell_type, CellType::Cumulus) {
+                            neighbor_cumulus += 1;
+                        }
+                    }
+                }
+                if matches!(s.cell_type, CellType::Cumulus) {
+                    cumulus_count += 1;
+                    neighbor_cumulus_concentrations.push(neighbor_cumulus);
+                }
+            }
+        }
+        // Expect at least SOME cumulus cells in the sample — adjacency
+        // can't make them appear from nothing if W1 doesn't allow.
+        assert!(
+            cumulus_count > 0,
+            "expected at least some cumulus cells in 400-cell sample"
+        );
+        // Average neighbor-cumulus count for cells that ARE cumulus
+        // should be > 0 (clustering effect — if no clustering, average
+        // would equal the global rate which is `cumulus_count / 400`).
+        #[allow(clippy::cast_precision_loss)]
+        let avg_self_neighbors =
+            neighbor_cumulus_concentrations.iter().sum::<i32>() as f32 / cumulus_count as f32;
+        #[allow(clippy::cast_precision_loss)]
+        let global_rate = cumulus_count as f32 / total as f32;
+        let global_neighbor_expectation = global_rate * 8.0;
+        assert!(
+            avg_self_neighbors > global_neighbor_expectation,
+            "adjacency clustering should raise neighbor cumulus rate above global: \
+             self-cells avg {avg_self_neighbors:.2} neighbors vs global expectation \
+             {global_neighbor_expectation:.2}"
+        );
+    }
 }

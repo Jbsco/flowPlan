@@ -212,4 +212,76 @@ mod tests {
         let segs = frontal_segments(42, 0.0, 0.0, 0.0, 20_000.0, 0.0);
         assert!(segs.is_empty());
     }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Phase E.7 backfill — band_tangent_at coverage (Phase C feature)
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn band_tangent_returns_unit_vector_or_fallback() {
+        // Sample band_tangent at many points across the world. Result
+        // must always be a unit-length vector (or the Vec2::X fallback,
+        // which is also unit length).
+        for ix in -10..=10 {
+            for iz in -10..=10 {
+                let x = ix as f32 * 50_000.0;
+                let z = iz as f32 * 50_000.0;
+                let t = band_tangent_at(42, x, z, 0.0);
+                let len = t.x.hypot(t.y);
+                assert!(
+                    (len - 1.0).abs() < 1e-4,
+                    "band tangent must be unit-length at ({x}, {z}): got {t:?} len={len}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn band_tangent_perpendicular_to_gradient_when_strong() {
+        // Where the pressure gradient exceeds the threshold, the tangent
+        // must be perpendicular to the gradient direction (dot product
+        // ≈ 0). Sample broadly; check any point with strong gradient.
+        let mut tested = 0;
+        for ix in -20..=20 {
+            for iz in -20..=20 {
+                let x = ix as f32 * 25_000.0;
+                let z = iz as f32 * 25_000.0;
+                let (dp_dx, dp_dz) = pressure_gradient(42, x, z, 0.0);
+                let mag = dp_dx.hypot(dp_dz);
+                if mag < FRONTAL_THRESHOLD_HPA_PER_M {
+                    continue; // weak gradient, skip
+                }
+                let t = band_tangent_at(42, x, z, 0.0);
+                // Skip the fallback case (gradient just under our weak
+                // threshold returns Vec2::X regardless).
+                if t == Vec2::X {
+                    continue;
+                }
+                // Dot product of unit-tangent with gradient direction
+                // should be ~0 (perpendicular).
+                let inv_mag = 1.0 / mag;
+                let dot = t.x * dp_dx * inv_mag + t.y * dp_dz * inv_mag;
+                assert!(
+                    dot.abs() < 1e-3,
+                    "tangent should be perpendicular to gradient at ({x}, {z}): \
+                     dot={dot}, t={t:?}"
+                );
+                tested += 1;
+            }
+        }
+        assert!(
+            tested > 0,
+            "no strong-gradient samples in test region — sample range too small or \
+             FRONTAL_THRESHOLD_HPA_PER_M too high?"
+        );
+    }
+
+    #[test]
+    fn band_tangent_deterministic() {
+        // Same (seed, position, time) must always return the same tangent.
+        let t1 = band_tangent_at(42, 12_345.0, -6_789.0, 100.0);
+        let t2 = band_tangent_at(42, 12_345.0, -6_789.0, 100.0);
+        assert_eq!(t1.x.to_bits(), t2.x.to_bits());
+        assert_eq!(t1.y.to_bits(), t2.y.to_bits());
+    }
 }
