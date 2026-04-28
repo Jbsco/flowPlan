@@ -1709,6 +1709,39 @@ impl Runtime {
             snow_fraction,
             scene_params.time_seconds,
         );
+        // Phase 3.2x.W: advance wingtip vortex pool. Half-span +
+        // size-factor derive from aircraft spec when available.
+        let (half_span_m, wing_size_factor) =
+            self.sim.aircraft.as_ref().map_or((0.0, 1.0), |spec| {
+                let span = (spec.wing_area_m2 * spec.aspect_ratio).sqrt();
+                let half = span * 0.5;
+                let factor = half / 7.0; // Northlander-relative
+                (half, factor)
+            });
+        // Sample ambient mist density at the vehicle position via the
+        // W2 cloud-density field. Couples vortex visibility to
+        // atmospheric content — clear-air flight produces no visible
+        // vortex (matches real-world wingtip-vortex condensation, only
+        // visible when fog/mist provides the medium that the rotating
+        // air pushes around).
+        let wingtip_mist_density = flowplan_world::weather::deltas::cloud_density_at(
+            WORLD_SEED,
+            &self.terrain,
+            curr.vehicle.position.x,
+            curr.vehicle.position.y,
+            curr.vehicle.position.z,
+            curr.time_of_day,
+        );
+        self.renderer.update_wingtip_vortex(
+            &self.queue,
+            curr.vehicle.position,
+            curr.vehicle.orientation,
+            curr.vehicle.velocity,
+            half_span_m,
+            wing_size_factor,
+            wingtip_mist_density,
+            scene_params.time_seconds,
+        );
 
         // Derive telemetry once per frame from the current snapshot. Both the 3D gizmo
         // and the debug HUD read from this; later phases add the hand-rolled HUD and

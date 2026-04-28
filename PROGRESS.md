@@ -17,19 +17,28 @@ All five post-CM-10 sub-phases shipped over this iteration. Cloud + rain pass to
 - **E.3 (rain vs snow type derivation)** — `snow_fraction` via `smoothstep(275, 271 K, t_at_camera)`. Lerps fall speed (rain 18 m/s ↔ snow 1.5 m/s) + shader streak shape (rain thin streak ↔ snow round flake) + brightness/opacity.
 - **E.4 (world-space particle pool)** — `RainParticleSystem` with 4096 fixed pool. Particles anchored in world coords with PCG hash + camera-relative billboard rendering. **Bug found + fixed**: engine uses camera-relative rendering — `view_proj` built with translation = 0; vertex shaders MUST subtract `camera.view_pos` before applying.
 
-**Follow-on plan (encoded as new tasks #332-#335; execution starting this iteration):**
+**Follow-on shipped (E.0 / E.5a / E.5b / E.6 / E.7 / E.8):**
 
-| Step | Description | Est. |
+| Step | Description | Status |
 |------|-------------|------|
-| 0 | **Tuning knobs** — CLEAR_AIR_PRIOR 2.5→2.0, NIMBUS_MIN_HUMIDITY 0.70→0.65, SQUALL_MIN_WIND_MPS 14→12, elig_frontal 2.0→3.0. Currently P(rain) ≈ 17% in typical conditions, mostly drizzle. Knobs raise heavy-rain probability without breaking gating discipline. | 10 min |
-| 1 | **E.5a temporal smoothing** — low-pass filter (~1s) on `precip_intensity` + derived `fog_density` so transitions fade instead of snap on cell-entry/exit. CPU-side state in app. | 30 min |
-| 2 | **E.5b multi-sample distance fog** — sample weather at camera+0/2/5/10 km along view direction; take max() for fog density. Approaching a storm thickens visibility *before* entering the cell. ~5 CPU samples per frame. | 45 min |
-| 3 | **E.6 volumetric mist (Mist cell type)** — new `CellType::Mist` with low altitude band (0-300m), conditions: T - dewpoint < 2 K + low altitude + over-water boost. Renders via existing volumetric raymarcher (no new pipeline). Dewpoint derived from RH + T. Visibility hazard + visual impactor. Morning mist eyecatch falls out from existing diurnal temperature cycle (cold dawn, warm afternoon). | 90 min |
-| 4 | **E.7 test coverage backfill** — unit tests for C/D/E sub-phases: cirrus parameterization, adjacency clustering, fog-density linearity, snow-fraction transition, frontal band-tangent perpendicularity, particle pool recycle/lerp. ~10 tests. | 45 min |
+| 0 | **Tuning knobs** — `CLEAR_AIR_PRIOR 2.5→2.0`, `NIMBUS_MIN_HUMIDITY 0.70→0.65`, `SQUALL_MIN_WIND_MPS 14→12`, `elig_frontal 2.0→3.0`. Raises heavy-rain probability while keeping ClearAir as the plurality. | shipped |
+| E.5a | **Temporal smoothing** — `1 - exp(-dt/τ)` low-pass with τ = 1 s on both at-camera precip + look-ahead precip. Rain particles + fog fade in/out instead of snapping. CPU-side state in `GameApp`. | shipped |
+| E.5b | **Multi-sample distance fog** — samples precip at camera + 0/2/5/10 km along view direction; max drives `fog_density`. Approaching a storm thickens visibility before camera enters the cell. | shipped |
+| E.6 | **Volumetric mist** as `CellType::Mist`. Magnus dewpoint formula (`magnus_dewpoint_k`); eligibility: `RH ≥ 0.80 ∧ T - Td < 2 K ∧ wind < 6 m/s`. Altitude band 0-300 m, density 0.65, no precip, 3 hr life cycle. New `PROFILE_FOG` (solid base, fades up). `GLOBAL_CLOUD_BASE_M` lowered 200 m → 0 m so raymarch covers ground level. | shipped |
+| E.7 | **Test coverage backfill** — 14 new tests for C/D/E sub-phases: Cirrus + Mist profile/altitude/no-precip checks, Magnus dewpoint at saturation + monotonicity, Mist eligibility (humid+calm+cool, excluded by wind/dry), adjacency clustering statistical assertion, frontal band-tangent perpendicularity (441 sample points), determinism. **111 weather tests passing** (up from 97). | shipped |
+| E.8 | **Visible weather cast** — rain shafts visible from outside the precip cell. `precip_rate_mm_per_hr` plumbed to `GpuWeatherCell`; `CloudSample.rain_density` flows through all paths. `rain_alt_factor(dy, shaft_depth, darken_band)` gives continuous transition: linear ramp 1500 m below cloud → smoothstep into cloud bottom 400 m → 0 above. Cloud bottom darkens (meteorologically correct). Sun-shower coupling: rain visibility scales with local cloud body density (50%-100%) — clear-air rain barely visible. | shipped |
+
+**Final perf: 3.24 ms cloud-pass** (was 3.11 ms pre-E.5+; +0.13 ms for the new effects, still 1.46 ms under the 4.7 ms budget).
+
+**E.8 tuning history (during ship):**
+- v1 absorption 0.45 + raw ambient color → "opaque dark column," wider than cloud, hard upper edge
+- v2 absorption 0.20 + multiscatter × 0.75 → still hard upper edge from `world_pos.y < cell.base` discontinuity
+- v3 (final) absorption 0.10 + `rain_alt_factor` smoothstep band + sun-shower coupling → continuous cloud-bottom-to-shaft transition, subtler overall, scales with local atmospheric content
+- User feedback at v3: "difficult to perceive at a distance — preferable to too much" — accepted as ship-ready
 
 **Deferred:**
-- Per-pixel terrain-aware mist (proper basin-filling) — bigger scope; revisit if E.6 cell-band approximation doesn't read right
-- Rain-availability re-tuning post-test if knobs aren't enough
+- Per-pixel terrain-aware mist (proper basin-filling) — bigger scope; revisit if E.6 cell-band approximation doesn't read right post-playtest.
+- Rain-shadow further visibility tuning if v3 too subtle in playtest.
 - Phase 6 replay determinism: rain particle pool uses ad-hoc xorshift, not deterministic across replays. Not needed for v1.
 
 **Memory pin** for the execution plan: `weather_phase_e_followon_plan.md`.

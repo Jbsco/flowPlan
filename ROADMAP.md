@@ -652,26 +652,28 @@ Consumes the 2.5a.7 chop hook (`SimState.chop_intensity`) and the 3.2 wind state
 - [ ] Author crosswind / headwind / tailwind takeoff + landing pairs once 3.2 wind state is plumbed into the aero surfaces — the wind deferrals enumerated in 2.5a follow-ups close here.
 - [ ] Re-baseline `beaver_preview` / `scene_extended` visual snapshots post-chop-wiring (pending `cargo insta accept`).
 
-### Milestone 3.2x: Weather visuals & particle system
+### Milestone 3.2x: Weather visuals & particle system -- LARGELY SHIPPED 2026-04-27
 
 Parallel to 3.2 (state) and 3.2b (chop). Weather **state** is one problem; weather **visuals** are another, and flowPlan has no particle system yet. This milestone builds the visual/particle layer that the rest of Phase 3+ will reuse.
 
-- [ ] **Particle system architecture:** preallocated pool, arena-backed per-frame instances, LOD + distance culling, lifecycle (spawn / update / despawn) on the render side. No allocations in the render hot path.
-- [ ] **Volumetric clouds** — target volumetric rendering from the start. 2D billboards rejected (fundamentally cannot render camera-inside-cloud, and players will invariably fly through clouds — see `cloud_flythrough_requirement` memory). Design spec comes from the [pre-3.2x cloud rendering research memo](#cloud-rendering-research-memo-pre-32x) (`docs/CLOUDS.md`). Implementation requirements:
-    - **Raymarched volumetric** with CPU-GPU shared noise field (Perlin-Worley blend). Camera-inside-cloud handled natively.
-    - **Weather-Voronoi-cell lookup** per raymarch sample (from 3.2; see [MAPGEN.md § Weather Voronoi layer](MAPGEN.md#weather-voronoi-layer-second-partition)). Cell provides gross weather-system shape (base/top altitude, density, column height, storm state); Perlin-Worley noise provides sub-cell detail. Adjacent-cell density interpolation at Voronoi edges for organic blending.
-    - **CPU-samplable density:** expose `world::cloud_density(x, y, z, t)` using the same formula the shader samples — bit-identical by construction. Pattern matches `world::water_height(x, z, t)` from Phase 2.2. Sim consumes this for turbulence / visibility / icing (see 3.2 "Weather affects flight").
-    - Banded alpha + hard-edge thresholding for cel-shading compatibility.
-    - Sized to sit within the frame budget — reference-tier 240 Hz cap of 60% GPU utilization is the ceiling; per-pass budget target ≤ 0.6 ms at reference.
-    - Deferred beyond v1: cloud shadows on terrain, volumetric light scattering through gaps, multi-layer cloud decks (though weather-Voronoi already supports altitude-stratified decks structurally).
-- [ ] **Rain / snow particles** — world-space streaks (far) + screen-space on-windshield overlay (near-camera). Density scales with precipitation regime from 3.2.
-- [ ] **Layer fog render** — horizontal fog plane at altitude (huge atmosphere win over valleys; the `ground_mist | wingtip_mist | layer_fog | dense_fog` state ladder's visual layer).
-- [ ] **Wingtip mist effect** — the signature mood beat from PLAN.md. Thin-column particle emitter at wingtip positions under humidity + low-altitude + water-takeoff conditions.
-- [ ] **Wake + spray particles (water)** — closes the 2.5a.X visual polish deferrals (wake spawn behind floats, spray at high-speed water operations, touchdown moment).
-- [ ] **Wind debris particles** — leaves in autumn, dust in dry biomes, blowing snow in winter. Deterministic per-chunk spawn from weather-RNG stream so replay works.
-- [ ] **Flag flutter at hubs** — small geometry-driven (not particle) but grouped here because it's the same wind-state consumer.
+- [x] **Particle system architecture:** preallocated pool, arena-backed per-frame instances, LOD + distance culling, lifecycle (spawn / update / despawn) on the render side. *(Shipped Phase E.4 as `RainParticleSystem` — fixed pool of 4096, world-anchored, recycled by lifetime + camera-distance + altitude. Pattern reusable for wingtip mist / wake / debris.)*
+- [x] **Volumetric clouds** — target volumetric rendering from the start. 2D billboards rejected (fundamentally cannot render camera-inside-cloud, and players will invariably fly through clouds — see `cloud_flythrough_requirement` memory). Design spec comes from the [pre-3.2x cloud rendering research memo](#cloud-rendering-research-memo-pre-32x) (`docs/CLOUDS.md`). Implementation:
+    - [x] **Raymarched volumetric** with CPU-GPU shared noise field (Perlin-Worley blend). Camera-inside-cloud handled natively. *(Shipped B1-B3c + CM-1..10 + post-CM-10 phases A-E.)*
+    - [x] **Weather-Voronoi-cell lookup** per raymarch sample. *(Shipped 3-cell softmax in Phase 3.6.3c.6 / 3.2x C2 + V-cut fix Post-Phase-B.)*
+    - [x] **CPU-samplable density:** `world::cloud_density(x, y, z, t)`. *(Shipped Phase 3.2.3 + extended in Phase E.6 with `magnus_dewpoint_k`.)*
+    - [x] Banded alpha + hard-edge thresholding for cel-shading compatibility. *(Shipped CM-10 with low-end smoothstep.)*
+    - [x] **Per-pass budget**: 3.24 ms at 1080p (target ≤ 4.7 ms gate; ≤ 0.6 ms reference target deferred behind GPU 3D noise textures cost-recovery option).
+    - Deferred beyond v1: cloud shadows on terrain, volumetric light scattering through gaps, multi-layer cloud decks.
+- [x] **Rain / snow particles** — world-space streaks (far) + screen-space on-windshield overlay (near-camera). *(Shipped E.4 world-space particle pool + E.3 rain/snow temperature derivation; cloud-bottom darkening + rain shafts visible from afar shipped E.8.)*
+- [x] **Layer fog render** — horizontal fog plane at altitude. *(Shipped Phase E.6 as `CellType::Mist` — volumetric ground-hugging fog via the cloud raymarcher; conditions: T-dewpoint < 2 K + RH ≥ 0.80 + calm wind. Per-pixel terrain-following deferred.)*
+- [ ] **Wingtip mist effect** — the signature mood beat from PLAN.md. Thin-column particle emitter at wingtip positions under humidity + low-altitude + water-takeoff conditions. *(Particle pool architecture from E.4 reusable; needs aircraft-wing-position attach + W3 humidity sample at wingtip + spawn gating.)*
+- [ ] **Wake + spray particles (water)** — closes the 2.5a.X visual polish deferrals (wake spawn behind floats, spray at high-speed water operations, touchdown moment). *(Likely depends on 3.5b FFT ocean for proper waterline interaction.)*
+- [ ] **Wind debris particles** — leaves in autumn, dust in dry biomes, blowing snow in winter. Deterministic per-chunk spawn from weather-RNG stream so replay works. *(Depends on 3.6.4 biome-specific environments for asset/region rules.)*
+- [ ] **Flag flutter at hubs** — small geometry-driven (not particle) but grouped here because it's the same wind-state consumer. *(Depends on hub system arrival in 3.6.3c.3+.)*
 
 Storm visuals, atmospheric optics (halos, sun-dogs, rainbows, crepuscular rays), and lightning flashes slip to Phase 5.5 polish unless a compelling bench scenario pulls them forward.
+
+**Net 3.2x state**: core volumetric weather system shipped end-to-end. Remaining items are gameplay/biome-specific particle effects that depend on later milestones (3.5b water, 3.6.3c hubs, 3.6.4 biome environments). 3.2x is **functionally complete for the weather-visual aspect** and unblocks downstream Phase 3 milestones.
 
 ### Milestone 3.3: Sim worker thread
 

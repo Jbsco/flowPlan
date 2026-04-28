@@ -21,6 +21,7 @@ pub mod instances;
 pub mod rain_particles;
 pub mod renderer;
 pub mod telemetry;
+pub mod wingtip_vortex;
 
 #[cfg(feature = "shader-hot-reload")]
 pub mod hot_reload;
@@ -31,9 +32,10 @@ pub use rain_particles::{RainParticleSystem, RAIN_PARTICLE_POOL_SIZE};
 pub use renderer::{
     GpuWeatherCell, Renderer, SceneParams, ShadingParams, CLOUD_NOISE_TEST_WGSL_SOURCE,
     CLOUD_NOISE_WGSL_SOURCE, MAX_WEATHER_CELLS, RAIN_PARTICLES_WGSL_SOURCE, VOLUMETRIC_WGSL_SOURCE,
-    WATER_WGSL_SOURCE,
+    WATER_WGSL_SOURCE, WINGTIP_VORTEX_WGSL_SOURCE,
 };
 pub use telemetry::Telemetry;
+pub use wingtip_vortex::{WingtipVortexSystem, WINGTIP_POOL_SIZE};
 
 // Dev-deps are consumed by `tests/visual_snapshot.rs` (Tier-3, hardware-gated). Mark
 // them as intentional here so the lib-test target does not trip

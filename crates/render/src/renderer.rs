@@ -261,6 +261,11 @@ pub const VOLUMETRIC_WGSL_SOURCE: &str = include_str!("volumetric.wgsl");
 /// particle pool as alpha-blended billboard streaks.
 pub const RAIN_PARTICLES_WGSL_SOURCE: &str = include_str!("rain_particles.wgsl");
 
+/// Embedded wingtip-vortex billboard shader (Phase 3.2x.W).
+/// Renders condensation puffs at aircraft wingtip world positions
+/// using the same world-up-aligned billboard pattern as rain particles.
+pub const WINGTIP_VORTEX_WGSL_SOURCE: &str = include_str!("wingtip_vortex.wgsl");
+
 /// Maximum W2 weather cells the volumetric raymarcher can hold (C2).
 ///
 /// Storage buffer is sized to this constant. The actual active cell
@@ -480,6 +485,11 @@ pub struct Renderer {
     /// Phase E.4 world-space rain particle pool. Active count scales
     /// with `precip_intensity` plumbed through `SceneParams`.
     rain_particles: crate::rain_particles::RainParticleSystem,
+    /// Phase 3.2x.W wingtip vortex pool. Particles spawn at the
+    /// aircraft wingtips when airspeed exceeds production threshold,
+    /// persist ~4 sec while fading. World-anchored so they trail the
+    /// flight path naturally as the aircraft maneuvers.
+    wingtip_vortex: crate::wingtip_vortex::WingtipVortexSystem,
     /// 2.4.2c: line-list pipeline used by the corner widgets and (later) HUD ladders
     /// and wireframe debug views.
     debug_lines: DebugLinesRenderer,
@@ -867,6 +877,15 @@ impl Renderer {
             &scene_bgl,
             DEPTH_FORMAT,
         );
+        // Phase 3.2x.W wingtip vortex pool. Renders in its own pass
+        // after rain particles. Empty until `update_wingtip_vortex` is
+        // called from the app each frame with current vehicle state.
+        let wingtip_vortex = crate::wingtip_vortex::WingtipVortexSystem::new(
+            device,
+            surface_format,
+            &camera_bgl,
+            DEPTH_FORMAT,
+        );
 
         // Two slots: slot 0 = bottom-right orientation gizmo, slot 1 = bottom-left
         // attitude indicator. Each has its own VBO pair so queue writes between
@@ -934,6 +953,7 @@ impl Renderer {
             vehicle,
             instances,
             rain_particles,
+            wingtip_vortex,
             debug_lines,
             widget_camera_buf_br,
             widget_camera_bg_br,
@@ -1155,6 +1175,47 @@ impl Renderer {
     #[must_use]
     pub fn rain_particle_count(&self) -> u32 {
         self.rain_particles.active_count()
+    }
+
+    /// Phase 3.2x.W: advance + upload the wingtip vortex pool. Call
+    /// once per frame with current vehicle pose + velocity + the
+    /// aircraft's half-span (computed from `wing_area_m2 ×
+    /// aspect_ratio).sqrt() / 2`) and a wing-size factor (default
+    /// `half_span / 7.0` for Northlander-relative scaling).
+    ///
+    /// `mist_density` couples vortex visibility to ambient atmospheric
+    /// content — sampled at the aircraft position via the existing
+    /// W2 cloud-density field. Below `MIN_MIST_DENSITY` the system
+    /// produces no visible vortex (matches real-world wingtip-vortex
+    /// condensation, which only renders in fog/mist).
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_wingtip_vortex(
+        &mut self,
+        queue: &wgpu::Queue,
+        vehicle_pos: glam::Vec3,
+        vehicle_orient: glam::Quat,
+        vehicle_velocity: glam::Vec3,
+        half_span_m: f32,
+        wing_size_factor: f32,
+        mist_density: f32,
+        current_time_s: f32,
+    ) {
+        self.wingtip_vortex.update(
+            queue,
+            vehicle_pos,
+            vehicle_orient,
+            vehicle_velocity,
+            half_span_m,
+            wing_size_factor,
+            mist_density,
+            current_time_s,
+        );
+    }
+
+    /// Live wingtip-vortex particle count for debug HUD readout.
+    #[must_use]
+    pub fn wingtip_vortex_count(&self) -> u32 {
+        self.wingtip_vortex.active_count()
     }
 
     /// Handle a window resize.
@@ -1526,6 +1587,34 @@ impl Renderer {
             });
             self.rain_particles
                 .record(&mut pass, &self.camera_bg, &self.scene_bg);
+        }
+
+        // Phase 3.2x.W wingtip vortex pass — alpha-blended billboard
+        // puffs depth-tested against the existing scene depth.
+        // No-op when active_count == 0.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("flowplan-wingtip-vortex-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            self.wingtip_vortex.record(&mut pass, &self.camera_bg);
         }
 
         // Widget passes (Phase 2.4.2c orientation gizmo + 2.4.4e attitude indicator).
