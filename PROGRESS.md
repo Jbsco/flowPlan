@@ -3,6 +3,45 @@
 
 Authoritative snapshot of what is built, what conventions are locked, and what comes next. Read this after [CLAUDE.md](CLAUDE.md) and before making any changes. Designed to survive session compaction / agent handoff -- if a detail isn't here, ask or re-derive from the specs and source.
 
+## 2026-04-27 (iteration 23) — Phase 3.2x.W: wingtip vortex ribbon
+
+Visual polish item from the 3.2x backlog. Adds a continuous parametric ribbon helix per wingtip — visible vortex condensation effect for misty conditions (matches real-world reference: vortex visible only when there's atmospheric particulate to push around).
+
+**Architectural pivot from initial particle attempt**:
+1. **v1 (particles, abandoned)** — `RainParticleSystem`-style pool with rings of 8 puffs spawned at intervals. Looked like discrete spaced ring-clouds; couldn't form a continuous tube no matter how dense. Confirmed by user playtest — discrete rings instead of helical ribbon.
+2. **v2 (ribbon, shipped)** — per-wing `VecDeque<Waypoint>` ring buffer. Each frame appends current wingtip position; expired waypoints drop. Per-frame regenerate triangle-strip vertex buffer from waypoints using two parametric circular functions:
+   - `inner = spine + r_inner(age) × (cos θ(age) · perp_a + sin θ(age) · perp_b)`
+   - `outer = spine + r_outer(age) × (cos θ(age) · perp_a + sin θ(age) · perp_b)`
+   - Triangles connect successive `(inner_i, outer_i)` pairs → continuous helical surface.
+   - Determinism improved over v1 (no RNG; pure aircraft history).
+
+**Speed coupling (post-playtest, two tuning rounds)**:
+- **Rotation rate ω inverse-linear in speed** — `ω = 25 × (80 - speed) / (80 - 35)` clamped. 25 rad/s at 35 m/s reference; 0 rad/s at 80 m/s (~Vne); ramps higher than reference at slow flight (capped 2×). Matches real-world physics: high-AoA slow flight = strong rotation per unit air; cruise = gentle / sheared-flat.
+- **Ribbon thickness inverse-linear in speed** — `thickness_factor = clamp(REFERENCE_SPEED / speed, 0.5, 2.0)`. Thickness BASE 0.35 m at reference, 0.7 m at 17.5 m/s, 0.18 m at 70 m/s. Matches "force differential by airflow over central 60-70% of wing section" — slow flight has more time per unit travel for vapor expansion.
+- **Inner radius growth 0.40 m/s; thickness growth 0.20 m/s** → outer absolute growth 0.60 m/s at reference. Vortex spreads outward AND widens with age (real-world breakdown character).
+- **Alpha attenuates with speed**: `alpha *= (1.4 - speed_factor × 0.4).clamp(0.4, 1.4)` → high speed = thinner + more transparent (subtle cruise hint); low speed = opaque + dramatic.
+- Reference speed shifted 45 → 35 m/s (typical bushplane mid-cruise/approach). Lifetime 1.5 s, waypoints 120/sec — short + densely sampled for sharp helix character.
+
+**Aircraft-spec hooks**:
+- `wing_size_factor = half_span / 7.0` derived from `(wing_area_m2 × aspect_ratio).sqrt() / 2`. Catalina at 31.7 m wingspan → `factor = 2.27` → ~2× larger vortices than Northlander at 14.6 m. Future v3 could add airfoil-driven CL_max from `airfoil_root` / `airfoil_tip` NACA designations to spike intensity at high-AoA / stalled flight.
+
+**Visibility gates**:
+- `airspeed ≥ 15 m/s` AND
+- `mist_density ≥ 0.05` (sampled via `weather::deltas::cloud_density_at(vehicle_pos, time)`)
+
+Clear-air flight produces no waypoints — matches real-world wingtip-vortex condensation (only visible in fog/mist where there's atmospheric particulate for the rotating air to push around).
+
+**Origin offset**: `+0.05 m` vertical lift above raw wingtip world position. Empirical tune to align with the visible wingtip mesh on Northlander; per-aircraft offset is future work.
+
+**Cost**: cloud-pass 3.39 ms (was 3.24 ms pre-wingtip; +0.15 ms acceptable, well under 4.7 ms budget). Two render-pass draw calls (left + right ribbon), CPU vertex buffer regeneration per frame at 720 max verts.
+
+**Files**:
+- `crates/render/src/wingtip_vortex.rs` (~430 lines)
+- `crates/render/src/wingtip_vortex.wgsl` (~30 lines)
+- `crates/render/tests/wingtip_vortex_wgsl_parses.rs`
+- Renderer integration in `renderer.rs` (`update_wingtip_vortex` + render-pass slot after rain particles)
+- Game-app integration in `game_app.rs` per-frame call with vehicle state + wing-spec derivation + mist sample
+
 ## 2026-04-27 (iteration 22) — Phase 3.6.3c.6 / 3.2x post-CM-10 sub-phases A-E shipped + follow-on plan
 
 All five post-CM-10 sub-phases shipped over this iteration. Cloud + rain pass total **3.11 ms cloud-perf** (1.6 ms under the 4.7 ms budget).

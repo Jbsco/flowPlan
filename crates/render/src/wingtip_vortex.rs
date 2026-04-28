@@ -64,50 +64,116 @@ pub const WINGTIP_POOL_SIZE: usize = WINGTIP_VERTEX_CAPACITY;
 /// circulation is strong enough to register even in mist.
 const MIN_PRODUCTION_SPEED_MPS: f32 = 15.0;
 
-/// Reference cruise speed for parametric scaling. Rotation rate ω,
-/// initial radius, expansion all scale relative to this.
-const REFERENCE_CRUISE_MPS: f32 = 45.0;
+/// Reference speed (m/s) for parametric scaling. Rotation rate ω,
+/// thickness, and alpha all calibrated such that this speed produces
+/// the canonical visible vortex character. Per playtest 2026-04-27:
+/// 35 m/s (~70 kts) — typical bushplane mid-cruise / approach speed.
+/// At this speed `speed_factor = 1.0` and the ribbon hits its target
+/// thickness + rotation rate.
+const REFERENCE_CRUISE_MPS: f32 = 35.0;
+
+/// Speed (m/s) at which rotation rate ω → 0. Modeled after the
+/// real-world physics intuition that very high airspeed shears the
+/// vortex flat (low-AoA cruise = gentle rotation per unit air; near
+/// Vne the visible spiral character disappears entirely). Roughly
+/// the Vne / max-cruise speed for a Beaver-class GA aircraft.
+const ROTATION_ZERO_SPEED_MPS: f32 = 80.0;
 
 /// Mist density threshold for visible vortex. Below = no spawn.
 const MIN_MIST_DENSITY: f32 = 0.05;
 
-/// Vertical offset (m) applied to the wingtip spawn position to match
-/// the visible mesh. See note in v1; calibrated for Northlander.
-const WINGTIP_VERTICAL_OFFSET_M: f32 = 0.05;
+/// Vertical offset (m, **in body up-direction**) applied to the wingtip
+/// spawn position. Applied via `vehicle_orient × Vec3::Y` so the offset
+/// rotates with the aircraft — at landing approach (high-AoA), the
+/// offset stays perpendicular to the wing rather than world-vertical.
+///
+/// **Tuning history**:
+/// - 0.05 m (ship-1, world-Y): origin appeared low on visible mesh
+/// - 0.20 m (ship-2, world-Y): better but orientation confusion at `AoA`
+/// - 0.20 m (ship-3 2026-04-27, **body-Y**): now follows wing during
+///   pitch/bank — vortex stays attached to wingtip in flight frame
+const WINGTIP_VERTICAL_OFFSET_M: f32 = 0.20;
 
-/// Particle/ribbon lifetime (s). After this the waypoint is dropped.
+/// Forward/aft offset (m, in body forward direction) for the wingtip
+/// spawn. Negative = aft of vehicle origin (typical for wing
+/// trailing-edge alignment on a Beaver-like aircraft). Currently 0
+/// — pending playtest tune to align with visible wingtip mesh.
+const WINGTIP_FORWARD_OFFSET_M: f32 = 0.0;
+
+/// Ribbon lifetime (s). After this the waypoint is dropped.
 /// Combined with rotation rate, sets the number of visible loops:
-/// `total_rotation = ω × lifetime`. With ω ≈ 5 rad/s and lifetime
-/// 3 s, that's ~2.4 complete loops — matches "fade out after a few
-/// complete loops" from design discussion.
-const RIBBON_LIFETIME_S: f32 = 3.0;
+/// `total_rotation = ω × lifetime`. With ω ≈ 29 rad/s at landing
+/// (28 m/s) and lifetime 0.8 s, that's ~3.7 complete loops — the
+/// playtest target ("3-4 visible loops at slow flight").
+///
+/// **Tuning history**:
+/// - 3.0 s initial: visible trail too long; loops too sparse
+/// - 1.5 s (ship-2 2026-04-27): "shorter/more compressed" — landed
+///   at ~6 visible loops at landing speed, still too dense
+/// - 0.8 s (ship-3 2026-04-27): playtest target — 3-4 loops at slow
+///   flight, ~3 at reference cruise. Combined with the sinusoidal
+///   size envelope (peak at `life_t` = 0.5), the ribbon now reads
+///   as a swell-and-fade rather than a uniformly-thick spiral.
+const RIBBON_LIFETIME_S: f32 = 0.8;
 
-/// Rotation rate ω at reference cruise (rad/s). Faster aircraft →
-/// tighter spiral. The angle along the ribbon is θ(age) = ω · age,
-/// scaled by speed.
-const ROTATION_RATE_AT_REFERENCE: f32 = 5.0;
+/// Rotation rate ω (rad/s) at `REFERENCE_CRUISE_MPS`.
+///
+/// Higher ω = more loops per second of flight = tighter / sharper
+/// spiral. The actual ω used per-frame is interpolated based on
+/// airspeed (see `generate_ribbon`):
+/// - 25 rad/s at 35 m/s reference (target — visible dramatic helix)
+/// - 0 rad/s at `ROTATION_ZERO_SPEED_MPS` (high-speed cruise; the
+///   spiral character disappears as airflow shears the vortex flat)
+/// - up to ~2× this at very low speed (slow-flight high-AoA = strong
+///   rotation per unit air)
+///
+/// **Tuning history**:
+/// - 5 rad/s initial constant: too sparse, only ~2 loops visible
+/// - 25 rad/s constant (ship-1): "sharper angle" achieved; matched user spec
+/// - 25 rad/s at reference, **inverse-speed scaled** (ship-2 2026-04-27): real-world
+///   physics intuition — rotation strength tracks `AoA` / lift coefficient,
+///   which is high at slow flight and low at cruise.
+const ROTATION_RATE_AT_REFERENCE: f32 = 25.0;
 
-/// Initial inner radius (m) at age 0. Ribbon's inner edge starts
-/// tight against the spine. Northlander-relative; multiplied by
-/// `wing_size_factor` for larger aircraft.
-const INNER_RADIUS_BASE_M: f32 = 0.10;
+/// Inner radius (m) at envelope baseline. Ribbon's inner edge starts
+/// already off-axis so the spiral is visible immediately at the
+/// wingtip. Northlander-relative; multiplied by `wing_size_factor`
+/// and by the per-waypoint `size_amplitude` envelope (1.0 at age = 0
+/// and age = lifetime, peaking mid-life with `peak_factor` swell).
+const INNER_RADIUS_BASE_M: f32 = 0.12;
 
-/// Initial outer-vs-inner radius offset (m). Defines starting ribbon
-/// thickness. Inner = `INNER_RADIUS_BASE_M`; outer = inner + this.
-const RIBBON_THICKNESS_BASE_M: f32 = 0.15;
+/// Outer-minus-inner thickness (m) at envelope baseline at reference
+/// cruise. Modulated inversely by speed via `thickness_speed_factor`
+/// (slow flight = thicker; the central 60-70% of the wing section
+/// produces a strong force differential at high `AoA`, expanding the
+/// visible vapor) AND by the size envelope (sinusoidal swell over
+/// the waypoint's lifetime).
+const RIBBON_THICKNESS_BASE_M: f32 = 0.35;
 
-/// Inner radius growth rate (m/s). Vortex spreads outward as it ages.
-const INNER_RADIUS_GROWTH_M_PER_S: f32 = 0.05;
+/// Peak amplification of the sinusoidal size envelope at slow flight.
+/// At reference cruise + above, `peak_factor` = 1.0 (no envelope swell;
+/// ribbon stays at baseline thickness over its lifetime). Below
+/// reference, `peak_factor` ramps to this value at + below
+/// `REFERENCE_CRUISE_MPS - PEAK_RAMP_WIDTH_MPS`. The envelope shape
+/// is `sin(π × life_t)`: zero at age 0 and age = lifetime, peaking at
+/// `life_t = 0.5`. So at slow flight, the ribbon visibly swells from
+/// baseline to ~10× near the middle of each waypoint's life and fades
+/// back; combined with the alpha fade, this reads as a dramatic
+/// "vortex blooms in the wake" character at landing speed.
+const PEAK_AMPLIFICATION_AT_SLOW: f32 = 10.0;
 
-/// Outer radius growth rate (m/s). Faster than inner → ribbon WIDENS
-/// over age (vortex breakdown — vapor disperses outward).
-const OUTER_RADIUS_GROWTH_M_PER_S: f32 = 0.15;
+/// Speed deficit (m/s) below `REFERENCE_CRUISE_MPS` at which
+/// `peak_factor` saturates at `PEAK_AMPLIFICATION_AT_SLOW`. Linear
+/// ramp from 1.0 at reference to 10.0 at reference - this width.
+/// Calibrated so that ~28 m/s landing approach (7 m/s below the
+/// 35 m/s reference) hits the full 10× swell.
+const PEAK_RAMP_WIDTH_MPS: f32 = 7.0;
 
-/// Number of waypoints per second per wingtip. Higher = smoother
-/// ribbon (shorter triangle strip segments). At 60 fps, 60 wp/s
-/// gives one waypoint per frame. Lifetime × rate = total waypoints
-/// in the buffer (3 s × 60 = 180 per wing).
-const WAYPOINTS_PER_SEC: f32 = 60.0;
+/// Number of waypoints per second per wingtip. Higher ω needs more
+/// sample density to read smoothly (avoid aliasing the rotation).
+/// At 60 fps display, 120 wp/s = 2 waypoints per frame. Total
+/// waypoints in buffer: lifetime × rate = 1.5 × 120 = 180 per wing.
+const WAYPOINTS_PER_SEC: f32 = 120.0;
 
 /// Per-vertex GPU layout: world position + alpha = 4 floats = 16 B.
 /// Padded to 16 B (already aligned).
@@ -276,14 +342,23 @@ impl WingtipVortexSystem {
 
         let speed = vehicle_velocity.length();
         let gates_pass = speed >= MIN_PRODUCTION_SPEED_MPS && mist_density >= MIN_MIST_DENSITY;
-        let speed_factor = (speed / REFERENCE_CRUISE_MPS).clamp(0.5, 2.5);
 
         // Append new waypoints when gates pass.
         if gates_pass {
+            // Body-frame axes in world space. `right_axis` is body X
+            // (lateral); `up_axis` is body Y; `forward_axis` is body
+            // forward (-Z in body frame per the engine's
+            // perspective_view_proj convention). Vertical offset is
+            // applied along body-Y (rotates with the aircraft) so at
+            // high-AoA / banked attitudes the offset stays
+            // perpendicular to the wing rather than fixed world-up.
             let right_axis = vehicle_orient * Vec3::X;
-            let vertical_offset = Vec3::new(0.0, WINGTIP_VERTICAL_OFFSET_M, 0.0);
-            let left_wingtip = vehicle_pos - right_axis * half_span_m + vertical_offset;
-            let right_wingtip = vehicle_pos + right_axis * half_span_m + vertical_offset;
+            let up_axis = vehicle_orient * Vec3::Y;
+            let forward_axis = vehicle_orient * Vec3::NEG_Z;
+            let body_offset =
+                up_axis * WINGTIP_VERTICAL_OFFSET_M + forward_axis * WINGTIP_FORWARD_OFFSET_M;
+            let left_wingtip = vehicle_pos - right_axis * half_span_m + body_offset;
+            let right_wingtip = vehicle_pos + right_axis * half_span_m + body_offset;
             let velocity_axis = if speed > 0.1 {
                 vehicle_velocity / speed
             } else {
@@ -341,7 +416,7 @@ impl WingtipVortexSystem {
         Self::generate_ribbon(
             &self.left.waypoints,
             current_time_s,
-            speed_factor,
+            speed,
             wing_size_factor,
             &mut verts,
         );
@@ -350,7 +425,7 @@ impl WingtipVortexSystem {
         Self::generate_ribbon(
             &self.right.waypoints,
             current_time_s,
-            speed_factor,
+            speed,
             wing_size_factor,
             &mut verts,
         );
@@ -375,10 +450,27 @@ impl WingtipVortexSystem {
     /// Generate triangle-strip vertices for one wing's ribbon.
     /// Appends to `out`; needs at least 2 waypoints to produce visible
     /// triangles (a strip of 1 quad = 4 verts).
+    ///
+    /// Speed coupling per playtest 2026-04-27 (post-tune):
+    /// - **Rotation rate ω scales inversely with speed** — `ω = 25 ×
+    ///   max(0, (80 - speed) / (80 - 35))`, capped. 25 rad/s at
+    ///   35 m/s; 0 at 80 m/s. Slow flight = tight visible spiral
+    ///   (high-`AoA` wing produces strong rotation per unit air);
+    ///   high-speed cruise = the spiral character disappears.
+    /// - **Ribbon thickness inversely with speed**: slow flight
+    ///   produces wider ribbons (the central 60-70% of the wing
+    ///   section's force differential has more time per unit travel
+    ///   to expand the vapor).
+    /// - **Sinusoidal size envelope at slow flight**: at ≤ ~28 m/s
+    ///   the ribbon swells from baseline to 10× peak at `life_t = 0.5`
+    ///   then fades back — the dramatic "vortex blooms in the wake"
+    ///   character of low-speed bushplane flight in mist.
+    /// - **Alpha inversely with speed**: high speed → transparent
+    ///   subtle hint; slow flight → opaque dramatic.
     fn generate_ribbon(
         waypoints: &VecDeque<Waypoint>,
         current_time_s: f32,
-        speed_factor: f32,
+        speed_mps: f32,
         wing_size_factor: f32,
         out: &mut Vec<RibbonVertexGpu>,
     ) {
@@ -386,18 +478,72 @@ impl WingtipVortexSystem {
             return;
         }
         let world_up = Vec3::Y;
+        // Speed-driven rotation rate: linear ramp from 0 at
+        // `ROTATION_ZERO_SPEED_MPS` to `ROTATION_RATE_AT_REFERENCE`
+        // at `REFERENCE_CRUISE_MPS`, allowed to extrapolate higher
+        // for slow flight (capped at 2× to avoid blur).
+        let speed_lerp = ((ROTATION_ZERO_SPEED_MPS - speed_mps)
+            / (ROTATION_ZERO_SPEED_MPS - REFERENCE_CRUISE_MPS))
+            .clamp(0.0, 2.0);
+        let omega = ROTATION_RATE_AT_REFERENCE * speed_lerp;
+        // Speed-driven thickness multiplier — asymmetric around
+        // reference. Below reference (slow flight) the curve is
+        // CUBIC-inverse so thickness grows aggressively at low
+        // speeds — the central 60-70% of the wing section produces
+        // a strong force differential at high AoA, expanding the
+        // visible vapor much faster than at cruise. Above reference
+        // (fast cruise) the curve is linear-inverse capped at the
+        // reference-baseline (no thicker than at reference) and
+        // floored at 0.5 (no thinner than half).
+        let thickness_speed_factor = if speed_mps >= REFERENCE_CRUISE_MPS {
+            (REFERENCE_CRUISE_MPS / speed_mps).clamp(0.5, 1.0)
+        } else {
+            (REFERENCE_CRUISE_MPS / speed_mps.max(MIN_PRODUCTION_SPEED_MPS))
+                .powi(3)
+                .min(8.0)
+        };
+        // Speed-driven peak amplification — applied to a sinusoidal
+        // envelope over the waypoint's lifetime. Slow flight produces
+        // a dramatic swell (peak ~10× baseline at life_t = 0.5) that
+        // builds and fades; reference-and-above stay flat (peak = 1).
+        // Linear ramp from 1.0 at `REFERENCE_CRUISE_MPS` to
+        // `PEAK_AMPLIFICATION_AT_SLOW` at
+        // `REFERENCE_CRUISE_MPS - PEAK_RAMP_WIDTH_MPS`, saturating at
+        // `PEAK_AMPLIFICATION_AT_SLOW` for any further speed deficit.
+        let peak_factor = if speed_mps >= REFERENCE_CRUISE_MPS {
+            1.0
+        } else {
+            let deficit =
+                ((REFERENCE_CRUISE_MPS - speed_mps) / PEAK_RAMP_WIDTH_MPS).clamp(0.0, 1.0);
+            1.0 + (PEAK_AMPLIFICATION_AT_SLOW - 1.0) * deficit
+        };
+        // Speed-driven alpha attenuation — opaque at slow speed,
+        // transparent at fast cruise. Same shape as for thickness/
+        // peak_factor: quietly subtle at high speed, dramatic at slow.
+        let speed_factor = (speed_mps / REFERENCE_CRUISE_MPS).clamp(0.5, 2.5);
+        let alpha_speed_factor = (1.4 - speed_factor * 0.4).clamp(0.4, 1.4);
         for wp in waypoints {
             let age = current_time_s - wp.spawn_time_s;
             if age < 0.0 {
                 continue;
             }
-            // Parametric spiral: angle and radii functions of age.
-            let theta = ROTATION_RATE_AT_REFERENCE * speed_factor * age;
-            let r_inner =
-                (INNER_RADIUS_BASE_M + INNER_RADIUS_GROWTH_M_PER_S * age) * wing_size_factor;
-            let r_outer =
-                (INNER_RADIUS_BASE_M + RIBBON_THICKNESS_BASE_M + OUTER_RADIUS_GROWTH_M_PER_S * age)
-                    * wing_size_factor;
+            // Parametric spiral. Rotation θ = ω(speed) × age.
+            let theta = omega * age;
+            // Per-waypoint life parameter (0 = just spawned;
+            // 1 = end-of-life). Drives the sinusoidal size envelope
+            // and the alpha fade.
+            let life_t = (age / RIBBON_LIFETIME_S).clamp(0.0, 1.0);
+            // Sinusoidal envelope: 0 at the endpoints (life_t = 0,
+            // life_t = 1), peaking at 1 at life_t = 0.5.
+            let envelope = (life_t * core::f32::consts::PI).sin();
+            // Combined size scaler. At reference+: peak_factor = 1
+            // → size_amplitude flat 1.0 (no envelope swell). At
+            // slow flight: peak_factor = 10 → size_amplitude swells
+            // from 1 → 10 → 1 over the waypoint's life.
+            let size_amplitude = 1.0 + (peak_factor - 1.0) * envelope;
+            let r_inner = INNER_RADIUS_BASE_M * wing_size_factor * size_amplitude;
+            let thickness = RIBBON_THICKNESS_BASE_M * thickness_speed_factor * size_amplitude;
+            let r_outer = r_inner + thickness * wing_size_factor;
 
             // Perpendicular plane to wp.axis.
             let mut perp_a = wp.axis.cross(world_up);
@@ -413,9 +559,11 @@ impl WingtipVortexSystem {
             let outer_pos = wp.spine_pos + radial_dir * r_outer;
 
             // Alpha fade — full at age 0, zero at lifetime, smoothstep
-            // for soft tail.
-            let life_t = (age / RIBBON_LIFETIME_S).clamp(0.0, 1.0);
-            let alpha = 1.0 - smoothstep(0.4, 1.0, life_t);
+            // for soft tail. Modulated by speed (high speed = more
+            // transparent overall; subtle hint at cruise vs opaque
+            // dramatic at slow flight).
+            let age_alpha = 1.0 - smoothstep(0.4, 1.0, life_t);
+            let alpha = (age_alpha * alpha_speed_factor).clamp(0.0, 1.0);
 
             out.push(RibbonVertexGpu {
                 world_pos: [inner_pos.x, inner_pos.y, inner_pos.z],

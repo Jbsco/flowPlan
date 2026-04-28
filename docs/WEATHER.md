@@ -426,9 +426,10 @@ Tradeoff: pool is more expensive per frame, but the visual payoff is decisive. T
 
 | Kind | Weather trigger | Authoring target | Phase |
 | --- | --- | --- | --- |
-| Rain streaks | `precipitation_rate > 0.5 mm/hr`, temp > 0°C | world-space streak billboards far + screen-space windshield overlay near | 3.2x |
-| Snow particles | as above, temp ≤ 0°C | softer snowflake sprites; slower fall | 3.2x |
-| Wingtip mist | high humidity + low altitude + water surface beneath | thin-column emitter at wingtip positions | 3.2x (signature mood beat per PLAN.md) |
+| Rain streaks | `precipitation_rate > 0.5 mm/hr`, temp > 0°C | world-space streak billboards far + screen-space windshield overlay near | **shipped Phase E.4** |
+| Snow particles | as above, temp ≤ 0°C | softer snowflake sprites; slower fall | **shipped Phase E.3** |
+| Wingtip vortex ribbon | airspeed ≥ 15 m/s + `cloud_density_at(vehicle_pos) ≥ 0.05` (mist coupling) | parametric ribbon helix per wing — two circular functions (inner + outer radii) wrapping spine, triangle-strip vertex buffer regenerated CPU-side per frame from waypoint ring buffer | **shipped Phase 3.2x.W (2026-04-27)** |
+| Wingtip mist (water-takeoff) | high humidity + low altitude + water surface beneath | thin-column emitter at wingtip positions during float-takeoff | future (separate from vortex ribbon — different trigger conditions, different visual character) |
 | Wind debris | dry biome dust / autumn leaves / winter snow / fire ash | per-biome textured sprite; chunked spawn | 3.2x |
 | Water spray | float / wheel contact velocity above threshold | already deferred from 2.5a polish | 3.2x |
 | Lightning | `Squall` cell + storm_phase > 0.7 | line-segment with emissive shader, post-process bloom | 5.5 polish |
