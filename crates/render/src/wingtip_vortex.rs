@@ -87,12 +87,19 @@ const MIN_MIST_DENSITY: f32 = 0.05;
 /// rotates with the aircraft — at landing approach (high-AoA), the
 /// offset stays perpendicular to the wing rather than world-vertical.
 ///
+/// Northlander/Beaver-class is a high-wing GA aircraft: the wing chord
+/// sits ~1 m above the fuselage CG (vehicle origin). The offset puts
+/// the spawn point at the visible wingtip rather than near the gear /
+/// fuselage centerline.
+///
 /// **Tuning history**:
 /// - 0.05 m (ship-1, world-Y): origin appeared low on visible mesh
 /// - 0.20 m (ship-2, world-Y): better but orientation confusion at `AoA`
 /// - 0.20 m (ship-3 2026-04-27, **body-Y**): now follows wing during
 ///   pitch/bank — vortex stays attached to wingtip in flight frame
-const WINGTIP_VERTICAL_OFFSET_M: f32 = 0.20;
+/// - 1.0 m (ship-4 2026-04-28): bumped to match high-wing chord on
+///   visible mesh — 0.20 m put spawn near landing-gear height
+const WINGTIP_VERTICAL_OFFSET_M: f32 = 1.0;
 
 /// Forward/aft offset (m, in body forward direction) for the wingtip
 /// spawn. Negative = aft of vehicle origin (typical for wing
@@ -164,10 +171,19 @@ const PEAK_AMPLIFICATION_AT_SLOW: f32 = 10.0;
 
 /// Speed deficit (m/s) below `REFERENCE_CRUISE_MPS` at which
 /// `peak_factor` saturates at `PEAK_AMPLIFICATION_AT_SLOW`. Linear
-/// ramp from 1.0 at reference to 10.0 at reference - this width.
-/// Calibrated so that ~28 m/s landing approach (7 m/s below the
-/// 35 m/s reference) hits the full 10× swell.
-const PEAK_RAMP_WIDTH_MPS: f32 = 7.0;
+/// ramp from 1.0 at reference to 10.0 at reference - this width;
+/// further speed loss does not amplify further (avoids unbounded
+/// growth at near-stall — the visible vortex would otherwise
+/// stretch beyond the realistic envelope at very slow flight).
+///
+/// **Tuning history**:
+/// - 7.0 (ship-3 2026-04-27): saturated at 28 m/s; growth still
+///   continued amplifying below that, producing oversize vortex
+///   at near-stall flight in playtest
+/// - 5.0 (ship-4 2026-04-27): saturate at 30 m/s; cap matches the
+///   visible character at landing approach without overshooting
+///   at near-stall
+const PEAK_RAMP_WIDTH_MPS: f32 = 5.0;
 
 /// Number of waypoints per second per wingtip. Higher ω needs more
 /// sample density to read smoothly (avoid aliasing the rotation).
@@ -413,11 +429,15 @@ impl WingtipVortexSystem {
 
         // Generate ribbon vertices: 2 verts per waypoint (inner + outer).
         let mut verts: Vec<RibbonVertexGpu> = Vec::with_capacity(WINGTIP_VERTEX_CAPACITY);
+        // Direction = +1 for left wing, -1 for right wing — vortices
+        // counter-rotate (right wing's circulation is mirror image of
+        // left's, both curling inward toward the wake).
         Self::generate_ribbon(
             &self.left.waypoints,
             current_time_s,
             speed,
             wing_size_factor,
+            1.0,
             &mut verts,
         );
         #[allow(clippy::cast_possible_truncation)]
@@ -427,6 +447,7 @@ impl WingtipVortexSystem {
             current_time_s,
             speed,
             wing_size_factor,
+            -1.0,
             &mut verts,
         );
         #[allow(clippy::cast_possible_truncation)]
@@ -451,20 +472,32 @@ impl WingtipVortexSystem {
     /// Appends to `out`; needs at least 2 waypoints to produce visible
     /// triangles (a strip of 1 quad = 4 verts).
     ///
+    /// `direction` flips the helix sense: +1 for the left wing, -1 for
+    /// the right wing. Real-world wingtip vortices counter-rotate
+    /// (mirror image), both curling inward toward the wake center.
+    ///
+    /// **Cross-section layout** (3 conceptual vertices per waypoint
+    /// emitted as 4 strip vertices, 2 per half-strip):
+    /// - inner edge — `r_inner`, alpha 0
+    /// - mid       — `(r_inner + r_outer) / 2`, alpha = `body_alpha`
+    /// - outer edge — `r_outer`, alpha 0
+    ///
+    /// The function appends two contiguous half-strips per wing —
+    /// outer-half (`outer_edge → mid`) then inner-half (`mid → inner_edge`).
+    /// Hardware interpolation produces a tent-profile alpha across
+    /// the ribbon's width, giving subtle edge fade.
+    ///
     /// Speed coupling per playtest 2026-04-27 (post-tune):
-    /// - **Rotation rate ω scales inversely with speed** — `ω = 25 ×
-    ///   max(0, (80 - speed) / (80 - 35))`, capped. 25 rad/s at
-    ///   35 m/s; 0 at 80 m/s. Slow flight = tight visible spiral
-    ///   (high-`AoA` wing produces strong rotation per unit air);
-    ///   high-speed cruise = the spiral character disappears.
+    /// - **Rotation rate ω scales inversely with speed** — 25 rad/s
+    ///   at 35 m/s; 0 at 80 m/s. Slow flight = tight visible spiral.
     /// - **Ribbon thickness inversely with speed**: slow flight
     ///   produces wider ribbons (the central 60-70% of the wing
     ///   section's force differential has more time per unit travel
     ///   to expand the vapor).
-    /// - **Sinusoidal size envelope at slow flight**: at ≤ ~28 m/s
+    /// - **Sinusoidal size envelope at slow flight**: at ≤ 30 m/s
     ///   the ribbon swells from baseline to 10× peak at `life_t = 0.5`
-    ///   then fades back — the dramatic "vortex blooms in the wake"
-    ///   character of low-speed bushplane flight in mist.
+    ///   then fades back; saturating cap prevents over-amplification
+    ///   at near-stall.
     /// - **Alpha inversely with speed**: high speed → transparent
     ///   subtle hint; slow flight → opaque dramatic.
     fn generate_ribbon(
@@ -472,6 +505,7 @@ impl WingtipVortexSystem {
         current_time_s: f32,
         speed_mps: f32,
         wing_size_factor: f32,
+        direction: f32,
         out: &mut Vec<RibbonVertexGpu>,
     ) {
         if waypoints.len() < 2 {
@@ -489,27 +523,25 @@ impl WingtipVortexSystem {
         // Speed-driven thickness multiplier — asymmetric around
         // reference. Below reference (slow flight) the curve is
         // CUBIC-inverse so thickness grows aggressively at low
-        // speeds — the central 60-70% of the wing section produces
-        // a strong force differential at high AoA, expanding the
-        // visible vapor much faster than at cruise. Above reference
-        // (fast cruise) the curve is linear-inverse capped at the
-        // reference-baseline (no thicker than at reference) and
-        // floored at 0.5 (no thinner than half).
+        // speeds. Above reference (fast cruise) the curve is
+        // linear-inverse, floored at 0.5.
+        //
+        // Below `REFERENCE_CRUISE_MPS - PEAK_RAMP_WIDTH_MPS` the
+        // input speed clamps to the saturation point, freezing
+        // thickness growth at the same speed where `peak_factor`
+        // saturates — so total ribbon size is bounded at slow flight
+        // (otherwise `thickness_speed_factor × size_amplitude` would
+        // keep compounding past the visible envelope).
         let thickness_speed_factor = if speed_mps >= REFERENCE_CRUISE_MPS {
             (REFERENCE_CRUISE_MPS / speed_mps).clamp(0.5, 1.0)
         } else {
-            (REFERENCE_CRUISE_MPS / speed_mps.max(MIN_PRODUCTION_SPEED_MPS))
-                .powi(3)
-                .min(8.0)
+            let clamped_speed = speed_mps.max(REFERENCE_CRUISE_MPS - PEAK_RAMP_WIDTH_MPS);
+            (REFERENCE_CRUISE_MPS / clamped_speed).powi(3)
         };
         // Speed-driven peak amplification — applied to a sinusoidal
-        // envelope over the waypoint's lifetime. Slow flight produces
-        // a dramatic swell (peak ~10× baseline at life_t = 0.5) that
-        // builds and fades; reference-and-above stay flat (peak = 1).
-        // Linear ramp from 1.0 at `REFERENCE_CRUISE_MPS` to
-        // `PEAK_AMPLIFICATION_AT_SLOW` at
-        // `REFERENCE_CRUISE_MPS - PEAK_RAMP_WIDTH_MPS`, saturating at
-        // `PEAK_AMPLIFICATION_AT_SLOW` for any further speed deficit.
+        // envelope over the waypoint's lifetime. Saturates at 30 m/s
+        // (5 m/s below reference) so further speed loss does not
+        // amplify further; prevents oversized vortex at near-stall.
         let peak_factor = if speed_mps >= REFERENCE_CRUISE_MPS {
             1.0
         } else {
@@ -518,32 +550,32 @@ impl WingtipVortexSystem {
             1.0 + (PEAK_AMPLIFICATION_AT_SLOW - 1.0) * deficit
         };
         // Speed-driven alpha attenuation — opaque at slow speed,
-        // transparent at fast cruise. Same shape as for thickness/
-        // peak_factor: quietly subtle at high speed, dramatic at slow.
+        // transparent at fast cruise.
         let speed_factor = (speed_mps / REFERENCE_CRUISE_MPS).clamp(0.5, 2.5);
         let alpha_speed_factor = (1.4 - speed_factor * 0.4).clamp(0.4, 1.4);
+
+        // Single-pass cross-section computation. Each entry is a
+        // `(outer, mid, inner, body_alpha)` tuple — the three
+        // ribbon-radius positions at this waypoint and the per-strip
+        // alpha at the bright (mid) edge. The two half-strips emit
+        // immediately afterward; we keep the data on the stack to
+        // avoid recomputing trig + envelope twice.
+        let mut sections: Vec<(Vec3, Vec3, Vec3, f32)> = Vec::with_capacity(waypoints.len());
         for wp in waypoints {
             let age = current_time_s - wp.spawn_time_s;
             if age < 0.0 {
                 continue;
             }
-            // Parametric spiral. Rotation θ = ω(speed) × age.
-            let theta = omega * age;
-            // Per-waypoint life parameter (0 = just spawned;
-            // 1 = end-of-life). Drives the sinusoidal size envelope
-            // and the alpha fade.
+            // Parametric spiral. Rotation θ = direction × ω(speed) × age.
+            // Direction = +1 left, -1 right (counter-rotation).
+            let theta = direction * omega * age;
             let life_t = (age / RIBBON_LIFETIME_S).clamp(0.0, 1.0);
-            // Sinusoidal envelope: 0 at the endpoints (life_t = 0,
-            // life_t = 1), peaking at 1 at life_t = 0.5.
             let envelope = (life_t * core::f32::consts::PI).sin();
-            // Combined size scaler. At reference+: peak_factor = 1
-            // → size_amplitude flat 1.0 (no envelope swell). At
-            // slow flight: peak_factor = 10 → size_amplitude swells
-            // from 1 → 10 → 1 over the waypoint's life.
             let size_amplitude = 1.0 + (peak_factor - 1.0) * envelope;
             let r_inner = INNER_RADIUS_BASE_M * wing_size_factor * size_amplitude;
             let thickness = RIBBON_THICKNESS_BASE_M * thickness_speed_factor * size_amplitude;
             let r_outer = r_inner + thickness * wing_size_factor;
+            let r_mid = (r_inner + r_outer) * 0.5;
 
             // Perpendicular plane to wp.axis.
             let mut perp_a = wp.axis.cross(world_up);
@@ -556,22 +588,34 @@ impl WingtipVortexSystem {
             let (sin_t, cos_t) = theta.sin_cos();
             let radial_dir = perp_a * cos_t + perp_b * sin_t;
             let inner_pos = wp.spine_pos + radial_dir * r_inner;
+            let mid_pos = wp.spine_pos + radial_dir * r_mid;
             let outer_pos = wp.spine_pos + radial_dir * r_outer;
 
-            // Alpha fade — full at age 0, zero at lifetime, smoothstep
-            // for soft tail. Modulated by speed (high speed = more
-            // transparent overall; subtle hint at cruise vs opaque
-            // dramatic at slow flight).
             let age_alpha = 1.0 - smoothstep(0.4, 1.0, life_t);
-            let alpha = (age_alpha * alpha_speed_factor).clamp(0.0, 1.0);
+            let body_alpha = (age_alpha * alpha_speed_factor).clamp(0.0, 1.0);
+            sections.push((outer_pos, mid_pos, inner_pos, body_alpha));
+        }
 
+        // Outer half-strip: alternating outer-edge (alpha 0) and mid (alpha = body).
+        for &(outer, mid, _, body_alpha) in &sections {
             out.push(RibbonVertexGpu {
-                world_pos: [inner_pos.x, inner_pos.y, inner_pos.z],
-                alpha,
+                world_pos: [outer.x, outer.y, outer.z],
+                alpha: 0.0,
             });
             out.push(RibbonVertexGpu {
-                world_pos: [outer_pos.x, outer_pos.y, outer_pos.z],
-                alpha,
+                world_pos: [mid.x, mid.y, mid.z],
+                alpha: body_alpha,
+            });
+        }
+        // Inner half-strip: alternating mid (alpha = body) and inner-edge (alpha 0).
+        for &(_, mid, inner, body_alpha) in &sections {
+            out.push(RibbonVertexGpu {
+                world_pos: [mid.x, mid.y, mid.z],
+                alpha: body_alpha,
+            });
+            out.push(RibbonVertexGpu {
+                world_pos: [inner.x, inner.y, inner.z],
+                alpha: 0.0,
             });
         }
     }
@@ -584,13 +628,20 @@ impl WingtipVortexSystem {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, camera_bg, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        // Two separate triangle-strip draws so the right ribbon doesn't
-        // connect to the left ribbon's last vertex.
-        if self.left_vertex_count >= 4 {
-            pass.draw(0..self.left_vertex_count, 0..1);
+        // Each wing emits two contiguous half-strips (outer + inner),
+        // both equal in vertex count. Four draws total so adjacent
+        // strips don't connect via triangle-strip continuity.
+        let left_half = self.left_vertex_count / 2;
+        if left_half >= 4 {
+            pass.draw(0..left_half, 0..1);
+            pass.draw(left_half..self.left_vertex_count, 0..1);
         }
-        if self.right_vertex_count >= 4 {
-            pass.draw(self.left_vertex_count..total, 0..1);
+        let right_half = self.right_vertex_count / 2;
+        if right_half >= 4 {
+            let r_start = self.left_vertex_count;
+            let r_mid = r_start + right_half;
+            pass.draw(r_start..r_mid, 0..1);
+            pass.draw(r_mid..total, 0..1);
         }
     }
 
